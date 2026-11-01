@@ -1,0 +1,24 @@
+== positive contamination: hostile DM_SO / route env, frozen base must load itself on the default route
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/contam.pt: 3 cases (partial), route default {'groups': 'off', 'streams': 1, 'ws_limit': 
+exit 0
+exit 1
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/checkout_default.pt: 72 cases (full), route default {'groups': 'off', 'streams': 1, 'ws_
+route default, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence checkout default exit 0
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/checkout_kv.pt: 60 cases (full), route kv {'groups': 'kv', 'streams': 1, 'ws_limit': 858
+route kv, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence checkout kv exit 0
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/checkout_head.pt: 60 cases (full), route head {'groups': 'head', 'streams': 1, 'ws_limit
+route head, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence checkout head exit 0
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/checkout_streams2.pt: 60 cases (full), route streams2 {'groups': 'kv', 'streams': 2, 'ws
+route streams2, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence checkout streams2 exit 0
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/h1a_default.pt: 72 cases (full), route default {'groups': 'off', 'streams': 1, 'ws_limit
+route default, FULL SUITE, A 07fee0f25b8b vs B 36f86c6183dc
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence h1a default exit 0

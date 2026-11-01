@@ -41,6 +41,22 @@ MODES = (("causal", "matched"), ("causal", "stale"), ("full", "stale"))
 CATS = ("fwd", "prod_fwd", "prod_bwd", "pass0", "pass1", "pass2", "twin", "glue")
 
 
+def sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def expected_configs(grid, modes="all", one=None):
+    """The (D, B, H, Hk, N, attn, mode) keys a kernels.py run must produce."""
+    shapes = MAIN if grid == "main" else HOLDOUT if grid == "holdout" else [one]
+    md = MODES if modes in (None, "all") else tuple(tuple(m.split("-")) for m in modes.split(","))
+    return [(D, B, H, Hk, N, attn, mode) for (D, B, H, Hk, N) in shapes for attn, mode in md]
+
+
 def classify(name):
     n = name
     if "FlashAttnFwdSm90Fq8F" in n:
@@ -126,19 +142,25 @@ def accounting(D, B, H, Hk, N, causal, mode, layout="bnhd"):
     f["pass0"] = 4 * P * D if mode == "matched" else 0
     b["pass0"] = 0
     if mode == "matched":
-        b["pass0"] = 2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + BHk * ND      # Q dO K V codes (+ K twin), LSE, delta
+        # Q, dO, K, V codes (the active v4 / v6 delta kernels load no K twin), LSE read, delta written
+        b["pass0"] = 2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N
         if D == 256:   # partial row sums [BH, N/64, 2, N] fp32 over visited 64 x 64 tiles: written, then reduced
             b["pass0"] += 2 * visited_tiles(N, 64, 64, causal) * BHq * 64 * 2 * 4
     f["pass1"] = 8 * P * D
-    # Q, dO, their twins, K, V, K twin codes; LSE, delta; dK and dV per query head (bf16); dS' tiles; psi
-    b["pass1"] = 4 * BHq * ND + 3 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + tiles * 64 * kbn + 4 * tiles
+    # Q, dO and their twins (Qt, dOt), K, V codes (no K twin: the certified GT build drops it at D 256 and the hd128
+    # path loads K / V directly); LSE, delta; dK and dV per query head (bf16); dS' tiles; psi
+    b["pass1"] = 4 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + tiles * 64 * kbn + 4 * tiles
     f["pass2"] = 2 * P * D
     b["pass2"] = tiles * 64 * kbn + 4 * tiles + BHk * ND + 2 * BHq * ND          # dS' tiles + psi, K twin, dQ bf16
     f["prod_fwd"] = 0
-    # bf16 q, k, v read; k read again by the k-mean; Q, K, K twin, V codes written (the Q twin is the twin kernel's)
-    b["prod_fwd"] = 2 * (BHq + 2 * BHk) * ND + 2 * BHk * ND + (BHq + 3 * BHk) * ND
+    blk_q, blk_k = (128, 64) if D == 128 else (64, 32)
+    kmean = 2 * BHk * (N // 64) * D * 4 + 2 * BHk * D * 4                      # fp32 partials written + read; mean out + in
+    scales = 4 * (BHq * N // blk_q + 2 * BHk * N // blk_k)                      # Q8s, K8s, V8s
+    # bf16 q, k, v read; k read again by the k-mean partial kernel; Q, K, K twin, V codes written (the Q twin is the
+    # twin kernel's); the k-mean exchange; the scales
+    b["prod_fwd"] = 2 * (BHq + 2 * BHk) * ND + 2 * BHk * ND + (BHq + 3 * BHk) * ND + kmean + scales
     f["prod_bwd"] = 0
-    b["prod_bwd"] = 2 * BHq * ND + BHq * ND + (2 * BHq * ND + 4 * BHq * N if mode == "stale" else 0)
+    b["prod_bwd"] = 2 * BHq * ND + BHq * ND + 4 * BHq * N // blk_q + (2 * BHq * ND + 4 * BHq * N if mode == "stale" else 0)
     f["twin"] = 0
     b["twin"] = 2 * 2 * BHq * ND                                                # Q and dO twins: codes read + written
     f["glue"] = 0
@@ -310,7 +332,10 @@ def main():
                         print(f"    {t:8.4f} ms  {classify(n):8s} {n[:150]}")
                 if r.get("fa3"):
                     print("    fa3 " + " ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in r["fa3"].items()))
-    meta = {"sustained_clock_mhz": clk, "torch": torch.__version__, "cuda": torch.version.cuda, "device": torch.cuda.get_device_name(0),
+    so = dm.core.loaded_library()
+    meta = {"package": os.path.realpath(os.path.dirname(dm.__file__)), "library": os.path.realpath(so),
+            "library_sha256": sha256(so), "grid": a.grid, "modes": a.modes, "shapes": shapes, "iters": a.iters,
+            "sustained_clock_mhz": clk, "torch": torch.__version__, "cuda": torch.version.cuda, "device": torch.cuda.get_device_name(0),
             "kernel_version": {k: v for k, v in dm.kernel_version().items() if k != "numerics"},
             "env": {k: v for k, v in os.environ.items() if k.startswith("DM_")}}
     if a.out:

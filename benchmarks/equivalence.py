@@ -22,8 +22,14 @@ per route: `dump --route kv` sets the environment before importing the package.
 """
 import argparse, os, sys
 
-ROUTES = {"default": {}, "kv": {"DM_BWD_HEAD_GROUPS": "kv"}, "head": {"DM_BWD_HEAD_GROUPS": "head"},
-          "streams2": {"DM_BWD_HEAD_GROUPS": "kv", "DM_BWD_STREAMS": "2"}}
+MANIFEST_VERSION = 2
+# Every route sets the complete routing configuration before the package is imported (nothing is inherited).
+ROUTES = {"default": {"DM_BWD_HEAD_GROUPS": "off", "DM_BWD_STREAMS": "1", "DM_BWD_WS_LIMIT_GB": "8"},
+          "kv": {"DM_BWD_HEAD_GROUPS": "kv", "DM_BWD_STREAMS": "1", "DM_BWD_WS_LIMIT_GB": "8"},
+          "head": {"DM_BWD_HEAD_GROUPS": "head", "DM_BWD_STREAMS": "1", "DM_BWD_WS_LIMIT_GB": "8"},
+          "streams2": {"DM_BWD_HEAD_GROUPS": "kv", "DM_BWD_STREAMS": "2", "DM_BWD_WS_LIMIT_GB": "8"}}
+REQUIRED = ("O", "dQ", "dK", "dV", "Q8", "Q8s", "Qt", "K8", "K8s", "kTt", "V8", "V8s", "LSE", "O_op",
+            "dO8", "dO8s", "dOt", "delta_stale")
 
 # (name, D, B, H, Hk, N, input kind, layout)
 SHAPES = [
@@ -145,23 +151,77 @@ def run_case(dm, name, D, B, H, Hk, N, kind, layout, attn, mode, seed):
     return {k_: v_.detach().contiguous().cpu() for k_, v_ in out.items()}, errs
 
 
+def selected_cases(route, only=None):
+    """(key, descriptor) of the cases a dump of this route runs: the split routes cover the GQA / MQA / held-out cases."""
+    shapes = [s for s in SHAPES if (only is None or only in s[0])]
+    if route != "default":
+        shapes = [s for s in shapes if s[3] != s[4] or s[0].endswith("heldout")]
+    out = []
+    for i, (name, D, B, H, Hk, N, kind, layout) in enumerate(SHAPES):
+        if (name, D, B, H, Hk, N, kind, layout) not in shapes:
+            continue
+        for attn, mode in MODES:
+            out.append((f"{name}/{attn}/{mode}", {"name": name, "D": D, "B": B, "H": H, "Hk": Hk, "N": N, "kind": kind,
+                                                  "layout": layout, "attn": attn, "mode": mode, "seed": 1000 + i}))
+    return out
+
+
+def required_tensors(desc):
+    return REQUIRED + (("delta_matched",) if desc["attn"] == "causal" else ())
+
+
+def sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def dump(a):
     os.environ.update(ROUTES[a.route])
+    os.environ.pop("DM_SO", None)          # the package on PYTHONPATH decides the library ...
+    if a.so:
+        os.environ["DM_SO"] = a.so         # ... unless one is named explicitly (recorded below)
     import torch
     import delta_matching as dm
+    from delta_matching import split as dm_split
     torch.backends.cuda.matmul.allow_tf32 = False
-    res = {"meta": {"route": a.route, "package": os.path.dirname(dm.__file__)}, "cases": {}, "errors": {}}
-    shapes = [s for s in SHAPES if (a.only is None or a.only in s[0])]
-    if a.route != "default":   # the split routes only matter for the backward: GQA / MQA cases
-        shapes = [s for s in shapes if s[3] != s[4] or s[0].endswith("heldout")]
-    for i, (name, D, B, H, Hk, N, kind, layout) in enumerate(shapes):
-        for attn, mode in MODES:
-            key = f"{name}/{attn}/{mode}"
-            t, e = run_case(dm, name, D, B, H, Hk, N, kind, layout, attn, mode, seed=1000 + i)
-            res["cases"][key] = t
-            res["errors"][key] = e
-            print(f"{key:40s} " + " ".join(f"{k} {v:.4f}" for k, v in e.items()), flush=True)
-    res["meta"]["library"] = dm.core.loaded_library()
+    cases = selected_cases(a.route, a.only)
+    if not cases:
+        raise SystemExit(f"no case matches --only {a.only!r}")
+    suite = "full" if a.only is None else "partial"
+    resolved = {"groups": dm_split._BWD_GROUPS, "streams": dm_split._BWD_STREAMS, "ws_limit": dm_split._BWD_WS_LIMIT}
+    want = ROUTES[a.route]
+    if (resolved["groups"] != want["DM_BWD_HEAD_GROUPS"] or resolved["streams"] != int(want["DM_BWD_STREAMS"])):
+        raise SystemExit(f"route {a.route}: the imported package resolved {resolved}, expected {want}")
+    res = {"manifest": {"version": MANIFEST_VERSION, "route": a.route, "route_env": want, "resolved_route": resolved,
+                        "suite": suite, "only": a.only, "cases": dict(cases), "tensors": {}},
+           "meta": {"package": os.path.realpath(os.path.dirname(dm.__file__)), "dm_so_arg": a.so}, "cases": {},
+           "errors": {}, "heads_per_call": {}}
+    for key, desc in cases:
+        t, e = run_case(dm, desc["name"], desc["D"], desc["B"], desc["H"], desc["Hk"], desc["N"], desc["kind"],
+                        desc["layout"], desc["attn"], desc["mode"], seed=desc["seed"])
+        res["cases"][key] = t
+        res["errors"][key] = e
+        res["heads_per_call"][key] = dm_split._bwd_heads_per_call(desc["B"], desc["H"], desc["Hk"],
+                                                                   desc["H"] // desc["Hk"], desc["N"])
+        res["manifest"]["tensors"][key] = {n: [list(x.shape), str(x.dtype)] for n, x in t.items()}
+        print(f"{key:40s} heads/call {res['heads_per_call'][key]:3d} " + " ".join(f"{k} {v:.4f}" for k, v in e.items()), flush=True)
+    so = dm.core.loaded_library()
+    res["meta"].update(library=os.path.realpath(so), library_sha256=sha256(so))
+    if a.expect_root:
+        import glob
+        pkg = os.path.realpath(os.path.join(a.expect_root, "delta_matching"))
+        libs = [os.path.realpath(x) for x in glob.glob(os.path.join(pkg, "_C*.so"))]
+        if res["meta"]["package"] != pkg or libs != [os.path.realpath(so)]:
+            raise SystemExit(f"imported {res['meta']['package']} / {os.path.realpath(so)}, expected {pkg} / {libs}")
+    for name in (a.drop or []):            # self-test: a required tensor missing from every case
+        for t in res["cases"].values():
+            t.pop(name, None)
+        for t in res["manifest"]["tensors"].values():
+            t.pop(name, None)
     if a.perturb:
         key = next(iter(res["cases"]))
         x = res["cases"][key][a.perturb]
@@ -169,13 +229,39 @@ def dump(a):
         flat[flat.numel() // 2] ^= 1
         print(f"perturbed {key} {a.perturb} at flat index {flat.numel() // 2}")
     torch.save(res, a.out)
-    print(f"wrote {a.out}: {len(res['cases'])} cases, library {res['meta']['library']}")
+    print(f"wrote {a.out}: {len(res['cases'])} cases ({suite}), route {a.route} {resolved}, "
+          f"library {res['meta']['library']} sha256 {res['meta']['library_sha256'][:16]}")
 
 
 def compare(a):
     import torch
     A, B = torch.load(a.a, weights_only=False), torch.load(a.b, weights_only=False)
     bad = 0
+    for X, nm in ((A, a.a), (B, a.b)):
+        m = X.get("manifest", {})
+        if m.get("version") != MANIFEST_VERSION:
+            raise SystemExit(f"{nm}: manifest version {m.get('version')} (expected {MANIFEST_VERSION})")
+    ma, mb = A["manifest"], B["manifest"]
+    if ma["route"] != mb["route"] or ma["route_env"] != mb["route_env"]:
+        raise SystemExit(f"route mismatch: {ma['route']} {ma['route_env']} vs {mb['route']} {mb['route_env']}")
+    if ma["cases"] != mb["cases"]:
+        raise SystemExit("the two dumps ran different case sets / descriptors")
+    if not ma["cases"]:
+        raise SystemExit("empty dumps")
+    partial = ma["suite"] != "full" or mb["suite"] != "full"
+    if not partial:
+        expected = dict(selected_cases(ma["route"]))
+        if ma["cases"] != expected:
+            raise SystemExit("a full-suite dump does not hold the expected case set of this script version")
+    elif not a.partial:
+        raise SystemExit("filtered (partial) dumps: pass --partial; a partial comparison is not a full-suite certification")
+    for X, nm in ((A, "A"), (B, "B")):
+        for k_, desc in X["manifest"]["cases"].items():
+            have = set(X["cases"].get(k_, {}))
+            miss = [t for t in required_tensors(desc) if t not in have]
+            if miss:
+                print(f"MISSING required tensors in {nm} {k_}: {miss}")
+                bad += 1
     keys = sorted(set(A["cases"]) | set(B["cases"]))
     for key in keys:
         if key not in A["cases"] or key not in B["cases"]:
@@ -209,6 +295,8 @@ def compare(a):
         for n, v in eb[key].items():
             if n in ea[key] and v > ea[key][n] * (1 + 1e-6):
                 worse.append(f"{key} {n} {ea[key][n]:.5f} -> {v:.5f}")
+    print(f"route {ma['route']}, {'PARTIAL (not a certification)' if partial else 'FULL SUITE'}, "
+          f"A {A['meta'].get('library_sha256', '?')[:12]} vs B {B['meta'].get('library_sha256', '?')[:12]}")
     print(f"compared {len(keys)} cases: {'BITWISE EQUAL' if bad == 0 else f'{bad} mismatching tensors'}; "
           f"error vs fp32 larger in {len(worse)} (case, tensor) pairs")
     for w in worse[:20]:
@@ -224,8 +312,12 @@ def main():
     d.add_argument("--route", choices=sorted(ROUTES), default="default")
     d.add_argument("--only", default=None, help="substring filter on case names")
     d.add_argument("--perturb", default=None, help="flip one bit of this tensor in the first case (comparator self-test)")
+    d.add_argument("--drop", action="append", help="remove this tensor from every case (manifest self-test)")
+    d.add_argument("--so", default=None, help="load this library explicitly (recorded); default: the package's own")
+    d.add_argument("--expect-root", default=None, help="fail unless the package and library come from this build root")
     c = sp.add_parser("compare")
     c.add_argument("a"); c.add_argument("b")
+    c.add_argument("--partial", action="store_true", help="accept filtered dumps (reported as a partial comparison)")
     a = ap.parse_args()
     if a.cmd == "dump":
         dump(a)

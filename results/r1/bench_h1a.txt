@@ -1,0 +1,46 @@
+BUILD-OK /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching/_C.so -> /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/jit/h1a/_C.so
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/contam.pt: 3 cases (partial), route default {'groups': 'off', 'streams': 1, 'ws_limit': 8589934592.0}, library /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/base/delta_matching/_C.so sha256 07fee0f25b8be7c9
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/base2_default.pt: 72 cases (full), route default {'groups': 'off', 'streams': 1, 'ws_limit': 8589934592.0}, library /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/base/delta_matching/_C.so sha256 07fee0f25b8be7c9
+imported /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching / /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching/_C.so, expected the build under /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 327, in <module>
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 323, in main
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 236, in compare
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/base2_kv.pt: 60 cases (full), route kv {'groups': 'kv', 'streams': 1, 'ws_limit': 8589934592.0}, library /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/base/delta_matching/_C.so sha256 07fee0f25b8be7c9
+imported /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching / /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching/_C.so, expected the build under /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 327, in <module>
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 323, in main
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 236, in compare
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/base2_head.pt: 60 cases (full), route head {'groups': 'head', 'streams': 1, 'ws_limit': 8589934592.0}, library /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/base/delta_matching/_C.so sha256 07fee0f25b8be7c9
+imported /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching / /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching/_C.so, expected the build under /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 327, in <module>
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 323, in main
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 236, in compare
+wrote /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv/base2_streams2.pt: 60 cases (full), route streams2 {'groups': 'kv', 'streams': 2, 'ws_limit': 8589934592.0}, library /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/base/delta_matching/_C.so sha256 07fee0f25b8be7c9
+imported /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching / /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching/_C.so, expected the build under /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 327, in <module>
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 323, in main
+  File "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py", line 236, in compare
+bench A rep 0 D128
+  delta_matching (matched)     forward   1.088   forward+backward   4.524
+  delta_matching (stale)       forward   1.095   forward+backward   3.891
+bench A rep 0 D256
+  delta_matching (matched)     forward   2.008   forward+backward   8.750
+  delta_matching (stale)       forward   2.025   forward+backward   7.781
+bench B rep 0 D128
+  delta_matching (matched)     forward   1.091   forward+backward   4.460
+  delta_matching (stale)       forward   1.099   forward+backward   3.819
+bench B rep 0 D256
+  delta_matching (matched)     forward   2.007   forward+backward   8.778
+  delta_matching (stale)       forward   2.033   forward+backward   7.777
+bench A rep 1 D128
+  delta_matching (matched)     forward   1.087   forward+backward   4.481
+  delta_matching (stale)       forward   1.091   forward+backward   3.852
+bench A rep 1 D256
+  delta_matching (matched)     forward   2.007   forward+backward   8.724
+  delta_matching (stale)       forward   2.037   forward+backward   7.776
+bench B rep 1 D128
+  delta_matching (matched)     forward   1.089   forward+backward   4.448
+  delta_matching (stale)       forward   1.089   forward+backward   3.812
+bench B rep 1 D256
+  delta_matching (matched)     forward   2.015   forward+backward   8.684
+  delta_matching (stale)       forward   2.024   forward+backward   7.748

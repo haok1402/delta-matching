@@ -1,0 +1,2 @@
+job 21160767: default (KDA_PROF=0, KDA_TRACE=0) build of ee69ad9 vs the accepted DO2 library (.local/jit/do2/_C.so):
+address-stripped cuobjdump -sass md5 of the whole library: ea35e9b365894e72cad2786e15153bc1 (both)

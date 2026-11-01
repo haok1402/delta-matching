@@ -31,11 +31,14 @@
 
 ## Timelines (medians over the 80 interior sampled steps per configuration; cycles)
 
-Consumer waits are pipeline waits measured from wait entry to exit; wgmma waits are warpgroup_wait durations; producer
-"p_acq" are producer-acquire waits (the producer blocked on a stage the consumers have not released); q_ready_lead is
-how long before the consumers asked for Q(m+1) the producer had issued it. "vec" is a warpgroup's vector work (exp,
-dS, amax, conversions, transpose / exchange, store, fold), "under other mma" the part of it during which the other
-warpgroup had a wgmma in flight (issue to retire).
+Every quantity is a BRACKETED REGION between two probe events of the instrumented kernel: it contains the named wait
+plus whatever pipeline-state, release, scale-prefetch and probe work lies between the two markers. "region_*_wait" are
+consumer pipeline-wait regions; "region_*_retire" are warpgroup_wait regions (dV / dK also include the release and
+state update that follow); producer regions for dOt / Q / Qt start at the previous producer event (no separate acquire
+entry marker); q_issue_lead is how long before the consumers asked for Q(m+1) the producer had ISSUED it (not when it
+landed). "vec_regions" are a warpgroup's instrumented vector regions (exp, dS, amax, conversions, transpose /
+exchange, barriers, store, fold); "in_*_outstanding" is the part of them inside the other warpgroup's software-
+outstanding wgmma windows (issue to the observed wait / release): a software bound, not tensor-pipe activity.
 
 ### D128 B4 H16/16 N8192 causal (matched): 8 sampled CTAs
 
@@ -46,26 +49,26 @@ warpgroup had a wgmma in flight (issue to retire).
 | step_wg0 | 3849 |
 | step_wg1 | 3866 |
 | offset | -61 |
-| wait_Q | 82 |
-| wait_dO | 80 |
-| wait_dOt | 62 |
-| wait_Qt | 85 |
-| wait_S | 9 |
-| wait_dP | 9 |
-| wait_dV | 20 |
-| wait_dK | 253 |
-| psi_barrier | 7 |
-| vec_wg0 | 2471 |
-| vec_wg0_under_wg1_mma | 708 |
-| vec_wg1 | 2574 |
-| vec_wg1_under_wg0_mma | 1078 |
-| p_acq_dO | 878 |
-| p_acq_dOt | 1613 |
-| p_acq_Q | 148 |
-| p_acq_Qt | 142 |
-| q_ready_lead | 3978 |
+| region_Q_wait | 82 |
+| region_dO_wait | 80 |
+| region_dOt_wait | 62 |
+| region_Qt_wait | 85 |
+| region_S_retire | 9 |
+| region_dP_retire | 9 |
+| region_dV_retire_release | 20 |
+| region_dK_retire_release_state | 253 |
+| region_psi_barrier | 7 |
+| vec_regions_wg0 | 2471 |
+| vec_regions_wg0_in_wg1_outstanding | 708 |
+| vec_regions_wg1 | 2574 |
+| vec_regions_wg1_in_wg0_outstanding | 1078 |
+| p_region_dO_acquire | 878 |
+| p_region_dOt_acquire_bracket | 1613 |
+| p_region_Q_acquire_bracket | 148 |
+| p_region_Qt_acquire_bracket | 142 |
+| q_issue_lead | 3978 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 27%; WG1 under WG0's wgmma: 40%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 27%; WG1 in WG0's: 40%.
 
 ### D128 B4 H16/16 N8192 full (stale): 8 sampled CTAs
 
@@ -76,26 +79,26 @@ Share of WG0's vector work while WG1 has wgmma in flight: 27%; WG1 under WG0's w
 | step_wg0 | 3938 |
 | step_wg1 | 3944 |
 | offset | -49 |
-| wait_Q | 65 |
-| wait_dO | 84 |
-| wait_dOt | 64 |
-| wait_Qt | 82 |
-| wait_S | 26 |
-| wait_dP | 9 |
-| wait_dV | 23 |
-| wait_dK | 255 |
-| psi_barrier | 7 |
-| vec_wg0 | 2398 |
-| vec_wg0_under_wg1_mma | 534 |
-| vec_wg1 | 2608 |
-| vec_wg1_under_wg0_mma | 1022 |
-| p_acq_dO | 986 |
-| p_acq_dOt | 1674 |
-| p_acq_Q | 152 |
-| p_acq_Qt | 144 |
-| q_ready_lead | 4056 |
+| region_Q_wait | 65 |
+| region_dO_wait | 84 |
+| region_dOt_wait | 64 |
+| region_Qt_wait | 82 |
+| region_S_retire | 26 |
+| region_dP_retire | 9 |
+| region_dV_retire_release | 23 |
+| region_dK_retire_release_state | 255 |
+| region_psi_barrier | 7 |
+| vec_regions_wg0 | 2398 |
+| vec_regions_wg0_in_wg1_outstanding | 534 |
+| vec_regions_wg1 | 2608 |
+| vec_regions_wg1_in_wg0_outstanding | 1022 |
+| p_region_dO_acquire | 986 |
+| p_region_dOt_acquire_bracket | 1674 |
+| p_region_Q_acquire_bracket | 152 |
+| p_region_Qt_acquire_bracket | 144 |
+| q_issue_lead | 4056 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 22%; WG1 under WG0's wgmma: 37%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 22%; WG1 in WG0's: 37%.
 
 ### D256 B4 H8/8 N8192 causal (matched): 8 sampled CTAs
 
@@ -106,26 +109,26 @@ Share of WG0's vector work while WG1 has wgmma in flight: 22%; WG1 under WG0's w
 | step_wg0 | 3801 |
 | step_wg1 | 3801 |
 | offset | -61 |
-| wait_Q | 70 |
-| wait_dO | 70 |
-| wait_dOt | 96 |
-| wait_Qt | 82 |
-| wait_S | 29 |
-| wait_dP | 23 |
-| wait_dV | 27 |
-| wait_dK | 221 |
-| psi_barrier | 22 |
-| vec_wg0 | 1914 |
-| vec_wg0_under_wg1_mma | 0 |
-| vec_wg1 | 2174 |
-| vec_wg1_under_wg0_mma | 664 |
-| p_acq_dO | 127 |
-| p_acq_dOt | 2860 |
-| p_acq_Q | 186 |
-| p_acq_Qt | 87 |
-| q_ready_lead | 4076 |
+| region_Q_wait | 70 |
+| region_dO_wait | 70 |
+| region_dOt_wait | 96 |
+| region_Qt_wait | 82 |
+| region_S_retire | 29 |
+| region_dP_retire | 23 |
+| region_dV_retire_release | 27 |
+| region_dK_retire_release_state | 221 |
+| region_psi_barrier | 22 |
+| vec_regions_wg0 | 1914 |
+| vec_regions_wg0_in_wg1_outstanding | 0 |
+| vec_regions_wg1 | 2174 |
+| vec_regions_wg1_in_wg0_outstanding | 664 |
+| p_region_dO_acquire | 127 |
+| p_region_dOt_acquire_bracket | 2860 |
+| p_region_Q_acquire_bracket | 186 |
+| p_region_Qt_acquire_bracket | 87 |
+| q_issue_lead | 4076 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 4%; WG1 under WG0's wgmma: 27%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 4%; WG1 in WG0's: 27%.
 
 ### D256 B4 H8/8 N8192 full (stale): 8 sampled CTAs
 
@@ -136,42 +139,46 @@ Share of WG0's vector work while WG1 has wgmma in flight: 4%; WG1 under WG0's wg
 | step_wg0 | 3846 |
 | step_wg1 | 3844 |
 | offset | -44 |
-| wait_Q | 78 |
-| wait_dO | 68 |
-| wait_dOt | 66 |
-| wait_Qt | 82 |
-| wait_S | 29 |
-| wait_dP | 22 |
-| wait_dV | 27 |
-| wait_dK | 223 |
-| psi_barrier | 22 |
-| vec_wg0 | 2001 |
-| vec_wg0_under_wg1_mma | 320 |
-| vec_wg1 | 1984 |
-| vec_wg1_under_wg0_mma | 614 |
-| p_acq_dO | 120 |
-| p_acq_dOt | 2889 |
-| p_acq_Q | 151 |
-| p_acq_Qt | 92 |
-| q_ready_lead | 4056 |
+| region_Q_wait | 78 |
+| region_dO_wait | 68 |
+| region_dOt_wait | 66 |
+| region_Qt_wait | 82 |
+| region_S_retire | 29 |
+| region_dP_retire | 22 |
+| region_dV_retire_release | 27 |
+| region_dK_retire_release_state | 223 |
+| region_psi_barrier | 22 |
+| vec_regions_wg0 | 2001 |
+| vec_regions_wg0_in_wg1_outstanding | 320 |
+| vec_regions_wg1 | 1984 |
+| vec_regions_wg1_in_wg0_outstanding | 614 |
+| p_region_dO_acquire | 120 |
+| p_region_dOt_acquire_bracket | 2889 |
+| p_region_Q_acquire_bracket | 151 |
+| p_region_Qt_acquire_bracket | 92 |
+| q_issue_lead | 4056 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 14%; WG1 under WG0's wgmma: 27%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 14%; WG1 in WG0's: 27%.
 
 
+## What the sampled, instrumented records show (and what they do not)
 
-## What the timeline shows (instrumented kernel)
-
-1. Loads are not the limiter in the sampled steps: consumer waits for Q / dO / dOt / Qt are 60-100 cycles each, while the
-   PRODUCER waits 880-2900 cycles per step to acquire a stage (it runs ahead and is throttled by consumer releases);
-   Q(m+1) is issued ~4000 cycles before it is needed. Consistent with the round-2 what-if (deeper hd128 stages slower).
-2. wgmma retirement waits are short except one: S / dP / dV waits 9-30 cycles, but the dK wait right before the dK fold
-   is ~220-255 cycles per step (~6% of the step) at both head dims: nothing independent is scheduled between the dK
-   issue and its fold.
-3. Vector work dominates each warpgroup's step: ~2400-2600 of ~3850 cycles at hd128, ~1900-2200 at d256.
-4. The two warpgroups start each step within ~45-60 cycles of each other (aligned); only 22-40% (hd128) and 4-27% (d256)
-   of one warpgroup's vector work runs while the other has a wgmma in flight. The psi barrier itself costs 7-22 cycles.
-   This supports the lockstep hypothesis (aligned phases); whether staggering would shorten the step depends on whether
-   the two warpgroups' vector work is issue-limited when co-scheduled, which this trace cannot show.
+1. In the sampled steps the consumers' load-wait regions are short (Q / dO / dOt / Qt: 60-100 cycles each) while the
+   producer's acquire regions are long (880-2900 cycles per step) and Q(m+1) is issued ~4000 cycles before it is
+   requested. In these records the consumers, not the loads, set the pace. This is sample- and instrumentation-
+   specific evidence, not proof that load latency never matters in the plain kernel (the d256 dO-depth result shows it
+   can).
+2. The region from dK issue to after its warpgroup_wait, release and state update is ~220-255 cycles per step at both
+   head dims, while the S / dP / dV retire regions are 9-30 cycles. Nothing independent sits between the dK issue and
+   the dK fold. This tail region includes the release / state work and probe overhead; it is not a pure tensor stall,
+   and how much of it a schedule change can recover is a hypothesis to measure (H1b).
+3. Instrumented vector regions take ~2400-2600 (hd128) / ~1900-2200 (d256) of ~3850 cycles per warpgroup step.
+4. The two warpgroups start each step within ~45-60 cycles of each other; 22-40% (hd128) / 4-27% (d256) of one's vector
+   regions fall inside the other's software-outstanding wgmma windows. Consistent with aligned phases; it does not
+   measure productive tensor / vector overlap, and whether staggering would shorten the step is not shown.
+5. Missing boundaries (next bounded diagnostic build): an immediate S-issued marker (event 21 is the dO-wait entry,
+   after S issue and scale prefetch), producer acquire entry markers for dOt / Q / Qt, consumer release boundaries
+   separate from waits (d256 Q release sits inside the exp region), per-pipeline stage / phase (only Q's is recorded).
 
 ## Post-DO2 ranking (results/r3/ab_main_confirm/B_median.json, main grid, modeled SOL as recorded)
 
@@ -186,8 +193,8 @@ Share of WG0's vector work while WG1 has wgmma in flight: 14%; WG1 under WG0's w
 ## Timeline-supported ordering of the remaining pass-1 hypotheses
 
 1. **H1b (task5, bitwise, hd128)**: pre-pack the dS' transpose words before issuing the dK gemm, and run the shuffles,
-   stmatrix, WG barriers and TMA store (~450 cycles per step of vector / sync work in the dense profile) while dK is in
-   flight, filling the exposed ~250-cycle dK wait. Requires the task4 Codex register-liveness / wgmma review first.
+   stmatrix, WG barriers and TMA store (~450 cycles per step of vector / sync regions in the dense profile) while dK is
+   outstanding, aiming at the ~250-cycle dK tail region (benefit a hypothesis until measured). Requires the task4 Codex register-liveness / wgmma review first.
 2. **Vector-work reductions (bitwise)**: psi amax via redux.sync on the |x| bit patterns; fewer instructions in the
    conversion / transpose paths. Each is small; candidates if H1b leaves the dK wait exposed.
 3. **PINGPONG (non-bitwise; Q2 + Q3 first)**: stagger the warpgroups by half a step so one's vector work runs under the

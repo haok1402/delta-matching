@@ -5,7 +5,11 @@ tile, for the two consumer warpgroups (actors 0, 1) and the producer warp (actor
     python benchmarks/trace_pass1.py capture --root <DM_TRACE build root> --out trace.json   # one backward per config
     python benchmarks/trace_pass1.py summarize trace.json > summary.md
 
-Timestamps are compared only within one CTA (one SM).  Event ids (consumer; both variants): 0 step start (before the Q
+Timestamps are compared only within one CTA (one SM).  Every derived quantity is a BRACKETED REGION between two
+probe events (it includes whatever work and probe overhead lies between them, not only the named wait); wgmma
+"outstanding" windows run from issue to the observed warpgroup_wait / release, a software bound, not tensor-pipe
+activity; q_issue_lead is how long before the consumers asked for Q(m+1) the producer had ISSUED it (not when it landed).
+Producer acquire regions for dOt / Q / Qt start at the previous event (no separate entry marker).  Event ids (consumer; both variants): 0 step start (before the Q
 wait), 3 Q wait done, 21 S issued (before the dO wait), 22 dO wait done, 4 dP issued, 5 S retired, 6 exp done, 7 dP
 retired, 8 dS done, 9 psi amax published, 10 psi barrier passed, 11 conversions (hd128) / first PdS barrier (d256) done,
 12 transpose (hd128) / exchange stores (d256) done, 13 dS' store issued, 23 / 24 dOt wait entry / exit, 14 dV issued,
@@ -106,9 +110,9 @@ def summarize(path):
         cfg = rec["cfg"]
         lines.append(f"## D{cfg[0]} B{cfg[1]} H{cfg[2]}/{cfg[3]} N{cfg[4]} {cfg[5]} ({rec['mode']}): {len(samples)} sampled CTAs")
         lines.append("")
-        st = {k: [] for k in ("step_wg0", "step_wg1", "offset", "wait_Q", "wait_dO", "wait_dOt", "wait_Qt", "wait_S", "wait_dP",
-                              "wait_dV", "wait_dK", "psi_barrier", "vec_wg0", "vec_wg0_under_wg1_mma", "vec_wg1",
-                              "vec_wg1_under_wg0_mma", "p_acq_dO", "p_acq_dOt", "p_acq_Q", "p_acq_Qt", "q_ready_lead")}
+        st = {k: [] for k in ("step_wg0", "step_wg1", "offset", "region_Q_wait", "region_dO_wait", "region_dOt_wait", "region_Qt_wait", "region_S_retire", "region_dP_retire",
+                              "region_dV_retire_release", "region_dK_retire_release_state", "region_psi_barrier", "vec_regions_wg0", "vec_regions_wg0_in_wg1_outstanding", "vec_regions_wg1",
+                              "vec_regions_wg1_in_wg0_outstanding", "p_region_dO_acquire", "p_region_dOt_acquire_bracket", "p_region_Q_acquire_bracket", "p_region_Qt_acquire_bracket", "q_issue_lead")}
         for smp in samples:
             steps = smp["steps"]
             for j in range(1, len(steps) - 1):          # skip the first (prologue) and last (tail) sampled step
@@ -119,30 +123,30 @@ def summarize(path):
                 st["step_wg0"].append(n0[0] - w0[0]); st["step_wg1"].append(n1[0] - w1[0])
                 st["offset"].append(w1[0] - w0[0])
                 for ev in (w0, w1):
-                    st["wait_Q"].append(ev[3] - ev[0]); st["wait_dO"].append(ev[22] - ev[21])
-                    st["wait_dOt"].append(ev[24] - ev[23]); st["wait_Qt"].append(ev[26] - ev[25])
-                    st["wait_S"].append(ev[5] - ev[4]); st["wait_dP"].append(ev[7] - ev[6])
-                    st["wait_dV"].append(ev[16] - ev[15]); st["wait_dK"].append(ev[17] - ev[16])
-                    st["psi_barrier"].append(ev[10] - ev[9])
+                    st["region_Q_wait"].append(ev[3] - ev[0]); st["region_dO_wait"].append(ev[22] - ev[21])
+                    st["region_dOt_wait"].append(ev[24] - ev[23]); st["region_Qt_wait"].append(ev[26] - ev[25])
+                    st["region_S_retire"].append(ev[5] - ev[4]); st["region_dP_retire"].append(ev[7] - ev[6])
+                    st["region_dV_retire_release"].append(ev[16] - ev[15]); st["region_dK_retire_release_state"].append(ev[17] - ev[16])
+                    st["region_psi_barrier"].append(ev[10] - ev[9])
                 v0, m0 = windows(w0); v1, m1 = windows(w1)
-                st["vec_wg0"].append(sum(y - x for x, y in v0)); st["vec_wg0_under_wg1_mma"].append(overlap(v0, m1))
-                st["vec_wg1"].append(sum(y - x for x, y in v1)); st["vec_wg1_under_wg0_mma"].append(overlap(v1, m0))
+                st["vec_regions_wg0"].append(sum(y - x for x, y in v0)); st["vec_regions_wg0_in_wg1_outstanding"].append(overlap(v0, m1))
+                st["vec_regions_wg1"].append(sum(y - x for x, y in v1)); st["vec_regions_wg1_in_wg0_outstanding"].append(overlap(v1, m0))
                 if pr[1]:
-                    st["p_acq_dO"].append(pr[2] - pr[1]); st["p_acq_dOt"].append(pr[4] - pr[3])
-                    st["p_acq_Q"].append(pr[7] - pr[5]); st["p_acq_Qt"].append(pr[9] - pr[8])
+                    st["p_region_dO_acquire"].append(pr[2] - pr[1]); st["p_region_dOt_acquire_bracket"].append(pr[4] - pr[3])
+                    st["p_region_Q_acquire_bracket"].append(pr[7] - pr[5]); st["p_region_Qt_acquire_bracket"].append(pr[9] - pr[8])
                     # how long before the consumers asked for Q(m+1) the producer had issued its load
-                    st["q_ready_lead"].append(steps[j + 1][0][0] - pr[8])
+                    st["q_issue_lead"].append(steps[j + 1][0][0] - pr[8])
         def med(k):
             return statistics.median(st[k]) if st[k] else float("nan")
         n = len(st["step_wg0"])
-        vec_share0 = sum(st["vec_wg0_under_wg1_mma"]) / max(1, sum(st["vec_wg0"]))
-        vec_share1 = sum(st["vec_wg1_under_wg0_mma"]) / max(1, sum(st["vec_wg1"]))
+        vec_share0 = sum(st["vec_regions_wg0_in_wg1_outstanding"]) / max(1, sum(st["vec_regions_wg0"]))
+        vec_share1 = sum(st["vec_regions_wg1_in_wg0_outstanding"]) / max(1, sum(st["vec_regions_wg1"]))
         lines += [f"{n} interior steps; medians in cycles (SM clock):", "",
                   "| quantity | median |", "|---|---:|"]
         for k in st:
             lines.append(f"| {k} | {med(k):.0f} |")
-        lines += ["", f"Share of WG0's vector work while WG1 has wgmma in flight: {100 * vec_share0:.0f}%; "
-                      f"WG1 under WG0's wgmma: {100 * vec_share1:.0f}%.", ""]
+        lines += ["", f"Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to "
+                      f"observed retire / release): {100 * vec_share0:.0f}%; WG1 in WG0's: {100 * vec_share1:.0f}%.", ""]
         agg[f"D{cfg[0]}_{cfg[5]}"] = {k: med(k) for k in st} | {"vec_under_other_mma": [vec_share0, vec_share1], "steps": n}
     return "\n".join(lines), agg
 

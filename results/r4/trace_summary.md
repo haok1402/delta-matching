@@ -11,26 +11,26 @@ Build: /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok
 | step_wg0 | 3849 |
 | step_wg1 | 3866 |
 | offset | -61 |
-| wait_Q | 82 |
-| wait_dO | 80 |
-| wait_dOt | 62 |
-| wait_Qt | 85 |
-| wait_S | 9 |
-| wait_dP | 9 |
-| wait_dV | 20 |
-| wait_dK | 253 |
-| psi_barrier | 7 |
-| vec_wg0 | 2471 |
-| vec_wg0_under_wg1_mma | 708 |
-| vec_wg1 | 2574 |
-| vec_wg1_under_wg0_mma | 1078 |
-| p_acq_dO | 878 |
-| p_acq_dOt | 1613 |
-| p_acq_Q | 148 |
-| p_acq_Qt | 142 |
-| q_ready_lead | 3978 |
+| region_Q_wait | 82 |
+| region_dO_wait | 80 |
+| region_dOt_wait | 62 |
+| region_Qt_wait | 85 |
+| region_S_retire | 9 |
+| region_dP_retire | 9 |
+| region_dV_retire_release | 20 |
+| region_dK_retire_release_state | 253 |
+| region_psi_barrier | 7 |
+| vec_regions_wg0 | 2471 |
+| vec_regions_wg0_in_wg1_outstanding | 708 |
+| vec_regions_wg1 | 2574 |
+| vec_regions_wg1_in_wg0_outstanding | 1078 |
+| p_region_dO_acquire | 878 |
+| p_region_dOt_acquire_bracket | 1613 |
+| p_region_Q_acquire_bracket | 148 |
+| p_region_Qt_acquire_bracket | 142 |
+| q_issue_lead | 3978 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 27%; WG1 under WG0's wgmma: 40%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 27%; WG1 in WG0's: 40%.
 
 ## D128 B4 H16/16 N8192 full (stale): 8 sampled CTAs
 
@@ -41,26 +41,26 @@ Share of WG0's vector work while WG1 has wgmma in flight: 27%; WG1 under WG0's w
 | step_wg0 | 3938 |
 | step_wg1 | 3944 |
 | offset | -49 |
-| wait_Q | 65 |
-| wait_dO | 84 |
-| wait_dOt | 64 |
-| wait_Qt | 82 |
-| wait_S | 26 |
-| wait_dP | 9 |
-| wait_dV | 23 |
-| wait_dK | 255 |
-| psi_barrier | 7 |
-| vec_wg0 | 2398 |
-| vec_wg0_under_wg1_mma | 534 |
-| vec_wg1 | 2608 |
-| vec_wg1_under_wg0_mma | 1022 |
-| p_acq_dO | 986 |
-| p_acq_dOt | 1674 |
-| p_acq_Q | 152 |
-| p_acq_Qt | 144 |
-| q_ready_lead | 4056 |
+| region_Q_wait | 65 |
+| region_dO_wait | 84 |
+| region_dOt_wait | 64 |
+| region_Qt_wait | 82 |
+| region_S_retire | 26 |
+| region_dP_retire | 9 |
+| region_dV_retire_release | 23 |
+| region_dK_retire_release_state | 255 |
+| region_psi_barrier | 7 |
+| vec_regions_wg0 | 2398 |
+| vec_regions_wg0_in_wg1_outstanding | 534 |
+| vec_regions_wg1 | 2608 |
+| vec_regions_wg1_in_wg0_outstanding | 1022 |
+| p_region_dO_acquire | 986 |
+| p_region_dOt_acquire_bracket | 1674 |
+| p_region_Q_acquire_bracket | 152 |
+| p_region_Qt_acquire_bracket | 144 |
+| q_issue_lead | 4056 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 22%; WG1 under WG0's wgmma: 37%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 22%; WG1 in WG0's: 37%.
 
 ## D256 B4 H8/8 N8192 causal (matched): 8 sampled CTAs
 
@@ -71,26 +71,26 @@ Share of WG0's vector work while WG1 has wgmma in flight: 22%; WG1 under WG0's w
 | step_wg0 | 3801 |
 | step_wg1 | 3801 |
 | offset | -61 |
-| wait_Q | 70 |
-| wait_dO | 70 |
-| wait_dOt | 96 |
-| wait_Qt | 82 |
-| wait_S | 29 |
-| wait_dP | 23 |
-| wait_dV | 27 |
-| wait_dK | 221 |
-| psi_barrier | 22 |
-| vec_wg0 | 1914 |
-| vec_wg0_under_wg1_mma | 0 |
-| vec_wg1 | 2174 |
-| vec_wg1_under_wg0_mma | 664 |
-| p_acq_dO | 127 |
-| p_acq_dOt | 2860 |
-| p_acq_Q | 186 |
-| p_acq_Qt | 87 |
-| q_ready_lead | 4076 |
+| region_Q_wait | 70 |
+| region_dO_wait | 70 |
+| region_dOt_wait | 96 |
+| region_Qt_wait | 82 |
+| region_S_retire | 29 |
+| region_dP_retire | 23 |
+| region_dV_retire_release | 27 |
+| region_dK_retire_release_state | 221 |
+| region_psi_barrier | 22 |
+| vec_regions_wg0 | 1914 |
+| vec_regions_wg0_in_wg1_outstanding | 0 |
+| vec_regions_wg1 | 2174 |
+| vec_regions_wg1_in_wg0_outstanding | 664 |
+| p_region_dO_acquire | 127 |
+| p_region_dOt_acquire_bracket | 2860 |
+| p_region_Q_acquire_bracket | 186 |
+| p_region_Qt_acquire_bracket | 87 |
+| q_issue_lead | 4076 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 4%; WG1 under WG0's wgmma: 27%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 4%; WG1 in WG0's: 27%.
 
 ## D256 B4 H8/8 N8192 full (stale): 8 sampled CTAs
 
@@ -101,24 +101,24 @@ Share of WG0's vector work while WG1 has wgmma in flight: 4%; WG1 under WG0's wg
 | step_wg0 | 3846 |
 | step_wg1 | 3844 |
 | offset | -44 |
-| wait_Q | 78 |
-| wait_dO | 68 |
-| wait_dOt | 66 |
-| wait_Qt | 82 |
-| wait_S | 29 |
-| wait_dP | 22 |
-| wait_dV | 27 |
-| wait_dK | 223 |
-| psi_barrier | 22 |
-| vec_wg0 | 2001 |
-| vec_wg0_under_wg1_mma | 320 |
-| vec_wg1 | 1984 |
-| vec_wg1_under_wg0_mma | 614 |
-| p_acq_dO | 120 |
-| p_acq_dOt | 2889 |
-| p_acq_Q | 151 |
-| p_acq_Qt | 92 |
-| q_ready_lead | 4056 |
+| region_Q_wait | 78 |
+| region_dO_wait | 68 |
+| region_dOt_wait | 66 |
+| region_Qt_wait | 82 |
+| region_S_retire | 29 |
+| region_dP_retire | 22 |
+| region_dV_retire_release | 27 |
+| region_dK_retire_release_state | 223 |
+| region_psi_barrier | 22 |
+| vec_regions_wg0 | 2001 |
+| vec_regions_wg0_in_wg1_outstanding | 320 |
+| vec_regions_wg1 | 1984 |
+| vec_regions_wg1_in_wg0_outstanding | 614 |
+| p_region_dO_acquire | 120 |
+| p_region_dOt_acquire_bracket | 2889 |
+| p_region_Q_acquire_bracket | 151 |
+| p_region_Qt_acquire_bracket | 92 |
+| q_issue_lead | 4056 |
 
-Share of WG0's vector work while WG1 has wgmma in flight: 14%; WG1 under WG0's wgmma: 27%.
+Share of WG0's instrumented vector regions inside WG1's software-outstanding wgmma windows (issue to observed retire / release): 14%; WG1 in WG0's: 27%.
 

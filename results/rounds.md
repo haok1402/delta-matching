@@ -86,8 +86,8 @@ the 12 MHA minimum-length / packed cases); baseline vs DO2 BITWISE EQUAL, FULL S
 A timeline-only build (`DM_TRACE=1`) records absolute clock64 event times for 8 sampled CTAs x 12 m-block steps x 3
 actors (two consumer warpgroups, producer) in both pass-1 collectives; bitwise to the DO2 build (72 cases); +14-16%
 pass-1 overhead (dense probes +17-26%). Results in `results/timeline_pass1.md` (raw trace and summaries in results/r4/):
-loads are not the limiter (consumer load waits 60-100 cycles, the producer waits 880-2900 cycles per step for free
-stages); the dK wgmma wait before the dK fold is exposed (~220-255 cycles per step); vector work is ~2000-2600 of ~3850
+in the sampled, instrumented records the consumer load-wait regions are short (60-100 cycles) and the producer
+acquire regions long (880-2900 cycles per step); the dK issue-to-retire/release tail region is ~220-255 cycles per step; vector work is ~2000-2600 of ~3850
 cycles per warpgroup step; the warpgroups start each step within ~60 cycles of each other and only 4-40% of one's vector
 work runs under the other's wgmma. Next pass-1 hypothesis: H1b (task4 review first).
 

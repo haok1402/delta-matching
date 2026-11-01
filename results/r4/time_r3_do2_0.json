@@ -1,0 +1,168 @@
+{
+ "meta": {
+  "root": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r3_do2",
+  "package": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r3_do2/delta_matching",
+  "library": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r3_do2/delta_matching/_C.so",
+  "library_sha256": "7d491ed1a5560e4e14b63357928fb511539209d9289e505626a16247c0bf39fc",
+  "route": {
+   "groups": "off",
+   "streams": 1,
+   "ws_limit": 8589934592.0
+  },
+  "device": "NVIDIA H100 80GB HBM3",
+  "configs": [
+   [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "causal"
+   ],
+   [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "full"
+   ],
+   [
+    128,
+    1,
+    16,
+    16,
+    32768,
+    "causal"
+   ],
+   [
+    128,
+    4,
+    16,
+    4,
+    8192,
+    "causal"
+   ],
+   [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "causal"
+   ],
+   [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "full"
+   ],
+   [
+    256,
+    1,
+    8,
+    8,
+    32768,
+    "causal"
+   ]
+  ],
+  "clock_mhz": 1950.0,
+  "prof": false,
+  "run_tag": "rep0"
+ },
+ "records": [
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 3.8864136,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "full"
+   ],
+   "mode": "stale",
+   "pass1_ms": 7.802972600000001,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    128,
+    1,
+    16,
+    16,
+    32768,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 15.4898606,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    4,
+    8192,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 3.8758314,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 4.0019436,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "full"
+   ],
+   "mode": "stale",
+   "pass1_ms": 7.9877096,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    256,
+    1,
+    8,
+    8,
+    32768,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 16.069939400000003,
+   "steps": 5
+  }
+ ]
+}

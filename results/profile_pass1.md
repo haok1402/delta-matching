@@ -14,8 +14,8 @@ utilization counters and L2 / smem throughput counters are not available here; t
    address-stripped `cuobjdump -sass` of the whole library matches, job 21158748). The probe build's outputs are bitwise the
    baseline's (72 equivalence cases); a first version with a 512 B counter array was NOT (it moved the dynamic smem base
    off the 1024 B alignment the SW128 TMA layouts need: dK / dV relative error 1.4), which is why the array is 1 KB.
-2. Perturbation: the probes cost about +20% pass-1 time (table below), so phase SHARES are the signal; absolute
-   cycles are inflated by roughly that factor, spread over the probe points.
+2. Perturbation: the probes cost about +20% pass-1 time (table below). How that overhead distributes over the phases
+   is unknown, so every phase share below is a share of the INSTRUMENTED kernel, not of the plain kernel.
 3. Resource usage (`cuobjdump --dump-resource-usage`), launch geometry and smem (`DM_DEBUG=1`), analytic budgets.
 4. What-if builds (pipeline depth, warpgroup decoupling), timed against the baseline in the same job, 2 repetitions in a
    FIXED order (base, then each variant; not alternated: exploratory only) (`results/r2/whatif_*.json`, patches in `results/r2/whatif_apply.py`).
@@ -37,7 +37,8 @@ utilization counters and L2 / smem throughput counters are not available here; t
 - MUFU: one exp2 per score: 64 x 128 = 8192 per step (hd128) at 16 / clk / SM = **512 cycles** (d256: 4096 -> 256).
 - HBM / L2: per hd128 step a CTA reads Q, Qt, dO, dOt tiles (4 x 8 KB, mostly L2 hits: every tile is re-read by the
   N / 128 CTAs of the head) and writes 8 KB of dS'. At the measured ~3300 plain cycles per step: about 0.6 TB/s of dS'
-  writes and ~3 TB/s of L2 reads across 132 SMs, far from either limit: pass 1 is not memory-bound.
+  writes and ~3 TB/s of L2 reads across 132 SMs, far below either throughput limit. This is a throughput estimate:
+  it does not exclude exposed load LATENCY (the d256 dO-depth result below shows exposed latency there).
 
 ## Probe perturbation (pass 1 ms, plain baseline vs probe build)
 
@@ -255,7 +256,10 @@ HYPOTHESES the data is consistent with, not established facts:
 5. The warpgroup-local psi probe (-4.2 .. -4.8%) changes the work (half the max scan, different psi values) and is not
    an isolated cost of the barrier or a bound on a correct ping-pong design.
 
-## Profile-based hypotheses for pass 1 (ranked by expected gain x confidence)
+## Historical round-2 ranking of the pass-1 hypotheses (superseded: see results/timeline_pass1.md and results/rounds.md)
+
+Outcome since: #1 P1-d256-DO2 was accepted in round 3 (-3.6% d256 pass 1, two jobs).
+
 
 1. **P1-d256-DO2** (d256, bitwise, schedule): double-buffer dO in the d256 pass 1 (`Stages_dO_d256 = 2`, smem 224 KB
    of 227 KB). Measured -2.4 .. -5.0% of d256 pass 1 in the what-if; next round, as an acceptance candidate on the

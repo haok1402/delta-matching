@@ -1,0 +1,2 @@
+== Q6: deterministic rebuild of the accepted DO2 revision 58c5d56 (for its build stamp)
+do2 sha 7d491ed1a5560e4e14b63357928fb511539209d9289e505626a16247c0bf39fc rebuild d083ba04813324ae20dbaf1f557c56b6a3086d3873f14f22dea60c4f396bcdc5

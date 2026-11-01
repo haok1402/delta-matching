@@ -46,7 +46,8 @@ profiling / tooling rounds change neither.
 
 Nsight Compute is unavailable (RmProfilingAdminOnly=1 on the nodes), so pass 1 was profiled with a clock64 probe build
 (`DM_PROF=1`, bitwise to the baseline, ~+20% overhead) plus what-if builds: `results/profile_pass1.md`, raw data in
-`results/r2/`. Findings: pass 1 is issue-bound and serialized (matrix work at modeled peak is 23-26% of the instrumented step time), the MUFU exp2 floor is half the tensor ideal at hd128, the d256 single dO stage exposes
+`results/r2/`. Findings: matrix work at modeled peak is 23-26% of the instrumented step time (issue pressure and serialization are
+hypotheses consistent with this, not measured), the MUFU exp2 floor is half the tensor ideal at hd128, the d256 single dO stage exposes
 load latency (a second dO stage: -2.4 .. -5.0% d256 pass 1 in two fixed-order exploratory repetitions, bitwise), and
 deeper hd128 stages are slower. Issue pressure and warpgroup lockstep are hypotheses consistent with the data (no
 hardware counters, no per-step timeline yet); the local-psi timing probe is not an isolated bound. Ranked profile-based hypotheses
@@ -75,3 +76,24 @@ are in the profile report; the next round takes P1-d256-DO2.
   grid. bench.py N8192 matched fwd+bwd (3 alternating reps): D256 8.623 / 8.635 / 8.616 -> 8.468 / 8.492 / 8.463 ms,
   D128 4.474 / 4.466 / 4.464 -> 4.461 / 4.472 / 4.483 ms (results/r3/bench_*.txt).
 - Counters: pass 1 eligible 0 -> 0 (accepted: reset).
+
+DO2 acceptance coverage completed in round 4: the forced routes now run all 72 cases (the earlier route filter skipped
+the 12 MHA minimum-length / packed cases); baseline vs DO2 BITWISE EQUAL, FULL SUITE, 72 cases on kv, head and streams2
+(job 21159927, results/r4/equivalence_b6_prof.txt), in addition to the default route's 72 (round 3).
+
+## Round 4: pass-1 sparse timeline (profiling; no kernel change, counters unchanged)
+
+A timeline-only build (`DM_TRACE=1`) records absolute clock64 event times for 8 sampled CTAs x 12 m-block steps x 3
+actors (two consumer warpgroups, producer) in both pass-1 collectives; bitwise to the DO2 build (72 cases); +14-16%
+pass-1 overhead (dense probes +17-26%). Results in `results/timeline_pass1.md` (raw trace and summaries in results/r4/):
+loads are not the limiter (consumer load waits 60-100 cycles, the producer waits 880-2900 cycles per step for free
+stages); the dK wgmma wait before the dK fold is exposed (~220-255 cycles per step); vector work is ~2000-2600 of ~3850
+cycles per warpgroup step; the warpgroups start each step within ~60 cycles of each other and only 4-40% of one's vector
+work runs under the other's wgmma. Next pass-1 hypothesis: H1b (task4 review first).
+
+| kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
+|---|---:|---|
+| pass 1 | 0 | 1 (H1a, round 1) |
+| forward | 0 | 0 |
+| pass 2 | 0 | 0 |
+| torch glue | 0 | 0 |

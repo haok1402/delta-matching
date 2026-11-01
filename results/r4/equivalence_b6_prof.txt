@@ -1,0 +1,16 @@
+== B6: all 72 cases on the forced routes, baseline vs DO2
+route kv, FULL SUITE, A 07fee0f25b8b vs B 7d491ed1a556
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+B6 kv exit 0
+route head, FULL SUITE, A 07fee0f25b8b vs B 7d491ed1a556
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+B6 head exit 0
+route streams2, FULL SUITE, A 07fee0f25b8b vs B 7d491ed1a556
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+B6 streams2 exit 0
+== trace / dense-probe builds vs the accepted DO2 build (default route, 72 cases)
+    sys.exit(main())
+    sys.exit(main())
+route default, FULL SUITE, A 7d491ed1a556 vs B 9095d08b9560
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+prof4 equivalence exit 0

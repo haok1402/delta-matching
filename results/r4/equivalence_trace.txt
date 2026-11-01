@@ -1,0 +1,4 @@
+route default, FULL SUITE, A 7d491ed1a556 vs B 321bf8318b8a
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+trace4 equivalence exit 0
+Build: /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/trace4/delta_matching/_C.so (sha256 321bf8318b8a132a), route {'groups': 'off', 'streams': 1, 'ws_limit': 8589934592.0}.

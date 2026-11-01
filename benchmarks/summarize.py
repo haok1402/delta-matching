@@ -4,7 +4,10 @@ per-shape tables (ms, TFLOPS, % of SOL), FlashAttention-3 comparisons, and (with
     python benchmarks/summarize.py results/baseline_main.json [--holdout results/baseline_holdout.json] > results/BASELINE.md
     python benchmarks/summarize.py new_main.json --base results/baseline_main.json --holdout new_hold.json --base-holdout base_hold.json
 """
-import argparse, json
+import argparse, json, os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kernels as K   # noqa: E402  (the accounting model; does not import delta_matching)
 
 CATS = ("fwd", "pass1", "pass0", "pass2", "prod_fwd", "prod_bwd", "twin", "glue")
 LABEL = {"fwd": "forward (fwd_fp8)", "pass0": "pass 0 (matched delta)", "pass1": "pass 1 (dK, dV, dS')",
@@ -12,9 +15,17 @@ LABEL = {"fwd": "forward (fwd_fp8)", "pass0": "pass 0 (matched delta)", "pass1":
          "twin": "twins (Q, dO transposes)", "glue": "torch glue (layout copies, GQA fold)"}
 
 
+REMODEL = False
+
+
 def load(p):
     with open(p) as f:
-        return json.load(f)
+        d = json.load(f)
+    if REMODEL:   # recompute the modeled SOL with the current accounting (kernels.accounting) at the run's clock
+        clk = d["meta"].get("sustained_clock_mhz", 1830.0)
+        for r in d["records"]:
+            r["sol"] = K.model_sol(r, clk)
+    return d
 
 
 def key(r):
@@ -35,7 +46,7 @@ def ranking(recs):
             continue
         rows.append((t - s, c, t, s))
     rows.sort(reverse=True)
-    out = ["| rank | kernel | measured ms (sum over grid) | SOL ms | wasted ms | % of SOL | share of fwd+bwd |",
+    out = ["| rank | kernel | measured ms (sum over grid) | modeled SOL ms | wasted vs model ms | % of modeled SOL | share of fwd+bwd |",
            "|---:|---|---:|---:|---:|---:|---:|"]
     tot = sum(r["e2e_fwdbwd_ms"] for r in recs)
     for i, (w, c, t, s) in enumerate(rows, 1):
@@ -73,10 +84,11 @@ def compare(new, base, title):
            " | ".join(f"{c} before / after" for c in CATS) + " |", "|" + "---|" * (6 + len(CATS))]
     tn = tb = 0.0
     worst = 0.0
+    missing = sorted(set(b) ^ {key(r) for r in new})
+    if missing:
+        raise SystemExit(f"summarize: {len(missing)} shape(s) present in only one of the two files, e.g. {missing[0]}")
     for r in new:
-        o = b.get(key(r))
-        if not o:
-            continue
+        o = b[key(r)]
         ch = 100 * (r["e2e_fwdbwd_ms"] / o["e2e_fwdbwd_ms"] - 1)
         worst = max(worst, ch)
         tn += r["e2e_fwdbwd_ms"]; tb += o["e2e_fwdbwd_ms"]
@@ -98,14 +110,17 @@ def compare(new, base, title):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("main"); ap.add_argument("--holdout"); ap.add_argument("--base"); ap.add_argument("--base-holdout")
+    ap.add_argument("--remodel", action="store_true", help="recompute the modeled SOL with the current accounting")
     a = ap.parse_args()
+    global REMODEL
+    REMODEL = a.remodel
     m = load(a.main)
     recs = m["records"]
     meta = m["meta"]
     clk = meta.get("sustained_clock_mhz", 1830)
     print(f"Device {meta['device']}, torch {meta['torch']}, CUDA {meta['cuda']}, kernel {meta['kernel_version'].get('code_sha')}. "
           f"Sustained SM clock {clk:.0f} MHz -> dense fp8 peak {132 * 8192 * clk / 1e6:.0f} TFLOPS (nominal 1979 at 1830 MHz); "
-          "HBM3 3.35 TB/s. Cells: measured ms / achieved TFLOPS / % of speed of light.\n")
+          "HBM3 3.35 TB/s. Cells: measured ms / achieved TFLOPS / % of modeled speed of light (an optimistic reference: unique bytes, perfect overlap).\n")
     if a.base:
         print(compare(recs, load(a.base)["records"], "Main grid: after vs before"))
         if a.holdout and a.base_holdout:

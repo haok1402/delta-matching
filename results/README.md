@@ -15,3 +15,15 @@ commit 0251105 built with hdim 128/256 only).
   with causal counting N (N + 1) / 2 visible pairs. The nominal 1979 TFLOPS corresponds to 1830 MHz; the GPU sustains
   about 1950 MHz under this load, a 2109 TFLOPS ceiling. The FLOP and byte model is `accounting()` in
   `benchmarks/kernels.py`.
+
+## Tooling (round 0)
+
+- `benchmarks/equivalence.py`: dump outputs + intermediates of one build per process (`PYTHONPATH=<build root>`), compare
+  two dumps byte for byte. 72 cases (D 128/256, MHA/GQA4/GQA3/MQA, packed-QKV and (B,H,N,D) layouts, stress inputs,
+  three modes) per route; the split routes (`--route kv|head|streams2`) cover the GQA/MQA cases.
+- `benchmarks/ab.py`: `freeze` a revision's package + library; `run` alternates two builds over repetitions of
+  `kernels.py` in fresh processes and reports per-kernel median sums, change and spread (`results/r0/`).
+- `results/r0/`: self-tests: the baseline against itself is bitwise equal on every route and within 0.4% per kernel
+  (worst single shape +0.86%, the per-shape noise floor); a one-bit perturbation and a slowed B are both detected.
+- The modeled SOL (`kernels.accounting`) counts unique bytes with perfect overlap: an optimistic reference.
+  `baseline.md` is regenerated with the corrected model (`summarize.py --remodel`).

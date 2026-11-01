@@ -1,0 +1,10 @@
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+compare exit 0
+perturbed d128_gqa4/causal/matched dV at flat index 524288
+wrote .local/equiv/perturb.pt: 3 cases, library /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/delta_matching/_C.so
+DIFF d128_gqa4/causal/matched dV: 1 of 1048576 elements differ, first at flat index 524288 (unravel (1, 0, 0, 0)), max |diff| 0.0312
+compared 3 cases: 1 mismatching tensors; error vs fp32 larger in 0 (case, tensor) pairs
+perturb compare exit 1
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs

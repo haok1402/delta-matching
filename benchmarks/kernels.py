@@ -6,7 +6,7 @@ backward producer (dO quantizer, stale delta), pass 0 (the matched delta), pass 
 the twins, and the torch glue (GQA dK / dV fold, copies).  The wall-clock forward and forward + backward come from CUDA
 events without the profiler.  The SM clock is sampled with nvidia-smi during the timed region.
 
-Speed of light per kernel: max(FLOPs / peak, bytes / HBM bandwidth), with the dense fp8 peak taken at the measured
+Modeled speed of light per kernel: max(FLOPs / peak, bytes / HBM bandwidth), with the dense fp8 peak taken at the measured
 sustained clock (132 SMs x 8192 fp8 FLOP / clk / SM: 1979 TFLOPS at 1830 MHz) and at its nominal value, and the HBM3
 bandwidth at 3.35 TB/s.  FLOPs count the matmuls only (causal: the N (N + 1) / 2 visible pairs); bytes are the compulsory
 traffic of each kernel (operands read once, outputs written once; the dS' tiles that pass 1 writes and pass 2 reads are
@@ -21,7 +21,7 @@ import argparse, json, os, statistics, subprocess, sys, threading, time
 
 import torch
 
-import delta_matching as dm
+dm = None   # delta_matching, imported in main() (summarize.py reuses the accounting without it)
 
 SMS = 132
 FP8_FLOP_PER_CLK_SM = 8192
@@ -98,29 +98,70 @@ def pairs(N, causal):
     return N * (N + 1) / 2 if causal else float(N) * N
 
 
-def accounting(D, B, H, Hk, N, causal, mode):
-    """FLOPs and compulsory bytes per kernel category for one call."""
+def visited_tiles(N, bm, bn, causal):
+    """(bm-row, bn-key) tiles a pass visits per head: every tile in full attention, the tiles with at least one visible
+    pair under the causal mask."""
+    nbm, nbn = N // bm, N // bn
+    if not causal:
+        return nbm * nbn
+    return sum(min(nbn, -(-((mb + 1) * bm) // bn)) for mb in range(nbm))
+
+
+def accounting(D, B, H, Hk, N, causal, mode, layout="bnhd"):
+    """Matmul FLOPs and modeled HBM bytes per kernel category for one fwd+bwd call (the API route, default knobs).
+
+    Bytes are unique tensor bytes moved once (operands read once, outputs written once): reuse through L2 is assumed,
+    so the modeled SOL is an optimistic reference, not a measured utilization.  dS' and psi are counted per VISITED
+    (64-row x kbn-key) tile (kbn 128 at D 128, 64 at D 256), the d256 pass-0 partial row sums per visited 64 x 64 tile.
+    Glue covers the producers' (B, N, H, D) -> (B*H, N, D) layout copies of q / k / v (bf16 read + write; absent when the
+    inputs are (B, H, N, D) contiguous) and the GQA dK / dV fold (per-query-head bf16 read, per-KV-head write).  The
+    head-group split route's per-group copies (long context) are not modeled."""
     P = pairs(N, causal) * B * H          # visible (query, key) pairs over all heads
     BHq, BHk, ND = B * H, B * Hk, N * D
+    kbn = 128 if D == 128 else 64
+    tiles = visited_tiles(N, 64, kbn, causal) * BHq
     f, b = {}, {}
     f["fwd"] = 4 * P * D
     b["fwd"] = BHq * ND + 2 * BHk * ND + 2 * BHq * ND + 4 * BHq * N            # Q K V codes, O bf16, LSE
     f["pass0"] = 4 * P * D if mode == "matched" else 0
-    b["pass0"] = (2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N) if mode == "matched" else 0
+    b["pass0"] = 0
+    if mode == "matched":
+        b["pass0"] = 2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + BHk * ND      # Q dO K V codes (+ K twin), LSE, delta
+        if D == 256:   # partial row sums [BH, N/64, 2, N] fp32 over visited 64 x 64 tiles: written, then reduced
+            b["pass0"] += 2 * visited_tiles(N, 64, 64, causal) * BHq * 64 * 2 * 4
     f["pass1"] = 8 * P * D
-    # Q, dO, their twins, K, V, K twin codes; LSE, delta; dK and dV per query head (bf16); dS' codes (one byte per pair)
-    b["pass1"] = 4 * BHq * ND + 3 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + P
+    # Q, dO, their twins, K, V, K twin codes; LSE, delta; dK and dV per query head (bf16); dS' tiles; psi
+    b["pass1"] = 4 * BHq * ND + 3 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + tiles * 64 * kbn + 4 * tiles
     f["pass2"] = 2 * P * D
-    b["pass2"] = P + BHk * ND + 2 * BHq * ND                                    # dS' codes, K twin, dQ bf16
+    b["pass2"] = tiles * 64 * kbn + 4 * tiles + BHk * ND + 2 * BHq * ND          # dS' tiles + psi, K twin, dQ bf16
     f["prod_fwd"] = 0
-    b["prod_fwd"] = 2 * (BHq + 2 * BHk) * ND + (2 * BHq + 3 * BHk) * ND         # bf16 in; Q, Qt, K, Kt, V codes out
+    # bf16 q, k, v read; k read again by the k-mean; Q, K, K twin, V codes written (the Q twin is the twin kernel's)
+    b["prod_fwd"] = 2 * (BHq + 2 * BHk) * ND + 2 * BHk * ND + (BHq + 3 * BHk) * ND
     f["prod_bwd"] = 0
     b["prod_bwd"] = 2 * BHq * ND + BHq * ND + (2 * BHq * ND + 4 * BHq * N if mode == "stale" else 0)
     f["twin"] = 0
-    b["twin"] = 2 * BHq * ND                                                    # dO twin (read + write)
+    b["twin"] = 2 * 2 * BHq * ND                                                # Q and dO twins: codes read + written
     f["glue"] = 0
-    b["glue"] = (2 * 2 * BHq * ND + 2 * 2 * BHk * ND) if Hk < H else 0          # GQA fold of dK / dV
+    b["glue"] = (2 * 2 * (BHq + 2 * BHk) * ND if layout == "bnhd" else 0) + \
+                ((2 * 2 * BHq * ND + 2 * 2 * BHk * ND) if Hk < H else 0)
     return f, b
+
+
+def model_sol(rec, clk):
+    """Per-category modeled SOL for one record (kernels.py JSON) at SM clock clk (MHz)."""
+    f, b = accounting(rec["D"], rec["B"], rec["H"], rec["Hk"], rec["N"], rec["attn"] == "causal", rec["mode"],
+                      rec.get("layout", "bnhd"))
+    peak = SMS * FP8_FLOP_PER_CLK_SM * clk * 1e6
+    sol = {}
+    for c in CATS:
+        ms = rec["ms"][c]
+        t_f, t_b = f[c] / peak * 1e3, b[c] / HBM * 1e3
+        t_fn = f[c] / NOMINAL_FP8 * 1e3
+        sol[c] = {"flops": f[c], "bytes": b[c], "sol_ms": max(t_f, t_b), "sol_nominal_ms": max(t_fn, t_b),
+                  "bound": "compute" if t_f >= t_b else "memory",
+                  "tflops": f[c] / (ms * 1e-3) / 1e12 if ms > 0 else 0.0,
+                  "pct_sol": 100 * max(t_f, t_b) / ms if ms > 0 else float("nan")}
+    return sol
 
 
 def time_events(fn, iters, warm=3):
@@ -180,9 +221,13 @@ def run_config(D, B, H, Hk, N, attn, mode, iters, clock, fa3, clk_sustained):
     def fwd():
         return dm.dm_attn_func(q, k, v, causal=causal, mode=mode)
 
+    slow = int(os.environ.get("KDA_BENCH_SLOWDOWN_CYCLES", "0"))   # A/B self-test: an extra spin kernel per step
+
     def step():
         q.grad = k.grad = v.grad = None
         fwd().backward(do)
+        if slow:
+            torch.cuda._sleep(slow)
 
     t0 = time.time()
     rec = {"D": D, "B": B, "H": H, "Hk": Hk, "N": N, "attn": attn, "mode": mode}
@@ -195,18 +240,7 @@ def run_config(D, B, H, Hk, N, attn, mode, iters, clock, fa3, clk_sustained):
         per[classify(n)] += ms
     rec["kernels"] = names
     rec["ms"] = per
-    f, b = accounting(D, B, H, Hk, N, causal, mode)
-    clk = clk_sustained
-    peak = SMS * FP8_FLOP_PER_CLK_SM * clk * 1e6
-    sol = {}
-    for c in CATS:
-        t_f, t_b = f[c] / peak * 1e3, b[c] / HBM * 1e3
-        t_fn = f[c] / NOMINAL_FP8 * 1e3
-        sol[c] = {"flops": f[c], "bytes": b[c], "sol_ms": max(t_f, t_b), "sol_nominal_ms": max(t_fn, t_b),
-                  "bound": "compute" if t_f >= t_b else "memory",
-                  "tflops": f[c] / (per[c] * 1e-3) / 1e12 if per[c] > 0 else 0.0,
-                  "pct_sol": 100 * max(t_f, t_b) / per[c] if per[c] > 0 else float("nan")}
-    rec["sol"] = sol
+    rec["sol"] = model_sol(rec, clk_sustained)
     if fa3:
         rec["fa3"] = fa3_arms(q, k, v, do, causal, iters)
     del q, k, v, do
@@ -252,12 +286,15 @@ def main():
     ap.add_argument("--fa3", action="store_true")
     ap.add_argument("--out", default=None)
     ap.add_argument("--names", action="store_true", help="print every kernel name and its category")
+    ap.add_argument("--sustain", type=float, default=4.0, help="seconds of sustained load for the clock measurement")
     a = ap.parse_args()
+    global dm
+    import delta_matching as dm
     shapes = MAIN if a.grid == "main" else HOLDOUT if a.grid == "holdout" else [(a.D, a.B, a.H, a.Hk, a.N)]
     modes = MODES if a.modes == "all" else tuple(tuple(m.split("-")) for m in a.modes.split(","))
     recs = []
     with ClockSampler() as clock:
-        clk = sustained_clock(clock)
+        clk = sustained_clock(clock, a.sustain)
         if clk != clk:
             clk = 1830.0
         print(f"sustained SM clock {clk:.0f} MHz -> dense fp8 peak {SMS * FP8_FLOP_PER_CLK_SM * clk / 1e6:.0f} TFLOPS", flush=True)

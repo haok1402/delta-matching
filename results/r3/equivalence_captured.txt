@@ -1,0 +1,29 @@
+24 passed in 37.29s
+route default, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+determinism base vs checkout default exit 0
+route default, FULL SUITE, A 07fee0f25b8b vs B 7d491ed1a556
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence do2 default exit 0
+route kv, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+determinism base vs checkout kv exit 0
+route kv, FULL SUITE, A 07fee0f25b8b vs B 7d491ed1a556
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence do2 kv exit 0
+route head, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+determinism base vs checkout head exit 0
+route head, FULL SUITE, A 07fee0f25b8b vs B 7d491ed1a556
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence do2 head exit 0
+route streams2, FULL SUITE, A 07fee0f25b8b vs B 07fee0f25b8b
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+determinism base vs checkout streams2 exit 0
+route streams2, FULL SUITE, A 07fee0f25b8b vs B 7d491ed1a556
+compared 60 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence do2 streams2 exit 0
+perturbed d128_gqa4/causal/matched g00-04.bwd.delta at byte 32768
+DIFF d128_gqa4/causal/matched g00-04.bwd.delta: 1 of 16384 elements differ, first at (1, 0, 0)
+compared 60 cases: 1 mismatching tensors; error vs fp32 larger in 0 (case, tensor) pairs
+perturb exit 1

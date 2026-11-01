@@ -80,14 +80,18 @@ def validate_run(d, build, expected, label):
         zero = [c for c in K.required_cats(r["mode"]) if not r["ms"][c] > 0]
         if zero:
             raise SystemExit(f"{label}: required kernel categories {zero} have no measured time in {key(r)}")
-        kern = r.get("kernels") or {}
-        if not kern:
-            raise SystemExit(f"{label}: empty kernel-event collection in {key(r)}")
+        kern = r.get("kernels")
+        if not isinstance(kern, dict) or not kern:
+            raise SystemExit(f"{label}: empty or missing kernel-event collection in {key(r)}")
+        for n, ms in kern.items():
+            if not isinstance(n, str) or not n or isinstance(ms, bool) or not isinstance(ms, (int, float)) \
+                    or not math.isfinite(ms) or ms <= 0:
+                raise SystemExit(f"{label}: invalid kernel event {n!r}: {ms!r} in {key(r)} (finite positive ms required)")
         recomputed = {c: 0.0 for c in K.CATS}
         for n, ms in kern.items():
             recomputed[K.classify(n)] += ms
         for c in K.CATS:
-            if abs(recomputed[c] - r["ms"][c]) > 1e-9 + 1e-6 * abs(r["ms"][c]):
+            if not math.isfinite(recomputed[c]) or abs(recomputed[c] - r["ms"][c]) > 1e-9 + 1e-6 * abs(r["ms"][c]):
                 raise SystemExit(f"{label}: category {c} total {r['ms'][c]} disagrees with its kernel events "
                                  f"({recomputed[c]}) in {key(r)}")
 

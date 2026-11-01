@@ -90,7 +90,14 @@ def test_validate_run_rejects_zero_required_kernels():
                         (lambda r: (r["ms"].__setitem__("pass0", 0.0), r["kernels"].pop("DeltaV6")), "zero matched pass0"),
                         (lambda r: r.__setitem__("kernels", {}), "empty kernel events"),
                         (lambda r: r["ms"].__setitem__("pass2", 5.0), "category total disagrees with events"),
-                        (lambda r: [r["ms"].__setitem__(c, 0.0) for c in K.CATS], "all categories zero")):
+                        (lambda r: [r["ms"].__setitem__(c, 0.0) for c in K.CATS], "all categories zero"),
+                        (lambda r: (r["ms"].__setitem__("pass1", 1e-9), r["kernels"].__setitem__("FlashAttnBwdSm90Fp8R", float("nan"))), "NaN event"),
+                        (lambda r: r["kernels"].__setitem__("FlashAttnBwdSm90Fp8R", float("inf")), "inf event"),
+                        (lambda r: r["kernels"].__setitem__("FlashAttnBwdSm90Fp8R", True), "bool event"),
+                        (lambda r: r["kernels"].__setitem__("FlashAttnBwdSm90Fp8R", "1.0"), "string event"),
+                        (lambda r: r["kernels"].__setitem__("", 0.1), "empty event name"),
+                        (lambda r: (r["ms"].__setitem__("pass1", 1e-9), r["kernels"].__setitem__("FlashAttnBwdSm90Fp8R", -1.0),
+                                    r["kernels"].__setitem__("FlashAttnBwdSm90Fp8R_2", 1.000000001)), "cancelling negative event")):
         r = rec()
         mutate(r)
         with pytest.raises(SystemExit):
@@ -126,15 +133,24 @@ def test_single_shape_regression_is_listed_despite_harmless_total():
     assert "subset" in res and res["subset"]["pass1"]["A"] > 0
 
 
-# ---------------------------------------------------------------- equivalence manifests
-def fake_dump(path, route="kv", only=None, drop=(), suite=None):
+# ---------------------------------------------------------------- equivalence: schema-validated captured dumps
+def fake_dump(path, route="kv", only="d128_gqa4", mutate=None, suite=None):
+    """A dump that satisfies the independently derived schema (zero tensors of the expected shapes / dtypes)."""
     cases = EQ.selected_cases(route, only)
-    res = {"manifest": {"version": EQ.MANIFEST_VERSION, "route": route, "route_env": EQ.ROUTES[route],
-                        "suite": suite or ("full" if only is None else "partial"), "only": only,
-                        "cases": dict(cases), "tensors": {}},
-           "meta": {"library_sha256": "0" * 64}, "cases": {}, "errors": {}}
+    res = {"manifest": {"version": EQ.MANIFEST_VERSION, "route": route, "route_env": dict(EQ.ROUTES[route]),
+                        "resolved_route": {"groups": EQ.ROUTES[route]["DM_BWD_HEAD_GROUPS"],
+                                           "streams": int(EQ.ROUTES[route]["DM_BWD_STREAMS"]),
+                                           "ws_limit": float(EQ.ROUTES[route]["DM_BWD_WS_LIMIT_GB"]) * 2 ** 30},
+                        "suite": suite or ("partial" if only else "full"), "only": only, "cases": dict(cases),
+                        "tensors": {}},
+           "meta": {"library_sha256": "0" * 64}, "cases": {}, "errors": {}, "heads_per_call": {}}
     for k_, desc in cases:
-        res["cases"][k_] = {n: torch.zeros(4) for n in EQ.required_tensors(desc) if n not in drop}
+        sch = EQ.expected_schema(desc, route)
+        res["cases"][k_] = {n: torch.zeros(shape, dtype=getattr(torch, dt.split(".")[1])) for n, (shape, dt) in sch.items()}
+        res["manifest"]["tensors"][k_] = {n: [list(shape), dt] for n, (shape, dt) in sch.items()}
+        res["heads_per_call"][k_] = EQ.heads_per_call(route, desc["H"], desc["Hk"])
+    if mutate:
+        mutate(res)
     torch.save(res, path)
     return path
 
@@ -144,29 +160,66 @@ def cmp(a, b, *extra):
                           capture_output=True, text=True)
 
 
-def test_compare_full_partial_and_rejections(tmp_path):
+def first_case(res):
+    return next(iter(res["cases"]))
+
+
+def test_schema_groups_follow_the_route():
+    desc = dict(EQ.selected_cases("kv", "d128_gqa4")[0][1])          # H 8, Hk 2 -> 4 query heads per KV group
+    assert {n.split(".")[0] for n in EQ.expected_schema(desc, "kv") if n.startswith("g")} == {"g00-04", "g04-08"}
+    assert {n.split(".")[0] for n in EQ.expected_schema(desc, "head") if n.startswith("g")} == {f"g{h:02d}-{h + 1:02d}" for h in range(8)}
+    assert {n.split(".")[0] for n in EQ.expected_schema(desc, "default") if n.startswith("g")} == {"g00-08"}
+    mqa = dict(EQ.selected_cases("kv", "d128_mqa")[0][1])             # MQA: one KV group = all heads
+    assert EQ.heads_per_call("kv", mqa["H"], mqa["Hk"]) == mqa["H"]
+    st = dict(EQ.selected_cases("kv", "d128_gqa4")[1][1])             # stale: no pass-0 tensors, a doq delta
+    assert st["mode"] == "stale" and "doq.delta" in EQ.expected_schema(st, "kv")
+    assert not any("delta_fp8" in n for n in EQ.expected_schema(st, "kv"))
+
+
+def test_valid_partial_dump_compares_only_with_partial_flag(tmp_path):
     a = fake_dump(tmp_path / "a.pt"); b = fake_dump(tmp_path / "b.pt")
     r = cmp(a, b)
-    assert r.returncode == 0 and "FULL SUITE" in r.stdout and "BITWISE EQUAL" in r.stdout
-    # jointly missing dV: both sides lack a required tensor
-    a2 = fake_dump(tmp_path / "a2.pt", drop=("dV",)); b2 = fake_dump(tmp_path / "b2.pt", drop=("dV",))
-    r = cmp(a2, b2)
-    assert r.returncode != 0 and "MISSING required" in r.stdout
-    # mismatched routes
-    c = fake_dump(tmp_path / "c.pt", route="head")
-    assert cmp(a, c).returncode != 0
-    # partial dumps need --partial and are labelled
-    p1 = fake_dump(tmp_path / "p1.pt", only="d128_gqa4"); p2 = fake_dump(tmp_path / "p2.pt", only="d128_gqa4")
-    assert cmp(p1, p2).returncode != 0
-    r = cmp(p1, p2, "--partial")
-    assert r.returncode == 0 and "PARTIAL" in r.stdout
+    assert r.returncode == 2 and "partial dump" in r.stdout
+    r = cmp(a, b, "--partial")
+    assert r.returncode == 0 and "PARTIAL" in r.stdout and "BITWISE EQUAL" in r.stdout, r.stdout
 
 
-def test_empty_selection_rejected():
+def test_captured_intermediate_byte_flip_is_reported(tmp_path):
+    a = fake_dump(tmp_path / "a.pt")
+
+    def flip(res):
+        res["cases"][first_case(res)]["g04-08.bwd.delta"].view(-1).view(torch.uint8)[5] ^= 1
+    b = fake_dump(tmp_path / "b.pt", mutate=flip)
+    r = cmp(a, b, "--partial")
+    assert r.returncode == 1 and "g04-08.bwd.delta" in r.stdout and "first at" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("why,mutate", [
+    ("jointly empty tensors", lambda res: [t.update({n: torch.empty(0, dtype=torch.uint8) for n in t}) for t in res["cases"].values()]),
+    ("wrong shape", lambda res: res["cases"][first_case(res)].__setitem__("quant.Q8", torch.zeros(3, 3, dtype=torch.float8_e4m3fn))),
+    ("wrong dtype", lambda res: res["cases"][first_case(res)].__setitem__("fwd.LSE", res["cases"][first_case(res)]["fwd.LSE"].double())),
+    ("manifest table not a dict", lambda res: res["manifest"].__setitem__("tensors", "x")),
+    ("manifest entry contradicts", lambda res: res["manifest"]["tensors"][first_case(res)].__setitem__("api.O", [[1], "torch.bfloat16"])),
+    ("wrong resolved route", lambda res: res["manifest"].__setitem__("resolved_route", {"groups": "off", "streams": 1, "ws_limit": 8 * 2.0 ** 30})),
+    ("wrong route env", lambda res: res["manifest"]["route_env"].__setitem__("DM_BWD_STREAMS", "2")),
+    ("missing group", lambda res: [t.pop(n) for t in res["cases"].values() for n in list(t) if n.startswith("g04-08")]),
+    ("extra group", lambda res: res["cases"][first_case(res)].__setitem__("g08-12.bwd.dq", torch.zeros(1, dtype=torch.bfloat16))),
+    ("wrong heads per call", lambda res: res["heads_per_call"].__setitem__(first_case(res), 8)),
+    ("full suite with a subset of cases", lambda res: res["manifest"].__setitem__("suite", "full")),
+])
+def test_jointly_invalid_dumps_are_rejected(tmp_path, why, mutate):
+    a = fake_dump(tmp_path / "a.pt", mutate=mutate); b = fake_dump(tmp_path / "b.pt", mutate=mutate)
+    r = cmp(a, b, "--partial")
+    assert r.returncode == 2 and "INVALID" in r.stdout, (why, r.stdout)
+
+
+def test_mismatched_routes_rejected(tmp_path):
+    a = fake_dump(tmp_path / "a.pt", route="kv"); b = fake_dump(tmp_path / "b.pt", route="head")
+    assert cmp(a, b, "--partial").returncode == 2
+
+
+def test_empty_selection_and_complete_routes():
     assert EQ.selected_cases("default", "no_such_case") == []
-
-
-def test_routes_are_complete():
-    for r, env in EQ.ROUTES.items():
+    for env in EQ.ROUTES.values():
         assert set(env) == {"DM_BWD_HEAD_GROUPS", "DM_BWD_STREAMS", "DM_BWD_WS_LIMIT_GB"}
     assert EQ.ROUTES["default"]["DM_BWD_HEAD_GROUPS"] == "off" and EQ.ROUTES["kv"]["DM_BWD_STREAMS"] == "1"

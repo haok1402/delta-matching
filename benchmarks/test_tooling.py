@@ -223,3 +223,24 @@ def test_empty_selection_and_complete_routes():
     for env in EQ.ROUTES.values():
         assert set(env) == {"DM_BWD_HEAD_GROUPS", "DM_BWD_STREAMS", "DM_BWD_WS_LIMIT_GB"}
     assert EQ.ROUTES["default"]["DM_BWD_HEAD_GROUPS"] == "off" and EQ.ROUTES["kv"]["DM_BWD_STREAMS"] == "1"
+
+
+def test_every_route_covers_every_fixed_case():
+    # independent of selected_cases(): every (shape, mode) of the fixed suite, including the minimum-length and packed
+    # MHA cases, on every route
+    want = {(name, attn, mode) for (name, *_rest) in EQ.SHAPES for (attn, mode) in EQ.MODES}
+    assert len(want) == 72 and {"d128_min", "d256_min", "d128_packed", "d256_packed"} <= {w[0] for w in want}
+    for route in EQ.ROUTES:
+        got = {(d["name"], d["attn"], d["mode"]) for _, d in EQ.selected_cases(route)}
+        assert got == want, (route, sorted(want - got)[:4])
+
+
+@pytest.mark.parametrize("why,mutate", [
+    ("None tensor", lambda res: res["cases"][first_case(res)].__setitem__("api.dV", None)),
+    ("non-tensor value", lambda res: res["cases"][first_case(res)].__setitem__("quant.Q8", [1, 2, 3])),
+    ("malformed descriptor", lambda res: res["manifest"]["cases"].__setitem__(first_case(res), {"name": "x"})),
+])
+def test_malformed_payloads_return_invalid(tmp_path, why, mutate):
+    a = fake_dump(tmp_path / "a.pt", mutate=mutate); b = fake_dump(tmp_path / "b.pt", mutate=mutate)
+    r = cmp(a, b, "--partial")
+    assert r.returncode == 2 and "INVALID" in r.stdout and "Traceback" not in r.stderr, (why, r.stdout, r.stderr[-300:])

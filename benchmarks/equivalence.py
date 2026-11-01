@@ -21,7 +21,8 @@ call) before comparing bytes.  Filtered dumps are partial and need `--partial`.
 
 Cases: D 128 and 256; MHA, GQA 4, GQA 3, MQA; batch 1 and > 1; the shortest legal N, N across the 512-row dV promotion
 window, a held-out shape; causal matched, causal stale, full stale; (B, N, H, D) inputs, packed QKV views, (B, H, N, D)
-contiguous inputs; stress inputs (zeros, constant K, q / k scaled by 3 and 10, sparse large outliers).  Routes set the
+contiguous inputs; stress inputs (zeros, constant K, q / k scaled by 3 and 10, sparse large outliers); all 72 cases
+on every route.  Routes set the
 complete routing environment before import: default (no split), kv (per KV group), head (per query head), streams2 (per
 KV group on 2 streams).  `dump --perturb <tensor>` flips one bit of a captured tensor (comparator self-test).
 """
@@ -58,12 +59,10 @@ REF_MAX_N = 2048   # fp32 reference (informational) only up to this length
 
 # ----------------------------------------------------------------------------------------------- the expected schema
 def selected_cases(route, only=None):
-    """(key, descriptor) of the cases a dump of this route runs: the split routes cover the GQA / MQA / held-out cases."""
+    """(key, descriptor) of the cases a dump of this route runs: every fixed shape x mode on every route."""
     out = []
     for i, (name, D, B, H, Hk, N, kind, layout) in enumerate(SHAPES):
         if only is not None and only not in name:
-            continue
-        if route != "default" and not (H != Hk or name.endswith("heldout")):
             continue
         for attn, mode in MODES:
             out.append((f"{name}/{attn}/{mode}", {"name": name, "D": D, "B": B, "H": H, "Hk": Hk, "N": N, "kind": kind,
@@ -150,6 +149,8 @@ def validate_dump(X, label, partial_ok=False):
         mt = {}
     hpc = X.get("heads_per_call") if isinstance(X.get("heads_per_call"), dict) else {}
     for key, desc in cases.items():
+        if expected_full.get(key) != desc:
+            continue          # already reported (case / descriptor outside the expected set): no schema to derive
         hp = heads_per_call(route, desc["H"], desc["Hk"])
         if hpc.get(key) != hp:
             bad.append(f"{label} {key}: heads per call {hpc.get(key)} != the route's {hp}")
@@ -162,9 +163,11 @@ def validate_dump(X, label, partial_ok=False):
         if set(rec_case) != set(sch):
             bad.append(f"{label} {key}: manifest tensor list differs from the schema")
         for name, (shape, dt) in sch.items():
-            t = have.get(name)
-            if t is not None and (not isinstance(t, torch.Tensor) or tuple(t.shape) != shape or str(t.dtype) != dt
-                                  or t.numel() == 0):
+            if name not in have:
+                continue      # already reported as a tensor-set difference
+            t = have[name]
+            if (not isinstance(t, torch.Tensor) or tuple(t.shape) != shape or str(t.dtype) != dt
+                    or t.numel() == 0):
                 got = (tuple(t.shape), str(t.dtype)) if isinstance(t, torch.Tensor) else type(t).__name__
                 bad.append(f"{label} {key} {name}: {got} != expected {(shape, dt)}")
             if name in rec_case and rec_case[name] != [list(shape), dt]:

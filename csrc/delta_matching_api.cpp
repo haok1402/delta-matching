@@ -15,6 +15,9 @@
 #ifndef KDA_PROF
 #define KDA_PROF 0   // DM_PROF=1 builds set it: the profiling-only variant
 #endif
+#ifndef KDA_TRACE
+#define KDA_TRACE 0  // DM_TRACE=1 builds set it: the timeline-only variant
+#endif
 #include <Python.h>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -218,16 +221,21 @@ std::tuple<at::Tensor, at::Tensor> fwd_fp8(
 // workspaces attached.  The shipped op passes nullptrs (params fields exist
 // but no kernel code reads them in the shipped build): host-side refactor
 // only, same params, same launches (dq / dk / dv bitwise unchanged).
-#if KDA_PROF
+#if KDA_PROF || KDA_TRACE
 #ifdef FA3FP11_DBG
-#error "KDA_PROF (profiling) and FA3FP11_DBG (instrumented numerics) share the dbg_cks slot: build one or the other"
+#error "KDA_PROF / KDA_TRACE (profiling) and FA3FP11_DBG (instrumented numerics) share the dbg_cks slot: build one or the other"
 #endif
 // Profiling-only build: pass 1 accumulates clock64() phase cycles into this buffer through the (otherwise DBG-only)
 // dbg_cks pointer: uint64 [variant (0 = hd128 P1-R, 1 = d256 V10)][warpgroup 2][slot 32].
 static at::Tensor* g_kda_prof = nullptr;
 static at::Tensor kda_prof_buffer() {
     if (g_kda_prof == nullptr) {
+#if KDA_TRACE
+        // csrc/kda_prof.h KT_WORDS = 2 * KT_S * KT_M * 3 * KT_E + 2 * KT_S * KT_HDR = 2*8*12*3*32 + 2*8*16
+        g_kda_prof = new at::Tensor(torch::zeros({18688}, at::TensorOptions().device(at::kCUDA).dtype(at::kLong)));
+#else
         g_kda_prof = new at::Tensor(torch::zeros({2, 2, 32}, at::TensorOptions().device(at::kCUDA).dtype(at::kLong)));
+#endif
     }
     return *g_kda_prof;
 }
@@ -396,7 +404,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     params.dbg_rows_ptr = dbg_rows_ptr;
     params.dbg_rowsabs_ptr = dbg_rowsabs_ptr;
     params.dbg_cks_ptr = dbg_cks_ptr;
-#if KDA_PROF
+#if KDA_PROF || KDA_TRACE
     if (params.dbg_cks_ptr == nullptr) { params.dbg_cks_ptr = reinterpret_cast<unsigned int*>(kda_prof_buffer().data_ptr()); }
 #endif
 
@@ -722,7 +730,7 @@ TORCH_LIBRARY(delta_matching, m) {
     m.def("twin_pi(Tensor x8) -> Tensor");
     m.def("build_gt() -> int");
     m.def("build_hd128() -> int");
-#if KDA_PROF
+#if KDA_PROF || KDA_TRACE
     m.def("prof_buffer() -> Tensor");
 #endif
 #ifdef FA3FP11_DBG
@@ -742,7 +750,7 @@ TORCH_LIBRARY_IMPL(delta_matching, CompositeExplicitAutograd, m) {
     m.impl("build_gt", &fp11_build_gt);
     m.impl("build_bf16dp", &fp11_build_bf16dp);
     m.impl("build_hd128", &fp11_build_hd128);
-#if KDA_PROF
+#if KDA_PROF || KDA_TRACE
     m.impl("prof_buffer", &kda_prof_buffer);
 #endif
 }

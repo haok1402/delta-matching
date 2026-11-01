@@ -26,3 +26,72 @@
 #define KP_STEP_DONE() do {} while (0)
 #define KP_FLUSH(variant, ptr) do {} while (0)
 #endif
+
+// ## KDA_TRACE (timeline-only build, DM_TRACE=1; never shipped): absolute clock64() event times for a fixed sample of
+// CTAs (linear block id lb with lb % KT_STRIDE == 0 and lb / KT_STRIDE < KT_S), the first KT_M m-block steps of each
+// sampled CTA's FIRST tile, for three actors (consumer warpgroups 0 / 1 = their first thread, the producer = its elected
+// lane).  Every (variant, sample, step, actor, event) has its own uint64 slot (no atomics), plus a per-sample header.
+// Timestamps are comparable only within a CTA (one SM).  Event 30 / 31 of a step hold the pipeline stage index / phase.
+#ifndef KDA_TRACE
+#define KDA_TRACE 0
+#endif
+#if KDA_TRACE
+#if KDA_PROF
+#error "KDA_TRACE and KDA_PROF are separate builds"
+#endif
+#define KT_S 8
+#define KT_M 12
+#define KT_E 32
+#define KT_HDR 16
+#define KT_STRIDE 17
+#define KT_EVENTS (2 * KT_S * KT_M * 3 * KT_E)
+#define KT_WORDS (KT_EVENTS + 2 * KT_S * KT_HDR)
+__device__ __forceinline__ int kt_linear_block() { return blockIdx.x + gridDim.x * (blockIdx.y + gridDim.y * blockIdx.z); }
+__device__ __forceinline__ int kt_sample_idx() {
+    int const lb = kt_linear_block();
+    return (lb % KT_STRIDE == 0 && lb / KT_STRIDE < KT_S) ? lb / KT_STRIDE : -1;
+}
+__device__ __forceinline__ unsigned long long* kt_slot(void* buf, int var, int s, int j, int actor) {
+    return reinterpret_cast<unsigned long long*>(buf) + ((((var * KT_S + s) * KT_M + j) * 3 + actor) * KT_E);
+}
+__device__ __forceinline__ unsigned long long* kt_hdr(void* buf, int var, int s) {
+    return reinterpret_cast<unsigned long long*>(buf) + KT_EVENTS + (var * KT_S + s) * KT_HDR;
+}
+__device__ __forceinline__ unsigned long long kt_smid() { unsigned r; asm volatile("mov.u32 %0, %%smid;" : "=r"(r)); return r; }
+// consumers (scope: wg_thread, warp_group_idx, work_idx, params)
+#undef KP
+#undef KP_BEGIN
+#undef KP_STEP_DONE
+#undef KP_FLUSH
+#define KP(slot) do { if ((slot) >= 3 && (slot) <= 18) { KT(slot); } } while (0)
+#define KP_BEGIN() do {} while (0)
+#define KP_STEP_DONE() do { ++kt_j; } while (0)
+#define KP_FLUSH(variant, ptr) do {} while (0)
+#define KT_BEGIN(var) constexpr int kt_var = (var); int const kt_s = kt_sample_idx(); \
+    bool const kt_rec = kt_s >= 0 && work_idx == 0 && wg_thread == 0; int kt_j = 0; void* const kt_buf_ = params.ptr_dbg_cks
+#define KT(e) do { if (kt_rec && kt_j < KT_M) { kt_slot(kt_buf_, kt_var, kt_s, kt_j, warp_group_idx)[(e)] = (unsigned long long)clock64(); } } while (0)
+#define KT_VAL(e, v) do { if (kt_rec && kt_j < KT_M) { kt_slot(kt_buf_, kt_var, kt_s, kt_j, warp_group_idx)[(e)] = (unsigned long long)(v); } } while (0)
+#define KT_HEADER(nb, h, b, mmin) do { if (kt_rec && warp_group_idx == 0) { unsigned long long* const kh_ = kt_hdr(kt_buf_, kt_var, kt_s); \
+    kh_[0] = 1ull; kh_[1] = (nb); kh_[2] = (h); kh_[3] = (b); kh_[4] = kt_smid(); kh_[5] = (mmin); kh_[6] = kt_linear_block(); \
+    kh_[7] = (unsigned long long)clock64(); } } while (0)
+// producer (scope: params, the collective's kt_ptile_ member; runs on the elected lane)
+#define KTP_BEGIN(var) constexpr int ktp_var = (var); int const ktp_s = kt_sample_idx(); bool const ktp_rec = ktp_s >= 0 && kt_ptile_ == 0; int ktp_j = 0
+#define KTP(e) do { if (ktp_rec && ktp_j < KT_M) { kt_slot(params.ptr_dbg_cks, ktp_var, ktp_s, ktp_j, 2)[(e)] = (unsigned long long)clock64(); } } while (0)
+#define KTP_VAL(e, v) do { if (ktp_rec && ktp_j < KT_M) { kt_slot(params.ptr_dbg_cks, ktp_var, ktp_s, ktp_j, 2)[(e)] = (unsigned long long)(v); } } while (0)
+#define KTP_H(i) do { if (ktp_rec) { kt_hdr(params.ptr_dbg_cks, ktp_var, ktp_s)[(i)] = (unsigned long long)clock64(); } } while (0)
+#define KTP_STEP() do { ++ktp_j; } while (0)
+#define KTP_END() do { ++kt_ptile_; } while (0)
+#define KT_MEMBERS int kt_ptile_ = 0;
+#else
+#define KT_BEGIN(var) do {} while (0)
+#define KT(e) do {} while (0)
+#define KT_VAL(e, v) do {} while (0)
+#define KT_HEADER(nb, h, b, mmin) do {} while (0)
+#define KTP_BEGIN(var) do {} while (0)
+#define KTP(e) do {} while (0)
+#define KTP_VAL(e, v) do {} while (0)
+#define KTP_H(i) do {} while (0)
+#define KTP_STEP() do {} while (0)
+#define KTP_END() do {} while (0)
+#define KT_MEMBERS
+#endif

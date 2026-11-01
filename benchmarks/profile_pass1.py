@@ -5,8 +5,9 @@ profiled by its own probes: per consumer warpgroup, the cycles spent in each pha
 (pipeline waits, wgmma exposure, exp, dS, the psi barrier, conversions, the dS' transpose / store, the fold), per
 tile (prologue, exit) and per CTA (lifetime, epilogue), summed over every CTA of every pass-1 launch.
 
-    PYTHONPATH=<DM_PROF build root> python benchmarks/profile_pass1.py --out prof.json        # phase cycles
-    PYTHONPATH=<any build root>     python benchmarks/profile_pass1.py --time-only --out t.json  # pass-1 kernel time
+    python benchmarks/profile_pass1.py --root <DM_PROF build root> --out prof.json        # phase cycles
+    python benchmarks/profile_pass1.py --root <any build root> --time-only --out t.json  # pass-1 kernel time
+(--root selects the package and its own library; inherited DM_SO / routing are overridden; the forced-unsplit route.)
 
 The modeled matrix-work time per CTA m-block step at peak is 1024 cycles at both head dims (4 wgmma of 2^21 FLOP per CTA step at
 D 128 (64 x 128 tile) and at D 256 (64 x 64 tile), 8192 dense fp8 FLOP / clk / SM).
@@ -18,6 +19,10 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import kernels as K  # noqa: E402
+import ab  # noqa: E402
+
+# the forced-unsplit route: one pass-1 launch per backward (no head-group split), sequential
+UNSPLIT = {"DM_BWD_HEAD_GROUPS": "off", "DM_BWD_STREAMS": "1", "DM_BWD_WS_LIMIT_GB": "8"}
 
 CONFIGS = [  # (D, B, H, Hk, N, attn)
     (128, 4, 16, 16, 8192, "causal"), (128, 4, 16, 16, 8192, "full"), (128, 1, 16, 16, 32768, "causal"),
@@ -117,20 +122,40 @@ def fmt(rec, an):
     return "\n".join(lines)
 
 
+def select_build(root):
+    """Load exactly the build under `root` (its package and its own library) on the forced-unsplit route; returns the
+    metadata to persist.  Inherited DM_SO / routing / slowdown settings are overridden before the import."""
+    pkg, lib, sha = ab.resolve_build(root)
+    os.environ.update(UNSPLIT)
+    os.environ["DM_SO"] = lib
+    os.environ.pop("KDA_BENCH_SLOWDOWN_CYCLES", None)
+    sys.path.insert(0, os.path.abspath(root))
+    import delta_matching as dm
+    from delta_matching import split as dm_split
+    dm.core._ops()
+    got_pkg, got_lib = os.path.realpath(os.path.dirname(dm.__file__)), os.path.realpath(dm.core.loaded_library())
+    if got_pkg != pkg or got_lib != lib or K.sha256(got_lib) != sha:
+        raise SystemExit(f"loaded {got_pkg} / {got_lib}, expected {pkg} / {lib}")
+    route = {"groups": dm_split._BWD_GROUPS, "streams": dm_split._BWD_STREAMS, "ws_limit": dm_split._BWD_WS_LIMIT}
+    if route["groups"] != "off" or route["streams"] != 1:
+        raise SystemExit(f"route not forced unsplit: {route}")
+    return {"root": os.path.abspath(root), "package": pkg, "library": lib, "library_sha256": sha, "route": route,
+            "device": torch.cuda.get_device_name(0), "configs": [list(c) for c in CONFIGS]}
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--root", required=True, help="build root (a frozen package or a checkout) to load")
     ap.add_argument("--out", required=True)
     ap.add_argument("--steps", type=int, default=5)
     ap.add_argument("--time-only", action="store_true")
     ap.add_argument("--clock", type=float, default=1950.0, help="SM clock (MHz) for the SM-cycle view")
+    ap.add_argument("--run-tag", default="", help="free-form label of this run (order within a job)")
     a = ap.parse_args()
-    import delta_matching as dm
+    meta = select_build(a.root)
     prof = not a.time_only
     if prof and not hasattr(torch.ops.delta_matching, "prof_buffer"):
-        dm.core._ops()
-        if not hasattr(torch.ops.delta_matching, "prof_buffer"):
-            raise SystemExit("not a DM_PROF=1 build (no prof_buffer op)")
-    dm.core._ops()
+        raise SystemExit("not a DM_PROF=1 build (no prof_buffer op)")
     recs = []
     for cfg in CONFIGS:
         r = run(cfg, a.steps, prof)
@@ -140,10 +165,8 @@ def main():
         else:
             print(f"{cfg}: pass 1 {r['pass1_ms']:.3f} ms", flush=True)
         recs.append(r)
-    so = dm.core.loaded_library()
     with open(a.out, "w") as f:
-        json.dump({"meta": {"library": os.path.realpath(so), "library_sha256": K.sha256(so), "clock_mhz": a.clock,
-                            "prof": prof}, "records": recs}, f, indent=1)
+        json.dump({"meta": dict(meta, clock_mhz=a.clock, prof=prof, run_tag=a.run_tag), "records": recs}, f, indent=1)
 
 
 if __name__ == "__main__":

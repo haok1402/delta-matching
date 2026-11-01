@@ -36,6 +36,8 @@ BF16_DP = os.environ.get("DM_BF16_DP", "0") == "1"
 # DM_PROF=1: a PROFILING-ONLY variant (never shipped): pass 1 records clock64() cycles per phase of every consumer
 # warpgroup's tile loop into a device buffer (the prof_buffer op); the arithmetic is unchanged (the probes read clocks).
 PROF = os.environ.get("DM_PROF", "0") == "1"
+# DM_TRACE=1: the TIMELINE-ONLY variant (never shipped): absolute clock64 event times for a fixed CTA / m-block sample.
+TRACE = os.environ.get("DM_TRACE", "0") == "1"
 # nvcc -lineinfo (source-line tables for ncu / nsight) is OPT-IN: it records the ABSOLUTE path of every source and
 # header in the device code of the library, and no compiler option remaps those.  The generated SASS is unchanged
 # either way (line tables are metadata), so the shipped numerics do not depend on it.
@@ -68,6 +70,8 @@ def defines():
         d.append("-DFA3FP11_DBG")
     if PROF:
         d.append("-DKDA_PROF=1")
+    if TRACE:
+        d.append("-DKDA_TRACE=1")
     d += [f"-D{k}={v}" for k, v in FLAGS.items()]
     d += EXTRA_DEFINES
     return d
@@ -163,7 +167,7 @@ def csrc_sha():
 
 def write_build_info():
     """Stamp this build into the package (read by delta_matching.kernel_version()); rewritten by every build."""
-    info = {"code_sha": csrc_sha(), "dbg": DBG, "bf16_dp": BF16_DP, "prof": PROF, "lineinfo": LINEINFO, "flags": FLAGS,
+    info = {"code_sha": csrc_sha(), "dbg": DBG, "bf16_dp": BF16_DP, "prof": PROF, "trace": TRACE, "lineinfo": LINEINFO, "flags": FLAGS,
             "extra_defines": EXTRA_DEFINES}
     with open(os.path.join(PACKAGE_DIR, "_build_info.py"), "w") as f:
         f.write("# written by the build (setup.py / delta_matching.jit); not hand-edited\n")

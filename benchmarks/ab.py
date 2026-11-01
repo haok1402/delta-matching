@@ -28,6 +28,11 @@ def freeze(a):
     info = os.path.join(os.path.dirname(os.path.realpath(a.so)), "_build_info.py")
     if os.path.isfile(info):
         shutil.copyfile(info, os.path.join(out, "delta_matching", "_build_info.py"))
+    else:   # never label a binary with an unrelated stamp: no sidecar, no stamp
+        stale = os.path.join(out, "delta_matching", "_build_info.py")
+        if os.path.exists(stale):
+            os.remove(stale)
+        print(f"freeze: no _build_info.py beside {a.so}; the frozen package carries no build stamp")
     rev = subprocess.run(["git", "-C", repo, "rev-parse", a.rev], capture_output=True, text=True).stdout.strip()
     with open(os.path.join(out, "FROZEN"), "w") as f:
         f.write(f"rev {rev}\nso {os.path.realpath(a.so)}\n")

@@ -430,6 +430,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::prefetch_tma_descriptor(params.tma_store_dS8.get_tma_descriptor());
     }
 
+    KT_MEMBERS   // the producer's tile counter (timeline-only build)
     // Producer (the M17 GT issue order per m-block: dO(m), dOt(m), Q(m+1), Qt(m+1); K / V one-shot on barrier_KV).
     template <typename SchedulerPrefetch, typename SharedStorage>
     CUTLASS_DEVICE void
@@ -441,6 +442,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             SharedStorage &shared_storage, SchedulerPrefetch const& scheduler_prefetch,
             cute::tuple<int32_t, int32_t, int32_t> block_coord) {
         auto [n_block, bidh, bidb] = block_coord;
+        KTP_BEGIN(0);
         SeqlenInfo_t seqlen_info{bidb, get<0>(params.shape_Q), size<0>(params.shape_K),
                                  params.cu_seqlens_q, params.cu_seqlens_k, params.seqused_q, params.seqused_k};
         auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(
@@ -514,27 +516,37 @@ struct CollectiveMainloopBwdSm90Fp8R {
             shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
             copy(params.tma_load_K.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0), tKgK, tKsK);
             copy(params.tma_load_V.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0), tVgV, tVsV);
+            KTP_H(8);
             #pragma unroll 1
             for (; m_block < m_block_max - 1; ++m_block) {
+                KTP_VAL(30, smem_pipe_write.index()); KTP_VAL(31, smem_pipe_write.phase()); KTP(1);
                 PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
                 pipeline_do.producer_acquire(smem_pipe_write_do_cur);
+                KTP(2);
                 copy(params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
                      tdOgdO(_, m_block), tdOsdO(_, smem_pipe_write_do_cur.index()));
                 copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, m_block), sdPsum(_, smem_pipe_write_do_cur.index()));
+                KTP(3);
                 if constexpr (!Q_dO_same_stages) { ++smem_pipe_write_do; }
                 pipeline_dot.producer_acquire(smem_pipe_write_dot);
+                KTP(4);
                 copy(params.tma_load_dOt.with(*pipeline_dot.producer_get_barrier(smem_pipe_write_dot), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
                      tdOtgdOt(_, m_block), tdOtsdOt(_, smem_pipe_write_dot.index()));
+                KTP(5);
                 ++smem_pipe_write_dot;
                 ++smem_pipe_write;
                 pipeline_q.producer_acquire(smem_pipe_write);
+                KTP(7);
                 copy(params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
                      tQgQ(_, m_block + 1), tQsQ(_, smem_pipe_write.index()));
                 copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, m_block + 1), sLSE(_, smem_pipe_write.index()));
+                KTP(8);
                 ++smem_pipe_write_qt;
                 pipeline_qt.producer_acquire(smem_pipe_write_qt);
+                KTP(9);
                 copy(params.tma_load_Qt.with(*pipeline_qt.producer_get_barrier(smem_pipe_write_qt), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
                      tQtgQt(_, m_block + 1), tQtsQt(_, smem_pipe_write_qt.index()));
+                KTP(10); KTP_STEP();
             }
         }
         scheduler_prefetch();
@@ -553,6 +565,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             ++smem_pipe_write_qt;
         }
         if constexpr (Q_dO_same_stages) { smem_pipe_write_do = smem_pipe_write; }
+        KTP_END();
     }
 
     CUTLASS_DEVICE void
@@ -606,6 +619,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         int const warp_in_wg = wg_thread / cutlass::NumThreadsPerWarp;
         uint32_t const wg_barrier_id = static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx;   // ids 5, 6: WG-local
         KP_BEGIN();
+        KT_BEGIN(0);
         // This warpgroup's dS' natural half tile (kBlockM rows x 64 keys, SW64) and its gmem box.
         Tensor sdS = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + warp_group_idx * (1 + FA3FP11_P1R_DSDEFER) * kDsHalfElems), SmemLayoutDS{});
         Tensor sdS1 = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (warp_group_idx * (1 + FA3FP11_P1R_DSDEFER) + FA3FP11_P1R_DSDEFER) * kDsHalfElems), SmemLayoutDS{});   // the second buffer (== sdS without DSDEFER)
@@ -701,6 +715,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             float fq8_g_fold = 0.0f;
             // (kBlockN, kBlockM) = the swapAB fragment: rows = keys, columns = query rows.
             Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<1, 0>(TileShape_MNK{}));
+            KT_VAL(30, smem_pipe_read.index()); KT_VAL(31, smem_pipe_read.phase()); KT(0);
             consumer_wait(pipeline_q, smem_pipe_read);
             KP(3);
             if constexpr (kSt >= 0) {
@@ -730,7 +745,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
                                           decltype(partition_fragment_C(TiledMmaSdP{}, select<1, 0>(TileShape_MNK{})))>,
                           "bf16-dP: the bf16 dP accumulator fragment must match the fp8 S one");
             PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read, smem_pipe_read_do);
+            KT(21);
             consumer_wait(pipeline_do, smem_pipe_read_do_cur);
+            KT(22);
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, Int<0>{}), tdPrdP);
             } else {
@@ -910,14 +927,18 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 fq8_g_max = fmaxf(fq8_g_max, fq8_g_cur);
             }
             // dV += P^T dO (RS), dK_tmp = dS'^T Q (RS, zero-init); FIFO retire.
+            KT(23);
             consumer_wait(pipeline_dot, smem_pipe_read_dot);
+            KT(24);
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, Int<0>{}), tdVrdV);
             } else {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, smem_pipe_read_dot.index()), tdVrdV);
             }
             KP(14);
+            KT(25);
             consumer_wait(pipeline_qt, smem_pipe_read_qt);
+            KT(26);
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, Int<kSt>{}), fq8_tmpK);
             } else {
@@ -957,6 +978,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         constexpr int kbm_ = kBlockM, kbn_ = kBlockN;
         int const fq8_mask_m_end = ((n_block + 1) * kbn_ > seqlen_k) ? INT32_MAX
                                    : ((n_block + 1) * kbn_ - (seqlen_k - seqlen_q) + kbm_ - 1) / kbm_;
+        KT_HEADER(n_block, get<1>(block_coord), bidb, m_block_min);
         KP(2);
         CUTLASS_PRAGMA_NO_UNROLL
         for (; m_block < m_block_max && m_block < fq8_mask_m_end; ++m_block) { bwd_step(m_block, mask_fn, Int<-1>{}); }

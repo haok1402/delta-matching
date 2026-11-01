@@ -28,6 +28,8 @@ def main():
         os.remove(dst)
     os.symlink(os.path.relpath(so, PACKAGE_DIR), dst)
     write_build_info()          # stamped after a successful build only
+    import shutil                # the stamp also travels beside the library it describes (frozen copies keep it)
+    shutil.copyfile(os.path.join(PACKAGE_DIR, "_build_info.py"), os.path.join(build_dir, "_build_info.py"))
     print("BUILD-OK", dst, "->", so)
 
 

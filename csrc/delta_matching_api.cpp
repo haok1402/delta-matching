@@ -12,6 +12,9 @@
 // Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao; BSD 3-Clause (THIRD_PARTY_NOTICES.md).
 
 #include "dm_flagset.h"   // stops a build outside the release flag set
+#ifndef KDA_PROF
+#define KDA_PROF 0   // DM_PROF=1 builds set it: the profiling-only variant
+#endif
 #include <Python.h>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -215,6 +218,20 @@ std::tuple<at::Tensor, at::Tensor> fwd_fp8(
 // workspaces attached.  The shipped op passes nullptrs (params fields exist
 // but no kernel code reads them in the shipped build): host-side refactor
 // only, same params, same launches (dq / dk / dv bitwise unchanged).
+#if KDA_PROF
+#ifdef FA3FP11_DBG
+#error "KDA_PROF (profiling) and FA3FP11_DBG (instrumented numerics) share the dbg_cks slot: build one or the other"
+#endif
+// Profiling-only build: pass 1 accumulates clock64() phase cycles into this buffer through the (otherwise DBG-only)
+// dbg_cks pointer: uint64 [variant (0 = hd128 P1-R, 1 = d256 V10)][warpgroup 2][slot 32].
+static at::Tensor* g_kda_prof = nullptr;
+static at::Tensor kda_prof_buffer() {
+    if (g_kda_prof == nullptr) {
+        g_kda_prof = new at::Tensor(torch::zeros({2, 2, 32}, at::TensorOptions().device(at::kCUDA).dtype(at::kLong)));
+    }
+    return *g_kda_prof;
+}
+#endif
 #ifdef FA3FP11_DBG
 // ## DBG: capture of the pass-1 -> pass-2 workspaces (the realized dS' e4m3 codes and the per-tile psi) for
 // bwd_fp8_dbg_ds (the row-sum residual AFTER dS quantization).  Null outside that op: every other op is unchanged.
@@ -379,6 +396,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     params.dbg_rows_ptr = dbg_rows_ptr;
     params.dbg_rowsabs_ptr = dbg_rowsabs_ptr;
     params.dbg_cks_ptr = dbg_cks_ptr;
+#if KDA_PROF
+    if (params.dbg_cks_ptr == nullptr) { params.dbg_cks_ptr = reinterpret_cast<unsigned int*>(kda_prof_buffer().data_ptr()); }
+#endif
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     if (head_size == 128) {
@@ -702,6 +722,9 @@ TORCH_LIBRARY(delta_matching, m) {
     m.def("twin_pi(Tensor x8) -> Tensor");
     m.def("build_gt() -> int");
     m.def("build_hd128() -> int");
+#if KDA_PROF
+    m.def("prof_buffer() -> Tensor");
+#endif
 #ifdef FA3FP11_DBG
     m.def("bwd_fp8_dbg(Tensor dout8, Tensor q8, Tensor k8, Tensor v8, Tensor lse, Tensor delta,"
           " Tensor kt8, Tensor q8s, Tensor k8s, Tensor v8s, Tensor do8s,"
@@ -719,6 +742,9 @@ TORCH_LIBRARY_IMPL(delta_matching, CompositeExplicitAutograd, m) {
     m.impl("build_gt", &fp11_build_gt);
     m.impl("build_bf16dp", &fp11_build_bf16dp);
     m.impl("build_hd128", &fp11_build_hd128);
+#if KDA_PROF
+    m.impl("prof_buffer", &kda_prof_buffer);
+#endif
 }
 
 TORCH_LIBRARY_IMPL(delta_matching, CUDA, m) {

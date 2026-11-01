@@ -193,6 +193,11 @@ public:
             mainloop.mma_init();
             scheduler.init_consumer();
             int work_idx = 0;
+#if KDA_PROF
+            // CTA-level probes (variant 0 slots 20-22): consumer lifetime, epilogue cycles, tiles
+            long long const kp_cta0 = clock64();
+            unsigned long long kp_epi = 0ull, kp_tiles = 0ull;
+#endif
             CUTLASS_PRAGMA_NO_UNROLL
             for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
                  work_tile_info.is_valid(params.scheduler);
@@ -207,13 +212,29 @@ public:
                     params.mainloop, pipeline_q, pipeline_do, pipeline_qt, pipeline_dot,
                     smem_pipe_read, smem_pipe_read_do, smem_pipe_read_qt, smem_pipe_read_dot,
                     tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage);
+#if KDA_PROF
+                long long const kp_e0 = clock64();
+#endif
                 if (tile_valid) {
                     epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV, threadIdx.x - NumCopyThreads, block_coord);
                 } else {
                     epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
                 }
+#if KDA_PROF
+                kp_epi += (unsigned long long)(clock64() - kp_e0);
+                kp_tiles += 1ull;
+#endif
             }
             epilogue.store_tail();
+#if KDA_PROF
+            if ((threadIdx.x - NumCopyThreads) % cutlass::NumThreadsPerWarpGroup == 0) {
+                int const kp_wg = (threadIdx.x - NumCopyThreads) / cutlass::NumThreadsPerWarpGroup;
+                unsigned long long* const kp_g = reinterpret_cast<unsigned long long*>(params.mainloop.ptr_dbg_cks) + (0 * 2 + kp_wg) * 32;
+                atomicAdd(kp_g + 20, (unsigned long long)(clock64() - kp_cta0));
+                atomicAdd(kp_g + 21, kp_epi);
+                atomicAdd(kp_g + 22, kp_tiles);
+            }
+#endif
         }
     }
 };

@@ -98,6 +98,8 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #define FA3FP11_P1R_SAGEDP 0
 #endif
 
+#include "kda_prof.h"
+
 namespace flash {
 
 using namespace cute;
@@ -603,6 +605,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         int const lane = thread_idx % cutlass::NumThreadsPerWarp;
         int const warp_in_wg = wg_thread / cutlass::NumThreadsPerWarp;
         uint32_t const wg_barrier_id = static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx;   // ids 5, 6: WG-local
+        KP_BEGIN();
         // This warpgroup's dS' natural half tile (kBlockM rows x 64 keys, SW64) and its gmem box.
         Tensor sdS = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + warp_group_idx * (1 + FA3FP11_P1R_DSDEFER) * kDsHalfElems), SmemLayoutDS{});
         Tensor sdS1 = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (warp_group_idx * (1 + FA3FP11_P1R_DSDEFER) + FA3FP11_P1R_DSDEFER) * kDsHalfElems), SmemLayoutDS{});   // the second buffer (== sdS without DSDEFER)
@@ -699,6 +702,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // (kBlockN, kBlockM) = the swapAB fragment: rows = keys, columns = query rows.
             Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<1, 0>(TileShape_MNK{}));
             consumer_wait(pipeline_q, smem_pipe_read);
+            KP(3);
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, Int<kSt>{}), tSrS);
             } else {
@@ -732,7 +736,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
             } else {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrdP);
             }
+            KP(4);
             warpgroup_wait<1>();   // S retired
+            KP(5);
             auto const stage_q = [&] { if constexpr (kSt >= 0) { return Int<kSt>{}; } else { return smem_pipe_read.index(); } }();
             // rowcol view: (16 query rows, 2 keys) per thread.
             Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
@@ -748,7 +754,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
             // The stage's LSE rows were read by the loop above and the S gemm has retired: raw Q's readers are done.
             pipeline_q.consumer_release(smem_pipe_read);
+            KP(6);
             warpgroup_wait<0>();   // dP retired
+            KP(7);
             auto const stage_do = [&] { if constexpr (kSt >= 0) { return Int<0>{}; } else { return smem_pipe_read_do_cur.index(); } }();
             Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 #ifdef FA3FP11_DBG
@@ -822,6 +830,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
             // The stage's dPsum rows were read above and the dP gemm has retired: raw dO's readers are done.
             pipeline_do.consumer_release(smem_pipe_read_do_cur);
+            KP(8);
             // psi = amax(|dS_tile|) / 448 across BOTH warpgroups (the tile is column-split per WG); parity-buffered slots.
             float fq8_amax = 0.f;
             #pragma unroll
@@ -830,7 +839,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
             for (int off = 16; off > 0; off /= 2) { fq8_amax = fmaxf(fq8_amax, __shfl_xor_sync(0xffffffff, fq8_amax, off)); }
             float* const fq8_psi_slots = fq8_psired + (m_block & 1) * 8;
             if (lane == 0) { fq8_psi_slots[thread_idx / cutlass::NumThreadsPerWarp] = fq8_amax; }
+            KP(9);
             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
+            KP(10);
             #pragma unroll
             for (int w = 0; w < NumMmaThreads / cutlass::NumThreadsPerWarp; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[w]); }
             bool const fq8_tile_zero = fq8_amax * (1.0f / 448.0f) < 1e-30f;
@@ -853,6 +864,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             Tensor rdS = make_tensor_like<Element>(tdKrdS_acc);
             flash::convert_type_out(tdKrdS_acc, rdS);
             static_assert(decltype(size(rdS))::value == 32, "P1-R: 32 dS' codes per thread per tile");
+            KP(11);
             // dS' natural (rows x keys) for pass 2: the ONE transpose.  A-register word 2i = (h0: g 2i, g 2i+1), word
             // 2i+1 = (h1: g 2i, g 2i+1); W[g] = (h0 pair(g) | h1 pair(g) << 16) is the natural word; the key pair this lane
             // stores comes from lanes srcA / srcB (slot h = ip / 4); stmatrix.trans writes 16 keys x 8 rows per matrix.
@@ -870,6 +882,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
                     fq8_out[2 * i] = __byte_perm(a0, b0, fq8_sel);
                     fq8_out[2 * i + 1] = __byte_perm(a1, b1, fq8_sel);
                 }
+                KP(12);
                 // The previous tile's TMA box store of this WG must have drained before the tile is overwritten.
                 if (wg_thread == 0) { cute::tma_store_wait<0>(); }
                 cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, wg_barrier_id);
@@ -881,6 +894,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, wg_barrier_id);
                 if (wg_thread == 0) { fq8_issue_ds_store(m_block); }
             }
+            KP(13);
             // dV window rescale (v10 / P1-A verbatim), the dK fold basis and the F2b anchor.
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
             float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
@@ -902,18 +916,22 @@ struct CollectiveMainloopBwdSm90Fp8R {
             } else {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, smem_pipe_read_dot.index()), tdVrdV);
             }
+            KP(14);
             consumer_wait(pipeline_qt, smem_pipe_read_qt);
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, Int<kSt>{}), fq8_tmpK);
             } else {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK);
             }
+            KP(15);
             warpgroup_wait<1>();
             pipeline_dot.consumer_release(smem_pipe_read_dot);
             ++smem_pipe_read_dot;
+            KP(16);
             warpgroup_wait<0>();
             pipeline_qt.consumer_release(smem_pipe_read_qt);
             ++smem_pipe_read_qt;
+            KP(17);
             ++smem_pipe_read;
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
             // plan-A dK fold: one fp32 FMA per element per tile in the tile's own g basis.
@@ -928,6 +946,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
                     tdVrdV(i) = 0.0f;
                 }
             }
+            KP(18);
+            KP_STEP_DONE();
         };
 
         auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
@@ -937,6 +957,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         constexpr int kbm_ = kBlockM, kbn_ = kBlockN;
         int const fq8_mask_m_end = ((n_block + 1) * kbn_ > seqlen_k) ? INT32_MAX
                                    : ((n_block + 1) * kbn_ - (seqlen_k - seqlen_q) + kbm_ - 1) / kbm_;
+        KP(2);
         CUTLASS_PRAGMA_NO_UNROLL
         for (; m_block < m_block_max && m_block < fq8_mask_m_end; ++m_block) { bwd_step(m_block, mask_fn, Int<-1>{}); }
         CUTLASS_PRAGMA_NO_UNROLL
@@ -951,6 +972,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
         #pragma unroll
         for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) = fq8_smem_dv[i * NumMmaThreads]; }
         if constexpr (Q_dO_same_stages) { smem_pipe_read_do = smem_pipe_read; }
+        KP(19);
+        KP_FLUSH(0, params.ptr_dbg_cks);
         ++work_idx;
         return true;
     }

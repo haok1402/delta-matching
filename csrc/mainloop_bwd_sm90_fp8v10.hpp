@@ -3,6 +3,7 @@
  ******************************************************************************/
 
 #pragma once
+#include "kda_prof.h"
 
 #include <cutlass/cutlass.h>
 #include <cutlass/array.h>
@@ -1483,6 +1484,10 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                                                       make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
 
         int warp_group_idx = __shfl_sync(0xFFFFFFFF, thread_idx / cutlass::NumThreadsPerWarpGroup, 0);
+#if KDA_PROF
+        int const wg_thread = thread_idx % cutlass::NumThreadsPerWarpGroup;
+#endif
+        KP_BEGIN();
         TiledMmaSdP tiled_mma_SdP;
         using TiledMmadP = std::conditional_t<!Mma_dP_is_RS, TiledMmaSdP, TiledMmadPRS>;
         TiledMmadP tiled_mma_dP;
@@ -1768,6 +1773,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
             float fq8_g_fold = 0.0f;
             Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
             consumer_wait(pipeline_q, smem_pipe_read);
+            KP(3);
             if constexpr (!(kAbl & 8)) {
             flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
             }
@@ -1798,7 +1804,9 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
             if constexpr (!(kAbl & 8)) {
             flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrV, tdPrdP);
             }
+            KP(4);
             warpgroup_wait<1>();
+            KP(5);
             // ## FP11-M17 GT: the S gemm (raw Q's ONLY reader: the twin comes from
             // gmem now) has retired and this stage's LSE was copied to registers
             // above: release raw Q here so the producer refills it ~a tile
@@ -1852,10 +1860,12 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                 }
             }
 
+            KP(6);
             warpgroup_wait<0>();
             // ## FP11-M17 GT: the dP gemm (raw dO's only reader) has retired and
             // dPsum was copied to registers above: release raw dO now.
             pipeline_do.consumer_release(smem_pipe_read_do_cur);
+            KP(7);
             // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
             Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
 #ifdef FA3FP11_DBG
@@ -1948,6 +1958,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                 }
             }
             }   // kAbl & 32
+            KP(8);
             // ## FQ8: psi = amax(|dS_tile|)/448 across BOTH warpgroups (the tile is
             // column-split per WG): warp-local amax -> per-warp smem slot -> barrier
             // -> joint max.  Clamp matches the reference (max(amax/448, 1e-30)).
@@ -1964,7 +1975,9 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
             cutlass::arch::fence_view_async_shared();
             // ## FQ8-V8: psi gets its OWN barrier id (dQEmptyWG3, unused at 2 WGs);
             // v1 borrowed dQEmptyWG1 which the TMA-dQ protocol now owns.
+            KP(9);
             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id: free at 2 WGs*/);
+            KP(10);
             #pragma unroll
             for (int w = 0; w < NumMmaThreads / cutlass::NumThreadsPerWarp; ++w) {
                 fq8_amax = fmaxf(fq8_amax, fq8_psired[w]);
@@ -2022,6 +2035,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                 if (thread_idx == 0) { cute::tma_store_wait<0>(); }
                 cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
             }
+            KP(11);
             if constexpr (!(kAbl & 4)) {
             #pragma unroll
             for (int mi = 0; mi < size<0>(rP_rc); ++mi) {
@@ -2057,6 +2071,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                 }
             }
             }   // kAbl & 4 (exchange stores)
+            KP(12);
 
             if constexpr (!Slice_dQKV_Mma) {
                 Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
@@ -2093,6 +2108,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                         cute::copy(params.tma_store_dS8, tdS8s, tdS8g);
                         cute::tma_store_arrive();
                     }
+                    KP(13);
                     // ## FP11-M4: in-window dV rescale = the v10 sequence
                     // VERBATIM (the window fragment was re-zeroed at the last
                     // boundary, so a window's first tile rescales exact
@@ -2148,6 +2164,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                     if constexpr (!(kAbl & 1)) {
                     flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrPt_cur, tdVrdO(_, _, _, smem_pipe_read_dot.index()), tdVrdV);
                     }
+                    KP(14);
                     // ## FQ8-V9: sQt is produced by the transpose warps.  The qt
                     // wait proves the transposer is done with raw q, and the S gemm
                     // (raw q's only MMA reader) retired at softmax: release raw q
@@ -2164,9 +2181,11 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                     if constexpr (!(kAbl & 1)) {
                     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK);
                     }
+                    KP(15);
                     warpgroup_wait<1>();   // retires dV; the dK temp stays in flight
                     if constexpr (!(kAbl & 256)) { pipeline_dot.consumer_release(smem_pipe_read_dot); }  // dV done
                     ++smem_pipe_read_dot;
+                    KP(16);
                     // ## V10: no dQ rescale (psi_mn rides to pass 2 as the
                     // per-tile dS' scale).
                 }
@@ -2207,6 +2226,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
             ++smem_pipe_read_qt;
             ++smem_pipe_read;
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
+            KP(17);
 
             // ## FP11-M4 plan-A dK fold: the wait<0> above retired the dK
             // temp gemm; fold the tile's chunk into the persistent TRUE-unit
@@ -2236,6 +2256,8 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                     tdVrdV(i) = 0.0f;
                 }
             }
+            KP(18);
+            KP_STEP_DONE();
         };
 
         // ## P1-C' (Delta-Matching-128, kHalves == 2): the two-half step.  Per 128-row STAGE: the stage's Q / dO scales, the dV window
@@ -2486,6 +2508,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
             }
         };
 
+        KP(2);
         // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
         // this helps quite a bit to not have to do causal masking for most of the iterations.
         if constexpr ((Is_causal || Is_local) && SeparateMaskingIterations) {
@@ -2561,6 +2584,8 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
         }
 
         if constexpr (Q_dO_same_stages) { smem_pipe_read_do = smem_pipe_read; }
+        KP(19);
+        KP_FLUSH(1, params.ptr_dbg_cks);
         ++work_idx;
         return true;
     }

@@ -1497,7 +1497,7 @@ struct CollectiveMainloopBwdSm90Fp8V10 {
                                                       make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
 
         int warp_group_idx = __shfl_sync(0xFFFFFFFF, thread_idx / cutlass::NumThreadsPerWarpGroup, 0);
-#if KDA_PROF
+#if KDA_PROF || KDA_TRACE
         int const wg_thread = thread_idx % cutlass::NumThreadsPerWarpGroup;
 #endif
         KP_BEGIN();

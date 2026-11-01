@@ -1,0 +1,101 @@
+{
+ "meta": {
+  "library": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/w_hd128_wgpsi_probe/delta_matching/_C.so",
+  "library_sha256": "d0688ee2f7b9d27a2cf3f10255339f4cac1fd287dc4b7f4b1444728521e86ff1",
+  "clock_mhz": 1950.0,
+  "prof": false
+ },
+ "records": [
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 3.6646405999999976,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "full"
+   ],
+   "mode": "stale",
+   "pass1_ms": 7.5309758,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    128,
+    1,
+    16,
+    16,
+    32768,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 14.560334799999987,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    4,
+    8192,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 3.6816178000000015,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 4.146874799999999,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "full"
+   ],
+   "mode": "stale",
+   "pass1_ms": 8.179012400000001,
+   "steps": 5
+  },
+  {
+   "cfg": [
+    256,
+    1,
+    8,
+    8,
+    32768,
+    "causal"
+   ],
+   "mode": "matched",
+   "pass1_ms": 16.45053,
+   "steps": 5
+  }
+ ]
+}

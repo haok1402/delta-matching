@@ -1,0 +1,7 @@
+1
+3a6702680d8aa87d7f5b8ab35ff4f462  -
+3a6702680d8aa87d7f5b8ab35ff4f462  -
+1
+11 passed in 12.74s
+route default, FULL SUITE, A 07fee0f25b8b vs B 486e577824bb
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs

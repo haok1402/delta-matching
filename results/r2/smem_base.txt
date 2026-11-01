@@ -1,0 +1,16 @@
+    128 [delta_matching hd128] smem_size=158720 grid=(256,1,1) block=(384,1,1)
+     16 [delta_matching hd128] smem_size=158720 grid=(4096,1,1) block=(384,1,1)
+      8 [delta_matching hd128] smem_size=158720 grid=(64,16,4) block=(384,1,1)
+    128 [delta_matching pass 0] smem_size=131840 grid=(256,1,1) block=384 stages=3
+     16 [delta_matching pass 0] smem_size=131840 grid=(64,64,1) block=384 stages=3
+      8 [delta_matching pass 0] smem_size=230400 grid=(2560,1,1) block=384 atomN=64 nbwg=2
+      8 [delta_matching pass 0] smem_size=230400 grid=(8704,1,1) block=384 atomN=64 nbwg=2
+     24 [delta_matching pass 2 hd128] smem_size=84992 grid=(128,64) block=128 kPromoteTiles=4 kDqPitch=136
+    128 [delta_matching pass 2 hd128] smem_size=84992 grid=(512,1) block=128 kPromoteTiles=4 kDqPitch=136
+     16 [delta_matching pass 2] smem_size=109568 grid=(128,32) block=128 kPromoteTiles=8 kDqPitch=264
+      8 [delta_matching pass 2] smem_size=109568 grid=(512,8) block=128 kPromoteTiles=8 kDqPitch=264
+      8 [delta_matching] smem_size=212992 grid=(128,8,4) block=(384,1,1)
+     16 [delta_matching] smem_size=212992 grid=(4096,1,1) block=(384,1,1)
+[delta_matching pass 0] smem_size=131840 grid=(256,1,1) block=384 stages=3
+[delta_matching pass 0] smem_size=131840 grid=(64,64,1) block=384 stages=3
+[delta_matching pass 0] smem_size=230400 grid=(2560,1,1) block=384 atomN=64 nbwg=2

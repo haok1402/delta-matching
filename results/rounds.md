@@ -6,7 +6,17 @@ order-alternated A/B (`benchmarks/ab.py`, 3 reps), confirmed by a second fresh j
 own repetition spread (main and held-out grids); bench.py D128 / D256 not worse than 1%; no new spills / stack /
 serialization.
 
-Consecutive rounds without an accepted gain: 1 (stop rule: 2).
+Stop rule (Hao, after round 1): per kernel. After two consecutive failed profile-based rounds on one kernel, move to the
+next kernel in the waste ranking; stop when each of the top four kernels (pass 1, forward, pass 2, torch glue) has two
+consecutive failures or is within 10% of its modeled limit. Non-bitwise changes are allowed when the numerics contract
+holds (AC-2.3). Hypotheses are based on a profile of the kernel.
+
+| kernel | consecutive failed rounds | rounds |
+|---|---:|---|
+| pass 1 | 1 (H1a, pre-profile) | 1 |
+| forward | 0 | - |
+| pass 2 | 0 | - |
+| torch glue | 0 | - |
 
 ## Round 1: H1a, pass 1 hd128, dV gemm issued before the cross-warpgroup psi barrier: REJECTED
 
@@ -28,3 +38,13 @@ Consecutive rounds without an accepted gain: 1 (stop rule: 2).
 - Verdict: below the 3% gate on the target subset; reverted. Reading: hiding the psi barrier wait behind the dV gemm
   recovers about 1% of pass 1, so the per-tile cross-warpgroup synchronization is not pass 1's main cost; the
   per-element issue work (exp2, dS, conversions, the dS' transpose) is the more likely limiter.
+
+## Round 2: pass-1 profile (no kernel change)
+
+Nsight Compute is unavailable (RmProfilingAdminOnly=1 on the nodes), so pass 1 was profiled with a clock64 probe build
+(`DM_PROF=1`, bitwise to the baseline, ~+20% overhead) plus what-if builds: `results/profile_pass1.md`, raw data in
+`results/r2/`. Findings: pass 1 is issue-bound and serialized (tensor pipe busy <= 23-26% of each m-block step; the two
+warpgroups run in lockstep), the MUFU exp2 floor is half the tensor ideal at hd128, the d256 single dO stage exposes
+load latency (a second dO stage: -2.4 .. -5.0% d256 pass 1, bitwise), deeper hd128 stages are slower, and decoupling
+the warpgroups (timing probe) is worth ~4-5% at hd128 before any ping-pong scheduling. Ranked profile-based hypotheses
+are in the profile report; the next round takes P1-d256-DO2.

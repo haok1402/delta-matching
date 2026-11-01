@@ -77,6 +77,19 @@ def validate_run(d, build, expected, label):
         if not all(isinstance(v, (int, float)) and math.isfinite(v) and v >= 0 for v in vals) or \
                 r["e2e_fwd_ms"] <= 0 or r["e2e_fwdbwd_ms"] <= 0:
             raise SystemExit(f"{label}: non-finite or non-positive timing in {key(r)}")
+        zero = [c for c in K.required_cats(r["mode"]) if not r["ms"][c] > 0]
+        if zero:
+            raise SystemExit(f"{label}: required kernel categories {zero} have no measured time in {key(r)}")
+        kern = r.get("kernels") or {}
+        if not kern:
+            raise SystemExit(f"{label}: empty kernel-event collection in {key(r)}")
+        recomputed = {c: 0.0 for c in K.CATS}
+        for n, ms in kern.items():
+            recomputed[K.classify(n)] += ms
+        for c in K.CATS:
+            if abs(recomputed[c] - r["ms"][c]) > 1e-9 + 1e-6 * abs(r["ms"][c]):
+                raise SystemExit(f"{label}: category {c} total {r['ms'][c]} disagrees with its kernel events "
+                                 f"({recomputed[c]}) in {key(r)}")
 
 
 def median_records(runs):

@@ -57,6 +57,12 @@ def expected_configs(grid, modes="all", one=None):
     return [(D, B, H, Hk, N, attn, mode) for (D, B, H, Hk, N) in shapes for attn, mode in md]
 
 
+def required_cats(mode):
+    """Kernel categories every measured configuration must contain (strictly positive time) on the API route with the
+    default knobs and (B, N, H, D) inputs: pass 0 only in the matched mode."""
+    return ("fwd", "pass1", "pass2", "prod_fwd", "prod_bwd", "twin", "glue") + (("pass0",) if mode == "matched" else ())
+
+
 def classify(name):
     n = name
     if "FlashAttnFwdSm90Fq8F" in n:
@@ -138,22 +144,23 @@ def accounting(D, B, H, Hk, N, causal, mode, layout="bnhd"):
     tiles = visited_tiles(N, 64, kbn, causal) * BHq
     f, b = {}, {}
     f["fwd"] = 4 * P * D
-    b["fwd"] = BHq * ND + 2 * BHk * ND + 2 * BHq * ND + 4 * BHq * N            # Q K V codes, O bf16, LSE
+    blk_q, blk_k = (128, 64) if D == 128 else (64, 32)
+    Sq, Skv = 4 * BHq * N // blk_q, 8 * BHk * N // blk_k                       # Q (or dO) scales; K + V scales
+    b["fwd"] = BHq * ND + 2 * BHk * ND + 2 * BHq * ND + 4 * BHq * N + Sq + Skv   # Q K V codes + scales, O bf16, LSE
     f["pass0"] = 4 * P * D if mode == "matched" else 0
     b["pass0"] = 0
     if mode == "matched":
         # Q, dO, K, V codes (the active v4 / v6 delta kernels load no K twin), LSE read, delta written
-        b["pass0"] = 2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N
+        b["pass0"] = 2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + 2 * Sq + Skv     # + Q, dO, K, V scales
         if D == 256:   # partial row sums [BH, N/64, 2, N] fp32 over visited 64 x 64 tiles: written, then reduced
             b["pass0"] += 2 * visited_tiles(N, 64, 64, causal) * BHq * 64 * 2 * 4
     f["pass1"] = 8 * P * D
     # Q, dO and their twins (Qt, dOt), K, V codes (no K twin: the certified GT build drops it at D 256 and the hd128
     # path loads K / V directly); LSE, delta; dK and dV per query head (bf16); dS' tiles; psi
-    b["pass1"] = 4 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + tiles * 64 * kbn + 4 * tiles
+    b["pass1"] = 4 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + tiles * 64 * kbn + 4 * tiles + 2 * Sq + Skv
     f["pass2"] = 2 * P * D
     b["pass2"] = tiles * 64 * kbn + 4 * tiles + BHk * ND + 2 * BHq * ND          # dS' tiles + psi, K twin, dQ bf16
     f["prod_fwd"] = 0
-    blk_q, blk_k = (128, 64) if D == 128 else (64, 32)
     kmean = 2 * BHk * (N // 64) * D * 4 + 2 * BHk * D * 4                      # fp32 partials written + read; mean out + in
     scales = 4 * (BHq * N // blk_q + 2 * BHk * N // blk_k)                      # Q8s, K8s, V8s
     # bf16 q, k, v read; k read again by the k-mean partial kernel; Q, K, K twin, V codes written (the Q twin is the

@@ -22,8 +22,10 @@ def test_accounting_terms_hd128_gqa():
     tiles = K.visited_tiles(N, 64, 128, True) * BHq
     # causal 64 x 128 tiles over 16 m-blocks: ceil((mb+1)*64/128) = 1,1,2,2,...,8,8 -> 72 per head
     assert K.visited_tiles(N, 64, 128, True) == 72 and K.visited_tiles(N, 64, 128, False) == 16 * 8
-    assert b["pass0"] == 2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N                       # no K twin
-    assert b["pass1"] == 4 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + tiles * 64 * 128 + 4 * tiles
+    Sq, Skv = 4 * BHq * N // 128, 8 * BHk * N // 64
+    assert b["fwd"] == BHq * ND + 2 * BHk * ND + 2 * BHq * ND + 4 * BHq * N + Sq + Skv
+    assert b["pass0"] == 2 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + 2 * Sq + Skv        # no K twin; scale reads
+    assert b["pass1"] == 4 * BHq * ND + 2 * BHk * ND + 8 * BHq * N + 4 * BHq * ND + tiles * 64 * 128 + 4 * tiles + 2 * Sq + Skv
     kmean = 2 * BHk * (N // 64) * D * 4 + 2 * BHk * D * 4
     scales = 4 * (BHq * N // 128 + 2 * BHk * N // 64)
     assert b["prod_fwd"] == 2 * (BHq + 2 * BHk) * ND + 2 * BHk * ND + (BHq + 3 * BHk) * ND + kmean + scales
@@ -36,7 +38,8 @@ def test_accounting_d256_partials_and_mha_glue():
     _, b = K.accounting(D, B, H, H, N, True, "matched")
     BHq, ND = 4, N * D
     part = 2 * K.visited_tiles(N, 64, 64, True) * BHq * 64 * 2 * 4
-    assert b["pass0"] == 2 * BHq * ND + 2 * BHq * ND + 8 * BHq * N + part
+    Sq, Skv = 4 * BHq * N // 64, 8 * BHq * N // 32
+    assert b["pass0"] == 2 * BHq * ND + 2 * BHq * ND + 8 * BHq * N + 2 * Sq + Skv + part
     assert b["glue"] == 2 * 2 * 3 * BHq * ND                                               # MHA: copies only
     _, b2 = K.accounting(D, B, H, H, N, True, "matched", layout="bhnd")
     assert b2["glue"] == 0
@@ -44,8 +47,12 @@ def test_accounting_d256_partials_and_mha_glue():
 
 # ---------------------------------------------------------------- A/B gates
 def rec(D=128, N=2048, attn="causal", mode="matched", t=1.0, B=16, H=16, Hk=16):
+    ms = {c: (t / len(K.CATS) if (c != "pass0" or mode == "matched") else 0.0) for c in K.CATS}
+    names = {"fwd": "FlashAttnFwdSm90Fq8F", "pass1": "FlashAttnBwdSm90Fp8R", "pass2": "fq8p2h128", "pass0": "DeltaV6",
+             "twin": "_twin_pi_kernel", "prod_bwd": "_doq_m17_kernel", "prod_fwd": "_quant_kernel", "glue": "direct_copy"}
+    kern = {names[c]: v for c, v in ms.items() if v > 0}
     return {"D": D, "B": B, "H": H, "Hk": Hk, "N": N, "attn": attn, "mode": mode, "e2e_fwd_ms": t / 3,
-            "e2e_fwdbwd_ms": t, "ms": {c: t / len(K.CATS) for c in K.CATS}}
+            "e2e_fwdbwd_ms": t, "ms": ms, "kernels": kern}
 
 
 def test_median_records_rejects_missing_repetition():
@@ -71,6 +78,23 @@ def test_validate_run_rejects_wrong_library_and_missing_config(tmp_path):
     nan = copy.deepcopy(good); nan["records"][0]["ms"]["pass1"] = float("nan")
     with pytest.raises(SystemExit):
         ab.validate_run(nan, build, exp, "nan")
+
+
+def test_validate_run_rejects_zero_required_kernels():
+    build = ("/x/delta_matching", "/x/delta_matching/_C.so", "a" * 64)
+    meta = {"package": build[0], "library": build[1], "library_sha256": build[2]}
+    stale = rec(attn="full", mode="stale")
+    assert stale["ms"]["pass0"] == 0.0
+    ab.validate_run({"meta": meta, "records": [stale]}, build, [ab.key(stale)], "stale without pass0 is fine")
+    for mutate, why in ((lambda r: (r["ms"].__setitem__("pass1", 0.0), r["kernels"].pop("FlashAttnBwdSm90Fp8R")), "zero pass1"),
+                        (lambda r: (r["ms"].__setitem__("pass0", 0.0), r["kernels"].pop("DeltaV6")), "zero matched pass0"),
+                        (lambda r: r.__setitem__("kernels", {}), "empty kernel events"),
+                        (lambda r: r["ms"].__setitem__("pass2", 5.0), "category total disagrees with events"),
+                        (lambda r: [r["ms"].__setitem__(c, 0.0) for c in K.CATS], "all categories zero")):
+        r = rec()
+        mutate(r)
+        with pytest.raises(SystemExit):
+            ab.validate_run({"meta": meta, "records": [r]}, build, [ab.key(r)], why)
 
 
 def test_child_env_drops_inherited_dm_so(monkeypatch):

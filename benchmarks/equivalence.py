@@ -335,6 +335,7 @@ def dump(a):
     import delta_matching as dm
     from delta_matching import split as dm_split
     torch.backends.cuda.matmul.allow_tf32 = False
+    dm.core._ops()   # load the library before any capture (the loader records its path on the unpatched accessor)
     cases = selected_cases(a.route, a.only)
     if not cases:
         raise SystemExit(f"no case matches --only {a.only!r}")

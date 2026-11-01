@@ -185,7 +185,7 @@
      "prologue_per_tile": 41540080,
      "exit_cycles_total": 11998238,
      "mma_cycles_total": 5335872690,
-     "tensor_busy_upper_bound": 0.2580580296517435,
+     "modeled_useful_fraction_of_peak": 0.2580580296517435,
      "tiles": 20480,
      "cta_cycles_per_tile": 264923.9895996094,
      "epilogue_cycles_per_tile": 782.105517578125,
@@ -216,7 +216,7 @@
      "prologue_per_tile": 42537741,
      "exit_cycles_total": 12036108,
      "mma_cycles_total": 5335726466,
-     "tensor_busy_upper_bound": 0.25811577488066373,
+     "modeled_useful_fraction_of_peak": 0.25811577488066373,
      "tiles": 20480,
      "cta_cycles_per_tile": 264932.2051757813,
      "epilogue_cycles_per_tile": 823.497021484375,
@@ -407,7 +407,7 @@
      "prologue_per_tile": 29365463,
      "exit_cycles_total": 12068509,
      "mma_cycles_total": 10621317237,
-     "tensor_busy_upper_bound": 0.25372251212641334,
+     "modeled_useful_fraction_of_peak": 0.25372251212641334,
      "tiles": 20480,
      "cta_cycles_per_tile": 522378.209375,
      "epilogue_cycles_per_tile": 663.735791015625,
@@ -438,7 +438,7 @@
      "prologue_per_tile": 29611754,
      "exit_cycles_total": 12195103,
      "mma_cycles_total": 10620454941,
-     "tensor_busy_upper_bound": 0.2537521371998407,
+     "modeled_useful_fraction_of_peak": 0.2537521371998407,
      "tiles": 20480,
      "cta_cycles_per_tile": 522382.87788085936,
      "epilogue_cycles_per_tile": 702.576953125,
@@ -629,7 +629,7 @@
      "prologue_per_tile": 35929451,
      "exit_cycles_total": 11975197,
      "mma_cycles_total": 20858102635,
-     "tensor_busy_upper_bound": 0.258992280773441,
+     "modeled_useful_fraction_of_peak": 0.258992280773441,
      "tiles": 20480,
      "cta_cycles_per_tile": 1023276.7129882813,
      "epilogue_cycles_per_tile": 772.942919921875,
@@ -660,7 +660,7 @@
      "prologue_per_tile": 36368531,
      "exit_cycles_total": 11978101,
      "mma_cycles_total": 20857487984,
-     "tensor_busy_upper_bound": 0.25900543173935375,
+     "modeled_useful_fraction_of_peak": 0.25900543173935375,
      "tiles": 20480,
      "cta_cycles_per_tile": 1023279.3973632812,
      "epilogue_cycles_per_tile": 818.528173828125,
@@ -851,7 +851,7 @@
      "prologue_per_tile": 40923496,
      "exit_cycles_total": 11997174,
      "mma_cycles_total": 5335736557,
-     "tensor_busy_upper_bound": 0.258034508330008,
+     "modeled_useful_fraction_of_peak": 0.258034508330008,
      "tiles": 20480,
      "cta_cycles_per_tile": 264917.25092773436,
      "epilogue_cycles_per_tile": 782.306884765625,
@@ -882,7 +882,7 @@
      "prologue_per_tile": 41704859,
      "exit_cycles_total": 12039547,
      "mma_cycles_total": 5335601179,
-     "tensor_busy_upper_bound": 0.2580813639188773,
+     "modeled_useful_fraction_of_peak": 0.2580813639188773,
      "tiles": 20480,
      "cta_cycles_per_tile": 264925.478125,
      "epilogue_cycles_per_tile": 823.73681640625,
@@ -1073,7 +1073,7 @@
      "prologue_per_tile": 45446885,
      "exit_cycles_total": 14469647,
      "mma_cycles_total": 5891002889,
-     "tensor_busy_upper_bound": 0.231974448187717
+     "modeled_useful_fraction_of_peak": 0.231974448187717
     },
     "wg1": {
      "m_block_steps": 1320960,
@@ -1099,7 +1099,7 @@
      "prologue_per_tile": 46177487,
      "exit_cycles_total": 13279589,
      "mma_cycles_total": 5889850266,
-     "tensor_busy_upper_bound": 0.23200202729380587
+     "modeled_useful_fraction_of_peak": 0.23200202729380587
     },
     "sm_cycles_total": 6601660837.200001,
     "loop_share_of_sm_cycles": 0.883275663624242,
@@ -1285,7 +1285,7 @@
      "prologue_per_tile": 31342727,
      "exit_cycles_total": 11880567,
      "mma_cycles_total": 11552805204,
-     "tensor_busy_upper_bound": 0.2332278080116639
+     "modeled_useful_fraction_of_peak": 0.2332278080116639
     },
     "wg1": {
      "m_block_steps": 2621440,
@@ -1311,7 +1311,7 @@
      "prologue_per_tile": 31738757,
      "exit_cycles_total": 12251622,
      "mma_cycles_total": 11553768465,
-     "tensor_busy_upper_bound": 0.2332238328091776
+     "modeled_useful_fraction_of_peak": 0.2332238328091776
     },
     "sm_cycles_total": 13053676521.6,
     "loop_share_of_sm_cycles": 0.8817118986329271,
@@ -1497,7 +1497,7 @@
      "prologue_per_tile": 35221261,
      "exit_cycles_total": 14466601,
      "mma_cycles_total": 23162576285,
-     "tensor_busy_upper_bound": 0.23273572655882677
+     "modeled_useful_fraction_of_peak": 0.23273572655882677
     },
     "wg1": {
      "m_block_steps": 5253120,
@@ -1523,7 +1523,7 @@
      "prologue_per_tile": 35901720,
      "exit_cycles_total": 13271876,
      "mma_cycles_total": 23161393126,
-     "tensor_busy_upper_bound": 0.23274246218619232
+     "modeled_useful_fraction_of_peak": 0.23274246218619232
     },
     "sm_cycles_total": 25775376541.200005,
     "loop_share_of_sm_cycles": 0.8967042008505978,

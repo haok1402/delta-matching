@@ -11,12 +11,15 @@ next kernel in the waste ranking; stop when each of the top four kernels (pass 1
 consecutive failures or is within 10% of its modeled limit. Non-bitwise changes are allowed when the numerics contract
 holds (AC-2.3). Hypotheses are based on a profile of the kernel.
 
-| kernel | consecutive failed rounds | rounds |
+| kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
 |---|---:|---|
-| pass 1 | 1 (H1a, pre-profile) | 1 |
-| forward | 0 | - |
-| pass 2 | 0 | - |
-| torch glue | 0 | - |
+| pass 1 | 0 | 1 (H1a, round 1) |
+| forward | 0 | 0 |
+| pass 2 | 0 | 0 |
+| torch glue | 0 | 0 |
+
+Only a rejected profile-based candidate increments its kernel's eligible counter; an accepted candidate resets it;
+profiling / tooling rounds change neither.
 
 ## Round 1: H1a, pass 1 hd128, dV gemm issued before the cross-warpgroup psi barrier: REJECTED
 
@@ -43,8 +46,8 @@ holds (AC-2.3). Hypotheses are based on a profile of the kernel.
 
 Nsight Compute is unavailable (RmProfilingAdminOnly=1 on the nodes), so pass 1 was profiled with a clock64 probe build
 (`DM_PROF=1`, bitwise to the baseline, ~+20% overhead) plus what-if builds: `results/profile_pass1.md`, raw data in
-`results/r2/`. Findings: pass 1 is issue-bound and serialized (tensor pipe busy <= 23-26% of each m-block step; the two
-warpgroups run in lockstep), the MUFU exp2 floor is half the tensor ideal at hd128, the d256 single dO stage exposes
-load latency (a second dO stage: -2.4 .. -5.0% d256 pass 1, bitwise), deeper hd128 stages are slower, and decoupling
-the warpgroups (timing probe) is worth ~4-5% at hd128 before any ping-pong scheduling. Ranked profile-based hypotheses
+`results/r2/`. Findings: pass 1 is issue-bound and serialized (matrix work at modeled peak is 23-26% of the instrumented step time), the MUFU exp2 floor is half the tensor ideal at hd128, the d256 single dO stage exposes
+load latency (a second dO stage: -2.4 .. -5.0% d256 pass 1 in two fixed-order exploratory repetitions, bitwise), and
+deeper hd128 stages are slower. Issue pressure and warpgroup lockstep are hypotheses consistent with the data (no
+hardware counters, no per-step timeline yet); the local-psi timing probe is not an isolated bound. Ranked profile-based hypotheses
 are in the profile report; the next round takes P1-d256-DO2.

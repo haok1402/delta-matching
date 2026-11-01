@@ -17,8 +17,8 @@ utilization counters and L2 / smem throughput counters are not available here; t
 2. Perturbation: the probes cost about +20% pass-1 time (table below), so phase SHARES are the signal; absolute
    cycles are inflated by roughly that factor, spread over the probe points.
 3. Resource usage (`cuobjdump --dump-resource-usage`), launch geometry and smem (`DM_DEBUG=1`), analytic budgets.
-4. What-if builds (pipeline depth, warpgroup decoupling), timed against the baseline in the same job, 2 alternating
-   repetitions (`results/r2/whatif_*.json`, patches in `results/r2/whatif_apply.py`).
+4. What-if builds (pipeline depth, warpgroup decoupling), timed against the baseline in the same job, 2 repetitions in a
+   FIXED order (base, then each variant; not alternated: exploratory only) (`results/r2/whatif_*.json`, patches in `results/r2/whatif_apply.py`).
 
 ## Resources and roles
 
@@ -57,7 +57,7 @@ Shares of the per-step loop; "wait X" phases are a warpgroup blocked on a pipeli
 
 ### D128 B4 H16/16 N8192 causal (matched): pass 1 4.667 ms per call
 
-m-block steps per call (WG0): 266240; cycles per step: WG0 3968, WG1 3967; tensor-core ideal 1024 -> tensor busy <= 26%; consumer loops cover 88% of the kernel's SM-cycles (ideal tensor share 23%)
+m-block steps per call (WG0): 266240; cycles per step: WG0 3968, WG1 3967 (instrumented loop); matrix work at modeled peak = 1024 cycles -> modeled useful-throughput fraction of peak 26% (a model, not a hardware utilization counter); consumer loops cover 88% of the instrumented kernel's SM-cycles
 
 per tile (CTA): lifetime 264924 cycles, prologue 2028, exit 586, epilogue (dK/dV store) 782
 
@@ -82,7 +82,7 @@ per tile (CTA): lifetime 264924 cycles, prologue 2028, exit 586, epilogue (dK/dV
 
 ### D128 B4 H16/16 N8192 full (stale): pass 1 9.371 ms per call
 
-m-block steps per call (WG0): 524288; cycles per step: WG0 4036, WG1 4035; tensor-core ideal 1024 -> tensor busy <= 25%; consumer loops cover 88% of the kernel's SM-cycles (ideal tensor share 22%)
+m-block steps per call (WG0): 524288; cycles per step: WG0 4036, WG1 4035 (instrumented loop); matrix work at modeled peak = 1024 cycles -> modeled useful-throughput fraction of peak 25% (a model, not a hardware utilization counter); consumer loops cover 88% of the instrumented kernel's SM-cycles
 
 per tile (CTA): lifetime 522378 cycles, prologue 1434, exit 589, epilogue (dK/dV store) 664
 
@@ -107,7 +107,7 @@ per tile (CTA): lifetime 522378 cycles, prologue 1434, exit 589, epilogue (dK/dV
 
 ### D128 B1 H16/16 N32768 causal (matched): pass 1 18.383 ms per call
 
-m-block steps per call (WG0): 1052672; cycles per step: WG0 3954, WG1 3954; tensor-core ideal 1024 -> tensor busy <= 26%; consumer loops cover 88% of the kernel's SM-cycles (ideal tensor share 23%)
+m-block steps per call (WG0): 1052672; cycles per step: WG0 3954, WG1 3954 (instrumented loop); matrix work at modeled peak = 1024 cycles -> modeled useful-throughput fraction of peak 26% (a model, not a hardware utilization counter); consumer loops cover 88% of the instrumented kernel's SM-cycles
 
 per tile (CTA): lifetime 1023277 cycles, prologue 1754, exit 585, epilogue (dK/dV store) 773
 
@@ -132,7 +132,7 @@ per tile (CTA): lifetime 1023277 cycles, prologue 1754, exit 585, epilogue (dK/d
 
 ### D128 B4 H16/4 N8192 causal (matched): pass 1 4.690 ms per call
 
-m-block steps per call (WG0): 266240; cycles per step: WG0 3968, WG1 3968; tensor-core ideal 1024 -> tensor busy <= 26%; consumer loops cover 88% of the kernel's SM-cycles (ideal tensor share 23%)
+m-block steps per call (WG0): 266240; cycles per step: WG0 3968, WG1 3968 (instrumented loop); matrix work at modeled peak = 1024 cycles -> modeled useful-throughput fraction of peak 26% (a model, not a hardware utilization counter); consumer loops cover 88% of the instrumented kernel's SM-cycles
 
 per tile (CTA): lifetime 264917 cycles, prologue 1998, exit 586, epilogue (dK/dV store) 782
 
@@ -157,7 +157,7 @@ per tile (CTA): lifetime 264917 cycles, prologue 1998, exit 586, epilogue (dK/dV
 
 ### D256 B4 H8/8 N8192 causal (matched): pass 1 5.129 ms per call
 
-m-block steps per call (WG0): 264192; cycles per step: WG0 4414, WG1 4414; tensor-core ideal 1024 -> tensor busy <= 23%; consumer loops cover 88% of the kernel's SM-cycles (ideal tensor share 20%)
+m-block steps per call (WG0): 264192; cycles per step: WG0 4414, WG1 4414 (instrumented loop); matrix work at modeled peak = 1024 cycles -> modeled useful-throughput fraction of peak 23% (a model, not a hardware utilization counter); consumer loops cover 88% of the instrumented kernel's SM-cycles
 
 | phase | WG0 cycles / step | share | WG1 cycles / step |
 |---|---:|---:|---:|
@@ -180,7 +180,7 @@ m-block steps per call (WG0): 264192; cycles per step: WG0 4414, WG1 4414; tenso
 
 ### D256 B4 H8/8 N8192 full (stale): pass 1 10.143 ms per call
 
-m-block steps per call (WG0): 524288; cycles per step: WG0 4391, WG1 4391; tensor-core ideal 1024 -> tensor busy <= 23%; consumer loops cover 88% of the kernel's SM-cycles (ideal tensor share 21%)
+m-block steps per call (WG0): 524288; cycles per step: WG0 4391, WG1 4391 (instrumented loop); matrix work at modeled peak = 1024 cycles -> modeled useful-throughput fraction of peak 23% (a model, not a hardware utilization counter); consumer loops cover 88% of the instrumented kernel's SM-cycles
 
 | phase | WG0 cycles / step | share | WG1 cycles / step |
 |---|---:|---:|---:|
@@ -203,7 +203,7 @@ m-block steps per call (WG0): 524288; cycles per step: WG0 4391, WG1 4391; tenso
 
 ### D256 B1 H8/8 N32768 causal (matched): pass 1 20.027 ms per call
 
-m-block steps per call (WG0): 1050624; cycles per step: WG0 4400, WG1 4400; tensor-core ideal 1024 -> tensor busy <= 23%; consumer loops cover 90% of the kernel's SM-cycles (ideal tensor share 21%)
+m-block steps per call (WG0): 1050624; cycles per step: WG0 4400, WG1 4400 (instrumented loop); matrix work at modeled peak = 1024 cycles -> modeled useful-throughput fraction of peak 23% (a model, not a hardware utilization counter); consumer loops cover 90% of the instrumented kernel's SM-cycles
 
 | phase | WG0 cycles / step | share | WG1 cycles / step |
 |---|---:|---:|---:|
@@ -224,32 +224,36 @@ m-block steps per call (WG0): 1050624; cycles per step: WG0 4400, WG1 4400; tens
 | wait dK (wgmma) + releases | 153 | 3.5% | 156 |
 | dK fold + dV promote | 580 | 13.2% | 579 |
 
-## What-if measurements (pass 1 ms change vs baseline, mean of 2 alternating reps, same job)
+## What-if measurements (EXPLORATORY: pass 1 ms change vs baseline, mean of 2 fixed-order repetitions in one job; not acceptance evidence)
 
 | variant | D128 N8k causal | D128 N8k full | D128 N32k causal | D128 N8k GQA4 | D256 N8k causal | D256 N8k full | D256 N32k causal | bitwise |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | d256 dO stages 1 -> 2 (smem 213 -> 224 KB) | +0.1% | -0.0% | -0.3% | +0.1% | **-5.0%** | **-2.4%** | **-3.5%** | yes (72 cases) |
 | hd128 dO / dOt stages 1 -> 2 (certified DOST / DOTST) | +1.7% | -0.0% | +1.7% | +1.7% | +0.1% | +0.0% | +0.2% | yes |
 | hd128 Q / Qt stages 2 -> 3 (certified QST) | +1.0% | +0.4% | +1.3% | +1.1% | -0.0% | +0.0% | +0.4% | yes |
-| hd128 warpgroup-local psi, no cross-WG barrier (TIMING PROBE, numerics wrong) | **-4.8%** | -2.7% | **-4.2%** | **-4.8%** | +0.0% | +0.5% | +1.0% | no |
+| hd128 warpgroup-local psi (TIMING PROBE, numerics wrong: also halves the cross-WG max scan and changes psi values; not an isolated or upper bound) | **-4.8%** | -2.7% | **-4.2%** | **-4.8%** | +0.0% | +0.5% | +1.0% | no |
 
-## Reading
+## Reading (what the data shows, and what remains hypothesis)
 
-1. **Pass 1 is issue-bound and serialized, not memory-bound.** A step takes ~3970 probe cycles (~3300 plain) against a
-   1024-cycle tensor ideal: the tensor pipe is busy at most 23-26% of the time. No single phase dominates (largest:
-   exp2 16% at hd128, issue S/dP + wait dO 18% at d256, dK fold + dV promote 9-13%, conversions 11%, amax 8%, store
-   8%). Everything inside a warpgroup is a dependent chain: wgmma issue -> wait -> elementwise -> conversions ->
-   wgmma, and the two warpgroups run in lockstep (the per-tile psi barrier costs only ~38 cycles itself, but it keeps the
-   two warpgroups' elementwise phases aligned, so tensor work of one never overlaps vector work of the other).
-2. **The MUFU floor is half the tensor ideal at hd128** (512 of 1024 cycles per step): even with perfect overlap,
-   exp2 alone would occupy the SFU for half the step; FA3's fp8 kernels face the same limit.
-3. **Load waits:** "wait Q" ~5% at both head dims; at d256 "issue S + wait dO + issue dP" is 18% and a second dO stage
-   removes 2.4-5% of pass 1 (bitwise): the single dO stage exposes TMA latency there. At hd128 deeper stages are slower
-   (one CTA per SM already; more smem stages lengthen the per-tile prologue).
-4. **Decoupling the two warpgroups alone (per-warpgroup psi) gives ~4-5% at hd128**; the remaining overlap needs an
-   explicit ping-pong schedule (FA3-style named-barrier ordering so one warpgroup's exp / conversion runs under the
-   other's wgmma), and per-warpgroup psi is a numerics change (two scales per 128-key tile; pass 2 must consume two
-   psi per tile).
+Measured: the instrumented step time (~3970 cycles at hd128, ~4400 at d256) is ~4x the 1024-cycle time of the step's
+matrix work at modeled peak; the per-phase totals (each summed over all CTAs) put no single phase above 18%; the d256
+pass 1 is sensitive to dO pipeline depth (a second stage: -2.4 .. -5.0%, bitwise); deeper hd128 stages are slower.
+
+Not measured (no hardware counters; the probes keep summed durations, not per-step timestamps), so these are
+HYPOTHESES the data is consistent with, not established facts:
+1. Issue pressure: the per-warpgroup chain wgmma issue -> wait -> elementwise -> conversions -> wgmma leaves the tensor
+   pipe idle much of the step. The modeled useful-throughput fraction of peak (23-26%) is matrix work over modeled peak
+   capacity during the instrumented loop; it is NOT a measured or upper-bounded tensor-pipe utilization.
+2. Lockstep: the per-tile psi barrier forces one rendezvous per step; whether the two warpgroups' vector phases are
+   otherwise aligned (so tensor work of one never overlaps vector work of the other) needs a per-step timeline probe
+   (not yet built); equal per-warpgroup totals do not show alignment.
+3. Memory: aggregate HBM / L2 traffic estimates are far below the limits, but that does not exclude exposed load
+   latency; the d256 dO-depth result shows exposed latency there, and the grouped phase "issue S + wait dO + issue dP"
+   does not separate the wait from the issues.
+4. MUFU: 8192 exp2 per hd128 step at 16 / clk / SM need >= 512 cycles: a throughput floor from the instruction mix,
+   not a measured stall.
+5. The warpgroup-local psi probe (-4.2 .. -4.8%) changes the work (half the max scan, different psi values) and is not
+   an isolated cost of the barrier or a bound on a correct ping-pong design.
 
 ## Profile-based hypotheses for pass 1 (ranked by expected gain x confidence)
 
@@ -258,9 +262,8 @@ m-block steps per call (WG0): 1050624; cycles per step: WG0 4400, WG1 4400; tens
    D256 subset.
 2. **P1-hd128-PINGPONG** (hd128, structural, non-bitwise): per-warpgroup psi (the stripped M23 HALFPSI arm: psi per
    64 keys, finer scale granularity) re-implemented in pass 1 and pass 2, plus explicit ping-pong ordering of the two
-   warpgroups' elementwise phases against each other's wgmma. Upper bound from the probe without ping-pong: -4..-5%;
-   ping-pong targets the lockstep that leaves the tensor pipe idle during exp / conversions (up to ~2x headroom in
-   principle). Needs the AC-2.3 numerics tooling (Q2).
+   warpgroups' elementwise phases against each other's wgmma. Prerequisites: a per-step timeline probe showing the
+   warpgroups' phase alignment and exposed waits (hypothesis 2 above), and the AC-2.3 numerics tooling (Q2).
 3. **P1-MUFU** (both, non-bitwise): compute part of the exp2 with an FMA polynomial (FA4-style) to offload the SFU; P is
    quantized to e4m3 afterwards, so few codes move; needs the numerics tooling.
 4. **P1-AMAX-REDUX** (both, bitwise, small): psi amax via `redux.sync.max.u32` on the |x| bit patterns (exact for

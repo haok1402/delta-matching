@@ -8,7 +8,7 @@ tile (prologue, exit) and per CTA (lifetime, epilogue), summed over every CTA of
     PYTHONPATH=<DM_PROF build root> python benchmarks/profile_pass1.py --out prof.json        # phase cycles
     PYTHONPATH=<any build root>     python benchmarks/profile_pass1.py --time-only --out t.json  # pass-1 kernel time
 
-The tensor-core ideal per CTA m-block step is 1024 cycles at both head dims (4 wgmma of 2^21 FLOP per CTA step at
+The modeled matrix-work time per CTA m-block step at peak is 1024 cycles at both head dims (4 wgmma of 2^21 FLOP per CTA step at
 D 128 (64 x 128 tile) and at D 256 (64 x 64 tile), 8192 dense fp8 FLOP / clk / SM).
 """
 import argparse, json, os, statistics, sys
@@ -83,7 +83,7 @@ def analyze(rec, clk):
         loop = sum(sl[i] for i in range(3, 19)) / nstep
         out[f"wg{wg}"] = {"m_block_steps": nstep, "cycles_per_step": loop, "phases_per_step": phases,
                           "prologue_per_tile": sl[2], "exit_cycles_total": sl[19], "mma_cycles_total": mma,
-                          "tensor_busy_upper_bound": IDEAL_STEP / loop}
+                          "modeled_useful_fraction_of_peak": IDEAL_STEP / loop}
         if var == 0 and sl[22]:
             out[f"wg{wg}"].update(tiles=sl[22], cta_cycles_per_tile=sl[20] / sl[22], epilogue_cycles_per_tile=sl[21] / sl[22],
                                   prologue_cycles_per_tile=sl[2] / sl[22], exit_cycles_per_tile=sl[19] / sl[22])
@@ -103,9 +103,10 @@ def fmt(rec, an):
         return "\n".join(lines + ["(no probe data)"])
     w0, w1 = an["wg0"], an.get("wg1", {})
     lines += [f"m-block steps per call (WG0): {w0['m_block_steps'] / rec['steps']:.0f}; cycles per step: WG0 {w0['cycles_per_step']:.0f}, "
-              f"WG1 {w1.get('cycles_per_step', float('nan')):.0f}; tensor-core ideal {IDEAL_STEP} -> tensor busy <= "
-              f"{100 * w0['tensor_busy_upper_bound']:.0f}%; consumer loops cover {100 * an['loop_share_of_sm_cycles']:.0f}% of the "
-              f"kernel's SM-cycles (ideal tensor share {100 * an['ideal_tensor_share']:.0f}%)", ""]
+              f"WG1 {w1.get('cycles_per_step', float('nan')):.0f} (instrumented loop); matrix work at modeled peak = {IDEAL_STEP} cycles "
+              f"-> modeled useful-throughput fraction of peak {100 * w0['modeled_useful_fraction_of_peak']:.0f}% (a model, not a "
+              f"hardware utilization counter); consumer loops cover {100 * an['loop_share_of_sm_cycles']:.0f}% of the "
+              f"instrumented kernel's SM-cycles", ""]
     if "cta_cycles_per_tile" in w0:
         lines += [f"per tile (CTA): lifetime {w0['cta_cycles_per_tile']:.0f} cycles, prologue {w0['prologue_cycles_per_tile']:.0f}, "
                   f"exit {w0['exit_cycles_per_tile']:.0f}, epilogue (dK/dV store) {w0['epilogue_cycles_per_tile']:.0f}", ""]

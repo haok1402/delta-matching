@@ -834,3 +834,10 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Workers launched: forward SASS diff vs FA3 fp8 per step and instruction-gap cuts (S19-fwd-*); pass-1 per-element
   instruction cuts on r18_c4 under residual-v4 (S19-p1-*). r18_c4 DBG pair + LSE controls building (job 21192664) as
   the numerics references. kda-p1fresh prototypes will be gated when they land.
+- Pass-1 cut worker (S19-p1-01..06 on r18_c4, results/screens/pass1_cuts_log.md): six bitwise variants (DVFRESH
+  zero-start dV window -15 instr / warp-step; scale-load / psi-pointer hoists; float4 dV overlay; psi store and
+  per-row work moved), none >= 1% in both screens (best -0.33 / +0.02%); moved work +1.3..2% slower; float4 / hoist
+  variants grow STACK 0 -> 8. Reading: bitwise-removable instructions sit in gemm-wait shadows; the ~0.05-point
+  sensitivity holds only on the S-retire -> dK-issue per-element chain (where SHFL8 / the clamp drop paid). dS in one
+  op impossible (two products of P^); dropping the amax pass leaves only a 1e2-1e3 too loose bound; packed f16x2 dS
+  saves <= 16 instr (~1.2%) even if v4 passed. No candidate.

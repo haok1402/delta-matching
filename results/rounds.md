@@ -847,3 +847,10 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   semaphores +28.9% (vs its 1-token control +48.6%: a second token is worth ~12% but the spin loop spills); TOK2p
   parity-alternating barriers +23.1% (control +19.8%). At 3 WGs any extra per-thread state or branch spills at 160
   registers. No candidate; C4 + SMSC (-2.4%) stays the only held forward piece.
+- Forward SASS-diff worker (results/screens/fwd_sassdiff.md): per 128 keys ours executes 591 / 64x128-step-normalized
+  vs FA3's 377.7 instructions (9.23 vs 5.90 per score per thread, 1.57x): +128 rho / promote, ~+88 per-tile scalar
+  bookkeeping, ~+36 integer / uniform / control; the ring turn is 191 instructions, 136 of them rho / promote / QGMMA.
+  New bitwise piece S19-fwd-10 (the lazy-rebase check without the -inf guard on unmasked steps, valid while local
+  attention is disabled; the next tile's scale reads issued after the ring-turn arrive) on the held C4 PRETURN + SMSC
+  stack: gate 21193779 bitwise on all four routes, forward -3.24% geomean, bench -0.6%; confirmation 21193980 (same
+  library 401dc8a35a68) -2.90% -> REJECTED (both jobs must clear 3%); held at ~-3.1% for one more bitwise piece.

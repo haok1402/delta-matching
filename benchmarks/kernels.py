@@ -86,7 +86,7 @@ def required_cats(mode):
 
 def classify(name):
     n = name
-    if "FlashAttnFwdSm90Fq8F" in n:
+    if "FlashAttnFwdSm90Fq8F" in n or "FlashAttnFwdSm90Fp8Port" in n:
         return "fwd"
     if "FlashAttnBwdSm90Fp8" in n:
         return "pass1"

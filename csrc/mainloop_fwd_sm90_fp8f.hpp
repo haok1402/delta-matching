@@ -1384,11 +1384,13 @@ struct CollectiveMainloopFwdSm90Fp8F {
             }
             } else if constexpr (kGroups == 4) {
             // ## Delta-Matching-128 F3: four 64-key groups (16 rowcol columns each) per 256-key tile.
+            // ## kda-fwd: scales floored at FLT_MIN (bitwise for nonzero scales; a zero Q / K scale block would give
+            // -inf * 0 = NaN for the masked scores, the inherited zero-input defect).
             float const g_[4] = {
-                fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 0],
-                fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 1],
-                fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 2],
-                fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 3]};
+                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 0], 1.17549435e-38f),
+                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 1], 1.17549435e-38f),
+                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 2], 1.17549435e-38f),
+                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 3], 1.17549435e-38f)};
             #pragma unroll
             for (int mi = 0; mi < size<0>(sc_); ++mi) {
                 #pragma unroll
@@ -1396,9 +1398,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
             }
             } else {
             // ## Delta-Matching-128: two 64-key groups (16 rowcol columns each).
-            float const g_[2] = {
-                fq8_q8sc * params.ptr_k8s[fq8_bh_k + 2 * n_blk + 0],
-                fq8_q8sc * params.ptr_k8s[fq8_bh_k + 2 * n_blk + 1]};
+            float const g_[2] = {   // ## kda-fwd: floored at FLT_MIN (see the F3 branch)
+                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 2 * n_blk + 0], 1.17549435e-38f),
+                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 2 * n_blk + 1], 1.17549435e-38f)};
             #pragma unroll
             for (int mi = 0; mi < size<0>(sc_); ++mi) {
                 #pragma unroll

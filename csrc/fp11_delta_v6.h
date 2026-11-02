@@ -398,8 +398,14 @@ struct DeltaV6 {
             Tensor tSrS1 = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
             Tensor tdPrdP1 = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
             // Per-n-block scales: this stage's two groups (prefetched one stage ahead).
-            float k8s_n0 = fq8_k8s_base[0], k8s_n1 = fq8_k8s_base[1 < params.nbn ? 1 : 0];
-            float v8s_n0 = fq8_v8s_base[0], v8s_n1 = fq8_v8s_base[1 < params.nbn ? 1 : 0];
+            // ## P0SPF: one 8-byte load per stage and tensor (the stage's two 64-key groups are adjacent; nblk_k = seqlen_k / 64
+            // is even, so the per-head base is 8-byte aligned), no clamps: a next stage always exists inside nbn when
+            // HasNext (2 (s + 1) < n_block_max <= nbn, nbn even).  Same values: bitwise.
+            float2 const* fq8_k8s_2 = reinterpret_cast<float2 const*>(fq8_k8s_base);
+            float2 const* fq8_v8s_2 = reinterpret_cast<float2 const*>(fq8_v8s_base);
+            float2 k8s_2 = fq8_k8s_2[0], v8s_2 = fq8_v8s_2[0];
+            float k8s_n0 = k8s_2.x, k8s_n1 = k8s_2.y;
+            float v8s_n0 = v8s_2.x, v8s_n1 = v8s_2.y;
             // Prologue: the first stage's (S0, dP0) in flight before the loop (v4b).
             {
                 auto tok = pipeline_kv.consumer_try_wait(smem_pipe_read);
@@ -425,9 +431,8 @@ struct DeltaV6 {
                 float const dp0 = fq8_do8sc * v8s_n0;
                 float const dp1 = fq8_do8sc * v8s_n1;
                 if constexpr (HasNext) {
-                    int const nn0 = nb0 + kNbPerStage, nn1 = nn0 + 1;
-                    k8s_n0 = fq8_k8s_base[nn0 < params.nbn ? nn0 : 0]; k8s_n1 = fq8_k8s_base[nn1 < params.nbn ? nn1 : 0];
-                    v8s_n0 = fq8_v8s_base[nn0 < params.nbn ? nn0 : 0]; v8s_n1 = fq8_v8s_base[nn1 < params.nbn ? nn1 : 0];
+                    float2 const kn = fq8_k8s_2[s + 1], vn = fq8_v8s_2[s + 1];
+                    k8s_n0 = kn.x; k8s_n1 = kn.y; v8s_n0 = vn.x; v8s_n1 = vn.y;
                 }
                 sched_sync();
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma, tSrQ(_, _, _, wg), tSrK(_, _, _, slot1), tSrS1);

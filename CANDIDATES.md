@@ -166,3 +166,23 @@ None reaches the 3% bar; C2 stays held for stacking with another bitwise piece.
 The integrator's full gate of the c3 stack on r17_p0s measured -2.26% (job 21181578). On r17_pk the flags no longer
 help, so the stack piece is **C2 on r17_pk: `kda-sm90-pass1-c2pk`**, READY for stacking (>= 1% bitwise in two jobs;
 BITWISE EQUAL vs r17_pk on all four routes, job 21182433; REG 168, STACK 0, no diagnostics).
+
+## DONE: per-element instruction ledger on r17_pk (+ SHFL8), 2026-11-02
+
+Unmasked step loop, causal: 993 static / ~698 executed instructions per warp per m-block step (32 elements per
+thread). Per element: exp line 3 (FFMA s * dsc - b, F1 clamp FMNMX, MUFU.EX2; EXPBX64 already folded the 2^8 offset
+into a per-row FFMA bias), dS line 2 (FFMA, FMUL), psi amax 1 (FMNMX), dS' scale 1 (FMUL), e4m3 conversions 1 (P~ and
+dS' F2FP pairs) = 8 / element = 256 per step; per row 32 (bias, dPsum * k8s); dK fold 64 FFMA; dV rescale 64 FMUL on
+half the steps; dV promote ~33 averaged. What is left and why it stays:
+- clamp FMNMX: the F1 cliff guard (fixed by the numerics contract); a result-side clamp costs the same.
+- amax FMNMX / scale FMUL / F2FP: one op per element each; sm90 has no 3-input FMNMX and no scaled e4m3 convert;
+  packed (bf16x2 / f16x2) variants need a conversion per pair and break even.
+- dS line FFMA + FMUL: minimal for P * (dP * a - b).
+- dK fold (2 / element): needed by the plan-A per-tile fp32 fold; accumulating dK across tiles in the wgmma accumulator
+  (any window) changes the accumulation and, like PW16 / PW32 on dV, moves per-case dK errors by more than 1e-5;
+  power-of-two psi with paired folds changes the dS' codes (per-case dK / dQ errors at quantization level).
+- dV promote / rescale: bitwise variants measured neutral (TOPFILL 1 / 3, PV4, POFF, DVZI); PW fails residual-v4.
+- per-row work and overhead: LSEPRE, STSEL, PSIADDR, DVZI measured neutral.
+The last instruction cut that paid was SHFL8 (-8 SHFL per warp-step, ~-1.1% on r17_pk, consistent with the
+~0.05-point-per-instruction sensitivity). I have no further grounded per-element cut: **kda-pass1 is DONE**;
+the held piece is `kda-sm90-pass1-c2pk` (SHFL8, -1.10% / -1.07%, bitwise, four routes).

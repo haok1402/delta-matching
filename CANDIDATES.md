@@ -14,6 +14,36 @@ round-17 certificate captures with my residual-v4 screen (`pass1-aux/p1x/v4check
 per-case error rise <= 1e-5, per-output mean not rising, strict per-row non-regression on rows whose accepted residual
 is <= 1e-3, degenerate set not growing, deterministic). Full screen log: `results/kda_pass1_screens.md` (124 rows).
 
+## READY
+
+### C2: SHFL8, the 8-shuffle dS' transpose (bitwise; >= 1% for stacking)
+
+- Branch `kda-sm90-pass1-c2` (03bfa0f): `KDA_P1_SHFL8` defaults to 1 on top of `kda-sm90-pass1-v2` (all other switches
+  off), base = `origin/kda-sm90` 3106faf (S17-p1-39 accepted).
+- What it changes: the dS' natural transpose for pass 2. Simulating the H1b byte movement
+  (`benchmarks/kda_xpose_sim.py`) shows that every target lane needs WHOLE A-operand words: rdS words 2j + h
+  (h = lane >= 16) from lanes srcA and srcB, so the 16 half-useful shuffles become 8 fully useful ones. Phase 0: low lanes
+  read srcA, high lanes srcB; phase 1 swapped. A provider picks word 2j or 2j + 1 by (lane bit 2) ^ phase with one
+  per-lane-selector PRMT, before the dK issue (rdS is the in-flight A operand afterwards, as in H1b); a receiver
+  interleaves its two words with a per-lane PRMT selector. 8 PRMT + 8 SHFL + 8 PRMT instead of 8 + 16 + 8 per step;
+  byte-exact for all 32 lanes in the simulation.
+- SASS: SHFL.IDX 16 -> 8 per step; REG 168, STACK 8 / 0 (= the accepted build), LOCAL 0, no ptxas diagnostics.
+- Bitwise: equivalence vs r14_h3 BITWISE EQUAL on default / kv / head / streams2 (72 cases each); pytest 49 / 3.
+- A/B vs frozen r17_p1, `--grid paper`, 3 reps, two jobs (21177436, 21177437; `pass1-aux/runs/full_v2s8_{1,2}`):
+
+| shape | job 1 pass 1 | job 2 pass 1 |
+|---|---:|---:|
+| B2 H16/4 N8192 | -2.12% | -2.02% |
+| B2 H32/4 N8192 | -1.92% | -0.83% |
+| B1 H16/4 N65536 | -1.27% | -1.52% |
+| B1 H32/4 N65536 | -1.80% | -1.63% |
+| geomean | **-1.78%** | **-1.50%** |
+
+  Other kernels within +0.5% (unchanged binaries); e2e fwd+bwd geomean -1.20% / -0.56%.
+- With the release flag `FA3FP11_HD128_DOST` 1 -> 2 (the integrator's flag probe 40, bitwise): pass 1 geomean
+  **-2.45% / -2.33%** (jobs 21177438 / 21177439, `full_v2s8o_*`).
+- Status: **READY (>= 1% bitwise, for stacking)**.
+
 ## C1 (TOPFILL=2 + DSDEFER + DVZI + LSEPRE + PV4): SUPERSEDED by the accepted S17-p1-39
 
 C1 was READY on 2026-11-01 (branch `kda-sm90-pass1-c1`, e2add66): pass 1 geomean -4.36% / -4.42% vs r17_c2 on the
@@ -32,7 +62,8 @@ accepted the same design independently (RESCALE-EARLY == TOPFILL=2, DSDEFER-SPLI
 | PCONVEARLY | P~ e4m3 conversion right after exp (before the dP wait) | -0.61 / -0.01% | neutral (conversions lever, variant 1) |
 | PCONVEARLY + DOST=2 | | -1.03 / -1.43% | no better than DOST=2 |
 | EXPSPLIT (on r17_c2) | exp rows 0..7 before the dP wait, dS 0..7 interleaved with exp 8..15 | -0.39 / -0.58% | neutral (first version deadlocked: `if constexpr (false)` before a `#pragma unroll` loop lost a pipeline release; fixed with #if) |
-| QST / DOST / DOTST sweep (flags) | (2,2,1) (3,3,1) (3,2,1) (3,3,2) (2,2,2) | pending | |
+| (QST, DOST, DOTST) flag sweep | (2,2,1) / (3,3,1) / (3,2,1) / (3,3,2) / (2,2,2) | -1.02/-1.39, -1.61/-1.36, -0.86/+0.23, +0.07/-0.14, +1.10/+0.75% | nothing beyond DOST=2 (2,2,1); screen noise ~1% (the same config v2o read -2.40/-1.47) |
+| SHFL8 | 8-shuffle dS' transpose | -1.67 / -1.86% | **C2** (conversions / packing lever, variant 2) |
 
 ## Output-changing levers vs residual-v4 (default route; all deterministic; pytest 49 / 3)
 

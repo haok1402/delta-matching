@@ -31,6 +31,14 @@
 __device__ __forceinline__ int kda_expbx_mask_end(int n128, int seqlen_q, int seqlen_k) {
     return ((n128 + 1) * 128 > seqlen_k) ? INT_MAX : ((n128 + 1) * 128 - (seqlen_k - seqlen_q) + 64 - 1) / 64;
 }
+// The same predicate as a stage split (pass 0 stage s = keys [128 s, 128 s + 128)): m_block < kda_expbx_mask_end(s)
+// <=> s >= kda_expbx_first_stage(m_block) (checked by brute force over seqlen_q, seqlen_k in [128, 2048] step 64).
+__device__ __forceinline__ int kda_expbx_first_stage(int m_block, int seqlen_q, int seqlen_k) {
+    int const t = 64 * m_block + (seqlen_k - seqlen_q);
+    int const s0 = t < 0 ? 0 : t / 128;
+    int const st = (seqlen_k % 128) ? (seqlen_k - 1) / 128 : INT_MAX;
+    return s0 < st ? s0 : st;
+}
 
 #include <climits>
 #include <cstdio>
@@ -365,8 +373,8 @@ struct DeltaV6 {
             float const lse0 = __fmul_rn(sLSE(row0, wg), float(M_LOG2E));   // the host prep's exact multiply
             float const lse1 = __fmul_rn(sLSE(row1, wg), float(M_LOG2E));
 #endif
-#if KDA_PK_EXPB == 3
-            // ## KDA_PK_EXPB=3 (EXPBX, named numerics arm, pass 0 + pass 1 identically): the folded-bias line
+#if KDA_PK_EXPB == 3 || KDA_PK_EXPB == 4
+            // ## KDA_PK_EXPB=3 / 4 (EXPBX, named numerics arm, pass 0 + pass 1 identically): the folded-bias line
             // P-hat = exp2(min(fma(s, dsc, -b), 12)), b = fma(lse, log2e, -8), on every (64-row m-block, 128-key block)
             // tile OUTSIDE pass 1's masked range (m_block < kda_expbx_mask_end(n128)); the certified line on the diagonal
             // 128 x 128 block (and the seqlen_k tail), where the rows with the fewest visible keys (smallest per-row
@@ -379,7 +387,7 @@ struct DeltaV6 {
             // ## M21 diet: the mask is a no-op on every n-block whose keys all lie at or below the row block's diagonal and
             // inside seqlen_k; skipping it there is bitwise (no element would have been set to -inf).  Warpgroup-uniform.
             int const fq8_diag_off = seqlen_k - seqlen_q;
-            auto exp_step = [&](auto& tSrS, int n_block, float dsc_g0, float dsc_g1) {
+            auto exp_step = [&](auto& tSrS, int n_block, float dsc_g0, float dsc_g1, auto xc) {
                 Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol(tSrS.layout()));
                 static_assert(decltype(size<0>(scores))::value == 2 && decltype(size<1>(scores))::value == 16,
                               "DeltaV6: expected 2 rows x 16 columns per thread for a 64x64 tile");
@@ -388,8 +396,9 @@ struct DeltaV6 {
                 if (need_mask) {
                     mask.template apply<true /*Seqlenk_mask*/, Is_causal, false /*Is_local*/>(tSrS, m_block, n_block);
                 }
-#if KDA_PK_EXPB == 3
-                if (m_block >= kda_expbx_mask_end(n_block >> 1, seqlen_q, seqlen_k)) {
+#if KDA_PK_EXPB == 3 || KDA_PK_EXPB == 4
+                // EXPB=3: per-n-block runtime branch; EXPB=4: the caller's stage split decides at compile time (xc)
+                if (KDA_PK_EXPB == 4 ? bool(decltype(xc)::value) : m_block >= kda_expbx_mask_end(n_block >> 1, seqlen_q, seqlen_k)) {
                     #pragma unroll
                     for (int mi = 0; mi < 2; ++mi) {
                         float const bx = mi == 0 ? bx0 : bx1;
@@ -456,8 +465,7 @@ struct DeltaV6 {
                 float2 const* fq8_k8s_2 = reinterpret_cast<float2 const*>(fq8_k8s_base);
                 float2 const* fq8_v8s_2 = reinterpret_cast<float2 const*>(fq8_v8s_base);
                 int const nb_last = Is_causal ? (m_block * kBlockM + kBlockM - 1 + fq8_diag_off) / kBlockN : (1 << 30);   // later n-blocks: fully masked
-                CUTLASS_PRAGMA_NO_UNROLL
-                for (int s = 0; s < nstages; ++s) {
+                auto w4_stage = [&](int s, auto xc) {
                     float2 const k2 = fq8_k8s_2[s], v2 = fq8_v8s_2[s];
                     auto tok = pipeline_kv.consumer_try_wait(smem_pipe_read);
                     pipeline_kv.consumer_wait(smem_pipe_read, tok);
@@ -472,7 +480,7 @@ struct DeltaV6 {
                             float const dp = fq8_do8sc * (j == 0 ? v2.x : v2.y);
                             warpgroup_wait<1>();
                             warpgroup_fence_operand(tSrS);
-                            exp_step(tSrS, nb, dsc, dsc);
+                            exp_step(tSrS, nb, dsc, dsc, xc);
                             warpgroup_wait<0>();
                             warpgroup_fence_operand(tdPrdP);
                             rowsum_step(tSrS, tdPrdP, dp, dp);
@@ -480,7 +488,18 @@ struct DeltaV6 {
                     }
                     pipeline_kv.consumer_release(smem_pipe_read);
                     ++smem_pipe_read;
-                }
+                };
+#if KDA_PK_EXPB == 4
+                int const s_x = min(nstages, kda_expbx_first_stage(m_block, seqlen_q, seqlen_k));
+                int s = 0;
+                CUTLASS_PRAGMA_NO_UNROLL
+                for (; s < s_x; ++s) { w4_stage(s, cute::true_type{}); }
+                CUTLASS_PRAGMA_NO_UNROLL
+                for (; s < nstages; ++s) { w4_stage(s, cute::false_type{}); }
+#else
+                CUTLASS_PRAGMA_NO_UNROLL
+                for (int s = 0; s < nstages; ++s) { w4_stage(s, cute::false_type{}); }
+#endif
             } else {
             // Warp-scheduler ping-pong: WG0 takes the first turn (WG1 pre-arrives on WG0's barrier).
             auto sched_sync = [&]() {
@@ -515,7 +534,7 @@ struct DeltaV6 {
                 warpgroup_fence_operand(tdPrdP0);
             }
             // The v4b unit body on one stage (two n-blocks), HasNext compile-time so every wait count is straight-line.
-            auto step = [&](int s, auto has_next_c, auto stage_c) {
+            auto step = [&](int s, auto has_next_c, auto stage_c, auto xc) {
                 constexpr bool HasNext = decltype(has_next_c)::value;
                 constexpr int kSt = decltype(stage_c)::value;   // compile-time ring stage under UNROLL3 (-1 = runtime)
                 int const slot0 = kSt >= 0 ? kNbPerStage * kSt : kNbPerStage * smem_pipe_read.index();
@@ -535,7 +554,7 @@ struct DeltaV6 {
                 sched_arrive();
                 warpgroup_wait<2>();   // no-op guard: S0 already retired
                 warpgroup_fence_operand(tSrS0);
-                exp_step(tSrS0, nb0, dsc0, dsc0);
+                exp_step(tSrS0, nb0, dsc0, dsc0, xc);
                 warpgroup_fence_operand(tdPrdP0);
                 rowsum_step(tSrS0, tdPrdP0, dp0, dp0);
                 PipelineState smem_pipe_read_next = smem_pipe_read;
@@ -553,7 +572,7 @@ struct DeltaV6 {
                     warpgroup_wait<1>();
                 }
                 warpgroup_fence_operand(tSrS1);
-                exp_step(tSrS1, nb1, dsc1, dsc1);
+                exp_step(tSrS1, nb1, dsc1, dsc1, xc);
                 if constexpr (HasNext) { warpgroup_wait<2>(); } else { warpgroup_wait<0>(); }   // dP1 retired: every read of this stage is done
                 warpgroup_fence_operand(tdPrdP1);
                 pipeline_kv.consumer_release(smem_pipe_read);
@@ -563,9 +582,20 @@ struct DeltaV6 {
                 warpgroup_fence_operand(tSrS0);
                 warpgroup_fence_operand(tdPrdP0);
             };
+#if KDA_PK_EXPB == 4
+            int const s_x = kda_expbx_first_stage(m_block, seqlen_q, seqlen_k);
+            int s = 0;
             CUTLASS_PRAGMA_NO_UNROLL
-            for (int s = 0; s < nstages - 1; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}); }
-            step(nstages - 1, cute::false_type{}, cute::Int<-1>{});
+            for (; s < nstages - 1 && s < s_x; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}, cute::true_type{}); }
+            CUTLASS_PRAGMA_NO_UNROLL
+            for (; s < nstages - 1; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}, cute::false_type{}); }
+            if (nstages - 1 < s_x) { step(nstages - 1, cute::false_type{}, cute::Int<-1>{}, cute::true_type{}); }
+            else { step(nstages - 1, cute::false_type{}, cute::Int<-1>{}, cute::false_type{}); }
+#else
+            CUTLASS_PRAGMA_NO_UNROLL
+            for (int s = 0; s < nstages - 1; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}, cute::false_type{}); }
+            step(nstages - 1, cute::false_type{}, cute::Int<-1>{}, cute::false_type{});
+#endif
             }
             // One writer per row: quad lane 0 stores row0's fp64 fold rounded once to fp32, quad lane 2 row1's.
             if ((wtid & 1) == 0) {

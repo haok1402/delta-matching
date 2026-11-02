@@ -795,8 +795,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
             mask_fn(tSrS, m_block);
             #pragma unroll
             for (int mi = 0; mi < size<0>(scores); ++mi) {
-#if KDA_PK_EXPB == 3
-                // ## KDA_PK_EXPB=3 (EXPBX): the folded-bias line on unmasked tiles only (pass 0: kda_expbx_mask_end).
+#if KDA_PK_EXPB == 3 || KDA_PK_EXPB == 4
+                // ## KDA_PK_EXPB=3 / 4 (EXPBX): the folded-bias line on unmasked tiles only (pass 0: kda_expbx_mask_end).
                 float const lse_scaled = kExpbx ? __fmaf_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E), -kFq8MoE)
                                                 : __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));
 #elif KDA_PK_EXPB == 1
@@ -810,7 +810,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
 #endif
                 #pragma unroll
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
-#if KDA_PK_EXPB == 3
+#if KDA_PK_EXPB == 3 || KDA_PK_EXPB == 4
                     if constexpr (kExpbx) {
                         scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
                     } else {

@@ -382,3 +382,11 @@ nothing, so the light probe's "turn-bound" reading was distorted by its own spil
 
 Raw data (timing JSON, numerics captures, A/B directories) lives outside git under
 `~/workspace/haok1402/kda-results/kda-sm90-fwd/` (formerly `kda-work/runs/`); this file keeps the numbers that matter.
+
+### Fallback for residual-v5: accepted forward without FWDDFOLD (kda-sm90-fwd-nofold a8ee6dc, on origin/kda-sm90)
+
+- r19_fwd with `FA3FP11_HD128_FWDDFOLD=0` (BM192 + lazy + C4 PRETURN + SMSC + S19 pieces kept; the no-fold descale path
+  already carries the FLT_MIN scale floor). Matched-mode change vs the original kernel: O only (LSE / backward are
+  the original's, so the dS row residuals are the original's by construction).
+- Timing vs r19_fwd (3 reps, 4 shapes, job s42): **+4.80% geo** (the fold is worth ~4.8% on the current stack);
+  i.e. about 1.16 x FA3 fp8 if C3g's fold has to go. Builds: `kda-work/frozen/nofold`, `nofold_dbg`.

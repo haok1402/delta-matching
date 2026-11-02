@@ -34,7 +34,10 @@ void run_flash_fwd_fp8f_impl(Flash_fwd_fp8_params &params, cudaStream_t stream) 
     using ArchTag = cutlass::arch::Sm90;
     static constexpr int kHeadDim = kHeadDim_;
     static constexpr int kHeadDimV = kHeadDim_;
-    static constexpr int kBlockM = 128;
+    // ## kda-fwd BM192 (FA3FP11_HD128_BM192=1, hd128 only): 192 x 128 tiles, THREE consumer warpgroups (160 registers each,
+    // setmaxnreg 160 / 32); the per-warpgroup serial chain (PV chain -> QK -> softmax) is latency-bound, so a third chain in
+    // flight raises tensor-pipe occupancy.  Each 64-row warpgroup lies in one 128-row Q scale block (index per warpgroup).
+    static constexpr int kBlockM = (kHeadDim_ < 256 && FA3FP11_HD128_BM192) ? 192 : 128;
     // ## Delta-Matching-128 F3 (FA3FP11_HD128_BN256=1, hd128 only): 256-key tiles (four 64-key groups per tile, half the tile
     // boundaries); the d256 configuration stays 128 x 128.
     static constexpr int kBlockN = (kHeadDim_ < 256 && FA3FP11_HD128_BN256) ? 256 : 128;

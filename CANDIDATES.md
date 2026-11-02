@@ -84,13 +84,36 @@ SASS: executed-instruction estimate per warp per m-block step (static loop count
 | HALFPSI + DOST/DOTST 2 | decoupling with 2-stage dO / dOt | pass 1 -0.5% | 2-stage dO costs +1.4% on its own (do2) |
 | PP1 / PP2 / PP3 (+HALFPSI, with / without DO2) | ping-pong: one-time WG offset; turn barriers on S/dP; turns on both gemm batches | -1.06 .. +1.0% | no gain: with everything serialized, the lone warp per SMSP is latency-bound |
 | DSDEFER alone, PV4 alone | | +0.33% / -0.04% | no gain alone (DSDEFER helps ~2% inside the C1 stack) |
-| POFF | producer warps 1..3 do the dV window promote | pending | |
+| POFF | producer warps 1..3 do the dV window promote (consumers stage the raw window; bitwise) | +4.22% / +4.54% | slower; with DSDEFER it exceeds the smem limit |
+| KRS / VRS / KRS+VRS | K (V) tile held in A registers, S (dP) as RS wgmma (bitwise) | +2.8% / +1.8% / +20.5% | spills (32-44, ~180 STL/LDL); inside C1: -1.1 / -2.0% vs C1 -5% |
+| DKSPLIT | dK temp gemm in two N = 64 halves through one 32-register temp (bitwise) | +3.70% / +3.84% | half 1 exposed; with KRS +6.5% (C1: -2.5%); with EARLY still 240-270 STL/LDL (+50..62%) |
 
 Timing-only ablations (KDA_ABL, garbage outputs) of the accepted step, pass 1 change when the piece is removed: exp line
 -9.5%, dS' transpose + stmatrix + TMA store -11%, dK fold -8.5%, dV promote (1 step in 8) -11%, psi amax + barrier
 -9.3%, e4m3 conversions -5.3%, dV rescale -2%, dS line -2%; S + dP gemms -21%, dV + dK gemms -9.7%, all gemms -30%;
-all vector work -63%. The pieces are nearly additive: vector and tensor work do not overlap. The remaining gemm + TMA
-skeleton (~37% of the step, ~1330 cycles) is close to a shared-memory bandwidth floor that sol4 does not model: per
-CTA step ~176 KB of smem traffic (S / dP SS wgmma read K/V + Q/dO per warpgroup 64 KB, dV / dK RS read dOt / Qt 32 KB,
-TMA writes 32.5 KB, dS' stmatrix + store 16 KB, promote 16 KB amortized, LSE / dPsum loads) at 128 B/clk = ~1375 cycles,
-vs the calibrated tensor floor ~1580 cycles. The full screen log is `pass1-aux/screens_table.md`.
+all vector work -63%. The pieces are nearly additive: vector and tensor work do not overlap; the gemm + TMA skeleton is
+~37% of the step (~1330 cycles at B2 N8192 32/4).
+Shared-memory bandwidth is NOT the bound (an earlier note here said it might be): extra LDS.128 traffic of 16 / 32 KB per
+CTA step in the S-wait bubble (KDA_ABL bits 10 / 11) changes pass 1 by -0.10 / +0.08% and -0.72 / +0.40% on the accepted
+build and -4.24 / -4.57% and -4.51 / -4.77% on C1 (= C1's own -5.1 / -4.8%): no contention. With the issue floor at ~1470
+cycles per CTA step (2 warps x ~734 executed instructions per SMSP) and tensor ~1580 (calibrated), the ~3600-cycle step
+is a latency-bound chain: the vector phases run at ~0.65 IPC per SMSP with both warpgroups' warps interleaving, and a
+warpgroup's vector work does not overlap its own or the other warpgroup's tensor work. This is why ping-pong does not
+help (a lone warp per SMSP issues slower still) and why the register budget (dK 64 + dV 64 + dK temp 64 + S / dP 64 of
+240) is the binding constraint for every intra-warpgroup pipelining design tried (EARLY, KRS / VRS, DKSPLIT + EARLY).
+The full screen log is `results/kda_pass1_screens.md`.
+
+## Numerics screens of the output-changing levers (Hao's rule, default route, 72 cases, round-17 certificate captures)
+
+| candidate | error vs fp32 increases (of 282 output pairs vs prev) | decreases | max increase | rows above their accepted residual + round-off | verdict under the rule as written |
+|---|---:|---:|---:|---:|---|
+| C1 + PW16 (n1p) | 10 | 38 | +0.033% (dV) | 0 | fails "not larger on any case" |
+| C1 + EXPB (n1e) | 25 | 60 | +0.0008% | 6 rows (4 cases) | fails both |
+| C1 + EXPB + PW16 (n1) | 29 | 66 | +0.033% | 6 | fails both |
+| C1 + EXPB + PW32 (n2) | 34 | 61 | +0.066% | 6 | fails both |
+
+Any rounding-level change moves some per-case errors and some rows' residuals up and others down (EXPB changes P^ in
+pass 0 and pass 1 identically; PW only changes the dV accumulation grouping and leaves every residual unchanged). Under
+the rule as written (no increase on any case, no row above its accepted residual + k 2^-23) none of these can pass;
+with a tolerance on the per-case error (e.g. +0.1% relative) PW16 / PW32 would pass, EXPB would still fail the
+per-row residual test in 6 rows. Evidence for Hao: `pass1-aux/runs/num_{n1,n1e,n1p,n2}_*`.

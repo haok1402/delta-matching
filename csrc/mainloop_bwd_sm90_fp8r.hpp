@@ -80,6 +80,21 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_P1_POFF
 #define KDA_P1_POFF 0
 #endif
+// kda-pass1 KDA_P1_KRS / KDA_P1_VRS (bitwise): the warpgroup's K (resp. V) tile is loaded once per CTA into the A-operand
+// register fragment (16 registers) and the S (resp. dP) gemm runs register-source (RS) against the Q (dO) stage:
+// 8 KB less shared-memory operand traffic per warpgroup per gemm per step (the A tile never changes in a CTA).
+#ifndef KDA_P1_KRS
+#define KDA_P1_KRS 0
+#endif
+// kda-pass1 KDA_P1_DKSPLIT (bitwise): the dK temp gemm as two N = 64 halves (d 0..63, then 64..127) into one 32-register
+// temp: half 0 is folded before half 1 is issued (each element's dot product over the 64 rows and its fold unchanged).
+// Frees 32 registers at the step's peak (for EARLY / KRS); half 1's tensor time is exposed.
+#ifndef KDA_P1_DKSPLIT
+#define KDA_P1_DKSPLIT 0
+#endif
+#ifndef KDA_P1_VRS
+#define KDA_P1_VRS 0
+#endif
 #if KDA_P1_DSDEFER
 #undef FA3FP11_P1R_DSDEFER
 #define FA3FP11_P1R_DSDEFER 1
@@ -169,7 +184,9 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 static_assert(KDA_P1_PP == 0 || KDA_P1_HALFPSI, "KDA_P1_PP needs KDA_P1_HALFPSI");
 // KDA_ABL (TIMING-ONLY ablations, outputs are garbage; never shipped): bit 0 no exp line (P = the scaled score),
 // 1 no dS' transpose / stmatrix / TMA store, 2 no dK fold, 3 no dV promote, 4 psi = 1 (no amax, no psi barrier),
-// 5 no dV window rescale, 6 no S / dP gemms, 7 no dV / dK gemms, 8 no dS line, 9 no P / dS' e4m3 conversions.
+// 5 no dV window rescale, 6 no S / dP gemms, 7 no dV / dK gemms, 8 no dS line, 9 no P / dS' e4m3 conversions,
+// 10 / 11: EXTRA shared-memory read traffic in the S-wait bubble, 16 / 32 KB per CTA step (4 / 8 LDS.128 per thread of
+// the K tile, folded into a never-true predicate's store): probes whether the step is smem-bandwidth bound.
 #ifndef KDA_ABL
 #define KDA_ABL 0
 #endif
@@ -271,6 +288,15 @@ struct CollectiveMainloopBwdSm90Fp8R {
     // dP^T = V dO^T: same tile shape and atom layout, ElementDp operands (== TiledMmaSdP at SAGEDP=0).
     using TiledMmadP = decltype(cute::make_tiled_mma(
         cute::GMMA::ss_op_selector<ElementDp, ElementDp, ElementAccum, TileShapeAtomSdP, GMMA::Major::K, GMMA::Major::K>(),
+        AtomLayoutSdP{}));
+    // DKSPLIT: the dK temp gemm per d half.
+    using TileShapeAtomdK_h = Shape<Int<kBlockN>, Int<kHeadDim / 2>, Int<kBlockM>>;
+    using TiledMmadK_h = decltype(cute::make_tiled_mma(
+        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShapeAtomdK_h, GMMA::Major::K, GMMA::Major::K>(),
+        Layout<Shape<Int<2>, _1, _1>>{}));
+    // KRS / VRS: the same S^T / dP^T tile shapes with A from registers.
+    using TiledMmaSdP_RS = decltype(cute::make_tiled_mma(
+        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShapeAtomSdP, GMMA::Major::K, GMMA::Major::K>(),
         AtomLayoutSdP{}));
     // dV / dK: (M = kBlockN keys, N = d, K = kBlockM rows), RS (A from registers), the two warpgroups tile M.
     using TileShapeAtomdKV = Shape<Int<kBlockN>, Int<kHeadDim>, Int<kBlockM>>;
@@ -801,6 +827,14 @@ struct CollectiveMainloopBwdSm90Fp8R {
         Tensor tdPrdO = wg_mma_dP.partition_fragment_B(sdO);
         Tensor tdVrdOt = wg_mma_dKV.partition_fragment_B(sdOt);     // (MMA, MMA_N, MMA_K, PIPE): (d, rows)
         Tensor tdKrQt = wg_mma_dKV.partition_fragment_B(sQt);
+#if KDA_P1_DKSPLIT
+        TiledMmadK_h tiled_mma_dK_h;
+        auto wg_mma_dK_h = tiled_mma_dK_h.get_slice(warp_group_thread_layout(warp_group_idx));
+        Tensor sQt_h0 = local_tile(sQt, make_shape(Int<kHeadDim / 2>{}, Int<kBlockM>{}, Int<kStages_qt>{}), make_coord(_0{}, _0{}, _0{}));
+        Tensor sQt_h1 = local_tile(sQt, make_shape(Int<kHeadDim / 2>{}, Int<kBlockM>{}, Int<kStages_qt>{}), make_coord(_1{}, _0{}, _0{}));
+        Tensor tdKrQt_h0 = wg_mma_dK_h.partition_fragment_B(sQt_h0);
+        Tensor tdKrQt_h1 = wg_mma_dK_h.partition_fragment_B(sQt_h1);
+#endif
         // Per-column (query row) statistics of the swapAB fragment: (2, V, MMA_N, PIPE) -> (16, PIPE); read from smem at use.
         Tensor tLSEsLSE = group_modes<0, 3>(thread_mma_SdP.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _, _));
         Tensor tLSEsdPsum = group_modes<0, 3>(thread_mma_SdP.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _, _));
@@ -845,6 +879,25 @@ struct CollectiveMainloopBwdSm90Fp8R {
 
         cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_KV.try_wait(work_idx % 2));
         if (barrier_token == cutlass::BarrierStatus::WaitAgain) { shared_storage.pipelines.barrier_KV.wait(work_idx % 2); }
+#if KDA_P1_KRS || KDA_P1_VRS
+        TiledMmaSdP_RS tiled_mma_S_rs;
+        auto thr_S_rs = tiled_mma_S_rs.get_thread_slice(thread_idx);
+        auto wg_S_rs = tiled_mma_S_rs.get_slice(warp_group_idx * cutlass::NumThreadsPerWarpGroup);
+        Tensor tScKV = thr_S_rs.partition_A(cute::make_identity_tensor(make_shape(Int<kBlockN>{}, Int<kHeadDim>{})));
+#endif
+#if KDA_P1_KRS
+        Tensor tSrK_rs = thr_S_rs.partition_fragment_A(sK);
+        #pragma unroll
+        for (int i = 0; i < size(tSrK_rs); ++i) { tSrK_rs(i) = sK(get<0>(tScKV(i)), get<1>(tScKV(i))); }
+        Tensor tSrQ_rs = wg_S_rs.partition_fragment_B(sQ);
+#endif
+#if KDA_P1_VRS
+        static_assert(!FA3FP11_P1R_SAGEDP, "VRS: e4m3 V only");
+        Tensor tdPrV_rs = thr_S_rs.partition_fragment_A(sV);
+        #pragma unroll
+        for (int i = 0; i < size(tdPrV_rs); ++i) { tdPrV_rs(i) = sV(get<0>(tScKV(i)), get<1>(tScKV(i))); }
+        Tensor tdPrdO_rs = wg_S_rs.partition_fragment_B(sdO);
+#endif
 
         // Scales: this WG's 64-key group (k8s / v8s), the Q / dO scale per 128 rows (m-block >> 1).
         int const fq8_bh = bidb * get<2>(params.shape_Q) + bidh;
@@ -958,6 +1011,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
         auto bwd_step = [&](int m_block, auto mask_fn, auto stage_c) {
             constexpr int kSt = decltype(stage_c)::value;   // compile-time Q / Qt stage under UNROLL2 (-1 = runtime)
             Tensor fq8_tmpK = make_fragment_like(tdKrdK);
+#if KDA_P1_DKSPLIT
+            Tensor fq8_tmpKh = partition_fragment_C(tiled_mma_dK_h, Shape<Int<kBlockN>, Int<kHeadDim / 2>>{});
+            static_assert(decltype(size(fq8_tmpKh))::value == 32, "DKSPLIT: 32 temps per thread per half");
+#endif
             float fq8_g_fold = 0.0f;
 #if !KDA_P1_EARLY
             // (kBlockN, kBlockM) = the swapAB fragment: rows = keys, columns = query rows.
@@ -967,6 +1024,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
             turn_sync();
             KP(3);
             if constexpr (KDA_A(6)) { clear(tSrS); warpgroup_arrive(); warpgroup_commit_batch(); }
+#if KDA_P1_KRS
+            else if constexpr (true) {
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_S_rs, tSrK_rs, tSrQ_rs(_, _, _, smem_pipe_read.index()), tSrS);
+            }
+#endif
             else if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, Int<kSt>{}), tSrS);
             } else {
@@ -1002,6 +1064,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
             consumer_wait(pipeline_do, smem_pipe_read_do_cur);
             KT(22);
             if constexpr (KDA_A(6)) { clear(tdPrdP); warpgroup_arrive(); warpgroup_commit_batch(); }
+#if KDA_P1_VRS
+            else if constexpr (true) {
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_S_rs, tdPrV_rs, tdPrdO_rs(_, _, _, smem_pipe_read_do_cur.index()), tdPrdP);
+            }
+#endif
             else if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, Int<0>{}), tdPrdP);
             } else {
@@ -1010,6 +1077,16 @@ struct CollectiveMainloopBwdSm90Fp8R {
             turn_arrive();
 #endif
             KP(4);
+#if KDA_A(10) || KDA_A(11)
+            {
+                constexpr int kN = KDA_A(11) ? 8 : 4;
+                uint4 const* src = reinterpret_cast<uint4 const*>(shared_storage.tensors.mainloop.smem_k.data()) + thread_idx;
+                uint32_t x = 0;
+                #pragma unroll
+                for (int j = 0; j < kN; ++j) { uint4 v = src[(j * NumMmaThreads + m_block) & 1023]; x ^= v.x ^ v.y ^ v.z ^ v.w; }
+                if (x == 0x9e3779b9u && m_block < 0) { fq8_psired[0] = __uint_as_float(x); }
+            }
+#endif
 #if KDA_P1_XPTOP
             if (fq8_xp_pending) { xpose_store(fq8_xp, fq8_xp_m); fq8_xp_pending = false; }
 #endif
@@ -1327,6 +1404,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
             consumer_wait(pipeline_qt, smem_pipe_read_qt);
             KT(26);
             if constexpr (KDA_A(7)) { for (int i = 0; i < size(fq8_tmpK); ++i) { fq8_tmpK(i) = __uint_as_float(recast<uint32_t>(rdS)(i % 8)); } warpgroup_arrive(); warpgroup_commit_batch(); }
+#if KDA_P1_DKSPLIT
+            else if constexpr (true) {
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dK_h, rdS, tdKrQt_h0(_, _, _, smem_pipe_read_qt.index()), fq8_tmpKh);
+            }
+#endif
             else if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, Int<kSt>{}), fq8_tmpK);
             } else {
@@ -1381,13 +1463,25 @@ struct CollectiveMainloopBwdSm90Fp8R {
             ++smem_pipe_read_dot;
             KP(16);
             warpgroup_wait<0>();
+#if KDA_P1_DKSPLIT
+            #pragma unroll
+            for (int i = 0; i < 32; ++i) { tdKrdK(i) = fmaf(fq8_tmpKh(i), fq8_g_fold, tdKrdK(i)); }
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(tiled_mma_dK_h, rdS, tdKrQt_h1(_, _, _, smem_pipe_read_qt.index()), fq8_tmpKh);
+            #pragma unroll
+            for (int i = 0; i < 32; ++i) { tdKrdK(32 + i) = fmaf(fq8_tmpKh(i), fq8_g_fold, tdKrdK(32 + i)); }
+#endif
             pipeline_qt.consumer_release(smem_pipe_read_qt);
             ++smem_pipe_read_qt;
             KP(17);
             ++smem_pipe_read;
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
             // plan-A dK fold: one fp32 FMA per element per tile in the tile's own g basis.
+#if KDA_P1_DKSPLIT
 #if KDA_P1_EARLY
+            bool const fq8_more = m_block + 1 < m_block_max;
+            if (fq8_more) { turn_sync(); issue_S(); issue_dP(); turn_arrive(); }
+#endif
+#elif KDA_P1_EARLY
             bool const fq8_more = m_block + 1 < m_block_max;
             if (fq8_more) { turn_sync(); }
 #if KDA_P1_EARLY == 3

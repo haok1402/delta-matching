@@ -1594,6 +1594,19 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 }
             };
 
+            // ## kda-fwd A1DEF (bitwise): the step's O rescale by alpha is deferred to the next step's start (before the
+            // turn, ahead of the promote it always preceded; nothing else touches tOrO in between) and skipped when
+            // alpha == 1 for the whole warp (x * 1.0f == x exactly, NaN / inf included).
+            static constexpr bool kA1Def = !kFwdLazy && kGroups == 4 && kAtomsPerGroup == 2 && kPVNSplit == 1 && kSchedPVFirst && kHeadDim < 256;
+            float fq8_alpha[2] = {1.f, 1.f};
+            auto fq8_apply_alpha = [&]() __attribute__((always_inline)) {
+                if constexpr (kA1Def) {
+                    if (!__all_sync(0xffffffff, fq8_alpha[0] == 1.f && fq8_alpha[1] == 1.f)) {
+                        typename Softmax::TensorT a_; a_(0) = fq8_alpha[0]; a_(1) = fq8_alpha[1];
+                        softmax.rescale_o(tOrO, a_);
+                    }
+                }
+            };
             fq8_prep();   // ## S19 PREW2: the prologue tile
 
             // The four-group PV chain for ONE head-dim slab.  With Defer, the
@@ -1803,6 +1816,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // until max_get_scale_grouped below), the same expression fq8_promote_last uses: bitwise either way.
                     static constexpr bool kPreTurn4 = kGroups == 4 && kAtomsPerGroup == 2 && kPVNSplit == 1 && kHeadDim < 256;
                     if constexpr (kPreTurn4) { fq8_lazy_rebase(cute::bool_constant<Check_inf>{}); }
+                    fq8_apply_alpha();   // ## A1DEF
                     auto const p4r1_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 1); } else { return typename Softmax::TensorT{}; } }();
                     auto const p4r2_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 2); } else { return typename Softmax::TensorT{}; } }();
                     auto const p4r3_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 3); } else { return typename Softmax::TensorT{}; } }();
@@ -1867,7 +1881,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // the Triton reference forward do.  It is not a P-hat basis quantity, so the
                     // denominator invariant (row_sum *= scores_scale,
                     // softmax_fq8f.h:195) is untouched.
-                    if constexpr (!kFwdLazy) { softmax.rescale_o(tOrO, scores_scale); }
+                    if constexpr (kA1Def) { fq8_alpha[0] = scores_scale(0); fq8_alpha[1] = scores_scale(1); }   // ## A1DEF
+                    else if constexpr (!kFwdLazy) { softmax.rescale_o(tOrO, scores_scale); }
                     KF(11);
                     if constexpr (kFwdDfold && !Check_inf) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
                     else { softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS); }
@@ -1973,6 +1988,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // The last tile's promote: ms_[3] and row_max are final and finalize
             // did not touch them.
             fq8_lazy_rebase(cute::true_type{});
+            fq8_apply_alpha();   // ## A1DEF
             fq8_promote_last(tOrD);
             pipeline_v.consumer_release(smem_pipe_read);  // release V, otherwise producers will hang
             if constexpr (kFwdLazy) {   // ## FWDLD: tOrO is in the reference basis: O = O_ref * 2^(mref - m l2) / l

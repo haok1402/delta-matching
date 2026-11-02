@@ -465,3 +465,17 @@ the backward numerics changes already accepted on the head (pass 0 / pass 1), so
   softmax): +1.13% geo slower (8 reps, job 21206005), and the O sha differs from e256bw, so it is not bitwise as built.
   REJECTED (slower). Moving that work out of the turn did nothing, like sl2 at 3 WGs.
 - Side measurement: the original runs 3.50% geo slower than e256bw (job 21205791).
+- **A1SKIP** (`kda-sm90-fwd-a1skip`, skip the step's O *= alpha in place when alpha == 1 warp-wide): the branch puts tOrO
+  in local memory (STACK 232 B), +52% geo, O differs. REJECTED.
+- **A1DEF** (`kda-sm90-fwd-a1def`, the same skip deferred to the next step's pre-turn, ahead of the promote it always
+  preceded): bitwise (O sha SAME), no spill, -0.10% geo (8 reps, job 21206311; -0.8 / -1.0% at N65536, +0.7 / +0.8% at
+  N8192). Below 1%: REJECTED, logged as neutral.
+- Port check of the BM192-era bitwise pieces on the 2-WG x 128 x 256 tile (kda-sm90 eabba10 = e256bw source):
+  - WGID: already active (the barrier ids are computed once per work tile, independent of the tile).
+  - SCPOST: already active (`fq8_read_sc` after the turn's arrive; SMSC4 reads 4 k + 4 v scales).
+  - PRETURN: active as PRETURN4, generalized to the non-lazy case.
+  - S19-fwd-10's -inf guard drop: it removed the guard from the LAZY rebase test, which does not exist without lazy. The
+    remaining non-lazy guard is max_l2<true> in basis_last (2 rows, about 4 instructions per step). That guard is needed
+    when the consumed tile is the last masked tile (rows with no visible key at seqlen_k < seqlen_q). Not ported: under
+    0.1% at best.
+  - PREW2: the 4-group form is PREW4 above (slower, and not bitwise as built).

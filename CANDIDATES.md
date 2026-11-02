@@ -349,3 +349,11 @@ Stack rebased on r18_c4 as kda-sm90-fwd-stk (30a05d9 + switches commit); four bi
 None adds >= 1% (all within +-0.25% of the stack). Removing the rescale and one wait from the turn (sl2) changes
 nothing, so the light probe's "turn-bound" reading was distorted by its own spills. Per-step cost is the same at 8K and
 64K (~1.93 us per step per SM, from kernel time / causal step count), so per-tile overheads are not a lever either.
+
+### C4 + SMSC : ACCEPTED as part of S19-fwd-23 (kda-sm90 020b155)
+
+- Stack gated by kda-sm90 as a fresh pair: C4 PRETURN (this helper) + SMSC (kda-fwdport) + the integrator worker's
+  S19-fwd-10 (lazy-rebase -inf guard dropped on unmasked steps; next tile's scale reads after the ring-turn arrive),
+  PREW2 (next step's rho_1 / promote weight in the previous softmax) and WGID (barrier ids once). Gate 21195830:
+  bitwise on all four routes, forward -3.51%; confirmation 21196466 (library 9ffc39ca080e): -3.92%. New accepted root
+  `.local/frozen/r19_fwd`.

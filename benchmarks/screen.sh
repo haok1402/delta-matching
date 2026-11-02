@@ -5,7 +5,7 @@
 # baseline dump; SHAPES: "H:B:N,..." (default 16:2:8192,32:2:8192).  A = the accepted root (ACCEPTED, default r14_h3).
 set -u
 TAG=$1; WT=$2; BITWISE=${3:-1}; SHAPES=${4:-16:2:8192,32:2:8192}
-R=$PWD; L=$R/.local; OUT=$L/screens/$TAG; ACC=${ACCEPTED:-$L/frozen/r17_pk}
+R=$PWD; L=$R/.local; OUT=$L/screens/$TAG; ACC=${ACCEPTED:-$L/frozen/r18_c4}
 rm -rf $OUT; mkdir -p $OUT
 if [ ! -f $L/jit/$TAG/_C.so ]; then
   ( cd $WT && DM_FA_SRC=$R/third_party/flash-attention MAX_JOBS=${MAX_JOBS:-32} DM_JIT_DIR=$L/jit/$TAG python -m delta_matching.jit ) > $OUT/build.log 2>&1

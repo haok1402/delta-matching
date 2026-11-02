@@ -456,3 +456,12 @@ the backward numerics changes already accepted on the head (pass 0 / pass 1), so
 - Decision: **e256bw READY as the bitwise floor** (-3.7% vs the original, bitwise). e256nf is REJECTED under the strict
   mean clause (O / dQ means rise by 2e-10 / 7e-8); it is the integrator's call if the mean clause tolerates round-off.
   e256 is REJECTED (dQ case above 1e-5, dQ mean rises).
+
+### Screens on the bitwise BN256 baseline (e256bw, now merged as kda-sm90 e80de8f / r21_clean)
+
+- **ST3** (`kda-sm90-fwd-bw-st3`, 3 K/V stages at the 256-key tile): the launch fails (CUDA invalid argument:
+  3 x 64 KB K/V + Q exceeds the shared-memory limit). REJECTED, does not fit.
+- **PREW4** (`kda-sm90-fwd-bw-prew4`, rho_1..3 + basis_last weight computed at the end of the previous step's
+  softmax): +1.13% geo slower (8 reps, job 21206005), and the O sha differs from e256bw, so it is not bitwise as built.
+  REJECTED (slower). Moving that work out of the turn did nothing, like sl2 at 3 WGs.
+- Side measurement: the original runs 3.50% geo slower than e256bw (job 21205791).

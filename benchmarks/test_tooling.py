@@ -244,3 +244,78 @@ def test_malformed_payloads_return_invalid(tmp_path, why, mutate):
     a = fake_dump(tmp_path / "a.pt", mutate=mutate); b = fake_dump(tmp_path / "b.pt", mutate=mutate)
     r = cmp(a, b, "--partial")
     assert r.returncode == 2 and "INVALID" in r.stdout and "Traceback" not in r.stderr, (why, r.stdout, r.stderr[-300:])
+
+
+# ---------------------------------------------------------------- gate runner: every failing step stops the gate
+STUB = r"""#!{py}
+import os, sys
+fail = os.environ.get("STUB_FAIL_ON", "")
+args = sys.argv[1:]
+line = " ".join(args)
+def done(tag):
+    sys.exit(42 if tag and tag in fail.split(",") else 0)
+if sys.argv[0].endswith("cuobjdump"):
+    done("cuobjdump")
+if args[:2] == ["-m", "delta_matching.jit"]:
+    jit = os.environ["DM_JIT_DIR"]; os.makedirs(jit, exist_ok=True)
+    open(os.path.join(jit, "_C.so"), "wb").write(b"lib")
+    os.makedirs("delta_matching", exist_ok=True)
+    link = os.path.join("delta_matching", "_C.so")
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(os.path.join(jit, "_C.so"), link)
+    done("jit")
+if args[:2] == ["-m", "pytest"]:
+    done("tooling" if "test_tooling" in line else "pytest")
+if "equivalence.py" in line and "dump" in args:
+    out = args[args.index("--out") + 1]
+    if "dump" not in fail.split(","):
+        open(out, "wb").write(b"x")
+    done("dump")
+if "equivalence.py" in line:
+    done("compare")
+if "ab.py" in line:
+    d = args[args.index("--out-dir") + 1]; os.makedirs(d, exist_ok=True)
+    if "ab" not in fail.split(","):
+        open(os.path.join(d, "ab.json"), "w").write("{{}}")
+    done("ab")
+if "bench.py" in line:
+    done("bench")
+sys.exit(0)
+"""
+
+
+def run_gate(tmp_path, mode, fail):
+    stub = tmp_path / "python"; stub.write_text(STUB.format(py=sys.executable)); stub.chmod(0o755)
+    cub = tmp_path / "cuobjdump"; cub.write_text(STUB.format(py=sys.executable)); cub.chmod(0o755)
+    wt = tmp_path / "wt"; (wt / "delta_matching").mkdir(parents=True)
+    if mode == "confirm":
+        (wt / "delta_matching" / "_C.so").write_bytes(b"lib")
+    prev = tmp_path / "prev.so"; prev.write_bytes(b"prev")
+    dumps = ",".join(str(tmp_path / f"d{i}.pt") for i in range(4))
+    env = dict(os.environ, GATE_PYTHON=str(stub), GATE_CUOBJDUMP=str(cub), STUB_FAIL_ON=fail)
+    return subprocess.run([sys.executable, os.path.join(HERE, "gate.py"), "--tag", "t", "--worktree", str(wt),
+                           "--prev-root", str(tmp_path), "--prev-lib", str(prev), "--subset", "D128", "--kernel", "X",
+                           "--mode", mode, "--base-dumps", dumps, "--prev-dumps", dumps,
+                           "--run-dir", str(tmp_path / f"run_{mode}_{fail or 'none'}")], env=env, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("mode,fail,step", [
+    ("full", "tooling", "tooling_tests"), ("full", "jit", "build"), ("full", "cuobjdump", "resources_prev"),
+    ("full", "pytest", "pytest"), ("full", "dump", "dump_default"), ("full", "compare", "compare_base_default"),
+    ("full", "ab", "ab_main"), ("full", "bench", "bench_A_rep0_D128"),
+    ("confirm", "ab", "ab_main"), ("confirm", "bench", "bench_A_rep0_D128"), ("timing", "jit", "build")])
+def test_gate_stops_on_any_failing_step(tmp_path, mode, fail, step):
+    r = run_gate(tmp_path, mode, fail)
+    assert r.returncode == 1 and f"step {step} failed" in r.stdout, (mode, fail, r.stdout[-800:], r.stderr[-400:])
+
+
+@pytest.mark.parametrize("mode", ["full", "confirm", "timing"])
+def test_gate_passes_when_every_step_passes(tmp_path, mode):
+    r = run_gate(tmp_path, mode, "")
+    assert r.returncode == 0 and "all steps passed" in r.stdout, (r.stdout[-800:], r.stderr[-400:])
+
+
+def test_gate_refuses_a_reused_run_directory(tmp_path):
+    (tmp_path / "run_full_none").mkdir()
+    assert run_gate(tmp_path, "full", "").returncode != 0

@@ -351,7 +351,7 @@ sys.exit(0)
 """
 
 
-def run_gate(tmp_path, mode, fail, extra=None, kernel="X"):
+def run_gate(tmp_path, mode, fail, extra=None, kernel="X", args=()):
     stub = tmp_path / "python"; stub.write_text(STUB.replace("{py}", sys.executable)); stub.chmod(0o755)
     cub = tmp_path / "cuobjdump"; cub.write_text(STUB.replace("{py}", sys.executable)); cub.chmod(0o755)
     wt = tmp_path / "wt"; (wt / "delta_matching").mkdir(parents=True)
@@ -364,7 +364,7 @@ def run_gate(tmp_path, mode, fail, extra=None, kernel="X"):
     return subprocess.run([sys.executable, os.path.join(HERE, "gate.py"), "--tag", "t", "--worktree", str(wt),
                            "--prev-root", str(tmp_path), "--prev-lib", str(prev), "--target", "pass2", "--kernel", kernel,
                            "--mode", mode, "--base-dumps", dumps, "--prev-dumps", dumps,
-                           "--run-dir", str(tmp_path / f"run_{mode}_{fail or 'none'}")], env=env, capture_output=True, text=True)
+                           "--run-dir", str(tmp_path / f"run_{mode}_{fail or 'none'}")] + list(args), env=env, capture_output=True, text=True)
 
 
 @pytest.mark.parametrize("mode,fail,step", [
@@ -373,7 +373,7 @@ def run_gate(tmp_path, mode, fail, extra=None, kernel="X"):
     ("full", "ab", "ab_all"), ("full", "bench", "bench_A_rep0_D128"),
     ("confirm", "ab", "ab_all"), ("confirm", "bench", "bench_A_rep0_D128"), ("timing", "jit", "build")])
 def test_gate_stops_on_any_failing_step(tmp_path, mode, fail, step):
-    r = run_gate(tmp_path, mode, fail)
+    r = run_gate(tmp_path, mode, fail, args=["--tooling-tests"] if fail == "tooling" else [])
     assert r.returncode == 1 and f"step {step} failed" in r.stdout, (mode, fail, r.stdout[-800:], r.stderr[-400:])
 
 
@@ -392,7 +392,7 @@ def test_gate_refuses_a_reused_run_directory(tmp_path):
                                        ("onlysass", "different functions"), ("truncated", "incomplete SASS"),
                                        ("tail", "incomplete SASS"), ("gap", "incomplete SASS"), ("dupoff", "incomplete SASS"),
                                        ("dupfunc", "duplicate SASS function"), ("noelf", "ELF .text sections"),
-                                       ("dupelf", "duplicate ELF"), ("stackgrow", "stack / local growth")])
+                                       ("dupelf", "duplicate ELF")])
 def test_gate_rejects_missing_or_malformed_resource_evidence(tmp_path, shape, why):
     r = run_gate(tmp_path, "full", "", extra={"STUB_RES": shape})
     assert r.returncode == 1 and why in r.stdout and "step pytest" not in r.stdout, r.stdout[-800:]
@@ -531,3 +531,26 @@ def test_gate_records_the_bench_decision_on_success(tmp_path):
     r = run_gate(tmp_path, "confirm", "")
     rec = json.load(open(tmp_path / "run_confirm_none" / "gate.json"))
     assert r.returncode == 0 and rec["bench_decision"]["ok"] and len(rec["bench_decision"]["changes_pct"]) == 4
+
+
+def test_stack_growth_is_a_warning_and_the_ab_still_runs(tmp_path):
+    r = run_gate(tmp_path, "full", "", extra={"STUB_RES": "stackgrow"})
+    rec = json.load(open(tmp_path / "run_full_none" / "gate.json"))
+    assert r.returncode == 0 and "WARNING: per-symbol stack" in r.stdout and "ab_all: rc 0" in r.stdout
+    assert rec["resource_regressions"] == ["_Z9KernelX_causal: STACK 8 -> 16"]
+
+
+def test_prebuilt_library_is_not_rebuilt_and_build_diagnostics_fail(tmp_path):
+    lib = tmp_path / "pre.so"; lib.write_bytes(b"lib")
+    log = tmp_path / "build.log"; log.write_text("BUILD-OK\n")
+    r = run_gate(tmp_path, "timing", "jit", args=["--lib", str(lib), "--build-log", str(log)])
+    assert r.returncode == 0 and "step build" not in r.stdout and "build:" not in r.stdout, r.stdout[-600:]
+    log.write_text("ptxas warning : (C7510) wgmma serialized\n")
+    (tmp_path / "x").mkdir()
+    r = run_gate(tmp_path / "x", "timing", "", args=["--lib", str(lib), "--build-log", str(log)])
+    assert r.returncode == 1 and "build diagnostics" in r.stdout, r.stdout[-600:]
+
+
+def test_tooling_tests_do_not_run_by_default(tmp_path):
+    r = run_gate(tmp_path, "full", "tooling")
+    assert r.returncode == 0 and "tooling_tests" not in r.stdout, r.stdout[-400:]

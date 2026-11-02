@@ -1,0 +1,46 @@
+diff --git a/csrc/mainloop_bwd_sm90_fp8r.hpp b/csrc/mainloop_bwd_sm90_fp8r.hpp
+index 1024dd7..2649563 100644
+--- a/csrc/mainloop_bwd_sm90_fp8r.hpp
++++ b/csrc/mainloop_bwd_sm90_fp8r.hpp
+@@ -34,6 +34,9 @@
+  * sums in true units; the WG's 64-key sum is reduced 2 keys per thread -> 8 lanes -> 4 warps in a fixed order).
+  ******************************************************************************/
+ #pragma once
++#ifndef FA3FP11_P1R_MUFUPOLY
++#define FA3FP11_P1R_MUFUPOLY 0
++#endif
+ 
+ #include <climits>
+ #include <cutlass/cutlass.h>
+@@ -766,7 +769,17 @@ struct CollectiveMainloopBwdSm90Fp8R {
+                 #pragma unroll
+                 for (int ni = 0; ni < size<1>(scores); ++ni) {
+                     // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
+-                    scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
++                    float const fq8_x = fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f);
++                    if (FA3FP11_P1R_MUFUPOLY && (ni & 1)) {   // resolved per element after full unrolling
++                        // ## r11 MUFU-POLY (named numerics candidate): odd columns on the FMA pipe, degree-3 minimax 2^f
++                        float const xc = fmaxf(fq8_x, -127.0f);
++                        float const j = floorf(xc);
++                        float const f = xc - j;
++                        float const p = fmaf(fmaf(fmaf(0.0771190897f, f, 0.2275643945f), f, 0.6951461434f), f, 1.0f);
++                        scores(mi, ni) = __int_as_float(__float_as_int(p) + (int(j) << 23));
++                    } else {
++                        scores(mi, ni) = exp2f(fq8_x);
++                    }
+                 }
+             }
+             // The stage's LSE rows were read by the loop above and the S gemm has retired: raw Q's readers are done.
+diff --git a/delta_matching/_buildcfg.py b/delta_matching/_buildcfg.py
+index 4fe77de..64b55e1 100644
+--- a/delta_matching/_buildcfg.py
++++ b/delta_matching/_buildcfg.py
+@@ -52,7 +52,7 @@ FLAGS = {
+     "FA3FP11_HD128": 1, "FA3FP11_HD128_PVFIRST": 1, "FA3FP11_HD128_BM128": 0, "FA3FP11_HD128_P0NBWG": 2,
+     "FA3FP11_HD128_DOTST": 1, "FA3FP11_HD128_BN256": 1, "FA3FP11_HD128_QST": 2, "FA3FP11_HD128_DOST": 1,
+     "FA3FP11_HD128_P2ST": 3, "FA3FP11_HD128_P0ST": 3, "FA3FP11_HD128_P1R": 1, "FA3FP11_HD128_P0V5": 1,
+-    "FA3FP11_P1R_SAGEDP": 1 if BF16_DP else 0,
++    "FA3FP11_P1R_SAGEDP": 1 if BF16_DP else 0, "FA3FP11_P1R_MUFUPOLY": 1,
+ }
+ EXTRA_DEFINES = ["-DFA3FP11_M16_P0V2_ATOMN=64", "-DFA3FP11_HD128_P0V6=1", "-DFA3FP11_P1R_MASKDIAG=1", "-DFA3FP11_P1R_RFSKIP=1"]
+ 

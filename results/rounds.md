@@ -386,3 +386,33 @@ D128 shapes: 39 configurations
 | pass 0 | 0 |
 
 Next: pass 1 at D128 (largest D128 waste), a new hypothesis from the existing D128 profile.
+
+## Direction after the independent audit (Hao, during round 11)
+
+Recorded in full in `docs/kda-sm90/rule-change-r10.md` (plan.md is frozen for the loop): stacking of >= 1% rejected
+changes with identical outputs into one >= 3% candidate (first: H1a + H1b (+ AMAX-REDUX) as one D128 pass-1
+candidate); build the Q2 / Q3 numerics gate now; pass-1 order psi-decoupling -> traced PINGPONG redone over all four
+GEMMs -> MUFU-poly, a lever failing only after two designed variants; cheap identical-output rounds (H3 glue copies,
+forward k-scale prefetch) interleaved; a four-floor speed-of-light model with calibrated peaks; review findings block
+only if verdict-changing, at most one tooling commit per round; gate.py stack growth is a warning, ptxas spill /
+serialization stays fatal; no CPU work or rebuilds in GPU jobs; waits on job IDs only.
+
+## Round 11: MUFU-POLY variant 1 (D128 pass 1, named numerics candidate): stage 1 slower (lever not yet failed)
+
+- Change (`results/r11/mufupoly_v1/mufupoly_v1.patch`, hd128 P1-R only; D256 code unchanged): the argument and F1
+  clamp as shipped; odd columns (half of each thread's elements) computed by a degree-3 minimax 2^f polynomial on the
+  FMA pipe with exponent-bit insertion (x clamped to >= -127; -inf -> a denormal that FTZ treats as 0); even columns
+  keep MUFU.EX2. Emitted (target functions): MUFU.EX2 128 -> 64, FFMA 768 -> 960, FRND / F2I 0 -> 128; REG 168,
+  STACK 8 / 0 unchanged, LOCAL 0, no spill / serialization diagnostics.
+- Stage 1 (job 21167357, `gate.py --mode timing --target pass1` vs PSIPF, merged grid): D128 pass 1 265.271 ->
+  280.097 ms (**+5.59%, slower**), 37 of 39 D128 shapes slower beyond spread; D256 pass 1 +0.03%; bench.py D128
+  matched / stale fwd+bwd +2.5% / +2.8% (the new structured bench predicate flags it).
+- Reading: halving the MUFU work moved ~3 extra FMA-pipe / conversion instructions per element onto the issue slots,
+  which (with the vector work already dominating the D128 pass-1 step) costs more than the MUFU pipe saved. Not a
+  failed lever yet (Hao: two designed variants); a second variant would need to cut issue slots, e.g. a smaller
+  replaced fraction or the conversion folded into the existing scale FMA. Counter: D128 pass 1 stays 0.
+- Tooling (the round's one bounded commit): gate.py per-symbol stack growth now a warning (A/B still runs); build-log
+  spill / C7510 / serialization diagnostics fatal; `--lib` / `--build-log` reuse a prebuilt library (no rebuild in
+  the gate); CPU tooling tests opt-in (`--tooling-tests`), run on the cpu partition instead.
+
+Next (Hao's order): the stacked D128 pass-1 candidate H1a + H1b (+ AMAX-REDUX) on the current PSIPF base.

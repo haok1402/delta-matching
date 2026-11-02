@@ -61,6 +61,7 @@ class Gate:
             json.dump(self.record, f, indent=1)
 
 
+DIAG_RE = re.compile(r"C7510|serializ|spill", re.IGNORECASE)
 RES_RE = re.compile(r"REG:(\d+)\s+STACK:(\d+)\s+SHARED:(\d+)\s+LOCAL:(\d+)")
 ELF_TEXT_RE = re.compile(r"^\s*[0-9a-f]+\s+[0-9a-f]+\s+([0-9a-f]+)\s.*\sPROGBITS\s.*\s\.text\.(\S+)\s*$")
 SASS_OFF_RE = re.compile(r"/\*([0-9a-f]{4,6})\*/")
@@ -205,6 +206,10 @@ def main():
     ap.add_argument("--base-dumps", default=""); ap.add_argument("--prev-dumps", default="")
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--lib", default=None, help="prebuilt candidate library (no rebuild in the gate); needs --build-log")
+    ap.add_argument("--build-log", default=None, help="the prebuilt library's build log (spill / serialization scan)")
+    ap.add_argument("--tooling-tests", action="store_true", help="also run the CPU tooling tests (default: run them "
+                    "outside GPU jobs)")
     a = ap.parse_args()
     if os.path.exists(a.run_dir):
         raise SystemExit(f"run directory {a.run_dir} exists: every gate run gets a fresh directory")
@@ -216,13 +221,28 @@ def main():
     env.pop("DM_SO", None)
     try:
         if a.mode in ("full", "timing"):
-            if a.mode == "full":
+            if a.tooling_tests:
                 gate.run("tooling_tests", [gate.py, "-m", "pytest", os.path.join(HERE, "test_tooling.py"), "-q"])
-            jit = os.path.join(run_dir, "jit")
-            gate.run("build", [gate.py, "-m", "delta_matching.jit"], cwd=wt, env=dict(env, MAX_JOBS="8", DM_JIT_DIR=jit))
-            lib = os.path.join(jit, "_C.so")
+            if a.lib:
+                # Hao (round 11): never rebuild in the gate when the library exists; link the worktree to it
+                lib = os.path.abspath(a.lib)
+                if not os.path.isfile(lib) or not a.build_log or not os.path.isfile(a.build_log):
+                    raise GateFailure("--lib needs an existing library and its --build-log")
+                link = os.path.join(wt, "delta_matching", "_C.so")
+                if os.path.lexists(link):
+                    os.remove(link)
+                os.symlink(lib, link)
+                build_log = os.path.abspath(a.build_log)
+            else:
+                jit = os.path.join(run_dir, "jit")
+                build_log = gate.run("build", [gate.py, "-m", "delta_matching.jit"], cwd=wt,
+                                     env=dict(env, MAX_JOBS="8", DM_JIT_DIR=jit))
+                lib = os.path.join(jit, "_C.so")
             if not os.path.isfile(lib):
                 raise GateFailure(f"build produced no library at {lib}")
+            diag = [l.strip() for l in open(build_log, errors="replace") if DIAG_RE.search(l)]
+            if diag:   # ptxas spill / wgmma serialization diagnostics stay hard failures
+                raise GateFailure(f"build diagnostics: {diag[0][:160]} ({len(diag)} lines)")
             linked = os.path.realpath(os.path.join(wt, "delta_matching", "_C.so"))
             if linked != os.path.realpath(lib):
                 raise GateFailure(f"the worktree package links {linked}, not the fresh build {lib}")
@@ -236,8 +256,8 @@ def main():
             gate.save(resources={"prev": r_prev, "cand": r_cand}, resource_regressions=regress)
             for line in regress:
                 print(f"[gate] resource regression: {line}", flush=True)
-            if regress and a.mode == "full":
-                raise GateFailure(f"per-symbol stack / local growth in the target functions ({len(regress)}): {regress[0]}")
+            if regress:   # Hao (round 11): a flagged warning; the A/B still runs and the timing decides
+                print(f"[gate] WARNING: per-symbol stack / local growth ({len(regress)}); recorded, not fatal", flush=True)
             for n in sorted(set(r_prev["rows"]) | set(r_cand["rows"])):
                 print(f"[gate] resources {n[-90:]}: prev {r_prev['rows'].get(n)} {r_prev['text_bytes'].get(n)} B -> "
                       f"cand {r_cand['rows'].get(n)} {r_cand['text_bytes'].get(n)} B", flush=True)

@@ -26,3 +26,28 @@ per-kernel stop rule:
 
 This file records the user's rule change; docs/kda-sm90/plan.md is frozen while the RLCR loop runs (the loop's
 hook forbids editing it), so the plan's AC-3.1 / AC-3.2 text is superseded by this file from round 10 on.
+
+## Direction after the independent audit (Hao, round 11; audit: ~/workspace/haok1402/audits/kda-sm90/REPORT.md)
+
+Extends the D128-only, all-shapes rule above:
+
+1. Stacking: 3% per candidate stays, but a rejected change with identical outputs that gave >= 1% on its target kernel
+   (confirmed by two jobs) goes into a stack; stacked changes are combined into one candidate that must clear 3%
+   together. First stacked candidate: H1a + H1b (+ AMAX-REDUX if ready) on the current base, gated as one D128 pass-1
+   candidate.
+2. Build the numerics gate for output-changing candidates (Q2 / Q3: fp32 error per case, determinism, matched-mode
+   rowsum residual, dS' / psi capture) now.
+3. Pass 1 at D128, in order: per-warpgroup psi with decoupling only; then trace the PINGPONG stage-1 build and redo the
+   turn over all four GEMMs; then MUFU-poly exp2. A lever counts as failed only after two designed variants.
+4. Between expensive pass-1 rounds, cheap rounds with identical outputs: H3 (remove the Q / K / V .contiguous()
+   copies and glue at D128), the forward k-scale prefetch.
+5. Speed-of-light model: per kernel the max of the tensor, MUFU, issue (SASS opcode counts) and byte floors, with peaks
+   calibrated by microbenchmarks in the same job (cuBLASLt fp8 GEMM, device-to-device copy); FA3 fp8 forward is the
+   practical forward reference.
+6. Codex review findings block a round only if they could change an accept / reject verdict; everything else is
+   queued for the final report. At most one bounded tooling commit per round.
+7. gate.py: per-symbol STACK / LOCAL growth is a flagged warning that still runs the A/B; ptxas spill or serialization
+   diagnostics stay hard fails.
+8. Builds and CPU tests out of GPU jobs where possible; build all variants of a round in one job that times them right
+   away; never rebuild inside gate.py when the .so exists.
+9. Wait on job IDs or PIDs only, never pgrep / pkill patterns on this shared account.

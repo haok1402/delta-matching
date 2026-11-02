@@ -828,3 +828,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   cases but neutral (pass 1 -0.60 .. +0.45%, the guards are off the critical path); the rest of the per-element path
   (exp, dS, amax, scale, e4m3, dK fold) cannot pass residual-v4 (P^ changes move per-row residuals; dS' code / dK
   accumulation changes move per-case errors well past 1e-5). DONE again (CANDIDATES.md on kda-sm90-pass1-v2 8b2e4ff).
+
+## Round 19 (started): own rounds in parallel with the helpers (Hao)
+
+- Workers launched: forward SASS diff vs FA3 fp8 per step and instruction-gap cuts (S19-fwd-*); pass-1 per-element
+  instruction cuts on r18_c4 under residual-v4 (S19-p1-*). r18_c4 DBG pair + LSE controls building (job 21192664) as
+  the numerics references. kda-p1fresh prototypes will be gated when they land.

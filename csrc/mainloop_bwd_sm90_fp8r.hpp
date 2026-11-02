@@ -123,6 +123,12 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_P1_FENCE2
 #define KDA_P1_FENCE2 0
 #endif
+//   KDA_P1_PCONVEARLY (bitwise): the P~ e4m3 codes (the dV gemm's A operand) are converted right after the exp line, from
+//     a permuted copy view of the fp32 P (register renaming), so the conversion sits before the dP retire wait instead of
+//     after the dS line; the dV issue stays where it is.
+#ifndef KDA_P1_PCONVEARLY
+#define KDA_P1_PCONVEARLY 0
+#endif
 #define KDA_DSBUF (KDA_P1_FENCE2 ? 4 : 2)
 
 #include "kda_prof.h"
@@ -854,6 +860,14 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
             // The stage's LSE rows were read by the loop above and the S gemm has retired: raw Q's readers are done.
             pipeline_q.consumer_release(smem_pipe_read);
+#if KDA_P1_PCONVEARLY
+            Tensor tSrS_pc = make_fragment_like(tSrS);
+            cute::copy(tSrS, tSrS_pc);
+            flash::permute_Cregs_fp8(tSrS_pc);
+            Tensor tdVrP_acc_e = make_tensor(tSrS_pc.data(), flash::convert_layout_acc_Aregs<TiledMmadKV>(tSrS_pc.layout()));
+            Tensor rP_e = make_tensor_like<Element>(tdVrP_acc_e);
+            flash::convert_type_out(tdVrP_acc_e, rP_e);
+#endif
             KP(6);
             warpgroup_wait<0>();   // dP retired
             KP(7);
@@ -937,10 +951,14 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // the H1b pre-pack, the dK issue and the transpose / TMA store then run while dV is in flight.  Same
             // instructions, values and accumulation order (schedule only); FIFO retire unchanged (dV, then dK).
             // P~ codes as the RS A operand of dV (register renaming + the FA3 Aregs view; no smem).
+#if KDA_P1_PCONVEARLY
+            auto& rP = rP_e;
+#else
             flash::permute_Cregs_fp8(tSrS);
             Tensor tdVrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
             Tensor rP = make_tensor_like<Element>(tdVrP_acc);
             flash::convert_type_out(tdVrP_acc, rP);
+#endif
             // dV += P^T dO (RS): issued now, retired first (FIFO) after the dK gemm below.
             KT(23);
             consumer_wait(pipeline_dot, smem_pipe_read_dot);

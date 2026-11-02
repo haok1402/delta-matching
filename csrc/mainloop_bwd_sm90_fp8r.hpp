@@ -34,6 +34,12 @@
  * sums in true units; the WG's 64-key sum is reduced 2 keys per thread -> 8 lanes -> 4 warps in a fixed order).
  ******************************************************************************/
 #pragma once
+// kda-pass1 KDA_NOCLAMP (named numerics change when on; pass 0 v6 and pass 1 together so the matched P^ stays identical):
+// drop the F1 cliff clamp min(t, 12) of the exp line.  Outputs change only where the clamp binds (t > 12).
+#ifndef KDA_NOCLAMP
+#define KDA_NOCLAMP 0
+#endif
+#define KDA_F1(x) (KDA_NOCLAMP ? (x) : fminf((x), 12.0f))
 
 #include <climits>
 #include <cutlass/cutlass.h>
@@ -840,22 +846,22 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
 #if KDA_PK_EXPB == 6
                     if constexpr (kExpbx) {
-                        scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
+                        scores(mi, ni) = exp2f(KDA_F1(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
                     } else {   // masked loop (rare): per-WG runtime choice
                         float const y = __fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled);
-                        scores(mi, ni) = exp2f(fminf(fq8_x64_orig ? __fadd_rn(y, kFq8MoE) : y, kFq8MoE + 4.0f));
+                        scores(mi, ni) = exp2f(KDA_F1(fq8_x64_orig ? __fadd_rn(y, kFq8MoE) : y));
                     }
 #elif KDA_PK_EXPB >= 3
                     if constexpr (kExpbx) {
-                        scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
+                        scores(mi, ni) = exp2f(KDA_F1(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
                     } else {
-                        scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+                        scores(mi, ni) = exp2f(KDA_F1(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE));
                     }
 #elif KDA_PK_EXPB
-                    scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
+                    scores(mi, ni) = exp2f(KDA_F1(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
 #else
                     // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
-                    scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+                    scores(mi, ni) = exp2f(KDA_F1(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE));
 #endif
                 }
             }

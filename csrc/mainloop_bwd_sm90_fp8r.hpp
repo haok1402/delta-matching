@@ -117,6 +117,13 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_P1_PROMOTE
 #define KDA_P1_PROMOTE 8
 #endif
+//   KDA_P1_FENCE2 (bitwise): four dS' half-tile buffers per warpgroup (+16 KB); the proxy fence runs after every second
+//     tile only (the odd tiles of the CTA and its last tile), and the stores of a tile pair are issued after the next psi
+//     barrier.  Half the fence.proxy.async per step; same bytes stored.
+#ifndef KDA_P1_FENCE2
+#define KDA_P1_FENCE2 0
+#endif
+#define KDA_DSBUF (KDA_P1_FENCE2 ? 4 : 2)
 
 #include "kda_prof.h"
 
@@ -300,7 +307,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQt>, SmemAlignmentQKVdO> smem_qt;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutdOt>, SmemAlignmentQKVdO> smem_dot;
         cute::array_aligned<ElementAccum, kDvOverlayFloats, 128> smem_dvacc;
-        cute::array_aligned<Element, NumMmaWarpGroups * 2 * kDsHalfElems, 1024> smem_ds;   // S17 DSDEFER-CTA: [wg][m parity] half tiles   // SW64 half tiles per WG (x2 under DSDEFER); 1024-B aligned: the swizzle anchors to the address
+        cute::array_aligned<Element, NumMmaWarpGroups * KDA_DSBUF * kDsHalfElems, 1024> smem_ds;   // S17 DSDEFER-CTA: [wg][m parity] half tiles   // SW64 half tiles per WG (x2 under DSDEFER); 1024-B aligned: the swizzle anchors to the address
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_lse;
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_dpsum;
         cute::array_aligned<ElementAccum, 16, 16> smem_psired;   // 8 warps x 2 tile parities
@@ -641,8 +648,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
         KP_BEGIN();
         KT_BEGIN(0);
         // This warpgroup's dS' natural half tile (kBlockM rows x 64 keys, SW64) and its gmem box.
-        Tensor sdS = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + warp_group_idx * 2 * kDsHalfElems), SmemLayoutDS{});
-        Tensor sdS1 = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (warp_group_idx * 2 + 1) * kDsHalfElems), SmemLayoutDS{});   // the second buffer (== sdS without DSDEFER)
+        Tensor sdS = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + warp_group_idx * KDA_DSBUF * kDsHalfElems), SmemLayoutDS{});
+        Tensor sdS1 = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (warp_group_idx * KDA_DSBUF + 1) * kDsHalfElems), SmemLayoutDS{});   // the second buffer (== sdS without DSDEFER)
 
         Layout warp_group_thread_layout = make_layout(make_shape(Int<NumMmaWarpGroups>{}), make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
         TiledMmaSdP tiled_mma_SdP;
@@ -737,12 +744,30 @@ struct CollectiveMainloopBwdSm90Fp8R {
             Tensor gdS8 = mdS8(_, _, n_block, m, fq8_bh);
             {   // S17 DSDEFER-SPLIT: this warpgroup's half only
                 int const w = warp_group_idx;
+#if KDA_P1_FENCE2
+                Tensor sbuf = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (w * KDA_DSBUF + ((m - fq8_m_first) & 3)) * kDsHalfElems), SmemLayoutDS{});
+#else
                 Tensor sbuf = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (w * 2 + (m & 1)) * kDsHalfElems), SmemLayoutDS{});
+#endif
                 Tensor gdS8h = local_tile(gdS8, Shape<Int<kBlockM>, Int<kDsHalfN>>{}, make_coord(_0{}, w));
                 cute::copy(params.tma_store_dS8, blk_tma_dS8.partition_S(sbuf), blk_tma_dS8.partition_D(gdS8h));
             }
             cute::tma_store_arrive();
         };
+#if KDA_P1_FENCE2
+        // two consecutive tiles of this warpgroup's half, one bulk-group commit
+        auto fq8_issue_ds_pair = [&](int m) {
+            #pragma unroll
+            for (int t = 0; t < 2; ++t) {
+                Tensor gdS8 = mdS8(_, _, n_block, m + t, fq8_bh);
+                int const w = warp_group_idx;
+                Tensor sbuf = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (w * KDA_DSBUF + ((m + t - fq8_m_first) & 3)) * kDsHalfElems), SmemLayoutDS{});
+                Tensor gdS8h = local_tile(gdS8, Shape<Int<kBlockM>, Int<kDsHalfN>>{}, make_coord(_0{}, w));
+                cute::copy(params.tma_store_dS8, blk_tma_dS8.partition_S(sbuf), blk_tma_dS8.partition_D(gdS8h));
+            }
+            cute::tma_store_arrive();
+        };
+#endif
         auto bwd_step = [&](int m_block, auto mask_fn, auto stage_c) {
             constexpr int kSt = decltype(stage_c)::value;   // compile-time Q / Qt stage under UNROLL2 (-1 = runtime)
             Tensor fq8_tmpK = make_fragment_like(tdKrdK);
@@ -937,9 +962,21 @@ struct CollectiveMainloopBwdSm90Fp8R {
             float* const fq8_psi_slots = fq8_psired + (m_block & 1) * 8;
             if (lane == 0) { fq8_psi_slots[thread_idx / cutlass::NumThreadsPerWarp] = fq8_amax; }
             KP(9);
+#if KDA_P1_FENCE2
+            {
+                // buffer r & 3 was last used by tile r - 4: its store group is the older of the two possibly outstanding
+                // (odd r: pairs issued at barriers r - 3 and r - 1) or the only one (even r: pair issued at barrier r - 2)
+                int const r = m_block - fq8_m_first;
+                if (wg_thread == 0) { if (r & 1) { cute::tma_store_wait<1>(); } else { cute::tma_store_wait<0>(); } }
+                cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
+                // tiles r - 2 and r - 1 were written, and fenced at step r - 1, before this barrier
+                if (wg_thread == 0 && r >= 2 && !(r & 1)) { fq8_issue_ds_pair(m_block - 2); }
+            }
+#else
             if (wg_thread == 0) { cute::tma_store_wait<0>(); }   // S17 DSDEFER-CTA: store(m - 2) drained (buffer m & 1)
             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
             if (wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
+#endif
             KP(10);
             #pragma unroll
             for (int w = 0; w < NumMmaThreads / cutlass::NumThreadsPerWarp; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[w]); }
@@ -1002,13 +1039,24 @@ struct CollectiveMainloopBwdSm90Fp8R {
                     fq8_pk[w] = __byte_perm(a, b, fq8_sel);
                 }
                 // The previous tile's TMA box store of this WG must have drained before the tile is overwritten.
+#if KDA_P1_FENCE2
+                int const fq8_r = m_block - fq8_m_first;
+                uint32_t const fq8_boff = uint32_t(fq8_r & 3) * kDsHalfElems;
+                uint32_t const fq8_a0 = fq8_st_addr0 + fq8_boff;
+                uint32_t const fq8_a1 = fq8_st_addr1 + fq8_boff;
+#else
                 uint32_t const fq8_a0 = (m_block & 1) ? fq8_st_addr0b : fq8_st_addr0;
                 uint32_t const fq8_a1 = (m_block & 1) ? fq8_st_addr1b : fq8_st_addr1;
+#endif
                 asm volatile("stmatrix.sync.aligned.x4.trans.m8n8.shared.b16 [%0], {%1, %2, %3, %4};\n"
                              :: "r"(fq8_a0), "r"(fq8_pk[0]), "r"(fq8_pk[1]), "r"(fq8_pk[2]), "r"(fq8_pk[3]));
                 asm volatile("stmatrix.sync.aligned.x4.trans.m8n8.shared.b16 [%0], {%1, %2, %3, %4};\n"
                              :: "r"(fq8_a1), "r"(fq8_pk[4]), "r"(fq8_pk[5]), "r"(fq8_pk[6]), "r"(fq8_pk[7]));
+#if KDA_P1_FENCE2
+                if ((fq8_r & 1) || m_block == m_block_max - 1) { cutlass::arch::fence_view_async_shared(); }
+#else
                 cutlass::arch::fence_view_async_shared();
+#endif
             }
             KP(13);
             warpgroup_wait<1>();
@@ -1055,7 +1103,14 @@ struct CollectiveMainloopBwdSm90Fp8R {
 
         // S17 DSDEFER-CTA: the last tile's halves, after a CTA-wide rendezvous (every stmatrix + fence of it done).
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
+#if KDA_P1_FENCE2
+        if (wg_thread == 0) {   // the pending tile(s): the last pair, or the unpaired last tile
+            int const rL = m_block_max - 1 - fq8_m_first;
+            if (rL & 1) { fq8_issue_ds_pair(m_block_max - 2); } else { fq8_issue_ds_cta(m_block_max - 1); }
+        }
+#else
         if (wg_thread == 0) { fq8_issue_ds_cta(m_block_max - 1); }
+#endif
         // Drain the last dS' box store (non-issuing threads return immediately).
         cute::tma_store_wait<0>();
         // Exit: the k8s unfold of dK (this WG's keys are one scale group) and the dV read-back from the overlay.

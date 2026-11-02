@@ -134,3 +134,38 @@ Per-row regressions / exempt (accepted exempt) per D128 matched case, worst fp32
 degenerate-row decision; DEFER is the cleanest (no regression outside the ill-conditioned stress rows).
 
 | w4u3 | W4 stage loop unrolled by the ring depth via a macro body (constant slots) | yes | -14.18% (ref -14.05%) | | sN1 | REJECTED: 540 vs 557 instr / stage, no time gain |
+
+## Final summary (helper kda-pass0)
+
+Accepted into kda-sm90 from this branch: C1 RTR, C2 SPF (with C1), C3 LPT + W4 (+ fallback). The integrator's gate
+measured pass 0 -5.21% for C2 and -7.67% for C3 on top of C2. Their sol4-v2 table puts the C2 build at 62.0% of the
+37.1 ms tensor floor; C3 brings that to ~67%.
+READY, waiting on tooling: C4 P0ALL (b864956, split.py; -14.35% / -14.47% for the C1..C4 stack vs r14_h3). It is
+byte-equal on all four routes; equivalence.py needs the all-heads delta schema. My estimate: ~69% of the floor.
+Waiting on Hao's numerics tolerance: DEFER (-2.2% on top of the stack), LAZY (-3.9%), LAZY+DEFER (-6.9%). Above are the
+residual-v3 numbers.
+
+What bounds pass 0 now (W4 what-ifs): tensor-only and vector-only each run at the calibrated floor; the full kernel is
+1.44x. The loss is overlap between the 4 warpgroups. Each warpgroup holds one S / dP pair (112 regs), so its own gemms
+overlap only with exp. Cross-iteration pipelining is serialized by ptxas (C7517), and a third accumulator spills (C7512).
+The 544-thread producer-warp layout is still capped at 96 regs.
+
+Levers, each tried in at least two designed variants:
+- pipeline depth / prefetch: ring depth 2 (+3..8%), depth 4 (-0.5%, and -0.3% on W4); scale prefetch SPF (accepted);
+  global LPT dispatch (accepted).
+- instruction cuts (bitwise): RTR (accepted), SPF (accepted), U3 lambda (outlined, 30x slower), W4U3 macro (no gain).
+  Output-changing: LAZY, DEFER (pending the rule).
+- tile shape / occupancy: W4 (accepted), W3 (-10.5%), W5 (-1.7%), C1W 2 CTAs/SM (+2.4%), RS Q/dO in registers
+  (-1.65% alone, slower with RTR), W4S3 (spills), W4 producer warp (no gain), multicast C=2 / 4 (-1.6% / +2.8% alone,
+  nothing on top of W4).
+- overlap / scheduling: SWP (+16%, C7517), C1W+SWP (+19%), warpgroup stagger (no gain).
+- fusion / sharing with forward / pass 1: not buildable without breaking the identity.
+  - Delta must be complete per row before pass 1 forms dS and psi, and pass 1 is column-CTA.
+  - Reusing pass 0's P / dP needs 2 x B H N^2 / 2 fp8 bytes and fp8-rounded dS inputs.
+  - The forward has no dO.
+  - Sharing done instead: K / V across GQA heads (multicast, no gain on W4), and one all-heads launch (C4).
+- Not tried: a joint pass-0 + pass-1 exp-line change (fma(s, dsc, 8 - lse), -1 FADD per element in both passes). It is
+  only legal if pass 1 changes identically.
+
+To reach 90% of the floor, the next steps lie outside bitwise pass-0 scheduling: the numerics tolerance for DEFER / LAZY,
+or the joint exp-line change with pass 1.

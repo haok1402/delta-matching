@@ -119,3 +119,18 @@ some cases by noise-level amounts and moves the ill-conditioned (near-one-hot, r
 screened, the strict rule (no larger fp32 error on any case; per-row non-regression on those rows) rejects any change to
 delta's rounding. These candidates wait for the rule's tolerance / degenerate-row definition (data sent to kda-sm90).
 
+
+### residual-v3 check (benchmarks/numerics.py at 112de4c, default route, vs cert_v3 r17_c3 captures; job kda-p0-n3)
+
+Per-row regressions / exempt (accepted exempt) per D128 matched case, worst fp32-error ratio vs prev:
+
+| candidate | gaussian cases (min, gqa4, gqa3_promote, mqa, packed, bhnd, heldout, constk) | stress (scale3, scale10, outliers) | exempt growth | worst fp32 error vs prev | determinism |
+|---|---|---|---|---|---|
+| DEFER | 0 regressions | 37 / 9 / 31 | none | +3 ppm (outliers dK), +1.5 ppm (bhnd dQ) | pass |
+| LAZY | 3 (gqa4) + 2 (gqa3) + 2 (mqa) + 1 (heldout) | 43 / 136 / 63 | none | +2.0 ppm | pass |
+| LAZY+DEFER | as LAZY | 62 / 141 / 72 | none | +1.7 ppm | pass |
+
+(The identity FAILs in the report are my unstamped what-if builds.) Status: all three wait for Hao's tolerance /
+degenerate-row decision; DEFER is the cleanest (no regression outside the ill-conditioned stress rows).
+
+| w4u3 | W4 stage loop unrolled by the ring depth via a macro body (constant slots) | yes | -14.18% (ref -14.05%) | | sN1 | REJECTED: 540 vs 557 instr / stage, no time gain |

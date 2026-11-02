@@ -697,3 +697,12 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   which moves every percentage with it; per-round comparisons should use the same-job calibration as here.
 - residual-v4 implemented (rule-change-r10.md); numerics gates of forward C1, pass-0 DEFER and LAZY submitted
   (jobs 21176380-82) against r17_p1 with its DBG pair.
+- CORRECTION to commit 23fe1e7: the "DEFER / LAZY pass the numerics gate, no gain" result is void. The patch files
+  (kda-work/p0/tools/{defer,lazy}.patch) only add code under #ifdef KDA_P0DEFER / KDA_P0LAZY and I built them without
+  the defines, so jobs 21176380 / 21176381 gated the unchanged kernel. The real candidates are commits on
+  origin/kda-sm90-pass0-num (e3275a3 P0DEFER, c49c0d6 P0LAZY on it); c49c0d6 is in the numerics gate (job 21177096).
+- Forward C3 (kda-fwd helper: BM192 = 192 x 128 tiles, three consumer warpgroups, on FWDLAZY + FWDDFOLD + RHOPRE;
+  -12.9% / -13.2% forward in the helper's two A/B jobs): FAILS residual-v4 on the default route (job 21176828): the
+  inherited all-zero causal NaN defect grew (O n_nan 522752 vs 522240), 70 well-conditioned stress-case rows regress
+  beyond round-off (scale3 36, outliers 18, scale10 15, mqa 1), and the per-output means rise by ~3e-7 -> REJECTED as
+  submitted; returned to the helper.

@@ -940,3 +940,18 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   (worst +1.5e-4 outliers), dQ 11 (+2.3e-3 mqa), dK 8 (+3.2e-3 mqa); q256: O 0 (worst +1.2e-6), dQ 1 case at +1.0e-5
   (scale10), dQ mean +1.3e-6; q256nf: O 0, dK 1 (+1.2e-5 outliers), dV 1 (+1.0e-5 gqa3). The dQ / dK misses include the
   backward numerics changes on the head; attribution pending (audit section f).
+
+## Round 21: residual-v5 and the TASK.md error clause: C3g and EXPBX64 REVERTED; clean baseline r21_clean
+
+- Attribution (results/residual_v5_audit.md sections f-h): HEAD (r19_fwd) failed the error clause vs the ORIGINAL in
+  33 case-outputs (relative reading; O 14, dQ 11, dK 8; worst stale mqa dK +2.1e-4 absolute = +3.2e-3 relative): 32
+  first fail at C3g, from its 192 x 128 tiling itself (29; FWDLAZY +1, the fold +2; O rises identical with or without
+  them; stale dQ / dK rises are those O changes through the stale delta); 1 at EXPBX64 (d128_bhnd matched dK +1.2e-5);
+  C4 and the round-19 forward stack are bitwise. Fixes tried: a BM192 promote reproducing the BN256 accumulation does
+  not fit (192 > 160 registers) and cannot reproduce whole-tile codes; BN256 ports with lazy (e256nf) or lazy + fold
+  (e256) raise the O / dQ means (2e-10 / 7e-8; and one dQ case +1.2e-5): rejected under "the mean does not rise".
+- Accepted (e80de8f): e256bw = the original 128 x 256 tile with only bitwise pieces (RHOPRE, SMSC4, PRETURN4), EXPB 0,
+  C4's SHFL8, every bitwise pass-0 / pass-1 / glue change: byte-identical to the ORIGINAL on 72 cases x 4 routes
+  except the repaired d128_zeros defect (job 21205898); v5 rows 0 worse; pytest passes. vs the original: forward
+  -2.29%, e2e fwd+bwd -8.38% (paper set, 3 reps). Cost of restoring the numerics vs r19_fwd: forward ~+13.6%, pass 0
+  ~+7%, pass 1 ~+3%, fwd+bwd ~+6%. Accepted root r21_clean.

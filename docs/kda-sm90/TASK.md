@@ -43,7 +43,11 @@ A change is accepted when all of these hold:
 - Measured on the fp32 dS row sums before dS is quantized, and on the delta used against the delta recomputed from the
   same fp8 P / dP.
 - Every row, with no exemptions, stays within fp32 round-off of its residual in the ORIGINAL kernel (main 3d4cd5b).
-- Error against fp32: per case at most 1e-5 relative above the original, and the mean over cases does not rise.
+  "fp32 round-off of the row" is the round-off of computing its sum from its own terms: |sum t|_cand <=
+  |sum t|_orig + k 2^-23 (sum |P^ dP| + |delta| sum P^) (benchmarks/v5; decided round 21, rule-change-r10.md).
+- Error against fp32: per case at most 1e-5 relative above the original (relative-L2 error units; both readings
+  reported), and the mean over cases does not rise. A repaired inherited defect (the original's NaN becoming finite
+  and correct, error not larger anywhere) is allowed.
 - Deterministic outputs; the debug build equals the production build.
 - Coverage: 72 cases x 4 routes, the four acceptance shapes with at least three seeds, and stress inputs (scaled x3 and
   x10, outliers, near-one-hot rows, long sequences).

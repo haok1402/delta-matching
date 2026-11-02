@@ -462,3 +462,139 @@ O round-off. Under reading B, the matched failures are O changes of +1.0e-5 to +
 (C3g, nofold, C3n2 alike), and one dK change from EXPBX64. The mean rises are all at most 1.04e-6 absolute; v4's noise
 allowance of 1e-6 would have absorbed all but HEAD's dK. "Does not rise" taken literally fails for every non-bitwise
 change.
+
+## (g) Attribution of HEAD's error-clause failures along the acceptance chain (for results/residual_v5_audit.md section f)
+
+**Data.** These are the same production-path captures as (f), default route; the other 3 routes are identical.
+`attrib.py` prints this table. The chain is:
+- original 3d4cd5b;
+- 9be3622 = the r17_p1 state before C3g. Its errors are bitwise equal to the original's on all 72 x 4 (r14_h3 and
+  every earlier bitwise piece are inside this interval);
+- C3g c1ceece;
+- the pass-0 stack 19c238b (bitwise vs C3g on all 72 x 4);
+- EXPBX64 7a06674;
+- C4 65d4424 (bitwise vs EXPBX64);
+- HEAD r19_fwd (the S19 forward stack; bitwise vs C4).
+
+Extra builds that split C3g:
+- **BM192 only:** c1ceece with FWDLAZY = 0 and FWDDFOLD = 0, i.e. 192 x 128 tiles with the original O rescale and
+  descale.
+- **C3n2:** BM192 + FWDLAZY, without the fold.
+- **nofold:** HEAD without the fold.
+- **revert:** section (h).
+
+**Reconciling with kda-fwd.** HEAD fails 33 case-outputs vs the original (O 14, dQ 11, dK 8, dV 0). These are the
+same cases as kda-fwd's "O 14 / dQ 11 / dK 8" (their counts follow reading B). kda-fwd's worst values, dQ +2.3e-3 and
+dK +3.2e-3 relative on d128_mqa/causal/stale, are the +1.49e-4 / +2.11e-4 absolute values in (f). Their O worst,
++1.5e-4 relative, is d128_outliers/full/stale. "A+B" in the table marks failures under both readings; "B" fails only
+the relative reading.
+
+**Culprit list:**
+- **C3g is where 32 of the 33 first fail.** Within C3g, the 192 x 128 tiling alone (BM192 only) already reproduces
+  almost every rise: alone it fails 29 (B) / 8 (A) case-outputs vs the original, against C3n2's 30 / 9 and C3g's
+  32 / 12. FWDLAZY and the fold change the size of the rise only marginally:
+  - LAZY adds 1 case under B, e.g. d128_scale3/full/stale dQ goes from -7.3e-5 (BM192 only) to +5.1e-5;
+  - the fold adds 2 under B, e.g. d128_scale10/full/stale dK goes from -2.2e-5 to +1.2e-5.
+  The O rises (14 cases, all from the forward) are identical in BM192 only, C3n2 and C3g. The dQ / dK rises on stale
+  cases are those O changes amplified by the stale delta, rowsum(dO * O).
+- **EXPBX64 is where 1 of the 33 first fails:** d128_bhnd/causal/matched dK, +1.2e-5 relative. It also adds
+  +1.1e-4 relative on d128_scale3/causal/stale dQ and dK, which C3g had already pushed over the threshold.
+- **C4 and the S19 forward stack contribute nothing:** they are bitwise.
+
+HEAD vs original: 33 failing case-outputs; by output: {'O': 14, 'dQ': 11, 'dK': 8, 'dV': 0}
+
+| case | out | fails | original 3d4cd5b | pre-C3g 9be3622 (r17_p1) | C3g c1ceece | pass-0 stack 19c238b | EXPBX64 7a06674 | C4 65d4424 | HEAD (S19 fwd) r19_fwd | BM192 only | BM192+LAZY (C3n2) | HEAD w/o fold (nofold) | revert | fails first at; step changes (rel) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| d128_bhnd/causal/matched | dK | B | 6.377446e-02 | 6.377446e-02 | 6.377443e-02 (-4.7e-07) | 6.377443e-02 (-4.7e-07) | 6.377518e-02 (+1.1e-05) | 6.377518e-02 (+1.1e-05) | 6.377518e-02 (+1.1e-05) | 6.377441e-02 (-7.0e-07) | 6.377441e-02 (-7.0e-07) | 6.377517e-02 (+1.1e-05) | 6.377446e-02 | **EXPBX64**, C3g -4.7e-07, EXPBX64 +1.2e-05 |
+| d128_bhnd/full/stale | dQ | B | 6.591269e-02 | 6.591269e-02 | 6.591494e-02 (+3.4e-05) | 6.591494e-02 (+3.4e-05) | 6.591471e-02 (+3.1e-05) | 6.591471e-02 (+3.1e-05) | 6.591471e-02 (+3.1e-05) | 6.591500e-02 (+3.5e-05) | 6.591491e-02 (+3.4e-05) | 6.591470e-02 (+3.1e-05) | 6.591269e-02 | **C3g**, C3g +3.4e-05, EXPBX64 -3.5e-06 |
+| d128_gqa3_promote/causal/stale | dK | A+B | 6.537305e-02 | 6.537305e-02 | 6.538387e-02 (+1.7e-04) | 6.538387e-02 (+1.7e-04) | 6.538390e-02 (+1.7e-04) | 6.538390e-02 (+1.7e-04) | 6.538390e-02 (+1.7e-04) | 6.538394e-02 (+1.7e-04) | 6.538387e-02 (+1.7e-04) | 6.538391e-02 (+1.7e-04) | 6.537305e-02 | **C3g**, C3g +1.7e-04, EXPBX64 +5.7e-07 |
+| d128_gqa3_promote/causal/stale | dQ | A+B | 6.586117e-02 | 6.586117e-02 | 6.590614e-02 (+6.8e-04) | 6.590614e-02 (+6.8e-04) | 6.590614e-02 (+6.8e-04) | 6.590614e-02 (+6.8e-04) | 6.590614e-02 (+6.8e-04) | 6.590618e-02 (+6.8e-04) | 6.590614e-02 (+6.8e-04) | 6.590613e-02 (+6.8e-04) | 6.586117e-02 | **C3g**, C3g +6.8e-04, EXPBX64 +1.1e-07 |
+| d128_gqa3_promote/full/stale | dQ | B | 6.578504e-02 | 6.578504e-02 | 6.578681e-02 (+2.7e-05) | 6.578681e-02 (+2.7e-05) | 6.578689e-02 (+2.8e-05) | 6.578689e-02 (+2.8e-05) | 6.578689e-02 (+2.8e-05) | 6.578688e-02 (+2.8e-05) | 6.578680e-02 (+2.7e-05) | 6.578685e-02 (+2.7e-05) | 6.578504e-02 | **C3g**, C3g +2.7e-05, EXPBX64 +1.2e-06 |
+| d128_gqa4/causal/matched | O | B | 4.629167e-02 | 4.629167e-02 | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629340e-02 (+3.7e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629167e-02 | **C3g**, C3g +3.8e-05 |
+| d128_gqa4/causal/stale | O | B | 4.629167e-02 | 4.629167e-02 | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629340e-02 (+3.7e-05) | 4.629343e-02 (+3.8e-05) | 4.629343e-02 (+3.8e-05) | 4.629167e-02 | **C3g**, C3g +3.8e-05 |
+| d128_gqa4/causal/stale | dK | B | 6.466066e-02 | 6.466066e-02 | 6.466527e-02 (+7.1e-05) | 6.466527e-02 (+7.1e-05) | 6.466565e-02 (+7.7e-05) | 6.466565e-02 (+7.7e-05) | 6.466565e-02 (+7.7e-05) | 6.466529e-02 (+7.2e-05) | 6.466537e-02 (+7.3e-05) | 6.466566e-02 (+7.7e-05) | 6.466066e-02 | **C3g**, C3g +7.1e-05, EXPBX64 +5.8e-06 |
+| d128_gqa4/causal/stale | dQ | A+B | 6.552625e-02 | 6.552625e-02 | 6.555036e-02 (+3.7e-04) | 6.555036e-02 (+3.7e-04) | 6.555016e-02 (+3.6e-04) | 6.555016e-02 (+3.6e-04) | 6.555016e-02 (+3.6e-04) | 6.555037e-02 (+3.7e-04) | 6.555039e-02 (+3.7e-04) | 6.555020e-02 (+3.7e-04) | 6.552625e-02 | **C3g**, C3g +3.7e-04, EXPBX64 -3.1e-06 |
+| d128_heldout/causal/stale | dQ | B | 6.613271e-02 | 6.613271e-02 | 6.613374e-02 (+1.6e-05) | 6.613374e-02 (+1.6e-05) | 6.613375e-02 (+1.6e-05) | 6.613375e-02 (+1.6e-05) | 6.613375e-02 (+1.6e-05) | 6.613345e-02 (+1.1e-05) | 6.613375e-02 (+1.6e-05) | 6.613376e-02 (+1.6e-05) | 6.613271e-02 | **C3g**, C3g +1.6e-05, EXPBX64 +2.3e-07 |
+| d128_min/full/stale | O | B | 5.155167e-02 | 5.155167e-02 | 5.155522e-02 (+6.9e-05) | 5.155522e-02 (+6.9e-05) | 5.155522e-02 (+6.9e-05) | 5.155522e-02 (+6.9e-05) | 5.155522e-02 (+6.9e-05) | 5.155523e-02 (+6.9e-05) | 5.155522e-02 (+6.9e-05) | 5.155522e-02 (+6.9e-05) | 5.155167e-02 | **C3g**, C3g +6.9e-05 |
+| d128_mqa/causal/matched | O | B | 4.654897e-02 | 4.654897e-02 | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654943e-02 (+1.0e-05) | 4.654947e-02 (+1.1e-05) | 4.654947e-02 (+1.1e-05) | 4.654897e-02 | **C3g**, C3g +1.0e-05 |
+| d128_mqa/causal/stale | O | B | 4.654897e-02 | 4.654897e-02 | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654944e-02 (+1.0e-05) | 4.654943e-02 (+1.0e-05) | 4.654947e-02 (+1.1e-05) | 4.654947e-02 (+1.1e-05) | 4.654897e-02 | **C3g**, C3g +1.0e-05 |
+| d128_mqa/causal/stale | dK | A+B | 6.558351e-02 | 6.558351e-02 | 6.579388e-02 (+3.2e-03) | 6.579388e-02 (+3.2e-03) | 6.579442e-02 (+3.2e-03) | 6.579442e-02 (+3.2e-03) | 6.579442e-02 (+3.2e-03) | 6.580021e-02 (+3.3e-03) | 6.579388e-02 (+3.2e-03) | 6.579440e-02 (+3.2e-03) | 6.558351e-02 | **C3g**, C3g +3.2e-03, EXPBX64 +8.2e-06 |
+| d128_mqa/causal/stale | dQ | A+B | 6.572077e-02 | 6.572077e-02 | 6.586918e-02 (+2.3e-03) | 6.586918e-02 (+2.3e-03) | 6.586932e-02 (+2.3e-03) | 6.586932e-02 (+2.3e-03) | 6.586932e-02 (+2.3e-03) | 6.586925e-02 (+2.3e-03) | 6.586919e-02 (+2.3e-03) | 6.586931e-02 (+2.3e-03) | 6.572077e-02 | **C3g**, C3g +2.3e-03, EXPBX64 +2.0e-06 |
+| d128_mqa/full/stale | dQ | B | 6.594842e-02 | 6.594842e-02 | 6.595290e-02 (+6.8e-05) | 6.595290e-02 (+6.8e-05) | 6.595280e-02 (+6.6e-05) | 6.595280e-02 (+6.6e-05) | 6.595280e-02 (+6.6e-05) | 6.595329e-02 (+7.4e-05) | 6.595293e-02 (+6.8e-05) | 6.595282e-02 (+6.7e-05) | 6.594842e-02 | **C3g**, C3g +6.8e-05, EXPBX64 -1.5e-06 |
+| d128_outliers/causal/matched | O | B | 4.387768e-02 | 4.387768e-02 | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.387768e-02 | **C3g**, C3g +1.0e-04 |
+| d128_outliers/causal/stale | O | B | 4.387768e-02 | 4.387768e-02 | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.388224e-02 (+1.0e-04) | 4.387768e-02 | **C3g**, C3g +1.0e-04 |
+| d128_outliers/full/stale | O | B | 6.014869e-02 | 6.014869e-02 | 6.015744e-02 (+1.5e-04) | 6.015744e-02 (+1.5e-04) | 6.015744e-02 (+1.5e-04) | 6.015744e-02 (+1.5e-04) | 6.015744e-02 (+1.5e-04) | 6.015744e-02 (+1.5e-04) | 6.015744e-02 (+1.5e-04) | 6.015744e-02 (+1.5e-04) | 6.014869e-02 | **C3g**, C3g +1.5e-04 |
+| d128_outliers/full/stale | dK | A+B | 2.365336e-01 | 2.365336e-01 | 2.365690e-01 (+1.5e-04) | 2.365690e-01 (+1.5e-04) | 2.365690e-01 (+1.5e-04) | 2.365690e-01 (+1.5e-04) | 2.365690e-01 (+1.5e-04) | 2.365649e-01 (+1.3e-04) | 2.365654e-01 (+1.3e-04) | 2.365654e-01 (+1.3e-04) | 2.365336e-01 | **C3g**, C3g +1.5e-04 |
+| d128_scale10/causal/matched | O | B | 2.716662e-01 | 2.716662e-01 | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716727e-01 (+2.4e-05) | 2.716727e-01 (+2.4e-05) | 2.716727e-01 (+2.4e-05) | 2.716662e-01 | **C3g**, C3g +2.4e-05 |
+| d128_scale10/causal/stale | O | B | 2.716662e-01 | 2.716662e-01 | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716728e-01 (+2.4e-05) | 2.716727e-01 (+2.4e-05) | 2.716727e-01 (+2.4e-05) | 2.716727e-01 (+2.4e-05) | 2.716662e-01 | **C3g**, C3g +2.4e-05 |
+| d128_scale10/causal/stale | dK | A+B | 1.132767e+00 | 1.132767e+00 | 1.132878e+00 (+9.8e-05) | 1.132878e+00 (+9.8e-05) | 1.132878e+00 (+9.8e-05) | 1.132878e+00 (+9.8e-05) | 1.132878e+00 (+9.8e-05) | 1.132867e+00 (+8.8e-05) | 1.132862e+00 (+8.4e-05) | 1.132862e+00 (+8.4e-05) | 1.132767e+00 | **C3g**, C3g +9.8e-05 |
+| d128_scale10/causal/stale | dQ | A+B | 1.135367e+00 | 1.135367e+00 | 1.135452e+00 (+7.4e-05) | 1.135452e+00 (+7.4e-05) | 1.135451e+00 (+7.4e-05) | 1.135451e+00 (+7.4e-05) | 1.135451e+00 (+7.4e-05) | 1.135432e+00 (+5.7e-05) | 1.135432e+00 (+5.7e-05) | 1.135431e+00 (+5.7e-05) | 1.135367e+00 | **C3g**, C3g +7.4e-05, EXPBX64 -1.0e-07 |
+| d128_scale10/full/stale | O | B | 3.073757e-01 | 3.073757e-01 | 3.073809e-01 (+1.7e-05) | 3.073809e-01 (+1.7e-05) | 3.073809e-01 (+1.7e-05) | 3.073809e-01 (+1.7e-05) | 3.073809e-01 (+1.7e-05) | 3.073812e-01 (+1.8e-05) | 3.073812e-01 (+1.8e-05) | 3.073812e-01 (+1.8e-05) | 3.073757e-01 | **C3g**, C3g +1.7e-05 |
+| d128_scale10/full/stale | dK | A+B | 1.159049e+00 | 1.159049e+00 | 1.159063e+00 (+1.2e-05) | 1.159063e+00 (+1.2e-05) | 1.159063e+00 (+1.2e-05) | 1.159063e+00 (+1.2e-05) | 1.159063e+00 (+1.2e-05) | 1.159022e+00 (-2.4e-05) | 1.159024e+00 (-2.2e-05) | 1.159023e+00 (-2.3e-05) | 1.159049e+00 | **C3g**, C3g +1.2e-05 |
+| d128_scale10/full/stale | dQ | A+B | 1.169416e+00 | 1.169416e+00 | 1.169432e+00 (+1.4e-05) | 1.169432e+00 (+1.4e-05) | 1.169432e+00 (+1.4e-05) | 1.169432e+00 (+1.4e-05) | 1.169432e+00 (+1.4e-05) | 1.169379e+00 (-3.2e-05) | 1.169383e+00 (-2.8e-05) | 1.169382e+00 (-2.9e-05) | 1.169416e+00 | **C3g**, C3g +1.4e-05, EXPBX64 -1.0e-07 |
+| d128_scale3/causal/matched | O | B | 1.172482e-01 | 1.172482e-01 | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172499e-01 (+1.5e-05) | 1.172499e-01 (+1.5e-05) | 1.172499e-01 (+1.5e-05) | 1.172482e-01 | **C3g**, C3g +1.6e-05 |
+| d128_scale3/causal/stale | O | B | 1.172482e-01 | 1.172482e-01 | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172500e-01 (+1.6e-05) | 1.172499e-01 (+1.5e-05) | 1.172499e-01 (+1.5e-05) | 1.172499e-01 (+1.5e-05) | 1.172482e-01 | **C3g**, C3g +1.6e-05 |
+| d128_scale3/causal/stale | dK | A+B | 2.320288e-01 | 2.320288e-01 | 2.320408e-01 (+5.2e-05) | 2.320408e-01 (+5.2e-05) | 2.320674e-01 (+1.7e-04) | 2.320674e-01 (+1.7e-04) | 2.320674e-01 (+1.7e-04) | 2.320372e-01 (+3.6e-05) | 2.320366e-01 (+3.4e-05) | 2.320633e-01 (+1.5e-04) | 2.320288e-01 | **C3g**, C3g +5.2e-05, EXPBX64 +1.1e-04 |
+| d128_scale3/causal/stale | dQ | A+B | 2.331026e-01 | 2.331026e-01 | 2.331158e-01 (+5.7e-05) | 2.331158e-01 (+5.7e-05) | 2.331421e-01 (+1.7e-04) | 2.331421e-01 (+1.7e-04) | 2.331421e-01 (+1.7e-04) | 2.331112e-01 (+3.7e-05) | 2.331112e-01 (+3.7e-05) | 2.331372e-01 (+1.5e-04) | 2.331026e-01 | **C3g**, C3g +5.7e-05, EXPBX64 +1.1e-04 |
+| d128_scale3/full/stale | O | B | 1.242314e-01 | 1.242314e-01 | 1.242346e-01 (+2.6e-05) | 1.242346e-01 (+2.6e-05) | 1.242346e-01 (+2.6e-05) | 1.242346e-01 (+2.6e-05) | 1.242346e-01 (+2.6e-05) | 1.242346e-01 (+2.6e-05) | 1.242346e-01 (+2.6e-05) | 1.242346e-01 (+2.6e-05) | 1.242314e-01 | **C3g**, C3g +2.6e-05 |
+| d128_scale3/full/stale | dQ | B | 2.382129e-01 | 2.382129e-01 | 2.382188e-01 (+2.5e-05) | 2.382188e-01 (+2.5e-05) | 2.382192e-01 (+2.6e-05) | 2.382192e-01 (+2.6e-05) | 2.382192e-01 (+2.6e-05) | 2.381956e-01 (-7.3e-05) | 2.382251e-01 (+5.1e-05) | 2.382255e-01 (+5.3e-05) | 2.382129e-01 | **C3g**, C3g +2.5e-05, EXPBX64 +1.4e-06 |
+
+## (h) The revert tree (C3g and EXPBX64 reverted; C4 and every bitwise piece kept): build and verification
+
+**Tree.** `.local/wt/v5-revert-prod` (production; this is the release candidate) is `git archive` of kda-sm90 HEAD
+8ec1517 with:
+- `delta_matching/_buildcfg.py`: FA3FP11_HD128_BM192 = 0, BN256 = 1, FWDLAZY = 0, FWDDFOLD = 0, and FWDST = 2 (the
+  original's 2 forward K/V stages at 128 x 256);
+- `csrc/dm_flagset.h`: the same five values, with comments;
+- `#define KDA_PK_EXPB 0` in `csrc/fp11_delta_v6.h` and in `csrc/mainloop_bwd_sm90_fp8r.hpp`.
+
+`diff -r` against HEAD shows only these lines. `.local/wt/v5-revert` is the same tree plus the v5 DBG extension.
+Libraries: `.local/jit/v5-revert-prod/_C.so` (sha256 d7bc8a70...) and `.local/jit/v5-revert-dbg`. Job 21204943.
+
+**EXPB = 0 and C4.**
+- EXPB = 0 is the certified original exp line in both passes:
+  - pass 0: lse0 = fl(lse * log2e), then exp2f(fminf(s * dsc - lse0 + 8, 12));
+  - pass 1: lse_scaled = __fmul_rn(LSE, log2e), then exp2f(KDA_F1C(s * dsc - lse_scaled + 8)), with kClampC = true.
+- C4's masked-line-only clamp (KDA_NOCLAMP = 4, the `orig` / `fq8_x64_orig` predicate) exists only inside the
+  `KDA_PK_EXPB == 6` branches. With EXPB = 0, KDA_F1 / KDA_F1C clamp every element: the ORIGINAL clamp form on every
+  line. So C4 keeps only its SHFL8 part, which is bitwise.
+- With BN256, the S19 forward pieces (SMSC: kGroups == 2; PRETURN / PREW: FWDLAZY) are compiled out. The forward is
+  the original 128 x 256 kernel.
+
+**Verification against the ORIGINAL (frozen base 3d4cd5b; a fresh equivalence dump, manifest v4):**
+- **equivalence.py dump / compare on all 4 routes.** The only mismatching tensors are in d128_zeros, the all-zero-input
+  known defect: 13 (default), 17 (kv), 25 (head), 17 (streams2) tensors, all of them O / LSE / delta / dK
+  intermediates and outputs of that one case. Every other case is byte-identical, every intermediate included. The
+  fp32 error is larger in 0 (case, tensor) pairs.
+- **Attribution of the d128_zeros difference.** It comes from the forward's FLT_MIN floor on the S-descale scales,
+  added on the BN256 path by f3396a6 (C3n2) within the C3g range. The commit message says it is "bitwise for nonzero
+  scales; zero-input O finite". The original gives NaN O (matched and causal stale) and NaN stale dK on that case; the
+  revert gives finite O / dK with error 0.0. It is a defect repair, not an arithmetic change on any finite case. Strict
+  byte equality would need that floor removed as well; I left it in, for the integrator to decide.
+- **Error audit (err_audit.py, 72 x 4).** 0 changed errors on every finite case-output, 0 failures under readings A and
+  B, and no mean rise on any output. The 6 non-finite pairs are the original's zeros NaNs: d128 is repaired to 0.0,
+  d256 is NaN in both.
+- **v5 row check (v5-abs and the ratio form) vs the original.** 0 rows worse, max c needed 0, on the 72 cases x 4
+  routes (334,592 rows each), the acceptance shapes (11,796,480 rows, 3 seeds) and stress (1,703,936 rows). Reports:
+  `~/workspace/haok1402/kda-results/r21-v5/revert_vs_orig/`.
+- **DBG = production:** the revert's DBG build reproduces its production outputs byte-for-byte on all 72 cases.
+
+**Timing** (`ab.py run --grid paper --reps 3`, jobs 21205385 / 21205386; `~/workspace/haok1402/kda-results/r21-v5/ab_revert_vs_{r19fwd,base}/ab.md`).
+Per-kernel sums over the paper grid (D128 causal matched; B2 N8192 and B1 N65536 at 16/4 and 32/4):
+
+| kernel | r19_fwd -> revert | original -> revert |
+|---|---|---|
+| fwd | +15.68% | +0.04% |
+| pass 0 | +7.01% | -12.63% |
+| pass 1 | +3.07% | -9.55% |
+| pass 2 | -0.21% | -9.17% |
+| glue | -0.07% | -36.53% |
+| e2e fwd | +12.75% | -3.56% |
+| e2e fwd+bwd | **+5.95%** | **-8.32%** |
+
+Per shape, fwd+bwd vs r19_fwd: +5.74% / +6.06% (64K at 16/4 and 32/4) and +6.27% / +5.73% (8K at 16/4 and 32/4),
+all beyond spread. Vs the original: -8.13% / -8.29% / -13.31% / -9.42%.
+
+The revert gives up the whole forward gain (the forward is back at the original's time) and EXPBX64's pass-0 / pass-1
+gain. It keeps every bitwise backward and glue gain: fwd+bwd is 8.3% faster than the original and 5.95% slower than
+r19_fwd.

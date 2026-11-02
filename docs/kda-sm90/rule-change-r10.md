@@ -284,3 +284,13 @@ Added as given; where it disagrees with plan.md or older notes, TASK.md wins. Fa
   (needed factor up to 89): they perturb the input, not the summation, so they do not calibrate it.
   Delta used vs delta recomputed from the same fp8 P / dP: within fp32 round-off (<= 3.5e-7 relative) in every build.
   The error-against-fp32 clause of TASK.md is audited next; it decides C3g / EXPBX64.
+- Decided (round 21), the TASK.md error clause and the re-audit (evidence: results/residual_v5_audit.md section f; all
+  four routes identical): forward C3g FAILS (absolute reading +1e-5: 12 stale / full case-outputs, worst
+  d128_mqa/causal/stale dK +2.1e-4; relative reading x(1 + 1e-5): also 5 matched O cases up to +1.04e-4 relative; the
+  per-output mean rises for O / dK / dV); EXPBX64 FAILS (2 stale case-outputs absolute; +1 matched dK +1.2e-5
+  relative; dQ / dK means rise); C4 PASSES (bitwise to its predecessor); the fold-free fallbacks (nofold, C3n2) fail
+  the same O cases, so the cause is BM192 + FWDLAZY, not the fold. TASK.md: a failing accepted change is reverted or
+  fixed before anything else is accepted -> C3g and EXPBX64 are REVERTED to the original arithmetic (release flags:
+  FA3FP11_HD128_BM192 = 0, BN256 = 1, FWDLAZY = 0, FWDDFOLD = 0; KDA_PK_EXPB = 0 in pass 0 and pass 1) while every
+  bitwise piece stays; the revert is accepted on bitwise equality with the original arithmetic (or the v5 audit) and
+  needs no speed gain. Fixes re-enter only as new candidates passing residual-v5 + the error clause.

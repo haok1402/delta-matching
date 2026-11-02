@@ -78,6 +78,8 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 
 | S44 | b3qkr / qkr256 | ping-pong | only the QK issue inside the ring turn, PV chain free-running (3 WGs / 2 WGs) | = C3 / = S26 | -3.20% / +3.10% geo (job 21177775; C3b -12.79%, S26 -6.89%): the turn must cover PV chain + QK |
 
+| S45 | b3os / b2os | registers | O accumulator in shared memory (thread-private float4 chunks), FA3-order step (turn = g0 + QK, rescale / g1 / softmax / promote outside) | = b3ld / bn128ld class | b2os (2 WGs, BN128) +21.7% geo (job 21178384); b3os (3 WGs) does not launch: O 96 KB + 2 K/V/Vt stages + Q + epilogue exceed 227 KB. Rejected |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below
@@ -202,3 +204,17 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   code apart from the floor, so treat as unconfirmed.
 - An edit error in the first C3g build (prologue descale commented out; O garbage, job 21178005) was caught by the
   numerics run and fixed before any timing was used.
+
+## Status after round 2 of kda-fwd (forward)
+
+- Best: C3g (BM192 three-WG + lazy O rescale + S-descale fold on unmasked steps + RHOPRE + 3 stages + zero-scale floor):
+  fwd -12.7% / -13.1% vs the accepted build on the paper shapes, ~1.14 x FA3 fp8 (the accepted build is ~1.31 x).
+- What limits it (measured): each consumer WG is a latency-bound serial chain (PV chain -> QK -> softmax); in the 3-WG
+  layout the ring turn (PV chain with one rescale wait + promote + QK issue) is ~60% of the step. Every overlap that
+  needs more than 160 registers spills (QK split, FA3 order, second temp), extra ring turns or moving QK out of the
+  turn are much slower, and O in smem does not fit / is slower.
+- The faithful per-64-key P basis costs two ops per score (rho rescale + promote) that no bitwise or round-off
+  reformulation removed (PVIL, GRPFOLD, SPLIT2, IL2, GPP variants); kda-fwdport measures the same work at ~24% over FA3
+  without scale loads, so FA3 parity under this numerics contract needs latency hiding beyond FA3's own.
+- kda-fwdport owns the k / v scale staging (smem) lever (the descale cost is mostly k-scale load latency); it stacks
+  on C3g.

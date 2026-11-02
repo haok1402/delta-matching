@@ -34,13 +34,13 @@ void run_flash_fwd_fp8port_impl(Flash_fwd_fp8_params &params, cudaStream_t strea
     using ArchTag = cutlass::arch::Sm90;
     static constexpr int kHeadDim = kHeadDim_;
     static constexpr int kHeadDimV = kHeadDim_;
-    static constexpr int kBlockM = 128;
+    static constexpr int kBlockM = (kVar / 10000000 % 10) == 1 ? 192 : 128;   // ## FWDPORT: BM192 = three consumer warpgroups
     // ## Delta-Matching-128 F3 (FA3FP11_HD128_BN256=1, hd128 only): 256-key tiles (four 64-key groups per tile, half the tile
     // boundaries); the d256 configuration stays 128 x 128.
     static constexpr int kBlockN = (kVar / 1000 % 10) == 0 ? 256 : (kVar / 1000 % 10) == 1 ? 224 : (kVar / 1000 % 10) == 2 ? 192 : 128;
     static constexpr bool MmaPV_is_RS = true;
     static constexpr bool IntraWGOverlap = true;
-    static constexpr int kStages = 2;
+    static constexpr int kStages = (kVar / 10000000 % 10) == 1 ? 3 : 2;
 
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
     using TileShape_MNK_PV = cute::Shape<Int<kBlockM>, Int<kHeadDimV>, Int<kBlockN>>;

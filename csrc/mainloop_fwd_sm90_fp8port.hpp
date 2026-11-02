@@ -1362,7 +1362,8 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         // kVarBasis, kVarPV).  Scales: Q one per 128-row m-block, K/V one per 64-key block (blocks(128)).
         static_assert(IntraWGOverlap && !HasQv && !LargeHeadDimV && MmaPV_is_RS && !V_colmajor);
         int const fq8_bh = bidb * get<2>(params.shape_Q) + bidh;
-        float const fq8_q8sc = params.ptr_q8s[fq8_bh * params.nblk_q + m_block];
+        float const fq8_q8sc = params.ptr_q8s[fq8_bh * params.nblk_q + (kBlockM == 128 ? m_block
+                                              : min((m_block * kBlockM + warp_group_idx * 64) / 128, params.nblk_q - 1))];
         int const fq8_bh_k = (bidb * get<2>(params.shape_K) + bidh_kv) * params.nblk_k;
         float fq8_v[kGS];
         float fq8_vn[kGS];

@@ -23,6 +23,9 @@
 // Causal: the CTA's stage range is [0, p + 1) at seqlen_q == seqlen_k (longest CTAs first); the mask is per 64 x 64 tile
 // as in v4b.  Deterministic by construction (one writer per row, one fixed order).
 #pragma once
+#ifndef KDA_PK_EXPB
+#define KDA_PK_EXPB 0
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -349,8 +352,19 @@ struct DeltaV6 {
 
             cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(0));
             if (barrier_token == cutlass::BarrierStatus::WaitAgain) { shared_storage.pipelines.barrier_QdO.wait(0); }
+#if KDA_PK_EXPB == 1
+            // ## KDA_PK_EXPB (named numerics arm, pass 0 + pass 1 identically): the 2^8 offset folded into the per-row
+            // bias b = fma(lse, log2e, -8); P-hat = exp2(min(fma(s, dsc, -b), 12)): one FFMA + FMNMX + MUFU per element.
+            float const lse0 = __fmaf_rn(sLSE(row0, wg), float(M_LOG2E), -kFq8MoE);
+            float const lse1 = __fmaf_rn(sLSE(row1, wg), float(M_LOG2E), -kFq8MoE);
+#elif KDA_PK_EXPB == 2
+            // ## KDA_PK_EXPB=2: b = fl(fl(lse * log2e) - 8) (the host-precomputable form of the bias)
+            float const lse0 = __fadd_rn(__fmul_rn(sLSE(row0, wg), float(M_LOG2E)), -kFq8MoE);
+            float const lse1 = __fadd_rn(__fmul_rn(sLSE(row1, wg), float(M_LOG2E)), -kFq8MoE);
+#else
             float const lse0 = __fmul_rn(sLSE(row0, wg), float(M_LOG2E));   // the host prep's exact multiply
             float const lse1 = __fmul_rn(sLSE(row1, wg), float(M_LOG2E));
+#endif
             // The v4b per-tile arithmetic, VERBATIM: (1) S~ -> P~ (mask, descale, LSE, F1 clamp, exp2), (2) the fixed-order
             // half row sums; (3) the M5 reduce's fp64 fold (n-block ascending, half 0 then half 1) in registers.
             // ## M21 diet: the mask is a no-op on every n-block whose keys all lie at or below the row block's diagonal and
@@ -372,7 +386,11 @@ struct DeltaV6 {
                     #pragma unroll
                     for (int ni = 0; ni < 16; ++ni) {
                         float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
+#if KDA_PK_EXPB
+                        scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), dsc, -lse_scaled), kFq8MoE + 4.0f));
+#else
                         scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+#endif
                     }
                 }
             };

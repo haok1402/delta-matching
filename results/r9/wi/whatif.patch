@@ -1,0 +1,86 @@
+diff --git a/csrc/fq8_dq_pass2.h b/csrc/fq8_dq_pass2.h
+index 1d52f36..791bb28 100644
+--- a/csrc/fq8_dq_pass2.h
++++ b/csrc/fq8_dq_pass2.h
+@@ -103,6 +103,11 @@ constexpr int kBK = 64;      // contraction depth per tile (= pass-1 kBlockN)
+ // kStages=2 the CTA is 109568 B -> 2 CTAs/SM again (regs R158 allow 3), and
+ // the measured cost is 0.462 ms.  Pipeline depth changes NO arithmetic: the
+ // barrier phase/slot math below is depth-generic.
++#ifndef KDA_P2WI
++#define KDA_P2WI 0
++#endif
++// r9 what-if knobs (timing only except 4): 1 psi constant (no load), 2 no in-window rescale, 3 TMA depth 3 (hd128),
++// 4 = candidate PSIPF (next tile's psi loaded one iteration early, before the barrier wait; bitwise by construction)
+ constexpr int kStages = 2;
+ 
+ // ## FP11-M3: promotion window length in tiles (C).  PINNED at 8 (512 keys):
+@@ -255,11 +260,15 @@ fq8_dq_pass2_kernel(CUTE_GRID_CONSTANT P2Params const params) {
+     // to M2's on any psi field.
+     float psi_w = 0.0f;
+     float psi_max = 0.0f;
++    float psi_pf = (KDA_P2WI == 4 && nb_end > 0) ? psi_row[0] : 0.0f;
+     #pragma unroll 1
+     for (int nb = 0; nb < nb_end; ++nb) {
+         int const s = nb % kStages;
++        float psi_nxt = 0.0f;
++        if constexpr (KDA_P2WI == 4) { psi_nxt = (nb + 1 < nb_end) ? psi_row[nb + 1] : 0.0f; }
+         shared.full_bar[s].wait((nb / kStages) & 1);
+-        float const psi_cur = psi_row[nb];
++        float const psi_cur = KDA_P2WI == 4 ? psi_pf : (KDA_P2WI == 1 ? 1.0f : psi_row[nb]);
++        if constexpr (KDA_P2WI == 4) { psi_pf = psi_nxt; }
+         // ## FP11-F2: psi == 0.0f is pass 1's zero-tile sentinel (fully
+         // underflowed or fully masked tile; its dS' codes are exact zeros).
+         // ## FP11-F2b (dominance skip, M2): also skip any tile whose psi sits
+@@ -277,7 +286,7 @@ fq8_dq_pass2_kernel(CUTE_GRID_CONSTANT P2Params const params) {
+                 float ratio = psi_w / psi_cur;
+                 ratio = fminf(fmaxf(ratio, 1e-8f), 1e8f);
+                 #pragma unroll
+-                for (int i = 0; i < size(acc); ++i) { acc(i) *= ratio; }
++                for (int i = 0; i < size(acc); ++i) { if constexpr (KDA_P2WI != 2) { acc(i) *= ratio; } }
+                 flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(
+                     tiled_mma, tCrA(_, _, _, s), tCrB(_, _, _, s), acc);
+             } else {
+diff --git a/csrc/fq8_dq_pass2_hd128.h b/csrc/fq8_dq_pass2_hd128.h
+index ef1d815..ad1f336 100644
+--- a/csrc/fq8_dq_pass2_hd128.h
++++ b/csrc/fq8_dq_pass2_hd128.h
+@@ -126,7 +126,12 @@ constexpr int kBK = 128;     // contraction depth per tile (= pass-1 kBlockN at
+ // d256 67584 B, and a stage pair is 24576 B, so the CTA is 83968 B at depth 2 and 108544 B at depth 3: BOTH keep 2 CTAs
+ // per SM (the 116736 B half-SM budget), i.e. depth 3 is free occupancy-wise here where at d256 it cost half the CTAs.
+ // Depth changes no arithmetic (the barrier phase/slot math is depth-generic), so the outputs must be bitwise.
+-constexpr int kStages = FA3FP11_HD128_P2ST;
++#ifndef KDA_P2WI
++#define KDA_P2WI 0
++#endif
++// r9 what-if knobs (timing only except 4): 1 psi constant (no load), 2 no in-window rescale, 3 TMA depth 3 (hd128),
++// 4 = candidate PSIPF (next tile's psi loaded one iteration early, before the barrier wait; bitwise by construction)
++constexpr int kStages = (KDA_P2WI == 3 ? 3 : FA3FP11_HD128_P2ST);
+ 
+ // ## FP11-M3: promotion window length in tiles (C).  PINNED at 8 (512 keys):
+ // ONE realization class per the design notes (no build knob).  the derivation notes: the
+@@ -282,11 +287,15 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
+     // to M2's on any psi field.
+     float psi_w = 0.0f;
+     float psi_max = 0.0f;
++    float psi_pf = (KDA_P2WI == 4 && nb_end > 0) ? psi_row[0] : 0.0f;
+     #pragma unroll 1
+     for (int nb = 0; nb < nb_end; ++nb) {
+         int const s = nb % kStages;
++        float psi_nxt = 0.0f;
++        if constexpr (KDA_P2WI == 4) { psi_nxt = (nb + 1 < nb_end) ? psi_row[nb + 1] : 0.0f; }
+         shared.full_bar[s].wait((nb / kStages) & 1);
+-        float const psi_cur = psi_row[nb];
++        float const psi_cur = KDA_P2WI == 4 ? psi_pf : (KDA_P2WI == 1 ? 1.0f : psi_row[nb]);
++        if constexpr (KDA_P2WI == 4) { psi_pf = psi_nxt; }
+         // ## FP11-F2: psi == 0.0f is pass 1's zero-tile sentinel (fully
+         // underflowed or fully masked tile; its dS' codes are exact zeros).
+         // ## FP11-F2b (dominance skip, M2): also skip any tile whose psi sits
+@@ -304,7 +313,7 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
+                 float ratio = psi_w / psi_cur;
+                 ratio = fminf(fmaxf(ratio, 1e-8f), 1e8f);
+                 #pragma unroll
+-                for (int i = 0; i < size(acc); ++i) { acc(i) *= ratio; }
++                for (int i = 0; i < size(acc); ++i) { if constexpr (KDA_P2WI != 2) { acc(i) *= ratio; } }
+                 flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(
+                     tiled_mma, tCrA(_, _, _, s), tCrB(_, _, _, s), acc);
+             } else {

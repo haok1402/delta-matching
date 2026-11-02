@@ -1,0 +1,205 @@
+{
+ "steps": [
+  {
+   "step": "ab_main",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/ab.py",
+    "run",
+    "--a",
+    ".local/frozen/r3_do2",
+    "--b",
+    ".local/wt/p2st3",
+    "--grid",
+    "main",
+    "--reps",
+    "3",
+    "--subset",
+    "D128",
+    "--out-dir",
+    ".local/rounds/r9/gate_p2st3_2/ab_main"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/01_ab_main.log"
+  },
+  {
+   "step": "ab_holdout",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/ab.py",
+    "run",
+    "--a",
+    ".local/frozen/r3_do2",
+    "--b",
+    ".local/wt/p2st3",
+    "--grid",
+    "holdout",
+    "--reps",
+    "3",
+    "--subset",
+    "D128",
+    "--out-dir",
+    ".local/rounds/r9/gate_p2st3_2/ab_holdout"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/02_ab_holdout.log"
+  },
+  {
+   "step": "bench_A_rep0_D128",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/03_bench_A_rep0_D128.log"
+  },
+  {
+   "step": "bench_A_rep0_D256",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "256",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/04_bench_A_rep0_D256.log"
+  },
+  {
+   "step": "bench_B_rep0_D128",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/05_bench_B_rep0_D128.log"
+  },
+  {
+   "step": "bench_B_rep0_D256",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "256",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/06_bench_B_rep0_D256.log"
+  },
+  {
+   "step": "bench_B_rep1_D128",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/07_bench_B_rep1_D128.log"
+  },
+  {
+   "step": "bench_B_rep1_D256",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "256",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/08_bench_B_rep1_D256.log"
+  },
+  {
+   "step": "bench_A_rep1_D128",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/09_bench_A_rep1_D128.log"
+  },
+  {
+   "step": "bench_A_rep1_D256",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "256",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/10_bench_A_rep1_D256.log"
+  },
+  {
+   "step": "bench_A_rep2_D128",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/11_bench_A_rep2_D128.log"
+  },
+  {
+   "step": "bench_A_rep2_D256",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "256",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/12_bench_A_rep2_D256.log"
+  },
+  {
+   "step": "bench_B_rep2_D128",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/13_bench_B_rep2_D128.log"
+  },
+  {
+   "step": "bench_B_rep2_D256",
+   "cmd": [
+    ".local/envs/dm/bin/python",
+    "benchmarks/bench.py",
+    "--D",
+    "256",
+    "--N",
+    "8192"
+   ],
+   "rc": 0,
+   "log": ".local/rounds/r9/gate_p2st3_2/14_bench_B_rep2_D256.log"
+  }
+ ],
+ "result": "PASSED (all steps exited 0; the acceptance decision reads ab_*/ab.json and the logs)"
+}

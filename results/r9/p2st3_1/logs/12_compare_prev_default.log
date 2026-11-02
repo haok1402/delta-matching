@@ -1,0 +1,2 @@
+route default, FULL SUITE, A 7d491ed1a556 vs B d2eee98774eb
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs

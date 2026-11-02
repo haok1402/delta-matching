@@ -1,0 +1,12 @@
+[gate_identity] candidate package and library verified (sha256 d2eee98774ebac50)
+......ss............s...............................                     [100%]
+=============================== warnings summary ===============================
+tests/test_api.py: 14 warnings
+  /lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [2] tests/test_api.py:70: needs two GPUs
+SKIPPED [1] tests/test_api.py:105: could not import 'flash_attn': No module named 'flash_attn'
+49 passed, 3 skipped, 14 warnings in 15.20s

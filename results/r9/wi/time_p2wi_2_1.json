@@ -1,0 +1,194 @@
+{
+ "meta": {
+  "root": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/p2wi_2",
+  "package": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/p2wi_2/delta_matching",
+  "library": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/p2wi_2/delta_matching/_C.so",
+  "library_sha256": "1530187dc36b74639eee03fb70a1bab2512b490501f48169581f331308711c10",
+  "route": {
+   "groups": "off",
+   "streams": 1,
+   "ws_limit": 8589934592.0
+  },
+  "device": "NVIDIA H100 80GB HBM3",
+  "configs": [
+   [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "causal"
+   ],
+   [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "full"
+   ],
+   [
+    128,
+    1,
+    16,
+    16,
+    32768,
+    "causal"
+   ],
+   [
+    128,
+    4,
+    16,
+    4,
+    8192,
+    "causal"
+   ],
+   [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "causal"
+   ],
+   [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "full"
+   ],
+   [
+    256,
+    1,
+    8,
+    8,
+    32768,
+    "causal"
+   ]
+  ]
+ },
+ "records": [
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "causal",
+    "matched"
+   ],
+   "ms": {
+    "pass2": 0.9582395000000001,
+    "pass1": 3.8921789
+   }
+  },
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    4,
+    8192,
+    "causal",
+    "matched"
+   ],
+   "ms": {
+    "pass2": 0.9434489999999996,
+    "pass1": 3.9142068
+   }
+  },
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "full",
+    "stale"
+   ],
+   "ms": {
+    "pass2": 1.7960383000000015,
+    "pass1": 7.869550899999998
+   }
+  },
+  {
+   "cfg": [
+    128,
+    4,
+    16,
+    16,
+    8192,
+    "causal",
+    "stale"
+   ],
+   "ms": {
+    "pass2": 0.9583003999999986,
+    "pass1": 3.8884828999999987
+   }
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "causal",
+    "matched"
+   ],
+   "ms": {
+    "pass2": 0.8373257000000004,
+    "pass1": 4.009156999999998
+   }
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    2,
+    8192,
+    "causal",
+    "matched"
+   ],
+   "ms": {
+    "pass2": 0.8293355000000003,
+    "pass1": 4.0200471
+   }
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "full",
+    "stale"
+   ],
+   "ms": {
+    "pass2": 1.5029310000000038,
+    "pass1": 8.0052574
+   }
+  },
+  {
+   "cfg": [
+    256,
+    4,
+    8,
+    8,
+    8192,
+    "causal",
+    "stale"
+   ],
+   "ms": {
+    "pass2": 0.8385512000000004,
+    "pass1": 4.018070799999999
+   }
+  }
+ ]
+}

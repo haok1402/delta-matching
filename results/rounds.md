@@ -798,3 +798,8 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Forward helper: under residual-v4 the clamp / rho / promote / exp variants it can name save < noise or fail v4 by
   1-3 orders; the remaining 15.5% to FA3 fp8 is the faithful per-group P basis. Directed to build and screen shared-
   basis P codes per 128-key tile (3 WGs; 2 WGs + BN256) as a named numerics change: residual-v4 decides.
+- Forward shared-basis P codes (FWDSHB; kda-sm90-fwd-shb dbe37f3, 3 WGs / BN128): forward -4.41% / -4.33% vs r17_pk,
+  but residual-v4 FAILS on the default route (82 problems): matched O error rises by 1.3e-3 .. 4.2e-3 in 10 of 23 cases
+  (limit 1e-5; e.g. gqa3_promote 4.604e-2 -> 5.025e-2) and 7 matched rows beyond the envelope; the smaller groups'
+  codes lose precision on the shared basis (more e4m3 subnormals): a real accuracy loss, REJECTED. 2 WGs + BN256:
+  +8.3%. Forward helper back to DONE; the per-group P basis is the forward's remaining cost under the contract.

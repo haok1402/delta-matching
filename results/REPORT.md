@@ -83,7 +83,8 @@ Source: `results/r17/accepted_pk/sol4c.md` (`benchmarks/sol4.py`).
 ## What was tried and why it failed (summary; full ledgers in results/screens and the helpers' CANDIDATES.md)
 
 - Forward (~90 variants incl. kda-fwd S1-S54): every bitwise variant other than the accepted ones within noise or
-  slower; probes put the rho rescales at ~9% and the S descale at ~5% of the forward; scheduler-barrier alternatives
+  slower; probes put the rho rescales at ~9% and the S descale at ~5% of the forward; shared-basis P codes (no rho)
+  -4.4% but O error +1.3e-3..4.2e-3 (fails residual-v4 by 100-400x: real accuracy loss); scheduler-barrier alternatives
   +1..12%; QK splits and in-step branches spill at 160 registers; held bitwise stack PRETURN + k/v-scale staging -2.4%.
 - Pass 1 (~180 variants incl. kda-pass1's ~135): PINGPONG (round 6), MUFU-poly v1 (+5.6%), per-warpgroup psi
   (pass 2's second accumulator +7..9%), freeing registers for a pipelined S / dP (kda-p1split, +3.5-4%); per element

@@ -1,0 +1,118 @@
+diff --git a/csrc/delta_matching_api.cpp b/csrc/delta_matching_api.cpp
+index abc8b62..f405c6d 100644
+--- a/csrc/delta_matching_api.cpp
++++ b/csrc/delta_matching_api.cpp
+@@ -15,6 +15,9 @@
+ #ifndef KDA_PROF
+ #define KDA_PROF 0   // DM_PROF=1 builds set it: the profiling-only variant
+ #endif
++#ifndef KDA_PINGPONG
++#define KDA_PINGPONG 0
++#endif
+ #ifndef KDA_TRACE
+ #define KDA_TRACE 0  // DM_TRACE=1 builds set it: the timeline-only variant
+ #endif
+@@ -328,7 +331,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
+ #define FA3FP11_HALFPSI 0
+ #endif
+     // ## M23 HALFPSI: at head_dim 128 pass 1 publishes one psi per (tile, warpgroup half): [BH, nbm, nbn, 2].
+-    at::Tensor psi = torch::empty({int64_t(batch_size) * num_heads, nbm, nbn, (FA3FP11_HALFPSI && head_size == 128) ? 2 : 1}, opts.dtype(at::kFloat));
++    at::Tensor psi = torch::empty({int64_t(batch_size) * num_heads, nbm, nbn, ((FA3FP11_HALFPSI || KDA_PINGPONG) && head_size == 128) ? 2 : 1}, opts.dtype(at::kFloat));
+ #ifdef FA3FP11_DBG
+     if (g_dbg_ds8 != nullptr) { *g_dbg_ds8 = ds8; *g_dbg_psi = psi; }   // ## DBG (bwd_fp8_dbg_ds only)
+ #endif
+diff --git a/csrc/mainloop_bwd_sm90_fp8r.hpp b/csrc/mainloop_bwd_sm90_fp8r.hpp
+index 1024dd7..2a3d500 100644
+--- a/csrc/mainloop_bwd_sm90_fp8r.hpp
++++ b/csrc/mainloop_bwd_sm90_fp8r.hpp
+@@ -99,6 +99,9 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
+ #endif
+ 
+ #include "kda_prof.h"
++#ifndef KDA_PINGPONG
++#define KDA_PINGPONG 0
++#endif
+ 
+ namespace flash {
+ 
+@@ -619,6 +622,13 @@ struct CollectiveMainloopBwdSm90Fp8R {
+         int const warp_in_wg = wg_thread / cutlass::NumThreadsPerWarp;
+         uint32_t const wg_barrier_id = static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx;   // ids 5, 6: WG-local
+         KP_BEGIN();
++#if KDA_PINGPONG
++        // ## M26 (PINGPONG) prologue, once per CTA: warpgroup 1 hands warpgroup 0 the first turn.  Per tile each warpgroup
++        // syncs and arrives once per m-block, so the arrival left at a tile's end is the next tile's prologue.
++        if (work_idx == 0 && warp_group_idx == 1) {
++            cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1));
++        }
++#endif
+         KT_BEGIN(0);
+         // This warpgroup's dS' natural half tile (kBlockM rows x 64 keys, SW64) and its gmem box.
+         Tensor sdS = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + warp_group_idx * (1 + FA3FP11_P1R_DSDEFER) * kDsHalfElems), SmemLayoutDS{});
+@@ -718,6 +728,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
+             KT_VAL(30, smem_pipe_read.index()); KT_VAL(31, smem_pipe_read.phase()); KT(0);
+             consumer_wait(pipeline_q, smem_pipe_read);
+             KP(3);
++#if KDA_PINGPONG
++            // ## M26 (PINGPONG): this warpgroup's turn to issue its S / dP gemms (named barriers 2 / 3: dQEmptyWG1 / WG2,
++            // unused by this collective); the turn passes to the other warpgroup right after the dP issue below.
++            cutlass::arch::NamedBarrier::sync(2 * cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx);
++#endif
+             if constexpr (kSt >= 0) {
+                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, Int<kSt>{}), tSrS);
+             } else {
+@@ -753,6 +768,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
+             } else {
+                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrdP);
+             }
++#if KDA_PINGPONG
++            cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + (1 - warp_group_idx));
++#endif
+             KP(4);
+             warpgroup_wait<1>();   // S retired
+             KP(5);
+@@ -857,17 +875,32 @@ struct CollectiveMainloopBwdSm90Fp8R {
+             float* const fq8_psi_slots = fq8_psired + (m_block & 1) * 8;
+             if (lane == 0) { fq8_psi_slots[thread_idx / cutlass::NumThreadsPerWarp] = fq8_amax; }
+             KP(9);
++#if KDA_PINGPONG
++            // ## M26 (PINGPONG, per-warpgroup psi): the amax of this warpgroup's own 64-key half (its four warps' slots,
++            // disjoint from the other warpgroup's), behind a WG-local barrier: no cross-warpgroup rendezvous per tile.
++            cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, wg_barrier_id);
++            KP(10);
++            #pragma unroll
++            for (int w = 0; w < 4; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[4 * warp_group_idx + w]); }
++#else
+             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
+             KP(10);
+             #pragma unroll
+             for (int w = 0; w < NumMmaThreads / cutlass::NumThreadsPerWarp; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[w]); }
++#endif
+             bool const fq8_tile_zero = fq8_amax * (1.0f / 448.0f) < 1e-30f;
+             float const fq8_psi_raw = fmaxf(fq8_amax * (1.0f / 448.0f), 1e-30f);
+             float const fq8_psi = fmaxf(fq8_psi_raw, fq8_g_max * (256.0f * 1e-8f) / fq8_q8sc);
+             float const fq8_psi_inv = fq8_tile_zero ? 0.0f : 1.0f / fq8_psi;
++#if KDA_PINGPONG
++            if (wg_thread == 0) {   // psi field [BH, nbm, nbn, 2]: one scale per 64-key warpgroup half
++                params.ptr_psi[((int64_t(fq8_bh) * params.nbm + m_block) * params.nbn + n_block) * 2 + warp_group_idx] = fq8_tile_zero ? 0.0f : fq8_psi;
++            }
++#else
+             if (thread_idx == 0) {
+                 params.ptr_psi[(int64_t(fq8_bh) * params.nbm + m_block) * params.nbn + n_block] = fq8_tile_zero ? 0.0f : fq8_psi;
+             }
++#endif
+             // P~ codes as the RS A operand of dV (register renaming + the FA3 Aregs view; no smem).
+             flash::permute_Cregs_fp8(tSrS);
+             Tensor tdVrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
+diff --git a/delta_matching/_buildcfg.py b/delta_matching/_buildcfg.py
+index 431cc0f..7393164 100644
+--- a/delta_matching/_buildcfg.py
++++ b/delta_matching/_buildcfg.py
+@@ -55,6 +55,7 @@ FLAGS = {
+     "FA3FP11_P1R_SAGEDP": 1 if BF16_DP else 0,
+ }
+ EXTRA_DEFINES = ["-DFA3FP11_M16_P0V2_ATOMN=64", "-DFA3FP11_HD128_P0V6=1", "-DFA3FP11_P1R_MASKDIAG=1", "-DFA3FP11_P1R_RFSKIP=1"]
++EXTRA_DEFINES += ["-DKDA_PINGPONG=1"]   # stage-1 feasibility build (numerics incomplete: pass 2 reads one psi)
+ 
+ 
+ def defines():

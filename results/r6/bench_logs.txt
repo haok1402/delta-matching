@@ -1,0 +1,48 @@
+B2 H16 Hk4 N8192 D128, median ms over 20
+  delta_matching (matched)     forward   1.085   forward+backward   4.471
+  delta_matching (stale)       forward   1.094   forward+backward   3.840
+  flash-attn 3 (bf16)          forward   0.773   forward+backward   3.257
+B2 H16 Hk4 N8192 D256, median ms over 20
+  delta_matching (matched)     forward   2.005   forward+backward   8.472
+  delta_matching (stale)       forward   2.042   forward+backward   7.519
+  flash-attn 3 (bf16)          forward   1.389   forward+backward   8.156
+B2 H16 Hk4 N8192 D128, median ms over 20
+  delta_matching (matched)     forward   1.086   forward+backward   4.513
+  delta_matching (stale)       forward   1.087   forward+backward   3.884
+  flash-attn 3 (bf16)          forward   0.771   forward+backward   3.425
+B2 H16 Hk4 N8192 D256, median ms over 20
+  delta_matching (matched)     forward   2.005   forward+backward   8.475
+  delta_matching (stale)       forward   2.022   forward+backward   7.517
+  flash-attn 3 (bf16)          forward   1.387   forward+backward   8.124
+B2 H16 Hk4 N8192 D128, median ms over 20
+  delta_matching (matched)     forward   1.088   forward+backward   4.513
+  delta_matching (stale)       forward   1.086   forward+backward   3.880
+  flash-attn 3 (bf16)          forward   0.773   forward+backward   3.357
+B2 H16 Hk4 N8192 D256, median ms over 20
+  delta_matching (matched)     forward   2.004   forward+backward   8.499
+  delta_matching (stale)       forward   2.019   forward+backward   7.507
+  flash-attn 3 (bf16)          forward   1.390   forward+backward   8.086
+B2 H16 Hk4 N8192 D128, median ms over 20
+  delta_matching (matched)     forward   1.088   forward+backward   4.490
+  delta_matching (stale)       forward   1.086   forward+backward   3.837
+  flash-attn 3 (bf16)          forward   0.772   forward+backward   3.388
+B2 H16 Hk4 N8192 D256, median ms over 20
+  delta_matching (matched)     forward   2.006   forward+backward   8.471
+  delta_matching (stale)       forward   2.019   forward+backward   7.537
+  flash-attn 3 (bf16)          forward   1.387   forward+backward   8.166
+B2 H16 Hk4 N8192 D128, median ms over 20
+  delta_matching (matched)     forward   1.086   forward+backward   4.462
+  delta_matching (stale)       forward   1.085   forward+backward   3.837
+  flash-attn 3 (bf16)          forward   0.771   forward+backward   3.366
+B2 H16 Hk4 N8192 D256, median ms over 20
+  delta_matching (matched)     forward   2.005   forward+backward   8.465
+  delta_matching (stale)       forward   2.017   forward+backward   7.513
+  flash-attn 3 (bf16)          forward   1.389   forward+backward   8.067
+B2 H16 Hk4 N8192 D128, median ms over 20
+  delta_matching (matched)     forward   1.087   forward+backward   4.510
+  delta_matching (stale)       forward   1.086   forward+backward   3.881
+  flash-attn 3 (bf16)          forward   0.772   forward+backward   3.504
+B2 H16 Hk4 N8192 D256, median ms over 20
+  delta_matching (matched)     forward   2.006   forward+backward   8.471
+  delta_matching (stale)       forward   2.018   forward+backward   7.536
+  flash-attn 3 (bf16)          forward   1.384   forward+backward   8.084

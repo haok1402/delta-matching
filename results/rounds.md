@@ -87,7 +87,8 @@ A timeline-only build (`DM_TRACE=1`) records absolute clock64 event times for 8 
 actors (two consumer warpgroups, producer) in both pass-1 collectives; bitwise to the DO2 build (72 cases); +14-16%
 pass-1 overhead (dense probes +17-26%). Results in `results/timeline_pass1.md` (raw trace and summaries in results/r4/):
 in the sampled, instrumented records the consumer load-wait regions are short (60-100 cycles) and the producer
-acquire regions long (880-2900 cycles per step); the dK issue-to-retire/release tail region is ~220-255 cycles per step; vector work is ~2000-2600 of ~3850
+acquire regions long (880-2900 cycles per step); the bracket from the dV retire/release marker to the dK retire/release/state marker is ~220-255 cycles per
+step (from the dK issue marker: 269 / 280 cycles at D128 causal / full, 247 / 250 at D256); vector work is ~2000-2600 of ~3850
 cycles per warpgroup step; the warpgroups start each step within ~60 cycles of each other and only 4-40% of one's vector
 work runs under the other's wgmma. Next pass-1 hypothesis: H1b (task4 review first).
 
@@ -100,8 +101,8 @@ work runs under the other's wgmma. Next pass-1 hypothesis: H1b (task4 review fir
 
 ## Round 5: H1b, pass 1 hd128, dS' transpose / store deferred under the dK gemm: REJECTED (profile-based)
 
-- Hypothesis (timeline-based, results/timeline_pass1.md): the ~220-255-cycle dK issue-to-retire/release tail region
-  can absorb the dS' transpose / stmatrix / TMA store.
+- Hypothesis (timeline-based, results/timeline_pass1.md): the dK tail (269 / 280 cycles from the dK issue marker to
+  the dK retire/release/state marker at D128) can absorb the dS' transpose / stmatrix / TMA store.
 - Review first (task4, results/r5/task4_codex_review.md): SAFE at the source / PTX level (no access to rdS / rP /
   accumulators while outstanding; dV / dK retirement before dOt / Qt release and the fold; the sdS reuse sequence
   intact); register budget near 240, so the 8 packed words are overwritten in place.
@@ -114,8 +115,11 @@ work runs under the other's wgmma. Next pass-1 hypothesis: H1b (task4 review fir
 - Performance (job 21161224, A = DO2, B = H1b, 3 alternating reps): D128 pass 1 248.145 -> 244.075 ms (-1.64%) main,
   20.626 -> 20.136 ms (-2.38%) held-out; one D256 main shape +3.05% within its spread (D256 kernels unchanged).
   bench.py N8192 matched fwd+bwd D128 4.505 / 4.523 / 4.618 -> 4.487 / 4.479 / 4.544 ms.
-- Verdict: below the 3% gate; not merged (developed in a worktree). The dK tail region is only partly recoverable this
-  way (~60 of ~250 cycles per step).
+- Verdict: below the 3% gate; not merged (developed in a worktree). How many cycles of the instrumented dK bracket the
+  schedule recovered is not measured (kernel-level timing vs a perturbed diagnostic bracket). Placement: in the emitted
+  SASS of the causal masked path all 16 transpose shuffles run before the first dK QGMMA (under the outstanding dV),
+  other paths interleave them with the dK K-loop; the dS' stmatrix / TMA store do precede the group waits. The
+  measurement therefore tested the compiler-selected overlap, not every shuffle after the dK issue.
 - Counters: pass 1 eligible 0 -> 1.
 
 | kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
@@ -127,3 +131,37 @@ work runs under the other's wgmma. Next pass-1 hypothesis: H1b (task4 review fir
 
 Next (Hao, round 5): pass-1 warpgroup ping-pong with per-warpgroup psi, then partial FMA-polynomial exp2 (both
 non-bitwise: the Q2 numerics gate and Q3 workspace capture are their acceptance prerequisites).
+
+## Round 6: PINGPONG (pass 1 hd128): per-warpgroup psi + warpgroup ping-pong of the S / dP issue: REJECTED at stage 1
+
+- Hypothesis (Hao's direction after the timeline): staggering the two warpgroups so one's vector work runs under the
+  other's wgmma shortens the step; it needs per-warpgroup psi (no cross-warpgroup psi rendezvous).
+- Staged gate (round-6 contract): stage 1 builds the real pass-1 side of the design and times the gated metric; stage 2
+  (pass 2 two-scale consumption, Q2 numerics gate, Q3 workspace capture, full gate) only if stage 1 reaches 3%. Pass 2's
+  changes can only add cost to the candidate, so stage 1 bounds the pass-1 gain. Stage 1's numerics are intentionally
+  incomplete (pass 2 still reads one psi per tile): timing only.
+- Change (results/r6/pingpong_stage1.patch, worktree build, `KDA_PINGPONG`): psi per 64-key warpgroup half from the
+  warpgroup's own four warp slots behind a WG-local barrier (ids 5 / 6, already the warpgroup's transpose barriers),
+  published as psi[BH, nbm, nbn, 2] (allocation doubled at hd128); ping-pong turn barriers ids 2 / 3 (dQEmptyWG1 / 2,
+  unused by P1-R): each warpgroup syncs its turn (256 threads) before its S / dP issue and arrives on the other's right
+  after the dP issue; warpgroup 1 pre-arrives warpgroup 0's turn once per CTA (the arrival left at each tile's end is the
+  next tile's prologue; both warpgroups run the same m-blocks, so per-tile syncs and arrives balance).
+- Emitted code (results/r6/pingpong_barrier_placement.sass, gate.json): the 256-thread turn BAR.SYNC sits directly
+  before each S QGMMA batch and BAR.ARV directly after the dP QGMMAs; three 128-thread barriers per step (psi + the two
+  transpose barriers); BAR.SYNC 18 -> 22, BAR.ARV 2 -> 8; QGMMA 48 unchanged; REG 168, STACK 8 -> 0, LOCAL 0, no CALL;
+  no ptxas spill / serialization diagnostics.
+- Measurement (job 21161717, benchmarks/gate.py --mode timing, A = DO2, B = stage 1, 3 alternating reps): D128 pass 1
+  243.398 -> 247.692 ms (+1.76%, slower) main, 20.416 -> 20.768 ms (+1.72%) held-out; e2e D128 fwd+bwd +0.75% on both
+  grids; bench.py D128 matched fwd+bwd 4.471 / 4.490 / 4.462 -> 4.513 / 4.513 / 4.510 ms.
+- Verdict: REJECTED at stage 1 (slower on the target kernel); not merged; stage 2 not built. Reading: forcing the
+  warpgroups to alternate their S / dP issue serializes them more than it overlaps their vector work with the other's
+  wgmma. (Earlier exploratory evidence, round 2: per-warpgroup psi WITHOUT the turn barriers was -4.2 .. -4.8% on pass 1;
+  that variant is a different hypothesis: decoupling only.)
+- Counters: pass 1 eligible 1 -> 2.
+
+| kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
+|---|---:|---|
+| pass 1 | 2 (H1b, PINGPONG) | 1 (H1a, round 1) |
+| forward | 0 | 0 |
+| pass 2 | 0 | 0 |
+| torch glue | 0 | 0 |

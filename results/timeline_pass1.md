@@ -168,8 +168,9 @@ Share of WG0's instrumented vector regions inside WG1's software-outstanding wgm
    requested. In these records the consumers, not the loads, set the pace. This is sample- and instrumentation-
    specific evidence, not proof that load latency never matters in the plain kernel (the d256 dO-depth result shows it
    can).
-2. The region from dK issue to after its warpgroup_wait, release and state update is ~220-255 cycles per step at both
-   head dims, while the S / dP / dV retire regions are 9-30 cycles. Nothing independent sits between the dK issue and
+2. The bracket from the dV retire/release marker (event 16) to the dK retire/release/state marker (event 17) is
+   ~220-255 cycles per step at both head dims (from the dK issue marker, event 15: 269 / 280 cycles at D128 causal /
+   full, 247 / 250 at D256), while the S / dP / dV retire regions are 9-30 cycles. Nothing independent sits between the dK issue and
    the dK fold. This tail region includes the release / state work and probe overhead; it is not a pure tensor stall,
    and how much of it a schedule change can recover is a hypothesis to measure (H1b).
 3. Instrumented vector regions take ~2400-2600 (hd128) / ~1900-2200 (d256) of ~3850 cycles per warpgroup step.
@@ -190,7 +191,12 @@ Share of WG0's instrumented vector regions inside WG1's software-outstanding wgm
 | torch glue | 36.445 | 13.822 | 22.623 | 38% |
 | pass 0 | 35.649 | 16.042 | 19.607 | 45% |
 
-## Timeline-supported ordering of the remaining pass-1 hypotheses
+## Timeline-supported ordering of the pass-1 hypotheses (historical, round 4)
+
+Outcome since: H1b rejected in round 5 (-1.64% D128 pass 1); per Hao (round 5) the next pass-1 rounds are PINGPONG
+(per-warpgroup psi + ping-pong) then MUFU-poly exp2; vector micro-reductions deprioritized. Current order and counters:
+results/rounds.md.
+
 
 1. **H1b (task5, bitwise, hd128)**: pre-pack the dS' transpose words before issuing the dK gemm, and run the shuffles,
    stmatrix, WG barriers and TMA store (~450 cycles per step of vector / sync regions in the dense profile) while dK is

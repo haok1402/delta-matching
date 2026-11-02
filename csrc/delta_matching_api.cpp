@@ -331,7 +331,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     at::Tensor dq_accum = torch::empty({4}, opts.dtype(at::kFloat));
     // ## FP11-M17 LSEK: the kernels form lse*log2e in-register (bitwise the host prep).
 #ifndef KDA_P1_LSEPRE
-#define KDA_P1_LSEPRE 0
+#define KDA_P1_LSEPRE 1   // candidate C1
 #endif
     // KDA_P1_LSEPRE: the hd128 pass 1 reads lse * log2e formed here once (the same rounded fp32 multiply); pass 2 and
     // the d256 pass 1 never read this buffer as a product.

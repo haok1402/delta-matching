@@ -66,12 +66,12 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 // the elected thread drains store(m-2) before the tile's psi barrier and issues store(m-1) right after it; no
 // WG-local named barrier on the dS' path (the last tile's store gets one barrier after the loop).
 #ifndef KDA_P1_DSDEFER
-#define KDA_P1_DSDEFER 0
+#define KDA_P1_DSDEFER 1   // candidate C1
 #endif
 // kda-pass1 KDA_P1_PV4 (bitwise): the dV overlay as float4 slots, slot4(j, thread) = j * NumMmaThreads + thread
 // (16 LDS.128 / STS.128 per promote instead of 64 + 64 scalar accesses; same values, same FMA order).
 #ifndef KDA_P1_PV4
-#define KDA_P1_PV4 0
+#define KDA_P1_PV4 1   // candidate C1
 #endif
 // kda-pass1 KDA_P1_POFF (bitwise): the dV window promote (all but the tile's last window) is offloaded to the producer
 // warpgroup's idle warps 1..3: the consumers stage the raw window accumulator (16 STS.128) + its basis f and arrive on
@@ -177,7 +177,7 @@ static_assert(KDA_P1_PP == 0 || KDA_P1_HALFPSI, "KDA_P1_PP needs KDA_P1_HALFPSI"
 // gemm: 1 = the promote of a window that ended at the previous step AND this step's dV rescale run right after the
 // S / dP issue (the last window still promotes at the last step); 2 = only the rescale moves.  Same values, same order.
 #ifndef KDA_P1_TOPFILL
-#define KDA_P1_TOPFILL 0
+#define KDA_P1_TOPFILL 2   // candidate C1
 #endif
 // KDA_P1_FOLDSPLIT (bitwise schedule): the second half of the dK fold of step m runs in step m+1's S-wait bubble (32
 // fp32 temps cross the step; each element's folds stay in tile order).  KDA_P1_XPTOP (bitwise, needs DSDEFER): the dS'
@@ -195,10 +195,10 @@ static_assert(KDA_P1_PP == 0 || KDA_P1_HALFPSI, "KDA_P1_PP needs KDA_P1_HALFPSI"
 static_assert(!KDA_P1_XPTOP || KDA_P1_DSDEFER, "KDA_P1_XPTOP needs KDA_P1_DSDEFER");
 #define KDA_A(b) ((KDA_ABL >> (b)) & 1)
 #ifndef KDA_P1_DVZI
-#define KDA_P1_DVZI 0
+#define KDA_P1_DVZI 1   // candidate C1
 #endif
 #ifndef KDA_P1_LSEPRE
-#define KDA_P1_LSEPRE 0
+#define KDA_P1_LSEPRE 1   // candidate C1
 #endif
 
 #include "kda_prof.h"

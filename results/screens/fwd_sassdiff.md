@@ -105,3 +105,34 @@ After the piece, the turn is 184 instructions, 128 of them rho + promote (the me
 8 QGMMA, and about 48 uniform/sync. Further bitwise instruction cuts in the turn are worth at most ~1%. The softmax-side
 bookkeeping (~90 instructions) does not pay (softmax has slack). FA3 parity needs the rho / promote out of the turn, which
 every measured layout so far rules out (registers at 160 per thread, numerics).
+
+## 7. Round 2 (integrator: the S19-fwd-10 stack gated at -3.24% / -2.90%; find a piece worth >= ~0.8% on top of it)
+
+Trees are S19-fwd-2N, built on S19-fwd-10 (HEAD + C4 PRETURN + SMSC + REBNI + SCPOST). The A/B uses A = S19-fwd-10 unless marked
+otherwise. The ring turn of S19-fwd-10 is 184 instructions (`s10_turn.txt`): 64 rho FMUL, 64 promote FFMA, 8 QGMMA, and
+~48 other. Of the other 48: about 21 descriptor uniforms, V release / K wait, the 4 rho clamps (2 of them dependent right after
+the g0 DEPBAR), the weight FMUL, and the BAR.ARV id remat (S2R + SHF / ISETP / IADD3 / SEL ending at BAR.ARV).
+
+| tag | change | bitwise | step path / turn | REG/STACK causal (non-causal) | fwd H16 | fwd H32 | verdict |
+|---|---|---|---|---|---:|---:|---|
+| S19-fwd-20 | PREW: lazy rebase + rho_1 + promote weight for the next step computed at the end of this step's softmax (loop-carried tensors) | rc 1 (d128_packed stale dK) | 669 / - | 128/200 (224): O spilled, 85 LDL+85 STL per step | +52.2% | +52.3% | reject |
+| S19-fwd-21 | 20 + WGID | rc 1 | 665 / - | 200 (224) | +53.1% | +53.8% | reject |
+| S19-fwd-22 | PREW2: only rho_1 + weight carried (2+2 floats) from the end of the previous softmax; the rebase stays pre-turn and recomputes the weight in its rare branch | rc 0 (72 cases) | 588 / 176 | 128/24 (56); 2 LDL + 2 STL per step in the softmax tail | +0.30% | +1.26% (passes +0.75% drift) | no gain alone |
+| S19-fwd-23 | PREW2 + WGID (barrier ids once; the pre-turn MUFUs can no longer sink into the turn, so WGID now shortens the turn) | rc 0 (72 cases) | 582 / 178 (no S2R in the turn) | 128/24 (56) | -0.66% | +0.24% (passes +0.85% drift) | best piece |
+| S19-fwd-24 | 23 vs S19-fwd-10, 4-rep | | | | -0.33% (-0.93 -0.04 -0.37 -0.14) | +0.09% (-1.84 -1.34 +2.73 +1.11; passes +0.8..1.0%) | piece ~0.3-0.7%, below 0.8% |
+| S19-fwd-25 | 23 vs r18_c4, 4-rep | | | | **-4.02%** (-3.99 -4.10 -4.04 -4.02) | **-4.18%** (-4.06 -4.61 -5.35 -3.92) | passes flat |
+| S19-fwd-26 | 23 vs r18_c4, 4-rep (second job) | | | | **-4.11%** (-4.13 -4.04 -4.12 -4.17) | -3.03% (-3.96 -3.22 -4.80 -2.20; passes +0.94..1.00% drift) | H32 raw below 3.5% |
+| S19-fwd-27 | S19-fwd-10 vs r18_c4, 4-rep (same window as 26) | | | | -3.36% | -3.34% (passes flat) | reference |
+
+Reading: on the clean H16 shape the piece is consistent: stack 23 gives -4.02 / -4.11% against S19-fwd-10's -3.44 / -3.36%
+(jobs 12 / 27), i.e. about -0.65%. H32 is noisier: -4.18% in a clean job, -3.03% raw in a job where the untouched pass kernels
+drifted +0.95% (about -4.0% if corrected for that). The piece does NOT reach 0.8% on its own, and the second 4-rep job vs r18_c4
+is not >= 3.5% raw on H32. Per the integrator note, the kda-fwd helper's turn levers (sl1 / sl2 / vrel) were not repeated.
+Numerics-class options were reviewed and none pays here: the rho clamps are load-bearing for zero-V-scale blocks (an upper-only
+clamp is equivalent but saves 2 FMNMX outside the turn); the shared-basis / fewer-rounding folds of the rho / promote chain are
+the rejected FWDSHB class; a one-sided warp skip of the rescale spills (S9 / S17-fwd-04).
+
+Best stack so far: `.local/wt/S19-fwd-23` (HEAD + C4 PRETURN + SMSC + REBNI + SCPOST + PREW2 + WGID; all bitwise, default route
+72/72 BITWISE EQUAL). Patch: `.local/screens/S19-fwd-23/variant.patch`; increment over S19-fwd-10:
+`.local/screens/S19-fwd-23/piece_on_10.patch`. Causal D128 symbol STACK 16 -> 24 B (2 loop-carried floats spilled in the
+softmax tail, not in the turn); non-causal BM192 40 -> 56 B.

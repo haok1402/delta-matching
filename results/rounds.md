@@ -861,3 +861,8 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   "ring-turn-bound" phase reading was distorted by the probe's own spills. Per-step cost is the same at 8K and 64K
   (~1.93 us per step per SM). The helper's stk measures -2.3 .. -2.5% vs r18_c4 (my gate pair of stk + S19-fwd-10:
   -3.24 / -2.90%). My worker continues on top of S19-fwd-10.
+- Forward stack S19-fwd-23 = C4 PRETURN (kda-fwd) + SMSC (kda-fwdport) + S19-fwd-10 + PREW2 (next step's rho_1 /
+  promote weight in the previous softmax) + WGID (barrier ids once), bitwise, gated as a FRESH pair per Hao's rule:
+  gate 21195830 bitwise on all four routes, forward -3.51% geomean (0.960 / 0.962 / 0.973 / 0.965), bench +0.46%;
+  confirmation 21196466 (library 9ffc39ca080e) -3.92%: ACCEPTED (accepted root r19_fwd). STACK 16 -> 24 B on the causal
+  forward symbol (warning only).

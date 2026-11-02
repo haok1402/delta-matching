@@ -272,7 +272,7 @@ if sys.argv[0].endswith("cuobjdump"):
     else:
         for f in funcs:
             print(f"\n\tcode for sm_90\n\t\tFunction : {f}")
-            n = 10 if shape == "truncated" and f.endswith("full") else 200
+            n = 10 if shape == "truncated" and f.endswith("full") else (5000 if shape == "long" else 200)
             for i in range(n):
                 op = "QGMMA.64x256x32.F32.E4M3.E4M3" if i % 20 == 0 else "FFMA R1, R2, R3, R4"
                 print(f"        /*{16 * i:04x}*/                   {op} ;  /* 0x000000000000 */")
@@ -429,3 +429,9 @@ def test_identity_plugin_checks_inside_the_pytest_process(tmp_path, case):
         assert r.returncode == 0 and "1 passed" in r.stdout, r.stdout[-600:]
     else:
         assert r.returncode == 3 and "gate_identity" in r.stdout + r.stderr and "passed" not in r.stdout, r.stdout[-600:]
+
+
+def test_gate_counts_instructions_past_offset_0x10000(tmp_path):
+    r = run_gate(tmp_path, "full", "", extra={"STUB_RES": "long"})
+    rec = json.load(open(tmp_path / "run_full_none" / "gate.json"))
+    assert r.returncode == 0 and rec["resources"]["cand"]["counts"]["QGMMA"] == 2 * 250, r.stdout[-600:]

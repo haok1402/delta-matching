@@ -87,7 +87,7 @@ def resources(gate, lib, kernel, tag):
             if cur:
                 bodies[cur] = []
             continue
-        if cur and re.search(r"/\*[0-9a-f]{4}\*/", line):
+        if cur and re.search(r"/\*[0-9a-f]{4,6}\*/", line):
             bodies[cur].append(line)
     if not rows or not bodies:
         raise GateFailure(f"{tag}: no function matches {kernel!r} (resources {len(rows)}, sass {len(bodies)})")

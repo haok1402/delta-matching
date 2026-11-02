@@ -19,6 +19,7 @@ if [ "$BITWISE" = 1 ]; then
   PYTHONPATH=$WT python benchmarks/equivalence.py dump --route default --expect-root $WT --out $OUT/default.pt > $OUT/dump.log 2>&1 \
     && python benchmarks/equivalence.py compare $L/equiv/base3_default.pt $OUT/default.pt > $OUT/compare.log 2>&1
   echo "bitwise default route rc $? ($(tail -1 $OUT/compare.log))"
+  rm -f $OUT/default.pt   # ~3.4 GB: the compare log is the record (lustre quota)
 fi
 for s in ${SHAPES//,/ }; do
   IFS=: read H B N <<< "$s"

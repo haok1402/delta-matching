@@ -781,7 +781,7 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - sol4c adopted (Hao, kda-solcheck evidence; rule-change-r10.md): r17_pk by sol4c (results/r17/accepted_pk/sol4c.md):
   pass1 66.3%, forward 78.5%, pass0 94.0%, pass2 94.1% (pass 0 and pass 2 meet the 90% target; forward and pass 1 do
   not). Forward helper DONE (54 variants, S1-S54; held C4 + SMSC bitwise -2.4%). Pass-0 work stops.
-- Pass-1 helper DONE (per-element ledger on r17_pk + SHFL8, CANDIDATES.md on origin/kda-sm90-pass1-v2 50cb4b1): the
+- Pass-1 helper DONE (per-element ledger on r17_pk + SHFL8, CANDIDATES.md on origin/kda-sm90-pass1-v2 f1ec03d): the
   unmasked step executes ~698 instructions per warp-step (993 static); per element 8 (exp 3: FFMA, F1 clamp, MUFU; dS 2;
   amax 1; scale 1; e4m3 conversion 1); per step +32 per-row, 64 FFMA dK fold, 64 FMUL dV rescale on half the steps,
   ~33 promote. Every remaining item is fixed by the numerics contract (F1 clamp, fp32 dK fold), has no sm90 shortcut

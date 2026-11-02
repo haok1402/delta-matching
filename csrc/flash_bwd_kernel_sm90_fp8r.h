@@ -215,7 +215,8 @@ public:
 #endif
         } else {  // Consumer
 #if KDA_FR & 64
-            cutlass::arch::warpgroup_reg_dealloc<KDA_FR_CREG>();
+            if constexpr (KDA_FR_CREG > 128) { cutlass::arch::warpgroup_reg_alloc<KDA_FR_CREG>(); }   // 512 threads launch at 128
+            else { cutlass::arch::warpgroup_reg_dealloc<KDA_FR_CREG>(); }
 #else
             cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
 #endif

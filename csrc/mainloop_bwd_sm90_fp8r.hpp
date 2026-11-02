@@ -1238,7 +1238,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
     template <typename SharedStorage>
     CUTLASS_DEVICE void
     mma_phantom(Params const& params, int t /*0..127*/, cute::tuple<int32_t, int32_t, int32_t> block_coord, SharedStorage& shared_storage) {
-        static_assert((KDA_FR & 3) == 3, "PHANTOM needs DKOUT + DVOUT");
+        static_assert((KDA_FR & 2) == 2, "PHANTOM needs DVOUT (DKOUT optional: without it the gemm WG is a dV-only warpgroup)");
+        constexpr bool kDK = (KDA_FR & 1) != 0;
         int const n_block = get<0>(block_coord);
         int const bidb = get<2>(block_coord);
         SeqlenInfo_t seqlen_info{bidb, get<0>(params.shape_Q), size<0>(params.shape_K),
@@ -1259,9 +1260,15 @@ struct CollectiveMainloopBwdSm90Fp8R {
         Tensor rA0 = make_tensor<Element>(aregs_layout);
         Tensor rA1 = make_tensor<Element>(aregs_layout);
         Tensor accV = partition_fragment_C(tiled_mma_dKV, select<1, 2>(TileShape_MNK{}));
+#if KDA_FR & 1
         Tensor accK = partition_fragment_C(tiled_mma_dKV, select<1, 2>(TileShape_MNK{}));
         Tensor dKp = make_fragment_like(accK);
-        clear(accV); clear(dKp);
+#else
+        Tensor accK = partition_fragment_C(tiled_mma_dKV, select<1, 2>(TileShape_MNK{}));   // dV-only: the second key half's dV window
+        Tensor dKp = make_tensor(accK.data(), accK.layout());   // alias: no fold state in the dV-only warpgroup
+#endif
+        clear(accV); clear(accK);
+        if constexpr (kDK) { clear(dKp); }
         uint64_t* const fr_bar = shared_storage.tensors.mainloop.fr_bar.data();
         uint32_t const ho = cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_fr_ho.data());
         float* const sdv = shared_storage.tensors.mainloop.smem_dvacc.data() + t;
@@ -1282,12 +1289,25 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 #pragma unroll
                 for (int i = 0; i < size(accV); ++i) { accV(i) *= 1.0001f; }
                 #pragma unroll
-                for (int i = 0; i < size(accV); ++i) { accV(i) *= 0.9999f; }
+                for (int i = 0; i < size(accV); ++i) { if constexpr (kDK) { accV(i) *= 0.9999f; } else { accK(i) *= 0.9999f; } }
             }
             cutlass::arch::ClusterBarrier::wait(&fr_bar[b], (s >> 1) & 1);
             lds8(rA0, hb + (0 * 128 + t) * 32);
             lds8(rA1, hb + (1 * 128 + t) * 32);
             flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rA0, tdVrdOt(_, _, _, st_dot), accV);
+            if constexpr (!kDK) {   // dV-only warpgroup: the real 128-key dV windows (accV keys 0-63, accK keys 64-127)
+                flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rA1, tdVrdOt(_, _, _, st_dot), accK);
+                cutlass::arch::ClusterBarrier::arrive(&fr_bar[4 + b]);
+                warpgroup_wait<0>();
+                if ((m_block & 7) == 7 || m_block == m_block_max - 1) {
+                    #pragma unroll
+                    for (int i = 0; i < size(accV); ++i) { float* const slot = sdv + (i * 2 + 0) * 128; *slot = fmaf(accV(i), g, *slot); accV(i) = 0.0f; }
+                    #pragma unroll
+                    for (int i = 0; i < size(accK); ++i) { float* const slot = sdv + (i * 2 + 1) * 128; *slot = fmaf(accK(i), g, *slot); accK(i) = 0.0f; }
+                }
+                g = g * 1.0000001f;
+                continue;
+            }
             flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rA1, tdVrdOt(_, _, _, st_dot), accV);
             cutlass::arch::ClusterBarrier::wait(&fr_bar[2 + b], (s >> 1) & 1);
             lds8(rA0, hb + (NumMmaThreads + 0 * 128 + t) * 32);
@@ -1314,7 +1334,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         }
         float cs = 0.f;
         #pragma unroll
-        for (int i = 0; i < size(dKp); ++i) { cs += dKp(i) + accV(i); }
+        for (int i = 0; i < size(dKp); ++i) { cs += (kDK ? dKp(i) : 0.f) + accV(i) + accK(i); }
         if (__float_as_uint(cs) == 0x7fc00001u) { params.ptr_psi[0] = cs; }   // keeps the fold alive; never true in practice
     }
 #endif

@@ -142,7 +142,8 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 // when only dK / dV are live).
 // ## kda-bwdport SK (TIMING ONLY, wrong outputs): the FA3-fp8 skeleton, each delta-matching addition removable to price it.
 //   1 = no psi (no amax, shuffles, slots, CTA barrier; dS' = e4m3(dS)), 2 = dK accumulated in place (no temp, no fold),
-//   4 = no dV window (no rescale, no promote), 8 = no dS' transpose / stmatrix / gmem store.
+//   4 = no dV window (no rescale, no promote), 8 = no dS' transpose / stmatrix / gmem store, 16 = no dV promote only,
+//   32 = no dV rescale only.
 #ifndef KDA_SK
 #define KDA_SK 0
 #endif
@@ -1042,7 +1043,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // S17 RESCALE-EARLY: the dV window rescale fills the S-retire bubble (the previous dV retired last step).
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
             float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
-            if (!(KDA_PK_PROBE & 1) && !(KDA_SK & 4) && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
+            if (!(KDA_PK_PROBE & 1) && !(KDA_SK & 4) && !(KDA_SK & 32) && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
             #pragma unroll
             for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) *= fq8_rf; }
             }
@@ -1358,7 +1359,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             #pragma unroll
             for (int i = 0; i < size(tdKrdK); ++i) { if constexpr (!(KDA_SK & 2)) { tdKrdK(i) = fmaf(fq8_tmpK(i), fq8_g_fold, tdKrdK(i)); } }
             // dV window boundary (geometry-fixed): promote in TRUE units into the overlay, re-zero the window.
-            if (!(KDA_SK & 4) && ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1)) {
+            if (!(KDA_SK & 4) && !(KDA_SK & 16) && ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1)) {
                 #pragma unroll
                 for (int i = 0; i < size(tdVrdV); ++i) {
                     float* const slot = fq8_smem_dv + i * NumMmaThreads;
@@ -1420,7 +1421,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
         #pragma unroll
         for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) *= fq8_ik; }
         #pragma unroll
-        for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) = fq8_smem_dv[i * NumMmaThreads]; }
+        for (int i = 0; i < size(tdVrdV); ++i) {
+            if constexpr ((KDA_SK & 4) || (KDA_SK & 16)) { tdVrdV(i) = fmaf(tdVrdV(i), fq8_f_prev, fq8_smem_dv[i * NumMmaThreads]); }   // probe: keep dV live
+            else { tdVrdV(i) = fq8_smem_dv[i * NumMmaThreads]; }
+        }
         if constexpr (Q_dO_same_stages) { smem_pipe_read_do = smem_pipe_read; }
         KP(19);
         KP_FLUSH(0, params.ptr_dbg_cks);

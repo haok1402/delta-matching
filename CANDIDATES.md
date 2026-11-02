@@ -302,3 +302,17 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   Every remaining candidate measured here either needs more than 160 registers at 3 WGs (spills), adds a branch inside
   the step (spills), moves work across the ring turn (slower), or changes numerics beyond residual-v4 (fp16 temp,
   merged bases). 54 screened variants, at least two per lever (ledger S1-S54).
+
+## Round 18: shared-basis P codes (FWDSHB), directed by kda-sm90 : REJECTED (numerics)
+
+- Design (branches kda-sm90-fwd-shb dbe37f3 = 3 WGs / BN128 on 8bc2425; kda-sm90-fwd-shb2 = 2 WGs / BN256, 2 stages):
+  per row and tile, shared basis ms_S = max_g ms_g; group g's codes on ms_S - log2(v_g / v_max) (V-scale ratio folded
+  into the codes), so the PV chain is ONE gemm per tile with no rho rescale and one promote; row sum and promote weight
+  unchanged in exact arithmetic (sigma_g part_g cancels the offset; weight = v_max 2^(ms_S - mref)).
+- Timing vs r17_pk (fwdtime, 4 shapes): 3 WGs **-4.41% / -4.33%** geo (jobs s31 / s32); 2 WGs BN256 **+8.30%** (s32;
+  the 3-WG layout matters more than the rho chain).
+- residual-v4, default route vs r17_pk (+ LSE envelope, --allow-repair; job nv5, `runs/nv5`): FAIL, 82 problems.
+  Matched O error rises in 10 of 23 cases by 1.3e-3 .. 4.2e-3 (limit 1e-5): gqa3_promote 4.604e-2 -> 5.025e-2,
+  min 4.529e-2 -> 4.825e-2, mqa 4.655e-2 -> 4.916e-2, gqa4 4.629e-2 -> 4.846e-2, packed / bhnd / constk ~+1.7e-3,
+  heldout +1.3e-3; 7 matched rows beyond the envelope. Cause: the smaller group's codes on the shared basis lose
+  precision (more e4m3 subnormals), a real accuracy loss, 100-400 x the tolerance.

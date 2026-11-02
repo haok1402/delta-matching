@@ -24,7 +24,7 @@
 // as in v4b.  Deterministic by construction (one writer per row, one fixed order).
 #pragma once
 #ifndef KDA_PK_EXPB
-#define KDA_PK_EXPB 0
+#define KDA_PK_EXPB 6
 #endif
 #if KDA_PK_EXPB >= 3 && KDA_PK_EXPB <= 5
 #error "KDA_PK_EXPB 3 / 4 / 5 were built on the pre-P0NML pass 0 (branch kda-sm90-p1packed-r1) and are superseded by 6"

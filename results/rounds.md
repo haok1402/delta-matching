@@ -328,7 +328,7 @@ Next pass-2 hypothesis: PSIPF (psi loaded one tile early, both headers), measure
 
 ## Rule change (Hao, during round 10): D128 is the target, one grid
 
-From round 10 on (docs/kda-sm90/plan.md, "Rule change (Hao, round 10)"; enforced by `ab.py decision()` and
+From round 10 on (docs/kda-sm90/rule-change-r10.md; enforced by `ab.py decision()` and
 `gate.py --target`): no held-out split (one grid of all 78 configurations, `kernels.py --grid all`); the target is the
 D128 kernels; a candidate is accepted when its target kernel is >= 3% faster summed over all D128 shapes in the full
 gate job AND a fresh confirmation job, no D128 shape is slower beyond its run-to-run spread (median slowdown larger

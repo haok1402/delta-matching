@@ -678,3 +678,16 @@ sets unchanged in all three:
 The stress-case rows already sit near residual 1 in the accepted build. A rule with a noise tolerance on the fp32 error
 (<= ~1e-5 relative) and an ill-conditioned exemption for rows whose ACCEPTED residual is already above a threshold
 (e.g. 1e-3) would accept DEFER and the forward C1; LAZY would still regress a handful of Gaussian rows.
+- S17-p1-39 (pass 1: early dV window rescale + deferred double-buffered dS' stores, from the round-17 pass-1 screen):
+  gate job 21174913 bitwise on all four routes vs the baseline and r17_c3, pass 1 -4.68% geomean, bench -1.9%;
+  confirmation 21175475 -4.87% (same library be70f302): ACCEPTED (accepted root r17_p1).
+- Per-warpgroup psi (Hao's named lever; S17-psi-01..09, results/screens/psi_log.md): implemented completely (pass 1
+  WG-local amax, psi[..., 2], pass 2 two accumulators with per-half windows, DBG op), numerically sound (errors: 34
+  better, 108 equal, 2 worse by +0.03% / +0.04%), but pass 1 -1.2..-1.8% and pass 2 +7.4..+8.6% (the second
+  accumulator's per-tile rescale): pass1 + pass2 +0.1..+0.8% -> REJECTED (variants 1-9; lever: 2+ designed variants
+  failed; the round-2 -4.2..-4.8% predates H1a / H1b, which already hid most of the psi barrier).
+- Pass-0 worker (S17-p0-01..23, results/screens/pass0_log.md, screened vs r14_h3): best bitwise S17-p0-20 (reduce-
+  scatter + nomaskloop + skipdead + setmaxnreg 240/24) -6% vs r14_h3, but its reduce-scatter equals the accepted P0RTR
+  and C3 restructured the kernel: the nomaskloop / skipdead / register-split pieces need a port onto r17_c3. Profile:
+  pass 0 is issue-bound with 192 fixed instructions per 64-key block for bitwise outputs -> bitwise ceiling ~70-75% of
+  its floor; 90% needs a numerics change (fold the +8, lazy dP descale), cf. the pass-0 helper's DEFER / LAZY.

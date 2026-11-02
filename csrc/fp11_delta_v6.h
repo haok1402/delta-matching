@@ -102,8 +102,14 @@ struct DeltaV6 {
     static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarpGroup;
     static constexpr int MaxThreadsPerBlock = NumMmaThreads + NumProducerThreads;
     static constexpr int MinBlocksPerMultiprocessor = 1;
-    static constexpr uint32_t LoadRegisterRequirement = kNWG == 2 ? 40 : 24;
-    static constexpr uint32_t MmaRegisterRequirement = kNWG == 2 ? 232 : 112;
+#ifndef KDA_P0W4LOAD
+#define KDA_P0W4LOAD 24
+#endif
+#ifndef KDA_P0W4MMA
+#define KDA_P0W4MMA 104   // swept: 112/24, 112/32, 104/24 (best), 104/40
+#endif
+    static constexpr uint32_t LoadRegisterRequirement = kNWG == 2 ? 40 : KDA_P0W4LOAD;
+    static constexpr uint32_t MmaRegisterRequirement = kNWG == 2 ? 232 : KDA_P0W4MMA;
 
     using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
     using ClusterShape = Shape<_1, _1, _1>;
@@ -350,13 +356,14 @@ struct DeltaV6 {
             // ## M21 diet: the mask is a no-op on every n-block whose keys all lie at or below the row block's diagonal and
             // inside seqlen_k; skipping it there is bitwise (no element would have been set to -inf).  Warpgroup-uniform.
             int const fq8_diag_off = seqlen_k - seqlen_q;
-            auto exp_step = [&](auto& tSrS, int n_block, float dsc_g0, float dsc_g1) {
+            auto exp_step_t = [&](auto may_mask_c, auto& tSrS, int n_block, float dsc_g0, float dsc_g1) {
+                constexpr bool MayMask = decltype(may_mask_c)::value;
                 Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol(tSrS.layout()));
                 static_assert(decltype(size<0>(scores))::value == 2 && decltype(size<1>(scores))::value == 16,
                               "DeltaV6: expected 2 rows x 16 columns per thread for a 64x64 tile");
                 bool const need_mask = (Is_causal && (n_block + 1) * kBlockN > m_block * kBlockM + fq8_diag_off)
                                        || ((n_block + 1) * kBlockN > seqlen_k);
-                if (need_mask) {
+                if (MayMask && need_mask) {
                     mask.template apply<true /*Seqlenk_mask*/, Is_causal, false /*Is_local*/>(tSrS, m_block, n_block);
                 }
                 #pragma unroll
@@ -368,6 +375,9 @@ struct DeltaV6 {
                         scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
                     }
                 }
+            };
+            auto exp_step = [&](auto& tSrS, int n_block, float dsc_g0, float dsc_g1) {
+                exp_step_t(cute::true_type{}, tSrS, n_block, dsc_g0, dsc_g1);
             };
             // ## P0RTR: the quad reduction as a transposed reduce.  Allreduce<4> gives every lane l of a quad
             // (x_l + x_{l^2}) + (x_{l^1} + x_{l^3}), the same value on all four lanes (fp32 add is commutative).  Here lane l
@@ -409,8 +419,41 @@ struct DeltaV6 {
                 float2 const* fq8_k8s_2 = reinterpret_cast<float2 const*>(fq8_k8s_base);
                 float2 const* fq8_v8s_2 = reinterpret_cast<float2 const*>(fq8_v8s_base);
                 int const nb_last = Is_causal ? (m_block * kBlockM + kBlockM - 1 + fq8_diag_off) / kBlockN : (1 << 30);   // later n-blocks: fully masked
+                int s0_tail = 0;
+                // ## P0NML: the leading stages whose two n-blocks need no mask (keys at or below this warpgroup's first row's
+                // diagonal and inside seqlen_k; need_mask is monotone in the n-block) run a loop without the mask test and
+                // without the per-n-block skip predicates.  Same arithmetic: bitwise.
+                {
+                    int const xdiag = m_block * kBlockM + fq8_diag_off;
+                    int const nbm0c = Is_causal ? (xdiag <= 0 ? 0 : xdiag / kBlockN) : (1 << 30);
+                    int const nbm0 = min(nbm0c, params.nbn);            // first n-block that needs the mask
+                    s0_tail = min(max(nbm0 / kNbPerStage, 0), nstages);
+                }
                 CUTLASS_PRAGMA_NO_UNROLL
-                for (int s = 0; s < nstages; ++s) {
+                for (int s = 0; s < s0_tail; ++s) {
+                    float2 const k2 = fq8_k8s_2[s], v2 = fq8_v8s_2[s];
+                    auto tok = pipeline_kv.consumer_try_wait(smem_pipe_read);
+                    pipeline_kv.consumer_wait(smem_pipe_read, tok);
+                    int const slot0 = kNbPerStage * smem_pipe_read.index();
+                    #pragma unroll
+                    for (int j = 0; j < kNbPerStage; ++j) {
+                        int const nb = kNbPerStage * s + j;
+                        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma, tSrQ(_, _, _, wg), tSrK(_, _, _, slot0 + j), tSrS);
+                        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma, tdPrdO(_, _, _, wg), tdPrV(_, _, _, slot0 + j), tdPrdP);
+                        float const dsc = fq8_q8sc * (j == 0 ? k2.x : k2.y) * float(M_LOG2E);
+                        float const dp = fq8_do8sc * (j == 0 ? v2.x : v2.y);
+                        warpgroup_wait<1>();
+                        warpgroup_fence_operand(tSrS);
+                        exp_step_t(cute::false_type{}, tSrS, nb, dsc, dsc);
+                        warpgroup_wait<0>();
+                        warpgroup_fence_operand(tdPrdP);
+                        rowsum_step(tSrS, tdPrdP, dp, dp);
+                    }
+                    pipeline_kv.consumer_release(smem_pipe_read);
+                    ++smem_pipe_read;
+                }
+                CUTLASS_PRAGMA_NO_UNROLL
+                for (int s = s0_tail; s < nstages; ++s) {
                     float2 const k2 = fq8_k8s_2[s], v2 = fq8_v8s_2[s];
                     auto tok = pipeline_kv.consumer_try_wait(smem_pipe_read);
                     pipeline_kv.consumer_wait(smem_pipe_read, tok);

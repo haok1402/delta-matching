@@ -242,3 +242,20 @@ exhausted levers report DONE; pass-0 work stops (it meets the target).
 - Hao (round 19): the two-job rule stands; a candidate that passes one job and misses the other is not rerun as the
   same pair. A near-miss stack is extended with one more held piece (bitwise or residual-v4) so it clears 3% with
   margin, and the larger stack is gated as a fresh pair.
+
+## Round 21: residual-v5 (Hao; replaces residual-v4 for every non-bitwise candidate, own and helpers')
+
+1. No exemptions for speed changes: every matched row, including the rows v4 exempts (residual above 1e-3 in the
+   accepted build, degenerate rows), must not exceed its residual in the ORIGINAL kernel (main 3d4cd5b) by more than
+   fp32 round-off of that row (k_r 2^-23 relative to the row's own sum of |terms|). The reference is the original, not
+   only the previous accepted build, so small regressions cannot accumulate.
+2. Measured tensors: the fp32 dS row sums the identity is defined on (before dS is quantized to e4m3), and the delta
+   used by the backward against the delta recomputed from the same fp8 P / dP. The exact captured tensors are stated
+   below once implemented (benchmarks/numerics.py v5).
+3. Coverage: the 72 cases on all four routes; the four acceptance shapes (B2 N8192, B1 N65536 at 16/4 and 32/4, causal
+   matched) with >= 3 input seeds; stress inputs (scaled x3 / x10, outliers, near-one-hot rows, long sequences). Per
+   case: rows checked, max and median residual, rows worse than the original.
+4. Every accepted named numerics change (forward C3g, EXPBX64, C4 masked-line clamp, and any other) is re-audited
+   under v5; one that makes any row worse than the original beyond round-off is reverted or fixed before anything
+   else is accepted.
+5. Bitwise candidates pass automatically; residual-v5 gates every non-bitwise candidate from now on.

@@ -221,7 +221,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
     static constexpr int kRowcol = kBlockN / 4;                            // rowcol fragment width per thread (2 consumer WGs)
     static constexpr int kColsPerGroup = kRowcol / kGroups;                // rowcol fragment columns per group (8 / 16 / 16)
     static constexpr int kAtomsPerGroup = kQuantKeys / 32;                 // fp8 k-atoms per group in the PV chain (1 at d256, 2 at hd128)
-    static_assert(kBlockM % kQuantRowsQ == 0, "delta_matching: kBlockM must be a multiple of the Q scale block");
+    static_assert(kBlockM % kQuantRowsQ == 0 || (kBlockM % 64 == 0 && kQuantRowsQ % 64 == 0), "delta_matching: each 64-row WG must sit in one Q scale block");
     static constexpr int kPVNSplit = LargeHeadDimV ? 1 : (kHeadDimV >= 256 ? FA3FP8F_TP_NSPLIT : FA3FP11_HD128_NSPLIT);
     static_assert(kHeadDimV % (8 * kPVNSplit) == 0, "delta_matching fwd: kPVNSplit must divide kHeadDimV/8");
     using TileShape_MNK_PVAtom = Shape<decltype(get<0>(TileShape_MNK{})),
@@ -1361,7 +1361,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
         // ## Delta-Matching-128: one Q scale per 128-row m-block (both WGs); d256 keeps the per-WG 64-row block.
         float const fq8_q8sc = kQuantRowsQ == 64
             ? params.ptr_q8s[fq8_bh * params.nblk_q + 2 * m_block + warp_group_idx]
-            : params.ptr_q8s[fq8_bh * params.nblk_q + m_block];
+            : params.ptr_q8s[fq8_bh * params.nblk_q + (kBlockM % kQuantRowsQ == 0 ? m_block
+                  : min((m_block * kBlockM + warp_group_idx * 64) / kQuantRowsQ, params.nblk_q - 1))];   // ## BM192
         // ## FP11-M16 (native GQA, READ side): k8s/v8s are per KV head
         // (b, h_k, nblk_k), matching the K/V TMA tensors (bidh_kv).  h_k == h
         // reproduces the M10 index arithmetic exactly.
@@ -1555,8 +1556,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // ## Delta-Matching-128: two 64-key groups per 128-key tile = two 2-atom sub-gemms into the
                     // zero-init temp, ONE rho rescale (group 1 onto group 0's basis) and one promote per tile
                     // (the d256 chain below with 4 groups: three rho rescales).  Same realization class.
+                    auto const rho1_ = fq8_rho(softmax, 1);   // ## kda-fwd RHOPRE (bitwise)
                     fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, D_);
-                    softmax.rescale_o(D_, fq8_rho(softmax, 1));
+                    softmax.rescale_o(D_, rho1_);
                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/Defer ? -1 : 0, 2, 4>(tiled_mma_pv, tOrP, B_, D_);
                 } else if constexpr (kGroups == 4 && kAtomsPerGroup == 2) {
                     // ## Delta-Matching-128 F3: four 64-key groups per 256-key tile (2 k-atoms each), the d256 chain's shape.

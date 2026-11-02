@@ -287,3 +287,41 @@ Current ranking (accepted DO2 arm of the round-8 GRPFOLD A/B, `results/r8/grpfol
 | pass2 | 105.897 | 63.061 | 42.836 | 59.5% |
 | glue | 36.474 | 13.822 | 22.652 | 37.9% |
 | pass0 | 35.804 | 16.042 | 19.762 | 44.8% |
+
+## Round 9: pass 2 profile, then P2ST3 (hd128 pass-2 TMA depth 2 -> 3): ACCEPTED (6a870e9)
+
+- Profile (`results/timeline_pass2.md`, `results/r9/wi/`, job 21165303): emitted order, resources / occupancy and
+  timing-only ablations of both pass-2 kernels (no in-kernel probes as timing evidence). Each CTA (one 128-thread
+  warpgroup, two CTAs per SM) runs one serial per-tile chain; the psi load is issued after the TMA barrier wait.
+  Ablations (8 configs, pass-2 sum): psi constant -4.31%, no in-window rescale -3.63%, hd128 depth 3 -4.49% (-7.8 ..
+  -9.0% on the hd128 configs), PSIPF (psi one tile early, bitwise on the default route) -3.09%.
+- Hypothesis P2ST3 (declared in the profile with footprint, budget and ledger): `FA3FP11_HD128_P2ST` 2 -> 3
+  (certified flag-set change), footprint the D128 pass 2. Smem 83968 -> 108544 B per CTA, two CTAs per SM at both
+  depths; registers unchanged; the ring ledger keeps the unconditional release barrier before every re-arm.
+- Gate (job 21165579, all steps rc 0, `results/r9/p2st3_1/`): pytest 49 / 3 skipped in the identity-verified process;
+  **bitwise on all four routes vs baseline and DO2**; per-symbol resources unchanged, complete SASS. D128 pass 2
+  55.653 -> 51.482 ms (**-7.50%**) main, 5.032 -> 4.609 ms (-8.41%) held-out; e2e fwd+bwd -0.23%; shapes over +1%
+  within spread; bench.py unchanged within noise.
+- Confirmation (job 21165963, same candidate sha d2eee98774eb vs DO2 7d491ed1a556, `results/r9/p2st3_2/`): D128 pass 2
+  55.797 -> 52.112 ms (**-6.60%**) main, 5.040 -> 4.642 ms (-7.89%) held-out; one D256 shape +1.34% within spread;
+  bench.py D128 matched fwd+bwd 4.502 / 4.505 / 4.498 -> 4.462 / 4.469 / 4.465 ms.
+- Verdict: ACCEPTED. New accepted build: library d2eee98774eb (`.local/frozen/r9_p2st3`, stamp code_sha 4b325343a46e
+  = the committed source); its route dumps are byte-identical to DO2's. Pass-2 counter stays 0 (reset by acceptance).
+
+| kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
+|---|---:|---|
+| pass 1 | 2: closed (reopens only with a new profile-based hypothesis, Hao) | 1 (H1a) |
+| forward | 2: closed | 0 |
+| pass 2 | 0 (P2ST3 accepted) | 0 |
+| torch glue | 0 | 0 |
+
+Current ranking (accepted P2ST3 arm of the confirmation, `results/r9/p2st3_2/ab_main/B_median.json`, main grid):
+
+| kernel | measured ms | modeled SOL ms | modeled waste ms | % of modeled SOL |
+|---|---:|---:|---:|---:|
+| pass1 | 501.860 | 130.755 | 371.105 | 26.1% |
+| fwd | 188.803 | 65.162 | 123.641 | 34.5% |
+| pass2 | 102.914 | 63.061 | 39.853 | 61.3% |
+| glue | 36.795 | 13.822 | 22.972 | 37.6% |
+| pass0 | 36.506 | 16.291 | 20.215 | 44.6% |
+Next pass-2 hypothesis: PSIPF (psi loaded one tile early, both headers), measured against P2ST3.

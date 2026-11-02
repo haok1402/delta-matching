@@ -266,3 +266,8 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   BN64, stages 2 / 3 / 4), layout (VCOL), scale loads (VPF; KSPF and smem staging owned by kda-sm90 / kda-fwdport).
 - Open: k / v scale staging through smem (kda-fwdport) to stack with C4 toward 3%; FA3 parity needs ~14% more and,
   by the measurements above, latency hiding beyond FA3's own under this numerics contract.
+
+- Integrator decision on the floor proposal (recorded in rule-change-r10.md): not adopted as the goal floor; every
+  accepted round reports both the sol4 % and the FA3-referenced % (r17_fwd: 59.0% of sol4, 86% of FA3). Method work
+  (per-group basis / Horner / promote) stays counted in the sol4 issue / MUFU floors from the emitted loop. Next step
+  unchanged: C4 + kda-fwdport's k / v-scale smem staging, >= 3% combined in two jobs vs r17_fwd.

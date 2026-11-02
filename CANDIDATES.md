@@ -287,3 +287,18 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - Tile-temp lever closed (kda-fwdport analysis, agreed): an fp16 temp does not fit FA3 order at 3 WGs (O 64 + S 64 +
   P 16 + T 32 = 176 > 160), needs a ~2^-9 prescale of P (products reach ~1.3e7 > 65504), and its accumulation error
   (~+2e-5 per case) fails residual-v4's 1e-5; a per-WG O slab in smem has S45's LDS / FFMA / STS promote cost.
+
+## DONE (kda-fwd), after Hao's sol4c decision
+
+- Accepted from this helper: C3g (kda-sm90 c1ceece; C1's lazy rescale + descale fold inside it). Held: C4 PRETURN
+  (bitwise -1.1%) and the C4 + kda-fwdport SMSC stack (bitwise -2.46% / -2.42%), below the 3% stacking bar.
+- Forward status: ~82% of sol4c (sol4-v2 / 0.699), 1.146 x FA3 fp8 on r17_p0s; the 90% sol4c target and FA3 parity are
+  not met.
+- Why no further lever (per-element instruction count of the steady step, 128-key tile, per thread: 64 scores):
+  FFMA (code argument) 64, MUFU (exp2) 64, FMNMX (group max) 64, FADD (row sum over unquantized p, required by the
+  denominator contract) 64, F2FP 32: the FA3 core; plus rho rescale 64 + promote 64 (the per-64-key P basis with a
+  zero-init tile temp, the fa3fp8_ff precision fix) and ~120 bookkeeping. Removed already: the S-descale FMUL (fold),
+  the per-tile alpha FMUL (lazy), the scale-load latency (SMSC), the in-turn rho / weight / rebase work (PRETURN).
+  Every remaining candidate measured here either needs more than 160 registers at 3 WGs (spills), adds a branch inside
+  the step (spills), moves work across the ring turn (slower), or changes numerics beyond residual-v4 (fp16 temp,
+  merged bases). 54 screened variants, at least two per lever (ledger S1-S54).

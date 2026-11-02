@@ -13,6 +13,7 @@ builds whose numerics are intentionally incomplete; never an acceptance).  The r
 GATE_PYTHON / GATE_CUOBJDUMP override the executables (CPU failure-injection tests).
 """
 import argparse, hashlib, json, os, re, shutil, subprocess, sys
+import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -57,24 +58,69 @@ class Gate:
             json.dump(self.record, f, indent=1)
 
 
+RES_RE = re.compile(r"REG:(\d+)\s+STACK:(\d+)\s+SHARED:(\d+)\s+LOCAL:(\d+)")
+MIN_BODY = 50   # instruction lines a selected kernel function must have (a real pass-1 / forward kernel has thousands)
+
+
 def resources(gate, lib, kernel, tag):
+    """Resource rows and SASS bodies of every function matching `kernel`; fails unless the selection is non-empty, the
+    resource and SASS outputs name the same functions, every function has a well-formed resource row and a body."""
     out = os.path.join(gate.run_dir, f"resource_{tag}.txt")
     log = gate.run(f"resources_{tag}", [gate.cuobjdump, "--dump-resource-usage", lib])
     shutil.copyfile(log, out)
     sass_log = gate.run(f"sass_{tag}", [gate.cuobjdump, "-sass", lib])
-    text = open(sass_log).read().splitlines()
-    keep, sel = [], False
-    for line in text:
-        if "Function : " in line:
-            sel = re.search(kernel, line) is not None
-        if sel:
-            keep.append(line)
+    res_lines = open(out).read().splitlines()
+    rows = {}
+    for i, line in enumerate(res_lines):
+        m = re.match(r"\s*Function (\S+):\s*$", line)
+        if m and re.search(kernel, m.group(1)):
+            nxt = res_lines[i + 1] if i + 1 < len(res_lines) else ""
+            r = RES_RE.search(nxt)
+            if not r:
+                raise GateFailure(f"{tag}: resource row missing or malformed for {m.group(1)[:80]}")
+            rows[m.group(1)] = dict(zip(("REG", "STACK", "SHARED", "LOCAL"), map(int, r.groups())))
+    bodies, cur = {}, None
+    for line in open(sass_log).read().splitlines():
+        m = re.match(r"\s*Function : (\S+)", line)
+        if m:
+            cur = m.group(1) if re.search(kernel, m.group(1)) else None
+            if cur:
+                bodies[cur] = []
+            continue
+        if cur and re.search(r"/\*[0-9a-f]{4}\*/", line):
+            bodies[cur].append(line)
+    if not rows or not bodies:
+        raise GateFailure(f"{tag}: no function matches {kernel!r} (resources {len(rows)}, sass {len(bodies)})")
+    if set(rows) != set(bodies):
+        raise GateFailure(f"{tag}: resource and SASS outputs select different functions for {kernel!r}")
+    short = [n for n, b in bodies.items() if len(b) < MIN_BODY]
+    if short:
+        raise GateFailure(f"{tag}: truncated SASS body for {short[0][:80]}")
+    keep = [l for n in sorted(bodies) for l in [f"Function : {n}"] + bodies[n]]
     with open(os.path.join(gate.run_dir, f"target_{tag}.sass"), "w") as f:
         f.write("\n".join(keep))
-    res = open(out).read()
     counts = {k: sum(1 for l in keep if k in l) for k in ("QGMMA", "STL", "LDL", "WARPGROUP.DEPBAR", "WARPGROUP.ARRIVE", "BAR.SYNC", "BAR.ARV", "CALL")}
-    blocks = re.findall(r"Function [^\n]*" + kernel + r"[^\n]*:\n[^\n]*", res)
-    return {"lines": len(keep), "counts": counts, "resource_lines": [b.split("\n")[1].strip() for b in blocks]}
+    return {"functions": len(rows), "rows": rows, "lines": len(keep), "counts": counts}
+
+
+ALLOWED_SKIPS = ("needs two GPUs", "could not import 'flash_attn'")
+MIN_PASSED = 49
+
+
+def check_junit(path):
+    """The candidate's test report: no failures / errors, at least MIN_PASSED passed, only the permitted skip reasons."""
+    if not os.path.isfile(path):
+        raise GateFailure("pytest wrote no junit report")
+    root = ET.parse(path).getroot()
+    cases = list(root.iter("testcase"))
+    failed = [c for c in cases if c.find("failure") is not None or c.find("error") is not None]
+    skipped = [c for c in cases if c.find("skipped") is not None]
+    passed = len(cases) - len(failed) - len(skipped)
+    bad_skips = [c.find("skipped").get("message", "") for c in skipped
+                 if not any(r in (c.find("skipped").get("message", "") or "") for r in ALLOWED_SKIPS)]
+    if failed or passed < MIN_PASSED or bad_skips:
+        raise GateFailure(f"candidate tests: {passed} passed, {len(failed)} failed, skips outside the permitted set "
+                          f"{bad_skips[:3]} (need >= {MIN_PASSED} passed)")
 
 
 def main():
@@ -110,11 +156,22 @@ def main():
             gate.save(candidate_library=lib, candidate_sha256=sha256(lib))
             r_prev = resources(gate, os.path.abspath(a.prev_lib), a.kernel, "prev")
             r_cand = resources(gate, lib, a.kernel, "cand")
+            if r_prev["functions"] != r_cand["functions"]:
+                raise GateFailure(f"target {a.kernel!r}: {r_prev['functions']} functions in the previous build, "
+                                  f"{r_cand['functions']} in the candidate")
             gate.save(resources={"prev": r_prev, "cand": r_cand})
-            print(f"[gate] resources prev {r_prev['resource_lines']} {r_prev['counts']}\n[gate] resources cand "
-                  f"{r_cand['resource_lines']} {r_cand['counts']}  (inspect target_*.sass)", flush=True)
+            print(f"[gate] resources prev {sorted(r_prev['rows'].values(), key=str)} {r_prev['counts']}\n[gate] resources cand "
+                  f"{sorted(r_cand['rows'].values(), key=str)} {r_cand['counts']}  (inspect target_*.sass)", flush=True)
         if a.mode == "full":
-            gate.run("pytest", [gate.py, "-m", "pytest", "tests/", "-q"], cwd=wt)
+            # the candidate's own tests, in a process pinned to the fresh build and verified from inside (gate_identity)
+            junit = os.path.join(run_dir, "pytest.xml")
+            tenv = dict(env, PYTHONPATH=os.pathsep.join([wt, HERE]), DM_SO=lib, KDA_EXPECT_PKG=os.path.join(wt, "delta_matching"),
+                        KDA_EXPECT_LIB=lib, KDA_EXPECT_SHA256=gate.record["candidate_sha256"])
+            for k_ in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
+                tenv.pop(k_, None)
+            gate.run("pytest", [gate.py, "-m", "pytest", "tests/", "-q", "-rs", "-p", "gate_identity", f"--junitxml={junit}"],
+                     cwd=wt, env=tenv)
+            check_junit(junit)
             base = a.base_dumps.split(","); prev = a.prev_dumps.split(",")
             if len(base) != 4 or len(prev) != 4:
                 raise GateFailure("--base-dumps / --prev-dumps need one dump per route: default,kv,head,streams2")

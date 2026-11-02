@@ -2,7 +2,7 @@
 
     python -m pytest benchmarks/test_tooling.py -q
 """
-import copy, os, subprocess, sys
+import copy, hashlib, json, os, subprocess, sys
 
 import pytest
 import torch
@@ -254,8 +254,29 @@ args = sys.argv[1:]
 line = " ".join(args)
 def done(tag):
     sys.exit(42 if tag and tag in fail.split(",") else 0)
+FUNCS = ["_Z9KernelX_causal", "_Z9KernelX_full", "_Z5Other"]
 if sys.argv[0].endswith("cuobjdump"):
-    done("cuobjdump")
+    if "cuobjdump" in fail.split(","):
+        done("cuobjdump")
+    shape = os.environ.get("STUB_RES", "ok")
+    lib = open(args[-1], "rb").read()
+    funcs = [f for f in FUNCS if not (shape == "nomatch" and "KernelX" in f)]
+    if "--dump-resource-usage" in args:
+        print("Fatbin elf code:\n================\narch = sm_90")
+        for f in funcs:
+            if shape == "onlysass" and f.endswith("full"):
+                continue
+            print(f"\tFunction {f}:")
+            bad = shape == "badrow" and f.endswith("causal")
+            print("\tREG:168 STACK:0" if bad else "\tREG:168 STACK:8 SHARED:0 LOCAL:0 CONSTANT[0]:904 TEXTURE:0 SURFACE:0 SAMPLER:0")
+    else:
+        for f in funcs:
+            print(f"\n\tcode for sm_90\n\t\tFunction : {f}")
+            n = 10 if shape == "truncated" and f.endswith("full") else 200
+            for i in range(n):
+                op = "QGMMA.64x256x32.F32.E4M3.E4M3" if i % 20 == 0 else "FFMA R1, R2, R3, R4"
+                print(f"        /*{16 * i:04x}*/                   {op} ;  /* 0x000000000000 */")
+    done("cuobjdump_ok")
 if args[:2] == ["-m", "delta_matching.jit"]:
     jit = os.environ["DM_JIT_DIR"]; os.makedirs(jit, exist_ok=True)
     open(os.path.join(jit, "_C.so"), "wb").write(b"lib")
@@ -265,8 +286,23 @@ if args[:2] == ["-m", "delta_matching.jit"]:
         os.remove(link)
     os.symlink(os.path.join(jit, "_C.so"), link)
     done("jit")
+if args[:2] == ["-m", "pytest"] and "test_tooling" in line:
+    done("tooling")
 if args[:2] == ["-m", "pytest"]:
-    done("tooling" if "test_tooling" in line else "pytest")
+    open(os.environ["STUB_ENVLOG"], "w").write(repr({k: os.environ.get(k) for k in
+        ("DM_SO", "PYTHONPATH", "KDA_EXPECT_PKG", "KDA_EXPECT_LIB", "KDA_EXPECT_SHA256", "PYTEST_ADDOPTS")}))
+    if "-p" not in args or args[args.index("-p") + 1] != "gate_identity":
+        sys.exit(7)
+    junit = [x.split("=", 1)[1] for x in args if x.startswith("--junitxml=")][0]
+    report = os.environ.get("STUB_JUNIT", "ok")
+    cases = ['<testcase classname="t" name="p%d"/>' % i for i in range(49 if report != "short" else 30)]
+    cases += ['<testcase classname="t" name="s%d"><skipped message="needs two GPUs"/></testcase>' % i for i in range(2)]
+    cases.append('<testcase classname="t" name="fa"><skipped message="could not import \'flash_attn\': no module"/></testcase>')
+    if report == "badskip":
+        cases.append('<testcase classname="t" name="x"><skipped message="needs a CUDA device"/></testcase>')
+    if report != "missing":
+        open(junit, "w").write('<testsuites><testsuite name="pytest">' + "".join(cases) + "</testsuite></testsuites>")
+    done("pytest")
 if "equivalence.py" in line and "dump" in args:
     out = args[args.index("--out") + 1]
     if "dump" not in fail.split(","):
@@ -277,7 +313,7 @@ if "equivalence.py" in line:
 if "ab.py" in line:
     d = args[args.index("--out-dir") + 1]; os.makedirs(d, exist_ok=True)
     if "ab" not in fail.split(","):
-        open(os.path.join(d, "ab.json"), "w").write("{{}}")
+        open(os.path.join(d, "ab.json"), "w").write("{}")
     done("ab")
 if "bench.py" in line:
     done("bench")
@@ -285,17 +321,18 @@ sys.exit(0)
 """
 
 
-def run_gate(tmp_path, mode, fail):
-    stub = tmp_path / "python"; stub.write_text(STUB.format(py=sys.executable)); stub.chmod(0o755)
-    cub = tmp_path / "cuobjdump"; cub.write_text(STUB.format(py=sys.executable)); cub.chmod(0o755)
+def run_gate(tmp_path, mode, fail, extra=None, kernel="X"):
+    stub = tmp_path / "python"; stub.write_text(STUB.replace("{py}", sys.executable)); stub.chmod(0o755)
+    cub = tmp_path / "cuobjdump"; cub.write_text(STUB.replace("{py}", sys.executable)); cub.chmod(0o755)
     wt = tmp_path / "wt"; (wt / "delta_matching").mkdir(parents=True)
     if mode == "confirm":
         (wt / "delta_matching" / "_C.so").write_bytes(b"lib")
     prev = tmp_path / "prev.so"; prev.write_bytes(b"prev")
     dumps = ",".join(str(tmp_path / f"d{i}.pt") for i in range(4))
-    env = dict(os.environ, GATE_PYTHON=str(stub), GATE_CUOBJDUMP=str(cub), STUB_FAIL_ON=fail)
+    env = dict(os.environ, GATE_PYTHON=str(stub), GATE_CUOBJDUMP=str(cub), STUB_FAIL_ON=fail,
+               STUB_ENVLOG=str(tmp_path / "pytest_env.txt"), **(extra or {}))
     return subprocess.run([sys.executable, os.path.join(HERE, "gate.py"), "--tag", "t", "--worktree", str(wt),
-                           "--prev-root", str(tmp_path), "--prev-lib", str(prev), "--subset", "D128", "--kernel", "X",
+                           "--prev-root", str(tmp_path), "--prev-lib", str(prev), "--subset", "D128", "--kernel", kernel,
                            "--mode", mode, "--base-dumps", dumps, "--prev-dumps", dumps,
                            "--run-dir", str(tmp_path / f"run_{mode}_{fail or 'none'}")], env=env, capture_output=True, text=True)
 
@@ -319,3 +356,76 @@ def test_gate_passes_when_every_step_passes(tmp_path, mode):
 def test_gate_refuses_a_reused_run_directory(tmp_path):
     (tmp_path / "run_full_none").mkdir()
     assert run_gate(tmp_path, "full", "").returncode != 0
+
+
+@pytest.mark.parametrize("shape,why", [("nomatch", "no function matches"), ("badrow", "malformed"),
+                                       ("onlysass", "different functions"), ("truncated", "truncated SASS")])
+def test_gate_rejects_missing_or_malformed_resource_evidence(tmp_path, shape, why):
+    r = run_gate(tmp_path, "full", "", extra={"STUB_RES": shape})
+    assert r.returncode == 1 and why in r.stdout and "step pytest" not in r.stdout, r.stdout[-800:]
+
+
+def test_gate_rejects_a_misspelled_kernel_selector(tmp_path):
+    r = run_gate(tmp_path, "full", "", kernel="NoSuchKernel")
+    assert r.returncode == 1 and "no function matches" in r.stdout, r.stdout[-800:]
+
+
+def test_gate_records_both_target_instantiations(tmp_path):
+    r = run_gate(tmp_path, "full", "")
+    rec = json.load(open(tmp_path / "run_full_none" / "gate.json"))
+    for side in ("prev", "cand"):
+        assert sorted(rec["resources"][side]["rows"]) == ["_Z9KernelX_causal", "_Z9KernelX_full"]
+        assert rec["resources"][side]["counts"]["QGMMA"] == 20
+
+
+@pytest.mark.parametrize("report,why", [("short", "30 passed"), ("badskip", "skips outside"), ("missing", "no junit")])
+def test_gate_rejects_an_incomplete_candidate_test_report(tmp_path, report, why):
+    r = run_gate(tmp_path, "full", "", extra={"STUB_JUNIT": report})
+    assert r.returncode == 1 and why in r.stdout, r.stdout[-800:]
+
+
+def test_candidate_pytest_is_pinned_to_the_fresh_build_in_a_hostile_environment(tmp_path):
+    hostile = {"DM_SO": str(tmp_path / "prev.so"), "PYTHONPATH": "/elsewhere", "PYTEST_ADDOPTS": "-k nothing"}
+    r = run_gate(tmp_path, "full", "", extra=hostile)
+    assert r.returncode == 0, r.stdout[-800:]
+    seen = eval(open(tmp_path / "pytest_env.txt").read())
+    lib = str(tmp_path / "run_full_none" / "jit" / "_C.so")
+    assert seen["DM_SO"] == lib == seen["KDA_EXPECT_LIB"]
+    assert seen["PYTHONPATH"].split(os.pathsep)[0] == str(tmp_path / "wt") and seen["PYTEST_ADDOPTS"] is None
+    assert seen["KDA_EXPECT_PKG"] == str(tmp_path / "wt" / "delta_matching")
+    assert seen["KDA_EXPECT_SHA256"] == hashlib.sha256(b"lib").hexdigest()
+
+
+FAKE_CORE = """
+import os
+_lib = None
+def _ops():
+    global _lib
+    _lib = os.environ.get("FAKE_LOADED") or os.environ["DM_SO"]
+def loaded_library():
+    return _lib
+"""
+
+
+@pytest.mark.parametrize("case", ["match", "other_lib", "bad_sha", "other_pkg", "unset"])
+def test_identity_plugin_checks_inside_the_pytest_process(tmp_path, case):
+    pkg = tmp_path / "wt" / "delta_matching"; pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("from . import core\n"); (pkg / "core.py").write_text(FAKE_CORE)
+    lib = tmp_path / "cand.so"; lib.write_bytes(b"cand"); other = tmp_path / "prev.so"; other.write_bytes(b"prev")
+    (tmp_path / "wt" / "tests").mkdir(); (tmp_path / "wt" / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path / "wt"), HERE]), DM_SO=str(lib),
+               KDA_EXPECT_PKG=str(pkg), KDA_EXPECT_LIB=str(lib), KDA_EXPECT_SHA256=hashlib.sha256(b"cand").hexdigest())
+    if case == "other_lib":
+        env["FAKE_LOADED"] = str(other)
+    elif case == "bad_sha":
+        env["KDA_EXPECT_SHA256"] = "0" * 64
+    elif case == "other_pkg":
+        env["KDA_EXPECT_PKG"] = str(tmp_path / "elsewhere" / "delta_matching")
+    elif case == "unset":
+        env.pop("KDA_EXPECT_SHA256")
+    r = subprocess.run([sys.executable, "-m", "pytest", "tests/", "-q", "-p", "gate_identity", "-p", "no:cacheprovider"],
+                       cwd=tmp_path / "wt", env=env, capture_output=True, text=True)
+    if case == "match":
+        assert r.returncode == 0 and "1 passed" in r.stdout, r.stdout[-600:]
+    else:
+        assert r.returncode == 3 and "gate_identity" in r.stdout + r.stderr and "passed" not in r.stdout, r.stdout[-600:]

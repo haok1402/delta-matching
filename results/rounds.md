@@ -165,3 +165,20 @@ non-bitwise: the Q2 numerics gate and Q3 workspace capture are their acceptance 
 | forward | 0 | 0 |
 | pass 2 | 0 | 0 |
 | torch glue | 0 | 0 |
+
+## Campaign transition after round 6: pass 1 closed, forward next
+
+Pass 1 has two consecutive failed profile-based rounds (H1b, PINGPONG) and is closed under the stop rule. The partial
+FMA-polynomial exp2 (MUFU-poly) and decoupling-only per-warpgroup psi stay as unexecuted pass-1 backlog for the report.
+Current ranking from the accepted DO2 arm of round 6 (results/r6 ab_main A_median.json; main grid sums, modeled SOL from
+`kernels.accounting`):
+
+| kernel | measured ms | modeled SOL ms | modeled waste ms | % of modeled SOL |
+|---|---:|---:|---:|---:|
+| pass 1 | 493.384 | 128.810 | 364.574 | 26.1% (closed) |
+| forward | 185.745 | 64.167 | 121.578 | 34.5% |
+| pass 2 | 105.895 | 63.061 | 42.834 | 59.6% |
+| torch glue | 36.473 | 13.822 | 22.650 | 37.9% |
+| pass 0 | 35.675 | 16.042 | 19.633 | 45.0% |
+
+The order is unchanged since round 3. Forward is the largest eligible gap: the next campaign profiles it (round 7).

@@ -411,3 +411,18 @@ Relative error vs the ORIGINAL kernel (frozen/base), per case, 66 finite cases, 
 
 O (the forward's own output) passes with both ports (worst +1.2e-6); the dQ / dK / dV movements of every build include
 the backward numerics changes already accepted on the head (pass 0 / pass 1), so they are not forward-attributable.
+
+### BN256 port under the residual-v5 row check (v5-abs, c = 1, the decided form) : PASS
+
+- DBG builds from my trees with kda-sm90's r21-v5 DBG extension applied (`kda-work/v5/q256{,nf}`, jit `v5-q256{,nf}-dbg`);
+  captures with its `numerics_v5.py` (read-only), checked against the ORIGINAL's DBG rows (its `data/orig`; the
+  original's acceptance-suite dump re-captured into my results dir). Job 21204758; raw data in
+  `kda-results/kda-sm90-fwd/v5/`.
+
+| suite | rows | q256 (fold on) | q256nf (fold off) | max c needed |
+|---|---:|---|---|---:|
+| 72 cases x {default, kv, head, streams2} | 334,592 per route | 0 abs-worse (161 ratio-worse) | 0 (72 ratio-worse) | 0.334 |
+| stress | 1,703,936 | 0 (78,780 ratio-worse) | 0 (53,580 ratio-worse) | 0.616 |
+| acceptance shapes | 11,796,480 | 0 (0) | 0 (0) | 0.012 |
+
+- Both builds include the head's accepted backward changes (EXPBX64, C4), so this is the combination's result.

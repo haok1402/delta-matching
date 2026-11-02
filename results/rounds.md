@@ -890,3 +890,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   pre-transposed V worth <= 2.5%. The 3-WG BM192 x BN128 layout is the best point of the space. Remaining structural
   option: an FA4-style split (softmax WG + PV WG per 64-row slice, P through shared memory), estimated 0-4%: prototype
   launched (round 20).
+- Pass-1 layout worker (S20-p1-01..08, results/screens/pass1_layout_log.md, 2-rep screens vs r19_fwd, all bitwise,
+  240 regs, no spills): dO / dOt depth 2 +0.5..+2.6% (the old ~-2% DOST gain is gone), Q3 + dO2 / dO2 + dOt2 neutral;
+  a first PERSISTENT pass 1 (one CTA per SM, longest-first, next tile's loads under the epilogue) +1.2..+2.1% (the
+  out-of-loop time is ~3400 of ~215000 cycles per CTA: <= 1.5-2% recoverable, below the extra per-tile sync);
+  L2 tile-order grouping 1 / 16 heads +0.3..+4.5%. 128-row steps, 2 CTAs / SM, 3 consumer WGs and other register
+  splits exceed the 65536-register file. The 64 x 128, 2-WG, non-persistent longest-first geometry is the only workable
+  point under the per-tile scale contract and the 240-register budget. No candidate; pass-1 progress rests on
+  kda-bwdport's FA3-structure rebuild.

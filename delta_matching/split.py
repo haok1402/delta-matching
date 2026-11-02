@@ -59,6 +59,12 @@ def _bwd_by_head_groups(ops, a, sm, B, H, Hkv, n_rep, N, D, hp, matched_delta=Fa
     Lse3 = Lse.reshape(B, H, N)
     Dlt3 = Dlt.reshape(B, H, N) if Dlt is not None else None     # None on the per-group matched path (pass 0 per group below)
     assert matched_delta or Dlt3 is not None, "the all-heads delta is required unless the delta is taken per group"
+    if matched_delta and D == 128:
+        # P0ALL (D128: the row-CTA pass 0 has no workspace): pass 0 once on all heads (one launch; the GQA groups share
+        # K / V in it), sliced per group below: bitwise the per-group delta (per-head fixed-order reductions, one writer
+        # per row).
+        Dlt3 = ops.delta_fp8(dO8, Q8, K8kv, V8kv, Lse3.contiguous(), kTtkv, Q8s, K8skv, V8skv, dO8s, causal).view(B, H, N)
+        matched_delta = False
     groups = list(range(0, H, hp))
     K = min(_BWD_STREAMS, len(groups))
     cur = torch.cuda.current_stream(dO8.device)

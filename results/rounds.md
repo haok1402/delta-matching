@@ -928,3 +928,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   dV error rule, not re-gated; PE deferred promote bitwise but neutral. The FA3-fp8 skeleton bound for pass 1 is -30%:
   psi ~11%, dS' hand-off ~8%, dV window ~8% (promote smem-bandwidth-bound), dK fold ~4%, i.e. the remaining pass-1 gap
   is the per-tile psi / dS' contract and the dV / dK promotes, not scheduling.
+- Forward under TASK.md's error clause (kda-fwd analysis): the O error rise (+1.5..2.5e-5 relative on scale3 / scale10
+  / scale30 vs the original) comes from the 128-key tiling itself (plain BM192 without lazy or fold shows it), not the
+  fold; a BM192 promote that reproduces the BN256 accumulation does not fit at 3 WGs (O 64 + S 64 + D 64 = 192 > 160
+  registers) and cannot reproduce whole-256-key-tile codes anyway. Prepared fallback: the ORIGINAL 2 WGs x 128 x 256
+  tile with the later pieces ported (FWDLAZY, RHOPRE for 4 groups, PRETURN, SMSC; with / without FWDDFOLD); C1 on that
+  tile measured -6.8% vs r14 with per-case O changes <= 4e-6 relative. The error-clause audit decides.

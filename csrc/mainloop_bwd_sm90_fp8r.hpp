@@ -117,6 +117,11 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #define FA3FP11_P1R_SAGEDP 0
 #endif
 
+// ## kda-pass1 KDA_P1_GUARDLITE (named numerics change when on): bit 0 drops the F2b emission floor of psi (and the running
+// g_max that anchors it), bit 1 drops the 1e-8 / 1e8 clamp of the dV window ratio.  Outputs change only where a guard binds.
+#ifndef KDA_P1_GUARDLITE
+#define KDA_P1_GUARDLITE 0
+#endif
 #include "kda_prof.h"
 
 namespace flash {
@@ -803,7 +808,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             KP(4);
             // S17 RESCALE-EARLY: the dV window rescale fills the S-retire bubble (the previous dV retired last step).
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
-            float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
+            float const fq8_rf = (KDA_P1_GUARDLITE & 2) ? fq8_f_prev / fq8_f_cur : fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
             if (!(KDA_PK_PROBE & 1) && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
             #pragma unroll
             for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) *= fq8_rf; }
@@ -1020,7 +1025,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             for (int w = 0; w < NumMmaThreads / cutlass::NumThreadsPerWarp; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[w]); }
             bool const fq8_tile_zero = fq8_amax * (1.0f / 448.0f) < 1e-30f;
             float const fq8_psi_raw = fmaxf(fq8_amax * (1.0f / 448.0f), 1e-30f);
-            float const fq8_psi = fmaxf(fq8_psi_raw, fq8_g_max * (256.0f * 1e-8f) / fq8_q8sc);
+            float const fq8_psi = (KDA_P1_GUARDLITE & 1) ? fq8_psi_raw : fmaxf(fq8_psi_raw, fq8_g_max * (256.0f * 1e-8f) / fq8_q8sc);
             float const fq8_psi_inv = fq8_tile_zero ? 0.0f : 1.0f / fq8_psi;
             if (thread_idx == 0) {
                 params.ptr_psi[(int64_t(fq8_bh) * params.nbm + m_block) * params.nbn + n_block] = fq8_tile_zero ? 0.0f : fq8_psi;
@@ -1053,7 +1058,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             if (!fq8_tile_zero) {
                 float const fq8_g_cur = fq8_psi * kFq8MoInv * fq8_q8sc;
                 fq8_g_fold = fq8_g_cur;
-                fq8_g_max = fmaxf(fq8_g_max, fq8_g_cur);
+                if (!(KDA_P1_GUARDLITE & 1)) { fq8_g_max = fmaxf(fq8_g_max, fq8_g_cur); }
             }
             // dK_tmp = dS'^T Q (RS, zero-init); FIFO retire: dV (issued above, H1a) first, then dK.
             KP(14);

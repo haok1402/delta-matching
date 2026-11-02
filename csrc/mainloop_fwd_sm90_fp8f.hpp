@@ -404,7 +404,12 @@ struct CollectiveMainloopFwdSm90Fp8F {
 
     // Set the bytes transferred in this TMA transaction (may involve multiple issues)
     static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(SmemLayoutQ{}) * cutlass::sizeof_bits_v<Element> / 8);
-    static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8);
+    // ## SMSC (kda-fwdport): at hd128 (PV-first, two 64-key groups per tile) the tile's k-scales and v-scales ride the
+    // K stage: the producer bulk-copies the 16-byte aligned windows k8s / v8s[4*(n/2) .. +4) (2 x 16 B) on the K barrier
+    // and the consumers read the tile's pair from smem after the K wait.  Same values: bitwise; removes the per-tile
+    // global scale-load latency from the softmax's critical path.
+    static constexpr bool kSmemSc = kHeadDim < 256 && kGroups == 2 && FA3FP11_HD128_PVFIRST;
+    static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8) + (kSmemSc ? 32u : 0u);
     static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutVt{})) * cutlass::sizeof_bits_v<Element> / 8);
     static constexpr uint32_t TmaTransactionBytesQv = static_cast<uint32_t>(size(SmemLayoutQv{}) * cutlass::sizeof_bits_v<Element> / 8);
 
@@ -454,6 +459,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
         SmemQv_t smem_qv;
         SmemP_t smem_p;
         SmemScale_t smem_scale;
+        cute::array_aligned<float, 8 * kStages, 128> smem_kvsc;   // ## SMSC: per K stage, 4 k-scales + 4 v-scales
     };
 
     using TensorStorageNoTranspose = std::conditional_t<
@@ -472,6 +478,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         SmemQv_t smem_qv;
         SmemScale_t smem_scale;
+        cute::array_aligned<float, 8 * kStages, 128> smem_kvsc;   // ## SMSC: per K stage, 4 k-scales + 4 v-scales
     };
 
     using TensorStorage = std::conditional_t<!Transpose_V, TensorStorageNoTranspose, TensorStorageTransposeV>;
@@ -945,6 +952,12 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 auto [n_block_idx, bidb_kv_idx] = paged_kv_manager.get_indices_for_K_TMA();
                 copy(params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                     tKgK_TMA(_, n_block_idx, bidb_kv_idx), tKsK_TMA(_, smem_pipe_write.index()));
+                if constexpr (kSmemSc) {
+                    int const sc_off = (bidb * get<2>(params.shape_K) + params.qhead_per_khead_divmod.divide(bidh)) * params.nblk_k + 4 * (n_block >> 1);
+                    float* sc_dst = shared_storage.tensors.mainloop.smem_kvsc.data() + 8 * smem_pipe_write.index();
+                    cute::SM90_BULK_COPY_G2S::copy(params.ptr_k8s + sc_off, pipeline_k.producer_get_barrier(smem_pipe_write), sc_dst, 16);
+                    cute::SM90_BULK_COPY_G2S::copy(params.ptr_v8s + sc_off, pipeline_k.producer_get_barrier(smem_pipe_write), sc_dst + 4, 16);
+                }
             } else {
                 constexpr bool Seqlenk_mask = decltype(need_seqlenk_masking_type)::value;
                 paged_kv_manager.template load_K<Seqlenk_mask>(n_block, sK_pi(_, _, smem_pipe_write.index()));
@@ -1369,6 +1382,13 @@ struct CollectiveMainloopFwdSm90Fp8F {
         // reproduces the M10 index arithmetic exactly.
         int const fq8_bh_k = (bidb * get<2>(params.shape_K) + bidh_kv) * params.nblk_k;
         float fq8_v[4] = {1.f, 1.f, 1.f, 1.f};
+        float fq8_ksc[2] = {1.f, 1.f}, fq8_vsc[2] = {1.f, 1.f};   // ## SMSC: the tile's scales, read from smem after the K wait
+        auto fq8_read_sc = [&](int stage, int n_blk) {
+            if constexpr (kSmemSc) {
+                float const* sc = shared_storage.tensors.mainloop.smem_kvsc.data() + 8 * stage + 2 * (n_blk & 1);
+                fq8_ksc[0] = sc[0]; fq8_ksc[1] = sc[1]; fq8_vsc[0] = sc[4]; fq8_vsc[1] = sc[5];
+            }
+        };
         auto fq8_descale = [&](auto& tSrS_, int n_blk) {
             auto sc_ = make_tensor(tSrS_.data(), flash::convert_layout_acc_rowcol(tSrS_.layout()));
             static_assert(decltype(size<1>(sc_))::value == kRowcol, "delta_matching fwd: rowcol width must match kBlockN / 4");
@@ -1400,8 +1420,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
             } else {
             // ## Delta-Matching-128: two 64-key groups (16 rowcol columns each).
             float const g_[2] = {   // ## kda-fwd: floored at FLT_MIN (see the F3 branch)
-                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 2 * n_blk + 0], 1.17549435e-38f),
-                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 2 * n_blk + 1], 1.17549435e-38f)};
+                fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[0] : params.ptr_k8s[fq8_bh_k + 2 * n_blk + 0]), 1.17549435e-38f),
+                fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[1] : params.ptr_k8s[fq8_bh_k + 2 * n_blk + 1]), 1.17549435e-38f)};
             #pragma unroll
             for (int mi = 0; mi < size<0>(sc_); ++mi) {
                 #pragma unroll
@@ -1414,7 +1434,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // floored at FLT_MIN: bitwise for every nonzero scale; an all-zero Q or K block (scale 0) would otherwise give
             // -inf * 0 = NaN for the masked scores (the inherited zero-input defect); with the floor, masked scores stay -inf
             // and the zero codes give the uniform softmax (O = 0 for zero V).
-            for (int g = 0; g < kGroups; ++g) { g_[g] = fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g], 1.17549435e-38f); }
+            for (int g = 0; g < kGroups; ++g) { g_[g] = fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[g & 1] : params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g]), 1.17549435e-38f); }
         };
         auto fq8_load_v = [&](int n_blk) {
             if constexpr (kGroups == 4) {
@@ -1422,6 +1442,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
             fq8_v[1] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 1];
             fq8_v[2] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 2];
             fq8_v[3] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 3];
+            } else if constexpr (kSmemSc) {
+            fq8_v[0] = fq8_vsc[0]; fq8_v[1] = fq8_vsc[1];
             } else {
             fq8_v[0] = params.ptr_v8s[fq8_bh_k + 2 * n_blk + 0];
             fq8_v[1] = params.ptr_v8s[fq8_bh_k + 2 * n_blk + 1];
@@ -1450,6 +1472,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
         if constexpr (IntraWGOverlap) {
             Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
             consumer_wait(pipeline_k, smem_pipe_read);
+            fq8_read_sc(smem_pipe_read.index(), n_block);   // ## SMSC
             flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
             warpgroup_wait<0>();
             pipeline_k.consumer_release(smem_pipe_read);
@@ -1524,12 +1547,29 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 else { softmax.promote_o(O_, D_, softmax.basis_last(fq8_v[kGroups - 1])); }
             };
             // ## FWDLD: rebase tOrO onto the running max when it has drifted more than 2^8 from the reference.
-            auto fq8_lazy_rebase = [&]() __attribute__((always_inline)) {
+            // ## S19 PREW2: rho_1 / promote weight of the consumed tile, computed when that tile's softmax ends.
+            static constexpr bool kPreW = kFwdLazy && kGroups == 2 && kPVNSplit == 1 && kSchedPVFirst;
+            float fq8_pre_r1[2] = {1.f, 1.f}, fq8_pre_w[2] = {0.f, 0.f};
+            auto fq8_prep_w = [&]() __attribute__((always_inline)) {
+                if constexpr (kPreW) {
+                    auto w_ = softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1]);
+                    fq8_pre_w[0] = w_(0); fq8_pre_w[1] = w_(1);
+                }
+            };
+            auto fq8_prep = [&]() __attribute__((always_inline)) {
+                if constexpr (kPreW) {
+                    auto r_ = fq8_rho(softmax, 1);
+                    fq8_pre_r1[0] = r_(0); fq8_pre_r1[1] = r_(1);
+                    fq8_prep_w();
+                }
+            };
+            auto fq8_lazy_rebase = [&](auto ci_c) __attribute__((always_inline)) {
+                static constexpr bool kCi = decltype(ci_c)::value;   // ## S19 REBNI
                 if constexpr (kFwdLazy) {
                     bool need_ = false;
                     #pragma unroll
                     for (int mi = 0; mi < size(softmax.mref_); ++mi) {
-                        need_ |= fabsf(softmax.template max_l2<true>(mi) - softmax.mref_(mi)) > 8.f;
+                        need_ |= fabsf(softmax.template max_l2<kCi>(mi) - softmax.mref_(mi)) > 8.f;
                     }
                     if (__any_sync(0xffffffff, need_)) {
                         typename Softmax::TensorT f_;
@@ -1541,9 +1581,12 @@ struct CollectiveMainloopFwdSm90Fp8F {
                             f_(mi) = fminf(exp2f(softmax.mref_(mi) - m_), 1.f); softmax.mref_(mi) = m_;
                         }
                         softmax.rescale_o(tOrO, f_);
+                        fq8_prep_w();   // ## S19 PREW2: the weight against the new reference
                     }
                 }
             };
+
+            fq8_prep();   // ## S19 PREW2: the prologue tile
 
             // The four-group PV chain for ONE head-dim slab.  With Defer, the
             // group-3 sub-gemm is left IN FLIGHT and its promote is issued by
@@ -1725,6 +1768,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // and ptxas then reports C7510, "wgmma instructions are serialized
             // due to wgmma pipeline crossing function boundary".  Measured cost
             // of letting it outline: 37.5 ms vs 0.69 ms for the parent.
+            // ## S19 WGID: the scheduler-barrier ids from the shfl'd warp_group_idx, computed once per work tile.
+            int const fq8_bar_sync_id = static_cast<int>(FwdNamedBarriers::WarpSchedulerWG1) + warp_group_idx;
+            int const fq8_bar_arv_id = static_cast<int>(FwdNamedBarriers::WarpSchedulerWG1)
+                + (NumMmaWarpGroups == 2 ? 1 - warp_group_idx : (warp_group_idx < NumMmaWarpGroups - 1 ? warp_group_idx + 1 : 0));
             auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) __attribute__((always_inline)) {
                 static constexpr bool Check_inf = decltype(check_inf_type)::value;
                 PipelineState smem_pipe_read_v(smem_pipe_read.index(), smem_pipe_read.phase(), smem_pipe_read.count());
@@ -1735,9 +1782,25 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     KF_VAL(30, smem_pipe_read_v.index()); KF_VAL(31, smem_pipe_read_v.phase()); KF(0);
                     consumer_wait(pipeline_v, smem_pipe_read_v);
                     KF(1);
-                    warp_scheduler_barrier_sync();
+                    // ## kda-fwd PRETURN (bitwise): with 128-key tiles and the lazy O rescale, the lazy rebase, rho_1 and the
+                    // promote weight depend only on the consumed tile's state, so they run BEFORE the ring turn; the turn
+                    // keeps only the two PV sub-gemms, the rescale, the promote and the QK issue.
+                    static constexpr bool kPreTurn = kFwdLazy && kGroups == 2 && kPVNSplit == 1;
+                    if constexpr (kPreTurn) { fq8_lazy_rebase(cute::bool_constant<Check_inf>{}); }
+                    static_assert(!kPreTurn || kPreW);
+                    typename Softmax::TensorT pre_r1_, pre_w_;   // ## S19 PREW2
+                    pre_r1_(0) = fq8_pre_r1[0]; pre_r1_(1) = fq8_pre_r1[1]; pre_w_(0) = fq8_pre_w[0]; pre_w_(1) = fq8_pre_w[1];
+                    if constexpr (UseSchedulerBarrier) { cutlass::arch::NamedBarrier::sync(2 * cutlass::NumThreadsPerWarpGroup, fq8_bar_sync_id); }   // ## S19 WGID
                     KF(2);
                     auto tOrD = make_tOrD();
+                    if constexpr (kPreTurn) {
+                        auto B_ = pv_B_slab(cute::Int<0>{}, tOrV(_, _, _, smem_pipe_read_v.index()));
+                        fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, tOrD);
+                        softmax.rescale_o(tOrD, pre_r1_);
+                        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 2, 4>(tiled_mma_pv, tOrP, B_, tOrD);
+                        auto O0_ = pv_O_slab(cute::Int<0>{});
+                        softmax.promote_o(O0_, tOrD, pre_w_);
+                    } else {
                     fq8_pv_tile(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD);
                     KF(3);
                     warpgroup_wait<0>();
@@ -1745,8 +1808,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // w_3 = v8sc_3 * 2^(ms_3 - m*l2) needs the CONSUMED tile's
                     // ms_[3] AND its running max; max_get_scale_grouped below
                     // destroys both, so every promote of this tile must precede it.
-                    fq8_lazy_rebase();   // before the promote: its weight 2^(ms_3 - mref) must stay bounded
+                    fq8_lazy_rebase(cute::true_type{});   // before the promote: its weight 2^(ms_3 - mref) must stay bounded
                     fq8_promote_last(tOrD);
+                    }
                     pipeline_v.consumer_release(smem_pipe_read_v);  // release V
                     KF(5);
                     // ---- tOrD is dead here; QK reuses its registers ----
@@ -1754,7 +1818,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     consumer_wait(pipeline_k, smem_pipe_read);
                     KF(6);
                     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
-                    warp_scheduler_barrier_arrive();
+                    if constexpr (UseSchedulerBarrier) { cutlass::arch::NamedBarrier::arrive(2 * cutlass::NumThreadsPerWarpGroup, fq8_bar_arv_id); }   // ## S19 WGID
+                    fq8_read_sc(smem_pipe_read.index(), n_block);   // ## SMSC, S19 SCPOST: after the ring-turn arrive
                     KF(7);
                     warpgroup_wait<0>();
                     pipeline_k.consumer_release(smem_pipe_read);  // release K
@@ -1786,6 +1851,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     KF(13);
                     fq8_load_v(n_block);           // this tile's four v-scales
                     if constexpr (!MmaPV_is_RS) { arrive_on_P_write_barrier(); }
+                    fq8_prep();   // ## S19 PREW2: for the next step's PV chain
                     KF(14); KF_STEP();
                 } else {
                     Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
@@ -1878,7 +1944,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
             warpgroup_wait<0>();
             // The last tile's promote: ms_[3] and row_max are final and finalize
             // did not touch them.
-            fq8_lazy_rebase();
+            fq8_lazy_rebase(cute::true_type{});
             fq8_promote_last(tOrD);
             pipeline_v.consumer_release(smem_pipe_read);  // release V, otherwise producers will hang
             if constexpr (kFwdLazy) {   // ## FWDLD: tOrO is in the reference basis: O = O_ref * 2^(mref - m l2) / l

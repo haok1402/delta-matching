@@ -227,3 +227,19 @@ changes. The numerics path for pass 0 is closed under v4; FOLD's -13% (the large
   - Registers: one S / dP pair per warpgroup at 112 regs, 3-accumulator variants spill.
   - ptxas: cross-iteration pipelining gets C7517 full waits.
   - Instruction trims: unrolling (W4U3, -17 instr / stage) gains nothing.
+
+## C5: NML + register split 104 / 24 (bitwise, stacking candidate) — branch kda-sm90-pass0-b2, e61c60d on kda-sm90 9be3622
+
+Port of kda-sm90's S17-p0 'nomaskloop' onto W4: leading stages whose n-blocks need no mask run a loop without the mask
+test / skip predicates. Its other pieces are already in W4: 'skipdead' (W4's nb_last skip) and the RTR scatter (C1).
+The register split was re-swept on W4: 112/24, 112/32, 104/24, 104/40, 96/24, 96/40, with 104/24 best.
+
+| evidence | result |
+|---|---|
+| screen sQ1 (vs r14_h3, 2 reps) | ref -12.57%, NML -13.54%, NML + 104/24 -13.82%, 112/32 -13.58%, 104/40 -13.61% |
+| screen sR1 (on e61c60d) | 104/24 -13.53%, 96/24 -13.01%, 96/40 -13.05%, 112/24 -12.98% |
+| equivalence (stamped build) | BITWISE EQUAL vs frozen r17_p1 on default / kv / head / streams2, 72 cases each (jobs 21178004, 21178009) |
+| ab.py paper / pass0 vs r17_p1 | **-1.27%** (job 21178004; -1.07 / -2.09 / +0.17 / -2.08) and **-1.42%** (job 21178009; -0.82 / -2.02 / -0.89 / -1.95); below 3%, no shape slower beyond spread |
+| resources | launch 96, consumer 104, producer 24; STACK 0, no spills |
+
+Status: **READY for stacking** (bitwise, >= 1% in two jobs).

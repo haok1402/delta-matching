@@ -1534,7 +1534,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
                         #pragma unroll
                         for (int mi = 0; mi < size(f_); ++mi) {
                             float const m_ = softmax.template max_l2<true>(mi);
-                            f_(mi) = exp2f(softmax.mref_(mi) - m_); softmax.mref_(mi) = m_;
+                            // <= 1 for every live row (the running max never falls below the reference); a row that had
+                            // no visible key yet (reference set from max_l2 = 0) holds O = 0, where the clamp avoids inf * 0.
+                            f_(mi) = fminf(exp2f(softmax.mref_(mi) - m_), 1.f); softmax.mref_(mi) = m_;
                         }
                         softmax.rescale_o(tOrO, f_);
                     }

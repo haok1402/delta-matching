@@ -186,3 +186,22 @@ half the steps; dV promote ~33 averaged. What is left and why it stays:
 The last instruction cut that paid was SHFL8 (-8 SHFL per warp-step, ~-1.1% on r17_pk, consistent with the
 ~0.05-point-per-instruction sensitivity). I have no further grounded per-element cut: **kda-pass1 is DONE**;
 the held piece is `kda-sm90-pass1-c2pk` (SHFL8, -1.10% / -1.07%, bitwise, four routes).
+
+## C4: SHFL8 + NOCLAMP=4 (F1 clamp only on the masked-tile line), pass 1 + pass 0; named numerics change, bitwise on the suite (2026-11-02)
+
+- Branch `kda-sm90-pass1-c4` (56c3510) on 7a06674 (r17_pk). Default build = the measured build (pass-1 and pass-0 SASS
+  identical); REG 168, STACK 0, no diagnostics.
+- The F1 clamp min(t, 12) stays on the certified line of the tiles pass 0 masks (EXPBX64's predicate: same tiles in
+  both passes, so P^ stays identical) and is dropped on the folded line elsewhere: -32 FMNMX per thread per step.
+- Screens (vs SHFL8 on r17_pk): NOCLAMP=1 (clamp off everywhere) pass 1 -2.1 / -2.3%, pass 0 -4.0 / -4.3%, but NaN
+  dK / dV on the all-zero defect case (masked -inf x underflowed descale = NaN, which the clamp maps to 12): fails the
+  numerics gate (route default, 29 problems, all d128_zeros). NOCLAMP=2 (clamp only if the step's LSE / descale is
+  non-finite): +7.6 / +7.1% slower (loop duplication) and still NaN. NOCLAMP=4: pass 1 -3.22 / -2.24%, pass 0 -4.44 /
+  -3.87%, BITWISE EQUAL.
+- Equivalence vs r17_pk: BITWISE EQUAL on default / kv / head / streams2 (72 cases each); pytest 49 / 3.
+- Paper set vs r17_pk, 3 reps, two jobs (21191218 / 21191219): pass 1 geomean **-2.93% / -2.93%**, pass 0 **-3.39% /
+  -3.21%**, e2e fwd+bwd -1.80% / -1.90%.
+- Status: READY (pass 1 just under 3% alone; >= 1% bitwise for stacking; pass 0 gain included).
+- Pass 1 reusing pass 0's S / dP or computing the matched delta itself: already prototyped and priced by kda-fuse (F1a
+  PDL two-phase +0.11%; F1b delta in pass 1: row-sum work +17% of pass 1, infeasible at 64K; F2a-c handoff costs more
+  HBM time than pass 1), not duplicated here.

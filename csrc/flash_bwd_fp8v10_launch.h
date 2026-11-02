@@ -66,7 +66,7 @@ void run_flash_bwd_fp11r_hd128(Flash_bwd_fp8_params &params, cudaStream_t stream
         false /*Varlen*/, false /*dKV_swapAB*/, 1 /*AtomLayoutKdKV = NumMmaWarpGroups / AtomLayoutNdKV*/>;
     using Scheduler = std::conditional_t<
         Is_causal,
-        flash::SingleTileBwdLPTScheduler<false /*Varlen*/, kBlockN, (KDA_FQ & 8) != 0 /*SPT: kda-bwdport FQ deterministic order*/>,
+        flash::SingleTileBwdLPTScheduler<false /*Varlen*/, kBlockN, ((KDA_FQ & 8) != 0 || (KDA_FQX & 32) != 0) /*SPT: kda-bwdport FQ deterministic order*/>,
         flash::SingleTileScheduler<false /*Varlen*/, false /*Split*/, false /*PackGQA*/, kBlockN>
     >;
     using AttnKernel = flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<CollectiveMainloop, CollectiveEpilogue, Scheduler>>;

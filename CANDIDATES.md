@@ -102,3 +102,14 @@ separate row pass; levers are inside it.
 Each half alone sits at the floor; together 1.44x. A warpgroup has one S / dP pair (112 regs), so its own gemms and
 vector work only overlap during exp (dP in flight); cross-iteration pipelining makes ptxas inject a full wait (C7517,
 see swp). The remaining gap is tensor / vector overlap across warpgroups.
+| w4s3 | C4 stack, W4 with S0, dP0, S1 up front (3 accumulators) and dP1 after rowsum0 | yes | -2.88% (ref -13.94%) | -4.54 / -2.33 / -3.01 / -1.61 | sK1 (21172843) | REJECTED: 112 regs -> 80 B spills, ptxas C7512 wgmma serialization |
+| w4p1 | C4 stack, producer = one warp after the consumer warpgroups (544 threads, no setmaxnreg) | yes | -14.40% (ref -14.13%) | | sL1 | no gain: ptxas still caps 544-thread CTAs at 96 regs (with or without -maxrregcount=120), consumers use 90 |
+| w4p1s3 / w4p1s3r | w4p1 + 3 accumulators (r: -maxrregcount=120) | yes | +11.28% / +11.88% | | sL1 / sL2 | REJECTED: capped at 96 regs, 308 B spills, C7512 |
+
+## Output-changing screens (Hao's per-row residual rule, round 17 decision)
+
+| variant | change | geomean pass 0 (ref C4 stack) | numerics screen (DBG builds, default route, D128 matched cases + B1 H4 N8192; `p0/tools/rowres.py`) | status |
+|---|---|---:|---|---|
+| lazy | dP descale once per 8-key half partial (fmaf(P, dP, a), partial x dp) instead of per element: -1 FMUL / element | -17.80% (ref -13.96%), -18.30% (ref -14.40%) | gaussian cases: per-row residual changes within about +-2 x 2^-24, no exemption growth; stress cases (scale3 / scale10 / outliers): near-one-hot rows with residual ~1 in both builds move by up to 0.18 absolute; fp32 error larger on 8 (case, output) pairs (dQ / dK of gqa4, gqa3_promote, packed, bhnd; +7e-9 .. +1.3e-7 relative) | fails the strict rule as screened (fp32 error not larger on any case) |
+| defer | per-lane fp64 row partials across n-blocks, one fp64 quad reduce at the end (no per-tile shuffles / fp64 folds) | -16.61% (ref -14.40%) | pending (job n2) | screening |
+| lazy_defer | lazy + defer | -21.25% (ref -14.40%) | pending (job n2) | screening |

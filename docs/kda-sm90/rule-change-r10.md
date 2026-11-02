@@ -181,3 +181,12 @@ of its calibrated sol4 limit on the four acceptance shapes; first milestone FA3 
 - Decided under the autonomy rule: "the mean over all cases may not rise" allows noise of at most 1e-6 absolute per
   output tensor (one tenth of the per-case tolerance; a systematic drift of the per-case size still fails). Evidence:
   forward C3n / C3f raise the O / dK / dV means by 1e-8 .. 5e-7 with per-case changes of both signs.
+- Decided under the autonomy rule (round 17), forward floor: the forward helper proposed floor_fwd = max(sol4 tensor
+  floor, measured FA3 fp8 forward time) (evidence: FA3 fp8 runs at 59.0% x 1.163 = 68.6% of the same tensor floor;
+  the method's per-group basis + Horner work costs ~+24% over FA3 in kda-fwdport's replica; the forward's issue floor
+  is 81% of its tensor floor). NOT adopted as the goal floor: FA3's time measures what a production kernel achieves,
+  not work the method needs, and FA3 parity is already the separate first milestone. Adopted instead: (1) every
+  accepted round reports BOTH the sol4 % and the FA3-referenced % (forward time vs FA3 fp8 forward time on the same
+  shapes); (2) a floor correction is admissible when it counts work the method needs: the per-group P^ basis / Horner
+  rho chain / promote instructions are now to be added to the forward's sol4 issue / MUFU floors from the emitted
+  step loop (they are in the ledger already; the tensor floor stays the calibrated GEMM peak).

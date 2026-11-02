@@ -354,11 +354,18 @@ struct DeltaV6 {
                     }
                 }
             };
-            flash::SumOp<float> fq8_sum_op;
-            double acc0 = 0.0, acc1 = 0.0;
+            // ## P0RTR: the quad reduction as a transposed reduce.  Allreduce<4> gives every lane l of a quad
+            // (x_l + x_{l^2}) + (x_{l^1} + x_{l^3}), the same value on all four lanes (fp32 add is commutative).  Here lane l
+            // keeps row (l >> 1) & 1 of the two rows, adds the partner l^2's partial of that row (step 1, xor 2), then the
+            // neighbour l^1's step-1 sum of the same row (step 2, xor 1): the same two additions in the same pairing, so each
+            // kept value is bitwise the Allreduce<4> result; 4 shuffles + 4 adds instead of 8 + 8, and the 2^-8 scale and
+            // the fp64 fold (half 0 then half 1, n-block ascending) run once per lane for its one row (acc_r).
+            double acc_r = 0.0;
+            bool const quad_hi = (wtid & 2) != 0;   // this lane keeps row1 (else row0)
             auto rowsum_step = [&](auto& tSrS, auto& tdPrdP, float dp_g0, float dp_g1) {
                 Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol(tSrS.layout()));
                 Tensor dPv = make_tensor(tdPrdP.data(), scores.layout());
+                float a[2][2];
                 #pragma unroll
                 for (int mi = 0; mi < 2; ++mi) {
                     float a0 = 0.f, a1 = 0.f;
@@ -366,13 +373,18 @@ struct DeltaV6 {
                     for (int ni = 0; ni < 8; ++ni) { a0 = fmaf(scores(mi, ni), dPv(mi, ni) * dp_g0, a0); }
                     #pragma unroll
                     for (int ni = 8; ni < 16; ++ni) { a1 = fmaf(scores(mi, ni), dPv(mi, ni) * dp_g1, a1); }
-                    a0 = flash::Allreduce<4>::run(a0, fq8_sum_op);
-                    a1 = flash::Allreduce<4>::run(a1, fq8_sum_op);
-                    // the pass-0.5 fold: part(j, half 0) then part(j, half 1), each a fp32 value added into fp64
-                    float const p0 = a0 * kFq8MoInv;
-                    float const p1 = a1 * kFq8MoInv;
-                    if (mi == 0) { acc0 += double(p0); acc0 += double(p1); } else { acc1 += double(p0); acc1 += double(p1); }
+                    a[mi][0] = a0; a[mi][1] = a1;
                 }
+                float k0 = quad_hi ? a[1][0] : a[0][0], k1 = quad_hi ? a[1][1] : a[0][1];
+                float const s0 = quad_hi ? a[0][0] : a[1][0], s1 = quad_hi ? a[0][1] : a[1][1];
+                k0 = k0 + __shfl_xor_sync(uint32_t(-1), s0, 2);
+                k1 = k1 + __shfl_xor_sync(uint32_t(-1), s1, 2);
+                k0 = k0 + __shfl_xor_sync(uint32_t(-1), k0, 1);
+                k1 = k1 + __shfl_xor_sync(uint32_t(-1), k1, 1);
+                // the pass-0.5 fold: part(j, half 0) then part(j, half 1), each a fp32 value added into fp64
+                float const p0 = k0 * kFq8MoInv;
+                float const p1 = k1 * kFq8MoInv;
+                acc_r += double(p0); acc_r += double(p1);
             };
 
             // Warp-scheduler ping-pong: WG0 takes the first turn (WG1 pre-arrives on WG0's barrier).
@@ -454,11 +466,10 @@ struct DeltaV6 {
             CUTLASS_PRAGMA_NO_UNROLL
             for (int s = 0; s < nstages - 1; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}); }
             step(nstages - 1, cute::false_type{}, cute::Int<-1>{});
-            // One writer per row: the quad leader stores the fp64 fold rounded once to fp32.
-            if ((wtid & 3) == 0) {
-                int const r0 = m_block * kBlockM + row0, r1 = m_block * kBlockM + row1;
-                if (r0 < seqlen_q) { params.ptr_dlt[int64_t(bh) * seqlen_q + r0] = float(acc0); }
-                if (r1 < seqlen_q) { params.ptr_dlt[int64_t(bh) * seqlen_q + r1] = float(acc1); }
+            // One writer per row: quad lane 0 stores row0's fp64 fold rounded once to fp32, quad lane 2 row1's.
+            if ((wtid & 1) == 0) {
+                int const r = m_block * kBlockM + (quad_hi ? row1 : row0);
+                if (r < seqlen_q) { params.ptr_dlt[int64_t(bh) * seqlen_q + r] = float(acc_r); }
             }
         }
     }

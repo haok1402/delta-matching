@@ -1739,8 +1739,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // w_3 = v8sc_3 * 2^(ms_3 - m*l2) needs the CONSUMED tile's
                     // ms_[3] AND its running max; max_get_scale_grouped below
                     // destroys both, so every promote of this tile must precede it.
+                    fq8_lazy_rebase();   // before the promote: its weight 2^(ms_3 - mref) must stay bounded
                     fq8_promote_last(tOrD);
-                    fq8_lazy_rebase();
                     pipeline_v.consumer_release(smem_pipe_read_v);  // release V
                     KF(5);
                     // ---- tOrD is dead here; QK reuses its registers ----
@@ -1872,6 +1872,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
             warpgroup_wait<0>();
             // The last tile's promote: ms_[3] and row_max are final and finalize
             // did not touch them.
+            fq8_lazy_rebase();
             fq8_promote_last(tOrD);
             pipeline_v.consumer_release(smem_pipe_read);  // release V, otherwise producers will hang
             if constexpr (kFwdLD) {   // ## FWDLD: tOrO is in the reference basis: O = O_ref * 2^(mref - m l2) / l

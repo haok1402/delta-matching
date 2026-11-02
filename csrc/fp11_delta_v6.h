@@ -23,6 +23,12 @@
 // Causal: the CTA's stage range is [0, p + 1) at seqlen_q == seqlen_k (longest CTAs first); the mask is per 64 x 64 tile
 // as in v4b.  Deterministic by construction (one writer per row, one fixed order).
 #pragma once
+// kda-pass1 KDA_NOCLAMP (named numerics change when on; pass 0 v6 and pass 1 together so the matched P^ stays identical):
+// drop the F1 cliff clamp min(t, 12) of the exp line.  Outputs change only where the clamp binds (t > 12).
+#ifndef KDA_NOCLAMP
+#define KDA_NOCLAMP 0
+#endif
+#define KDA_F1(x) (KDA_NOCLAMP ? (x) : fminf((x), 12.0f))
 #ifndef KDA_PK_EXPB
 #define KDA_PK_EXPB 6
 #endif
@@ -408,7 +414,7 @@ struct DeltaV6 {
                         for (int i = 0; i < size(scores); ++i) { scores(i) = __fadd_rn(scores(i), kFq8MoE); }
                     }
                     #pragma unroll
-                    for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(fminf(scores(i), kFq8MoE + 4.0f)); }
+                    for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(KDA_F1(scores(i))); }
                     return;
                 }
 #endif
@@ -419,9 +425,9 @@ struct DeltaV6 {
                     for (int ni = 0; ni < 16; ++ni) {
                         float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
 #if KDA_PK_EXPB == 1 || KDA_PK_EXPB == 2
-                        scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), dsc, -lse_scaled), kFq8MoE + 4.0f));
+                        scores(mi, ni) = exp2f(KDA_F1(__fmaf_rn(scores(mi, ni), dsc, -lse_scaled)));
 #else
-                        scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+                        scores(mi, ni) = exp2f(KDA_F1(scores(mi, ni) * dsc - lse_scaled + kFq8MoE));
 #endif
                     }
                 }

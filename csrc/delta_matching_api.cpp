@@ -255,12 +255,6 @@ static at::Tensor kda_prof_fwd_buffer(int64_t head_dim) {
     return torch::from_blob(ptr, {words}, at::TensorOptions().device(at::kCUDA).dtype(at::kLong));
 }
 #endif
-#ifdef FA3FP11_DBG
-// ## DBG: capture of the pass-1 -> pass-2 workspaces (the realized dS' e4m3 codes and the per-tile psi) for
-// bwd_fp8_dbg_ds (the row-sum residual AFTER dS quantization).  Null outside that op: every other op is unchanged.
-static at::Tensor* g_dbg_ds8 = nullptr;
-static at::Tensor* g_dbg_psi = nullptr;
-#endif
 std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     at::Tensor dout8,   // (b, s_q, h, d) e4m3 codes
     at::Tensor q8,      // (b, s_q, h, d) e4m3
@@ -283,7 +277,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     // ## bf16-dP: the RAW bf16 V / dO for SageBwd's exempt matmul (5) dP = dO V^T.  Undefined on every
     // certified call; required, and required to be absent, exactly as FA3FP11_P1R_SAGEDP dictates.
     at::Tensor vraw = at::Tensor(),
-    at::Tensor doraw = at::Tensor()
+    at::Tensor doraw = at::Tensor(),
+    // ## r13 numerics gate: invocation-owned capture of this launch's pass-1 -> pass-2 workspaces (the realized dS'
+    // codes and psi); null on every production call (host code only: no kernel reads these).
+    at::Tensor* ds8_out = nullptr,
+    at::Tensor* psi_out = nullptr
 ) {
     c10::cuda::CUDAGuard device_guard(q8.device());
     dm_check_inputs("bwd", q8, {dout8, k8, v8, lse, delta, kt8, qt8, dot8, q8s, k8s, v8s, do8s, vraw, doraw});
@@ -344,9 +342,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
 #endif
     // ## M23 HALFPSI: at head_dim 128 pass 1 publishes one psi per (tile, warpgroup half): [BH, nbm, nbn, 2].
     at::Tensor psi = torch::empty({int64_t(batch_size) * num_heads, nbm, nbn, (FA3FP11_HALFPSI && head_size == 128) ? 2 : 1}, opts.dtype(at::kFloat));
-#ifdef FA3FP11_DBG
-    if (g_dbg_ds8 != nullptr) { *g_dbg_ds8 = ds8; *g_dbg_psi = psi; }   // ## DBG (bwd_fp8_dbg_ds only)
-#endif
+    if (ds8_out != nullptr) { *ds8_out = ds8; }
+    if (psi_out != nullptr) { *psi_out = psi; }
 
     Flash_bwd_fp8_params params{};
     params.b = batch_size;
@@ -704,6 +701,30 @@ std::tuple<at::Tensor, at::Tensor> delta_fp8_dbg(
     return {dlt, cks};
 }
 
+// ## r13 numerics gate: the TWIN-TAKING DBG backward (the production bwd_fp8_t signature): this launch's dq / dk / dv,
+// the matched row / absolute-row partials, the checksums, and its realized dS' codes and psi through invocation-owned
+// outputs (no process-global capture state; concurrent split groups each own their tensors).
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> bwd_fp8_t_dbg(
+    at::Tensor dout8, at::Tensor q8, at::Tensor k8, at::Tensor v8,
+    at::Tensor lse, at::Tensor delta, at::Tensor kt8, at::Tensor qt8, at::Tensor dot8,
+    at::Tensor q8s, at::Tensor k8s, at::Tensor v8s, at::Tensor do8s,
+    double softmax_scale, bool is_causal
+) {
+    int const b = q8.size(0), sq = q8.size(1), h = q8.size(2);
+    int const sk = k8.size(1);
+    int const nbm = sq / 64, nbn = sk / fp11_bwd_block_n(q8.size(3));
+    auto fopts = q8.options().dtype(at::kFloat);
+    at::Tensor rows = torch::zeros({int64_t(b) * h, nbn, 2, sq}, fopts);
+    at::Tensor rowsabs = torch::zeros({int64_t(b) * h, nbn, 2, sq}, fopts);
+    at::Tensor cks = torch::zeros({2, int64_t(b) * h, nbm, nbn}, q8.options().dtype(at::kInt));
+    at::Tensor ds8, psi;
+    auto [dq, dk, dv] = bwd_fp8_core(
+        dout8, q8, k8, v8, lse, delta, kt8, qt8, dot8, q8s, k8s, v8s, do8s, softmax_scale, is_causal,
+        rows.data_ptr<float>(), rowsabs.data_ptr<float>(), reinterpret_cast<unsigned int*>(cks.data_ptr<int>()),
+        at::Tensor(), at::Tensor(), &ds8, &psi);
+    return {dq, dk, dv, rows, rowsabs, cks, ds8, psi};
+}
+
 // ## DBG: bwd_fp8_dbg plus the realized dS' of the SAME launch: ds8 [BH, nbm, nbn, 64, kbn] e4m3 codes
 // (kbn = 128 at hd128, 64 at d256; natural rows x keys per tile; under causal only the tiles with nb * kbn <= 64 * mb + 63
 // are written, the rest is uninitialized memory) and psi [BH, nbm, nbn, 1] fp32 (0 marks a zero tile).  True units:
@@ -714,11 +735,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     at::Tensor q8s, at::Tensor k8s, at::Tensor v8s, at::Tensor do8s,
     double softmax_scale, bool is_causal
 ) {
-    at::Tensor ds8, psi;
-    g_dbg_ds8 = &ds8; g_dbg_psi = &psi;
-    auto r = bwd_fp8_dbg(dout8, q8, k8, v8, lse, delta, kt8, q8s, k8s, v8s, do8s, softmax_scale, is_causal);
-    g_dbg_ds8 = nullptr; g_dbg_psi = nullptr;
-    return {std::get<0>(r), std::get<1>(r), std::get<2>(r), std::get<3>(r), std::get<4>(r), std::get<5>(r), ds8, psi};
+    at::Tensor qt8 = fp11_twin_pi(q8);
+    at::Tensor dot8 = fp11_twin_pi(dout8);
+    return bwd_fp8_t_dbg(dout8, q8, k8, v8, lse, delta, kt8, qt8, dot8, q8s, k8s, v8s, do8s, softmax_scale, is_causal);
 }
 #endif  // FA3FP11_DBG
 
@@ -761,6 +780,9 @@ TORCH_LIBRARY(delta_matching, m) {
     m.def("bwd_fp8_dbg_ds(Tensor dout8, Tensor q8, Tensor k8, Tensor v8, Tensor lse, Tensor delta,"
           " Tensor kt8, Tensor q8s, Tensor k8s, Tensor v8s, Tensor do8s,"
           " float softmax_scale, bool is_causal) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
+    m.def("bwd_fp8_t_dbg(Tensor dout8, Tensor q8, Tensor k8, Tensor v8, Tensor lse, Tensor delta,"
+          " Tensor kt8, Tensor qt8, Tensor dot8, Tensor q8s, Tensor k8s, Tensor v8s, Tensor do8s,"
+          " float softmax_scale, bool is_causal) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
 #endif
 }
 
@@ -787,5 +809,6 @@ TORCH_LIBRARY_IMPL(delta_matching, CUDA, m) {
     m.impl("bwd_fp8_dbg", &bwd_fp8_dbg);
     m.impl("delta_fp8_dbg", &delta_fp8_dbg);
     m.impl("bwd_fp8_dbg_ds", &bwd_fp8_dbg_ds);
+    m.impl("bwd_fp8_t_dbg", &bwd_fp8_t_dbg);
 #endif
 }

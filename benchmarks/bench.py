@@ -25,14 +25,17 @@ def main():
     ap.add_argument("--B", type=int, default=2); ap.add_argument("--H", type=int, default=16); ap.add_argument("--Hk", type=int, default=4)
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--json-out", default=None, help="also write the timings as JSON (gate.py's benchmark predicate)")
+    ap.add_argument("--modes", default="matched,stale", help="delta_matching arms to time (gate.py: matched only)")
     a = ap.parse_args()
     g = torch.Generator(device="cuda").manual_seed(0)
     q = torch.randn(a.B, a.N, a.H, a.D, device="cuda", dtype=torch.bfloat16, generator=g, requires_grad=True)
     k = torch.randn(a.B, a.N, a.Hk, a.D, device="cuda", dtype=torch.bfloat16, generator=g, requires_grad=True)
     v = torch.randn(a.B, a.N, a.Hk, a.D, device="cuda", dtype=torch.bfloat16, generator=g, requires_grad=True)
     do = torch.randn(a.B, a.N, a.H, a.D, device="cuda", dtype=torch.bfloat16, generator=g)
-    arms = {"delta_matching (matched)": lambda: dm.dm_attn_func(q, k, v, causal=True, mode="matched"),
-            "delta_matching (stale)": lambda: dm.dm_attn_func(q, k, v, causal=True, mode="stale")}
+    modes = [m for m in a.modes.split(",") if m]
+    if not modes or any(m not in ("matched", "stale") for m in modes):
+        raise SystemExit(f"--modes must list matched and / or stale, got {a.modes!r}")
+    arms = {f"delta_matching ({m})": (lambda m=m: dm.dm_attn_func(q, k, v, causal=True, mode=m)) for m in modes}
     try:
         from flash_attn import flash_attn_func as fa2
         arms["flash-attn 2 (bf16)"] = lambda: fa2(q, k, v, causal=True)

@@ -187,15 +187,25 @@ TUNE_DIM = 128           # rule (Hao, round 10): the evolved head dim
 # D256) must stay correct (tests, equivalence) but is reported only, never a predicate
 
 
-def is_tuned(r, tune_dim=TUNE_DIM):
+def is_matched(r, tune_dim=TUNE_DIM):
     return r["D"] == tune_dim and r["attn"] == "causal" and r["mode"] == "matched"
+
+
+def is_tuned(r, tune_dim=TUNE_DIM):
+    """The TARGET configurations (Hao, round 13): D128 causal matched at N 4096 / 8192."""
+    return is_matched(r, tune_dim) and r["N"] in (4096, 8192)
+
+
+def is_guarded(r, tune_dim=TUNE_DIM):
+    """The no-regression guard (Hao, round 13): D128 causal matched at N 16384 / 32768."""
+    return is_matched(r, tune_dim) and r["N"] in (16384, 32768)
 TARGET_PCT = 3.0
 
 
 def decision(raw_a, raw_b, res, target, tune_dim=TUNE_DIM, threshold=TARGET_PCT):
-    """Acceptance predicates for target kernel category `target` (scope of round 12): (1) the target's summed median over
-    every tuned configuration (D128 causal matched) improves by >= threshold %; (2) no tuned configuration is slower
-    beyond its spread.  Any other configurations in the run (stale / full / D256) are reported, not gated."""
+    """Acceptance predicates for target kernel category `target` (Hao, round 13): (1) the target's summed median over the
+    TARGET configurations (D128 causal matched, N 4096 / 8192) improves by >= threshold %; (2) no target or guard
+    (N 16384 / 32768) configuration is slower beyond its spread.  Other configurations are reported, not gated."""
     def per_rep(runs, sel):
         return [sum(r["ms"][target] for r in recs if sel(r)) for recs in runs]
     med_a, med_b = median_records(raw_a), median_records(raw_b)
@@ -207,7 +217,8 @@ def decision(raw_a, raw_b, res, target, tune_dim=TUNE_DIM, threshold=TARGET_PCT)
     oa = sum(r["ms"][target] for r in med_a if other(r)); ob = sum(r["ms"][target] for r in med_b if other(r))
     ra, rb = per_rep(raw_a, other), per_rep(raw_b, other)
     other_rng = max(max(ra) - min(ra), max(rb) - min(rb)) if ra else 0.0
-    kt = lambda k: is_tuned(dict(D=k[0], attn=k[5], mode=k[6]), tune_dim)
+    kt = lambda k: (is_tuned(dict(D=k[0], N=k[4], attn=k[5], mode=k[6]), tune_dim)
+                    or is_guarded(dict(D=k[0], N=k[4], attn=k[5], mode=k[6]), tune_dim))
     slow_tune = [s for s in res["shapes"] if kt(s["key"]) and s["slower_beyond_spread"]]
     slow_other = [s for s in res["shapes"] if not kt(s["key"]) and s["slower_beyond_spread"]]
     d = {"target": target, "tune_dim": tune_dim, "threshold_pct": threshold,

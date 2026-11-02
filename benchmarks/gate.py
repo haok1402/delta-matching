@@ -6,12 +6,16 @@ directory; the first failing step stops the gate with a non-zero exit naming the
         --base-dumps .local/equiv/base3_default.pt,.local/equiv/base4_kv.pt,.local/equiv/base4_head.pt,.local/equiv/base4_streams2.pt \\
         --prev-dumps .local/equiv/p2st3_default.pt,... --run-dir .local/rounds/r10/gate_psipf_2
 
-Modes: full (tooling tests, build, ELF-complete resources / SASS with per-symbol stack / local growth fatal, candidate
-pytest with in-process identity, four 72-case equivalence suites vs the baseline and the previous accepted revision,
-ONE merged-grid A/B (every shape, no held-out split) vs the previous accepted revision, bench.py both D), confirm
-(A/B + bench only, against an already built candidate root), timing (build, resources, A/B, bench: feasibility builds;
-never an acceptance).  Acceptance rule (Hao, round 10): the --target kernel >= 3% faster summed over all D128 shapes,
-no D128 shape slower beyond its run-to-run spread, D256 correct and not slower (ab.py decision()); a full job and a
+Modes: full (bitwise candidates: build or --lib prebuilt reuse, build-diagnostic scan (C7510 / serialization / actual
+spill warnings / positive spill counts fatal), ELF-complete resources / SASS (per-symbol STACK / LOCAL growth recorded as a
+warning), candidate pytest with in-process identity, four 72-case byte-equivalence suites vs the baseline and the
+previous accepted revision, ONE A/B on the target grid (kernels.py --grid d128m) vs the previous accepted revision,
+bench.py D128 matched), numerics (output-changing candidates: as full, with benchmarks/numerics.py captures and checks
+on every route in place of the byte suites), confirm (A/B + bench only, against an already built candidate root),
+timing (build, resources, A/B, bench: feasibility only, never an acceptance).  CPU tooling tests only with
+--tooling-tests.  Acceptance (Hao, rounds 10-13; docs/kda-sm90/rule-change-r10.md): the --target kernel >= 3% faster
+summed over the D128 causal matched N 4k / 8k target configurations, no target or 16k / 32k guard configuration slower
+beyond its run-to-run spread (ab.py decision()), bench.py D128 matched fwd+bwd within 1%; a full / numerics job and a
 fresh confirm job must both pass.  The run directory must not exist (fresh).
 GATE_PYTHON / GATE_CUOBJDUMP override the executables (CPU failure-injection tests).
 """
@@ -61,8 +65,8 @@ class Gate:
             json.dump(self.record, f, indent=1)
 
 
-DIAG_FATAL_RE = re.compile(r"C7510|(warning|error)\b.*serializ", re.IGNORECASE)
-SPILL_RE = re.compile(r"(\d+) bytes spill stores,\s*(\d+) bytes spill loads")
+DIAG_FATAL_RE = re.compile(r"C7510|(warning|error)\b.*(serializ|spill)|registers are spilled", re.IGNORECASE)
+SPILL_RE = re.compile(r"(\d+) bytes spill (?:stores|loads)")
 
 
 def build_diagnostics(path):
@@ -70,8 +74,7 @@ def build_diagnostics(path):
     spill counts; zero-count resource reports and incidental path / source text are not diagnostics."""
     out = []
     for line in open(path, errors="replace"):
-        m = SPILL_RE.search(line)
-        if m and (int(m.group(1)) or int(m.group(2))):
+        if any(int(n) for n in SPILL_RE.findall(line)):   # any positive spill store / load count (B11)
             out.append(line.strip())
         elif DIAG_FATAL_RE.search(line):
             out.append(line.strip())
@@ -216,7 +219,13 @@ def main():
     ap.add_argument("--subset", default=None, help="supplementary per-kernel report on D128 / D256 (not a predicate)")
     ap.add_argument("--target", required=True, help="kernel category the candidate targets (acceptance predicates)")
     ap.add_argument("--kernel", required=True)
-    ap.add_argument("--mode", choices=("full", "confirm", "timing"), required=True)
+    ap.add_argument("--mode", choices=("full", "numerics", "confirm", "timing"), required=True)
+    ap.add_argument("--base-root", default=None, help="numerics: the frozen original-baseline build root")
+    ap.add_argument("--cand-dbg-root", default=None, help="numerics: a DM_DBG=1 build root of the candidate source")
+    ap.add_argument("--prev-dbg-root", default=None, help="numerics: a DM_DBG=1 build root of the previous revision")
+    ap.add_argument("--ws", choices=("same", "differs"), default="differs",
+                    help="numerics: whether the candidate's dS' / psi workspaces are declared unchanged")
+    ap.add_argument("--routes", default=",".join(ROUTES), help="numerics: routes to certify (default all four)")
     ap.add_argument("--base-dumps", default=""); ap.add_argument("--prev-dumps", default="")
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--reps", type=int, default=3)
@@ -234,7 +243,7 @@ def main():
     env = dict(os.environ, DM_FA_SRC=os.path.join(REPO, "third_party", "flash-attention"))
     env.pop("DM_SO", None)
     try:
-        if a.mode in ("full", "timing"):
+        if a.mode in ("full", "numerics", "timing"):
             if a.tooling_tests:
                 gate.run("tooling_tests", [gate.py, "-m", "pytest", os.path.join(HERE, "test_tooling.py"), "-q"])
             if a.lib:
@@ -278,7 +287,7 @@ def main():
                 print(f"[gate] resources {n[-90:]}: prev {r_prev['rows'].get(n)} {r_prev['text_bytes'].get(n)} B -> "
                       f"cand {r_cand['rows'].get(n)} {r_cand['text_bytes'].get(n)} B", flush=True)
             print(f"[gate] counts prev {r_prev['counts']}\n[gate] counts cand {r_cand['counts']}  (inspect target_*.sass)", flush=True)
-        if a.mode == "full":
+        if a.mode in ("full", "numerics"):
             # the candidate's own tests, in a process pinned to the fresh build and verified from inside (gate_identity)
             junit = os.path.join(run_dir, "pytest.xml")
             tenv = dict(env, PYTHONPATH=os.pathsep.join([wt, HERE]), DM_SO=lib, KDA_EXPECT_PKG=os.path.join(wt, "delta_matching"),
@@ -288,6 +297,27 @@ def main():
             gate.run("pytest", [gate.py, "-m", "pytest", "tests/", "-q", "-rs", "-p", "gate_identity", f"--junitxml={junit}"],
                      cwd=wt, env=tenv)
             check_junit(junit)
+        if a.mode == "numerics":
+            # output-changing candidate: numerical certification instead of byte equality (benchmarks/numerics.py)
+            if not a.base_root or not a.cand_dbg_root or (a.ws == "same" and not a.prev_dbg_root):
+                raise GateFailure("numerics mode needs --base-root, --cand-dbg-root (and --prev-dbg-root with --ws same)")
+            N = os.path.join(HERE, "numerics.py")
+            caps = {"base": os.path.abspath(a.base_root), "prev": os.path.abspath(a.prev_root), "cand": wt,
+                    "cand-repeat": wt}
+            dbgs = {"cand-dbg": os.path.abspath(a.cand_dbg_root), "cand-dbg-repeat": os.path.abspath(a.cand_dbg_root)}
+            if a.ws == "same":
+                dbgs["prev-dbg"] = os.path.abspath(a.prev_dbg_root)
+            for r in a.routes.split(","):
+                files = {}
+                for tag, root in list(caps.items()) + list(dbgs.items()):
+                    out = os.path.join(run_dir, f"num_{r}_{tag}.json")
+                    gate.run(f"numcap_{r}_{tag}", [gate.py, N, "capture", "--root", root, "--route", r, "--out", out]
+                             + (["--dbg"] if tag in dbgs else []), env=dict(env, PYTHONPATH=root))
+                    files[tag] = out
+                gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws,
+                                           "--report", os.path.join(run_dir, f"num_{r}_report.json")]
+                         + [x for tag, f in files.items() for x in (f"--{tag}", f)])
+        if a.mode == "full":
             base = a.base_dumps.split(","); prev = a.prev_dumps.split(",")
             if len(base) != 4 or len(prev) != 4:
                 raise GateFailure("--base-dumps / --prev-dumps need one dump per route: default,kv,head,streams2")
@@ -325,7 +355,7 @@ def main():
                     bj = os.path.join(run_dir, f"bench_{x}_rep{rep}_D{D}.json")
                     bench_files.append((x, D, bj))
                     gate.run(f"bench_{x}_rep{rep}_D{D}", [gate.py, os.path.join(HERE, "bench.py"), "--D", str(D), "--N", "8192",
-                                                          "--json-out", bj],
+                                                          "--modes", "matched", "--json-out", bj],
                              env=dict(env, PYTHONPATH=root))
         bdec = bench_decision(bench_files)
         gate.save(bench_decision=bdec)

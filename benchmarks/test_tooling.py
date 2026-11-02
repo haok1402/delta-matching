@@ -340,6 +340,8 @@ if "ab.py" in line:
             % (("true", "true") if acc else ("false", "false")))
     done("ab")
 if "bench.py" in line:
+    if args[args.index("--modes") + 1] != "matched":
+        sys.exit(9)
     out = args[args.index("--json-out") + 1]
     slow = os.environ.get("STUB_BENCH_SLOW") == "1" and "bench_B_" in os.path.basename(out)
     t = 20.0 if slow else 10.0
@@ -484,7 +486,7 @@ def test_gate_rejects_when_the_acceptance_predicates_fail(tmp_path):
 def _recs(times, d_pass2):
     """One repetition: two D128 shapes and one D256 shape; e2e times per shape, pass2 per head dim."""
     out = []
-    for (D, N), e2e in zip(((128, 2048), (128, 4096), (256, 2048)), times):
+    for (D, N), e2e in zip(((128, 4096), (128, 8192), (256, 2048)), times):
         ms = {c: 1.0 for c in K.CATS}; ms["pass2"] = d_pass2[D]
         out.append({"D": D, "B": 1, "H": 16, "Hk": 16, "N": N, "attn": "causal", "mode": "matched",
                     "e2e_fwd_ms": e2e / 2, "e2e_fwdbwd_ms": e2e, "ms": ms, "kernels": {}})
@@ -508,7 +510,7 @@ def test_decision_rejects_small_gain_slow_d128_shape_and_slow_d256():
     small = _decide(A, [_recs((10.0, 20.0, 30.0), {128: 0.98, 256: 1.0}) for _ in range(3)])
     assert not small["accept"] and not small["checks"]["target_gain"]
     slow = _decide(A, [_recs((10.5, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)])
-    assert not slow["accept"] and slow["tune_shapes_slower_beyond_spread"] == [[128, 1, 16, 16, 2048, "causal", "matched"]]
+    assert not slow["accept"] and slow["tune_shapes_slower_beyond_spread"] == [[128, 1, 16, 16, 4096, "causal", "matched"]]
     # scope (round 12): a slower D256 shape / target is reported, not gated
     other = _decide(A, [_recs((10.0, 20.0, 31.0), {128: 0.9, 256: 1.2}) for _ in range(3)])
     assert other["accept"] and other["other_shapes_slower_beyond_spread"] and other["target_other_slower_beyond_spread"]
@@ -599,9 +601,144 @@ def test_lib_pointing_at_the_package_entry_is_kept_intact(tmp_path, kind):
     ("nvcc -o /tmp/spill_test/serialize_kernels.o -c x.cu\n", False),
     ("ptxas info    : 32 bytes stack frame, 16 bytes spill stores, 16 bytes spill loads\n", True),
     ("ptxas warning : (C7510) Potential Performance Loss: wgmma.mma_async instructions are serialized\n", True),
-    ("ptxas warning : wgmma serialized due to function call\n", True)])
+    ("ptxas warning : wgmma serialized due to function call\n", True),
+    ("ptxas warning : Registers are spilled to local memory in function 'X'\n", True),
+    ("ptxas info    : 0 bytes stack frame, 8 bytes spill stores\n", True),
+    ("ptxas info    : 4 bytes spill loads\n", True)])
 def test_build_diagnostics_parse_counts_not_words(tmp_path, text, fatal):
     log = tmp_path / "b.log"; log.write_text("BUILD-OK\n" + text)
     sys.path.insert(0, HERE)
     import gate as G
     assert bool(G.build_diagnostics(str(log))) == fatal
+
+
+def test_decision_targets_4k_8k_and_guards_16k_32k():
+    def recs(t, p2):
+        out = []
+        for N, e2e, x in ((2048, t[0], p2[0]), (8192, t[1], p2[1]), (32768, t[2], p2[2])):
+            ms = {c: 1.0 for c in K.CATS}; ms["pass2"] = x
+            out.append({"D": 128, "B": 1, "H": 16, "Hk": 16, "N": N, "attn": "causal", "mode": "matched",
+                        "e2e_fwd_ms": e2e / 2, "e2e_fwdbwd_ms": e2e, "ms": ms, "kernels": {}})
+        return out
+    A = [recs((10.0 + 0.01 * i, 20.0 + 0.01 * i, 30.0 + 0.01 * i), (1.0, 1.0, 1.0)) for i in range(3)]
+    # 2k much slower (correctness-only, not gated); 8k target 10% faster; 32k guard unchanged -> accept
+    d = _decide(A, [recs((15.0, 20.0, 30.0), (2.0, 0.9, 1.0)) for _ in range(3)])
+    assert d["accept"] and d["tuned_configs"] == 1 and abs(d["target_tune_change_pct"] + 10) < 1e-6, d
+    # the 32k guard slower beyond spread -> reject
+    g = _decide(A, [recs((10.0, 20.0, 31.0), (1.0, 0.9, 1.0)) for _ in range(3)])
+    assert not g["accept"] and g["tune_shapes_slower_beyond_spread"] == [[128, 1, 16, 16, 32768, "causal", "matched"]]
+
+
+def test_full_gate_fails_on_a_spill_warning_only_build_log(tmp_path):
+    lib = tmp_path / "pre.so"; lib.write_bytes(b"lib")
+    log = tmp_path / "build.log"; log.write_text("BUILD-OK\nptxas warning : Registers are spilled to local memory in function 'X'\n")
+    r = run_gate(tmp_path, "full", "", args=["--lib", str(lib), "--build-log", str(log)])
+    assert r.returncode == 1 and "build diagnostics" in r.stdout, r.stdout[-600:]
+
+
+# ---- numerics.py check: synthetic captures ----
+import numerics as NUM  # noqa: E402
+
+
+def _cap(dbg=False, err=1e-3, h="h", ws="w", residual=1e-7, route="default"):
+    cases = {}
+    for k, desc in EQ.selected_cases(route):
+        c = {"errors": {o: err for o in NUM.OUTPUTS}, "out_hash": {o: h + o for o in NUM.OUTPUTS}, "ref_id": "r" + k}
+        if dbg:
+            g = {"heads": desc["H"], "problems": [], "ws_hash": ws, "visited_tiles": 3}
+            if desc["mode"] == "matched":
+                g.update(residual=residual, residual_bound=NUM.residual_bound(desc["N"]), zero_den_nonzero_num=0)
+            c["groups"] = [g]
+        cases[k] = c
+    return {"schema": NUM.SCHEMA, "route": route, "dbg": dbg, "library": "x", "library_sha256": "y", "cases": cases}
+
+
+def _numcheck(tmp_path, mutate=None, ws="differs"):
+    files = {"base": _cap(), "prev": _cap(), "cand": _cap(), "cand-repeat": _cap(), "cand-dbg": _cap(True),
+             "cand-dbg-repeat": _cap(True), "prev-dbg": _cap(True)}
+    if mutate:
+        mutate(files)
+    args = ["check", "--route", "default", "--ws", ws]
+    for tag, d in files.items():
+        p = tmp_path / f"{tag}.json"; p.write_text(json.dumps(d)); args += [f"--{tag}", str(p)]
+    return subprocess.run([sys.executable, os.path.join(HERE, "numerics.py")] + args, capture_output=True, text=True)
+
+
+def test_numerics_check_passes_a_self_certificate(tmp_path):
+    r = _numcheck(tmp_path, ws="same")
+    assert r.returncode == 0 and "PASS" in r.stdout, r.stdout[-800:]
+
+
+def _first(files, tag):
+    return next(iter(files[tag]["cases"].values()))
+
+
+@pytest.mark.parametrize("why,mutate", [
+    ("missing cases", lambda f: f["cand"]["cases"].pop(next(iter(f["cand"]["cases"])))),
+    ("non-finite errors", lambda f: _first(f, "cand")["errors"].update(dQ=float("nan"))),
+    ("error", lambda f: _first(f, "cand")["errors"].update(dK=2e-3)),
+    ("nondeterministic", lambda f: _first(f, "cand-repeat")["out_hash"].update(O="other")),
+    ("DBG-build outputs differ", lambda f: _first(f, "cand-dbg")["out_hash"].update(dV="other")),
+    ("workspace", lambda f: _first(f, "cand-dbg")["groups"][0]["problems"].append("zero-psi tile with codes")),
+    ("workspaces differ between", lambda f: _first(f, "cand-dbg-repeat")["groups"][0].update(ws_hash="z")),
+    ("reference identities differ", lambda f: _first(f, "prev")["ref_id"].__class__ and _first(f, "prev").update(ref_id="q")),
+    ("no captured backward groups", lambda f: _first(f, "cand-dbg").update(groups=[])),
+])
+def test_numerics_check_rejects(tmp_path, why, mutate):
+    r = _numcheck(tmp_path, mutate)
+    assert r.returncode == 1 and why in r.stdout, (why, r.stdout[-800:])
+
+
+def test_numerics_check_rejects_perturbed_centering_and_changed_unchanged_workspaces(tmp_path):
+    def centering(f):
+        for c in f["cand-dbg"]["cases"].values():
+            for g in c["groups"]:
+                if "residual" in g:
+                    g["residual"] = 1.0
+                    return
+    r = _numcheck(tmp_path, centering)
+    assert r.returncode == 1 and "matched residual" in r.stdout, r.stdout[-600:]
+    (tmp_path / "w").mkdir()
+    r = _numcheck(tmp_path / "w", lambda f: [g.update(ws_hash="new") for t in ("cand-dbg", "cand-dbg-repeat")
+                                             for c in f[t]["cases"].values() for g in c["groups"]], ws="same")
+    assert r.returncode == 1 and "declared unchanged" in r.stdout, r.stdout[-600:]
+
+
+def test_row_residual_and_workspace_validation():
+    rows = torch.zeros(1, 2, 2, 2)                     # [BH 1, nbn 2, wg 2, sq 2]
+    rows[0, 0, 0] = torch.tensor([1.0, 2.0]); rows[0, 1, 0] = torch.tensor([-1.0, -2.0])
+    ratio, bad = NUM.row_residual(rows, rows.abs())
+    assert ratio == 0.0 and bad == 0
+    rows[0, 1, 1, 0] = 0.5                              # row 0: |0.5| / 2.5
+    assert abs(NUM.row_residual(rows, rows.abs())[0] - 0.2) < 1e-12
+    z = torch.zeros(1, 2, 2, 1)
+    assert NUM.row_residual(z, z) == (0.0, 0)
+    ds8 = torch.zeros(1, 2, 2, 64, 128, dtype=torch.uint8)
+    psi = torch.ones(1, 2, 2, 1)
+    probs, h, nvis = NUM.check_workspace(ds8, psi, 128, causal=True)
+    assert not probs and nvis == 2       # causal at kbn 128: n-tile 1 is visited by neither m-block 0 nor 1
+    psi[0, 0, 0, 0] = 0.0; ds8[0, 0, 0, 3, 5] = 0x38
+    assert "zero-psi tile" in NUM.check_workspace(ds8, psi, 128, causal=True)[0][0]
+    assert NUM.check_workspace(ds8[..., :64], psi, 128, causal=True)[1] is None
+
+
+def test_numerics_baseline_defect_cases_must_match_the_baseline_pattern(tmp_path):
+    def nan_everywhere(f):
+        for tag in ("base", "prev", "cand", "cand-repeat"):
+            _first(f, tag)["errors"]["O"] = float("nan")
+    r = _numcheck(tmp_path, nan_everywhere)
+    assert r.returncode == 0 and "PASS" in r.stdout, r.stdout[-600:]
+    (tmp_path / "b").mkdir()
+
+    def cand_differs(f):
+        for tag in ("base", "prev", "cand-repeat"):
+            _first(f, tag)["errors"]["O"] = float("nan")
+    r = _numcheck(tmp_path / "b", cand_differs)
+    assert r.returncode == 1 and "differs from the baseline defect" in r.stdout, r.stdout[-600:]
+
+
+def test_row_residual_uses_the_centering_magnitude():
+    rows = torch.zeros(1, 1, 2, 1); rows[0, 0, 0, 0] = 1e-6          # a one-key row: one tiny residue
+    assert NUM.row_residual(rows, rows.abs())[0] == 1.0                # plain ratio: always 1
+    delta = torch.full((1, 1), 1.0)
+    assert NUM.row_residual(rows, rows.abs(), delta)[0] < 1e-8         # residue / (|t| + 2^8 |delta|)

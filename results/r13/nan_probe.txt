@@ -1,0 +1,3 @@
+== NaN probe (accepted build)
+causal True O nonfinite 522240 of 524288 first at [[0, 0, 0, 0]]
+causal False O nonfinite 0 of 524288 first at []

@@ -65,3 +65,14 @@ Extends the D128-only, all-shapes rule above:
   identical-output gains, a second fresh job, no D128 causal matched shape slower beyond its spread), measured on this
   grid only; bench.py predicate on D128 matched only. Enforced by `ab.py decision()` (`is_tuned`) and `gate.py`
   (A/B on `--grid d128m`). The shorter A/B jobs leave room for more candidates.
+
+## Sequence-length focus (Hao, round 13; replaces the round-12 target set)
+
+- Target grid: D128 causal matched at N = 4096 and 8192, in four head / GQA variants (H/Hk 16/16, 16/4, 32/8, 8/8;
+  B for ~32k tokens per call: B 8 at 4k, B 4 at 8k): 8 target configurations (`kernels.D128_TARGET`). Kernels are
+  ranked and changes accepted (>= 3% on the target kernel summed over these, stacking, a second fresh job) on it.
+- No-regression guard: the same variants at N 16384 and 32768 (`kernels.D128_GUARD`): no shape slower beyond its
+  run-to-run spread.
+- 2k only has to stay correct (tests, equivalence); not measured.
+- `kernels.py --grid d128m` = target + guard (16 configurations, causal matched); `ab.py decision()` sums the target
+  over the target set and checks shape slowdowns over target + guard.

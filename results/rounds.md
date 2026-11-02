@@ -462,3 +462,38 @@ Order from here (waste, the audit direction and the scope): pass 1 (psi decoupli
 gate it needs), with cheap identical-output rounds interleaved (forward k-scale prefetch; H3 glue copies), pass 0
 profiled and placed after forward (12.99 ms waste, 15.8% of matched kernel time), then pass 2 / producers.
 Counters (D128 matched): pass 1 0, forward 0, pass 0 0, glue 0, pass 2 0.
+
+## Sequence-length focus (Hao, during round 13)
+
+Target grid: D128 causal matched at N 4096 / 8192 in four head / GQA variants (H/Hk 16/16, 16/4, 32/8, 8/8; B for
+~32k tokens per call) = 8 target configurations; ranking and acceptance (3% on the target kernel, stacking, second
+job) on it; the same variants at 16k / 32k are a no-regression guard; 2k stays correct only. Recorded in
+`docs/kda-sm90/rule-change-r10.md`; implemented in `kernels.py` (`D128_TARGET`, `D128_GUARD`, `--grid d128m` = 16
+configurations) and `ab.py` (`is_tuned`, `is_guarded`, `decision()`).
+
+## Round 13: the numerics gate (Q2 / Q3) built and self-certified on the accepted build; a pre-existing NaN defect found
+
+- C++ (host code only): `bwd_fp8_core` hands the realized dS' / psi to invocation-owned outputs (the process-global
+  capture pointers are gone); a DBG-build op `bwd_fp8_t_dbg` takes the caller's Q / dO twins (the production
+  `bwd_fp8_t` signature) and returns that launch's dq / dk / dv, matched row / absolute-row partials, checksums, dS'
+  and psi. Shipped (non-DBG) library: all 22 kernel functions byte-identical to the accepted build (job 21168827).
+- `benchmarks/numerics.py`: `capture` (all 72 cases of a route, no length / kind limit; fp32 reference with TF32 off;
+  relative-L2 errors of O / dQ / dK / dV in the common layout, output and reference identities; with `--dbg` every
+  backward group call of the public API is routed to `bwd_fp8_t_dbg`, so the certified gradients come from the launch
+  whose workspaces are captured: visited-tile dS' / psi validation and hashes, matched row residual) and `check`
+  (complete coverage, equal reference identities, no per-case / output error increase vs base and previous,
+  deterministic independent repeat, DBG == production outputs, workspace determinism, `--ws same` equality, matched
+  residual within bound). `gate.py --mode numerics` wires the captures and checks per route.
+- Residual definition (declared): `|sum_j t_j| / (sum_j |t_j| + 2^8 |delta|)` per row, t_j = P^_j (dP_j - delta) from the
+  kernel's partials, reduced in fp64 (n-tile ascending, then warpgroup); bound `sk * 2^-23`. The plain `|sum t| / sum |t|`
+  is exactly 1 for any row with a single nonzero term (causal row 0), whatever the rounding residue.
+- Baseline self-certificate (jobs 21168827 / 21169100; base = frozen original baseline, prev = cand = accepted stack,
+  DBG = the DBG build of the same source, independent repeats): **PASS on default / kv / head / streams2**; worst matched
+  residual 5.64e-5 against a bound of 1.22e-4 (d128_scale10). Evidence: `results/r13/selfcert/`.
+- **Pre-existing defect found** (present in the frozen original baseline and in every accepted build): all-zero causal
+  inputs give NaN forward outputs (522240 of 524288 O elements in a B1 H4 N1024 D128 probe; full attention is clean;
+  `results/r13/nan_probe.txt`). The gate lists these cases as baseline defects (the candidate must reproduce the
+  baseline's non-finite pattern there). The cause is not yet established; it needs its own fix round (likely a zero
+  scale multiplying the masked -inf scores in the forward descale).
+- Tooling repairs in the same commit: B11 (actual ptxas spill warnings and any positive spill count fail the gate), Q16
+  (bench.py `--modes`, the gate times matched only), Q17 (gate documentation). CPU suite 103 passed (beside the job).

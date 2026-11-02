@@ -40,7 +40,13 @@ HOLDOUT = [(128, 3, 12, 4, 6144), (128, 1, 24, 8, 12288), (256, 3, 6, 2, 6144), 
 ALL = MAIN + HOLDOUT
 # Scope change (Hao, round 12): only the matched-delta method at head dim 128 is tuned / measured: the D128 shapes of the
 # one grid, causal matched only ("d128m"); stale / full attention and D256 must stay correct but are not measured.
-D128M = [s for s in ALL if s[0] == 128]
+# Sequence-length focus (Hao, round 13; replaces the round-12 d128m set): the TARGET is D128 causal matched at N 4096 and
+# 8192 in four head / GQA variants (B for ~32k tokens per call); the same variants at 16k / 32k are a no-regression
+# guard; 2k only has to stay correct (not measured).
+D128_VARIANTS = ((16, 16), (16, 4), (32, 8), (8, 8))
+D128_TARGET = [(128, 32768 // N, H, Hk, N) for N in (4096, 8192) for H, Hk in D128_VARIANTS]
+D128_GUARD = [(128, 32768 // N, H, Hk, N) for N in (16384, 32768) for H, Hk in D128_VARIANTS]
+D128M = D128_TARGET + D128_GUARD
 MODES = (("causal", "matched"), ("causal", "stale"), ("full", "stale"))
 
 CATS = ("fwd", "prod_fwd", "prod_bwd", "pass0", "pass1", "pass2", "twin", "glue")

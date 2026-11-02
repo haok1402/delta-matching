@@ -7,3 +7,7 @@ dist/
 delta_matching/_jit/
 delta_matching/_build_info.py
 .pytest_cache/
+
+# raw results stay outside git (Hao): ~/workspace/haok1402/kda-results/<branch>/
+results/**/*.json
+runs/

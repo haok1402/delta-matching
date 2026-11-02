@@ -106,7 +106,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   3. RHOPRE: the three rho of the PV chain computed before it (bitwise on its own).
 - Outputs: NOT bitwise (named numerics change, round-off class). O changes (lazy + fold); LSE changes at round-off (the
   row sum takes the re-rounded p of the fold), hence dQ / dK / dV change at round-off too. Per-row evidence
-  (`kda-work/runs/n2`, fp32 reference, TF32 off, job 21172655): O relative L2 vs fp32 equal to A within 6 digits on
+  (`kda-results/kda-sm90-fwd/n2`, fp32 reference, TF32 off, job 21172655): O relative L2 vs fp32 equal to A within 6 digits on
   all six cases (randn x1 / x3 / x10 / x30 logit scale, B1 H16/4 N8192, B2 H4 N2048, B1 H4/1 N16384); per-row error
   differences symmetric (e.g. B1 H16/4 N8192: 39 of 131072 rows worse by > 1e-4 abs, max +1.07e-3, min -1.95e-3 =
   e4m3 code flips at rounding boundaries); no NaN / Inf (the first lazy version gave NaN at x10 / x30; fixed).
@@ -117,8 +117,8 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 
 | job | fwd geo-mean | fwd sum ms | e2e fwd+bwd | shapes slower beyond spread | decision |
 |---|---:|---:|---:|---|---|
-| 21172873 (`runs/ab_c1c_1`) | **-7.05%** | 75.682 -> 70.270 (-7.15%) | -0.92% | none | ACCEPT (this job) |
-| 21172874 (`runs/ab_c1c_2`) | **-6.79%** | 75.229 -> 70.060 (-6.87%) | -1.65% | none | ACCEPT (this job) |
+| 21172873 (`kda-results/kda-sm90-fwd/ab_c1c_1`) | **-7.05%** | 75.682 -> 70.270 (-7.15%) | -0.92% | none | ACCEPT (this job) |
+| 21172874 (`kda-results/kda-sm90-fwd/ab_c1c_2`) | **-6.79%** | 75.229 -> 70.060 (-6.87%) | -1.65% | none | ACCEPT (this job) |
 
 - Still needed for acceptance (kda-sm90): `gate.py --mode numerics` (four routes, DBG pairs) under Hao's residual
   contract; pytest on the build.
@@ -126,7 +126,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - Re-measured on the current accepted build r17_c3 (rebased commit c3df077, build c1e): fwd geo-mean **-6.86%**
   (job 21174360) and **-6.57%** (21174361); no shape slower beyond spread; ACCEPT (this job) in both.
 - residual-v3 screen, default route (kda-sm90's r17_c3 base / acc / dbg captures and defects manifest; job 21174390,
-  `kda-work/runs/nv3_default`): (1) 1 matched row above its accepted residual by more than round-off
+  `kda-results/kda-sm90-fwd/nv3_default`): (1) 1 matched row above its accepted residual by more than round-off
   (d128_mqa/causal/matched, group 0) of 334592; (2) exemptions 8378 = accepted (no growth); (3) deterministic; error vs
   fp32 over 288 case / output pairs: 43 up (median 1e-6 rel, max 3.9e-5), 53 down (min -6.2e-5), 192 equal ->
   strict "not larger" FAILS on noise (90 problems). Needs Hao's ruling on fp32-noise tolerance and the one row.
@@ -156,7 +156,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - Why: the phase probe (S34) shows each WG is a latency-bound serial chain; a third chain in flight raises tensor-pipe
   occupancy. Alone (S35) it is neutral; with the C1 instruction cuts the two compound.
 - Screen (16/4 8k + 64k, 2 reps, job 21175696): C3 -12.61% geo, C3b-equivalent -13.13%, C1 -6.81% on the same job.
-- Numerics (fp32 reference, job 21175697, `runs/n5`): no NaN / Inf at x1..x30; O relL2 change per case -6.4e-5 ..
+- Numerics (fp32 reference, job 21175697, `kda-results/kda-sm90-fwd/n5`): no NaN / Inf at x1..x30; O relL2 change per case -6.4e-5 ..
   +2.5e-5 relative (absolute -3e-6 .. +6e-6), e.g. B1 H16/4 N8192 4.733676e-2 -> 4.733682e-2. Per-row differences
   symmetric (order class: two 64-key groups per promote).
 - Rule reading recorded (Hao: decide and record): residual-v4's "per case, the relative error may rise by at most
@@ -169,7 +169,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   slower beyond spread; ACCEPT (this job) in both. (C3b = + 3 stages screened -0.5% further; A/B pending.)
 - Phase probe on the C3 configuration (S40, job 21176432): per WG step ~4600-4800 cycles, gemm turn ~2750 (60%),
   softmax ~1650: the PV chain + QK turn is now the long phase (next levers target it).
-- Numerics, default route vs the r17_c3 captures (job 21176433, `runs/nv3c3`, residual-v3 checker):
+- Numerics, default route vs the r17_c3 captures (job 21176433, `kda-results/kda-sm90-fwd/nv3c3`, residual-v3 checker):
   rows: 1 matched row above its accepted residual (d128_mqa/causal/matched group 0, the same near-one-hot row as C1),
   exemptions unchanged; deterministic. Error vs fp32 (absolute change of the relative-L2 metric, 288 case / output
   pairs): matched cases max rise +8.3e-6 (all <= 1e-5), finite-case mean change matched O +0.0004%, dQ / dK +0.0001%,
@@ -189,7 +189,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - Fix for (1), commit 3565487 (C3f): the folded scale q8sc * k8sc floored at FLT_MIN (bitwise for nonzero scales);
   d128_zeros O now has 0 NaN and is finite (O = 0 = the fp32 reference for V = 0). The defect is removed; no 192-row
   tiling can reproduce the frozen NaN pattern.
-- Evidence on (2), `runs/ctl`, jobs 21177451 / 21177475: the ACCEPTED r17_p1 DBG build with only its LSE moved by
+- Evidence on (2), `kda-results/kda-sm90-fwd/ctl`, jobs 21177451 / 21177475: the ACCEPTED r17_p1 DBG build with only its LSE moved by
   +1 ulp (no kernel change) "regresses" 1930 well-conditioned rows under the same rule (d128_scale10 up to +0.29,
   outliers +0.24, scale3 413 rows, d256 stress cases too); -1 ulp likewise. C3f: 70 up / 180 down; C3n (C3 without
   FWDDFOLD, b1613d8): 23 up / 14 down. Against a per-row envelope k 2^-23 + max over the +-1 ulp LSE controls of
@@ -210,7 +210,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   steps keep the exact descale). Reason: the one row that kept C3f out (d128_mqa group 0, row 4098) has 3 visible keys;
   its softmax lives in the diagonal tile and the fold moved its 3-term sum (LSE +-1 ulp controls and C3n leave it
   bitwise). Short causal rows live in masked tiles, so they keep the accepted p / LSE.
-- Numerics reproduction (kda-sm90's checker 9be3622-era numerics.py on its ngate_nfwd3_1 captures, `runs/nv4g`):
+- Numerics reproduction (kda-sm90's checker 9be3622-era numerics.py on its ngate_nfwd3_1 captures, `kda-results/kda-sm90-fwd/nv4g`):
   0 rows beyond the LSE envelope (strict v4: 41, all scale3 / scale10 / outliers); no mean-error failures; zero-input
   O finite (repaired defect).
 - A/B vs r17_p1: fwd geo-mean **-12.66%** (job 21178095), **-13.09%** (21178096); no shape slower beyond spread.
@@ -311,7 +311,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   unchanged in exact arithmetic (sigma_g part_g cancels the offset; weight = v_max 2^(ms_S - mref)).
 - Timing vs r17_pk (fwdtime, 4 shapes): 3 WGs **-4.41% / -4.33%** geo (jobs s31 / s32); 2 WGs BN256 **+8.30%** (s32;
   the 3-WG layout matters more than the rho chain).
-- residual-v4, default route vs r17_pk (+ LSE envelope, --allow-repair; job nv5, `runs/nv5`): FAIL, 82 problems.
+- residual-v4, default route vs r17_pk (+ LSE envelope, --allow-repair; job nv5, `kda-results/kda-sm90-fwd/nv5`): FAIL, 82 problems.
   Matched O error rises in 10 of 23 cases by 1.3e-3 .. 4.2e-3 (limit 1e-5): gqa3_promote 4.604e-2 -> 5.025e-2,
   min 4.529e-2 -> 4.825e-2, mqa 4.655e-2 -> 4.916e-2, gqa4 4.629e-2 -> 4.846e-2, packed / bhnd / constk ~+1.7e-3,
   heldout +1.3e-3; 7 matched rows beyond the envelope. Cause: the smaller group's codes on the shared basis lose
@@ -379,3 +379,6 @@ nothing, so the light probe's "turn-bound" reading was distorted by its own spil
   jumps inside a tile the two group bases are no longer within B binades, and the next step's rho
   (v0 / v1) 2^(ms0 - ms1) hits its [1e-30, 1e30] guard. The current-max floor is what bounds |ms0 - ms1| <= B. Rejected.
 - My r19 DBG build and LSE +-1 ulp control packages: `kda-work/frozen/r19_dbg`, `r19_dbg_lse{p,m}`.
+
+Raw data (timing JSON, numerics captures, A/B directories) lives outside git under
+`~/workspace/haok1402/kda-results/kda-sm90-fwd/` (formerly `kda-work/runs/`); this file keeps the numbers that matter.

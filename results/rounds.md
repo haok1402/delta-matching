@@ -922,3 +922,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   The ratio form's bound (k 2^-23 times the cancelled Σ|t|) is far below the round-off of computing the row sum.
   Next (in progress): v5-abs, round-off of the row sum from its actual terms, k 2^-23 (Σ|P^dP| + |delta| Σ P^), on
   |Σt|, every row vs the original, calibrated by the +-1 ulp controls; revert C3g / EXPBX64 if they fail it.
+- kda-bwdport DONE, no candidate (CANDIDATES.md on kda-sm90-bwdport c874d5d): FA3-style in-kernel dQ (pass 2 folded
+  into pass 1) rejected in every form (dQ gemm +8..12% of pass 1, smem hand-off +9%, deterministic order +34%; best
+  real form +3% vs pass 1 + pass 2); PT32 (dV promote window 8 -> 32) is the PW32 lever already failing the per-case
+  dV error rule, not re-gated; PE deferred promote bitwise but neutral. The FA3-fp8 skeleton bound for pass 1 is -30%:
+  psi ~11%, dS' hand-off ~8%, dV window ~8% (promote smem-bandwidth-bound), dK fold ~4%, i.e. the remaining pass-1 gap
+  is the per-tile psi / dS' contract and the dV / dK promotes, not scheduling.

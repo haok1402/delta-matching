@@ -92,6 +92,8 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 | S52 | c4m | masking | C4+SMSC: masked-range tiles fully visible for a WG run the unmasked step body (second inlined step instance) | intended bitwise | +18.1% geo (job s28): causal D128 STACK 16 -> 136 B, d256 1408 B; O differs (prologue-masked rows): rejected |
 | S53 | c4m2 | masking | C4+SMSC: one step body, the causal mask skipped by a warp-uniform branch on fully visible tiles | bitwise (O = r17) | +20.0% geo (job s30): STACK 144 B (d256 312 B); a branch in the step breaks the allocation: rejected |
 
+| S54 | host | host path | fwd_fp8 host cost (integrator lever: ~0.3 ms per call in paper C.2) | n/a | not a lever: host 0.015 ms per call, back-to-back wall 0.684 ms = kernel (r17_p0s, B2 N8192 16/4, job 21180725, nsys cuda_api_sum in runs/host); the C.2 per-call gap is idle-GPU launch latency in the event window |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below

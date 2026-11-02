@@ -869,3 +869,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Accepted build r19_fwd (job 21196592, same-job calibration 1424.2 TFLOP/s): sol4c (fixed ref.) pass1 69.2%, forward
   82.4%, pass0 97.6%, pass2 94.3%; forward / FA3 fp8 1.108; original -> now e2e fwd -15.8%, fwd+bwd -13.3%; paper C.2
   16/4 fwd+bwd 529.7 TFLOP/s.
+
+## Round 20 (started): layout-space rounds (Hao: keep running own rounds)
+
+- Workers launched on r19_fwd: forward layout space (S20-fwd-*: key-tile width vs P-hat group size, 4 warpgroups at
+  120 registers, register splits, K / V depth, 2 CTAs / SM, producer warp instead of a producer warpgroup) and pass-1
+  layout space (S20-p1-*: tile shapes vs psi granularity, warpgroup count, register split, Q / dO / K depths, dS' store
+  layout, scheduler order, 2 CTAs / SM), bitwise or residual-v4. kda-p1fresh DONE and stopped; kda-bwdport starts pass 1
+  from FA3's BF16 backward structure (its candidates are gated when READY).

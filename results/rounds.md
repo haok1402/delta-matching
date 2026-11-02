@@ -296,8 +296,8 @@ Current ranking (accepted DO2 arm of the round-8 GRPFOLD A/B, `results/r8/grpfol
   Ablations (8 configs, pass-2 sum): psi constant -4.31%, no in-window rescale -3.63%, hd128 depth 3 -4.49% (-7.8 ..
   -9.0% on the hd128 configs), PSIPF (psi one tile early, bitwise on the default route) -3.09%.
 - Hypothesis P2ST3 (declared in the profile with footprint, budget and ledger): `FA3FP11_HD128_P2ST` 2 -> 3
-  (certified flag-set change), footprint the D128 pass 2. Smem 83968 -> 108544 B per CTA, two CTAs per SM at both
-  depths; registers unchanged; the ring ledger keeps the unconditional release barrier before every re-arm.
+  (certified flag-set change), footprint the D128 pass 2. Dynamic smem 84992 -> 109568 B per CTA (+1024 B static; corrected from the
+  83968 / 108544 B array payloads first quoted), two CTAs per SM at both depths; registers unchanged; the ring ledger keeps the unconditional release barrier before every re-arm.
 - Gate (job 21165579, all steps rc 0, `results/r9/p2st3_1/`): pytest 49 / 3 skipped in the identity-verified process;
   **bitwise on all four routes vs baseline and DO2**; per-symbol resources unchanged, complete SASS. D128 pass 2
   55.653 -> 51.482 ms (**-7.50%**) main, 5.032 -> 4.609 ms (-8.41%) held-out; e2e fwd+bwd -0.23%; shapes over +1%
@@ -325,3 +325,64 @@ Current ranking (accepted P2ST3 arm of the confirmation, `results/r9/p2st3_2/ab_
 | glue | 36.795 | 13.822 | 22.972 | 37.6% |
 | pass0 | 36.506 | 16.291 | 20.215 | 44.6% |
 Next pass-2 hypothesis: PSIPF (psi loaded one tile early, both headers), measured against P2ST3.
+
+## Rule change (Hao, during round 10): D128 is the target, one grid
+
+From round 10 on (docs/kda-sm90/plan.md, "Rule change (Hao, round 10)"; enforced by `ab.py decision()` and
+`gate.py --target`): no held-out split (one grid of all 78 configurations, `kernels.py --grid all`); the target is the
+D128 kernels; a candidate is accepted when its target kernel is >= 3% faster summed over all D128 shapes in the full
+gate job AND a fresh confirmation job, no D128 shape is slower beyond its run-to-run spread (median slowdown larger
+than the larger repetition range), and D256 stays correct and not slower (no D256 shape slower beyond spread, the
+target's D256 sum not slower beyond the spread of its per-repetition sums). D256 is not tuned and needs no
+counterpart. Pass 1 and forward reopen at D128 with fresh counters; pass 2 and glue keep theirs. Rounds 3 (DO2) and 9
+(P2ST3) stay committed.
+
+| kernel (D128 target) | eligible counter from round 10 |
+|---|---:|
+| pass 1 | 0 (reopened) |
+| forward | 0 (reopened) |
+| pass 2 | 0 |
+| glue | 0 |
+
+## Round 10: PSIPF (pass 2, both head dims): ACCEPTED (00d951b); P2ST3 re-read under the new rule
+
+- Hypothesis PSIPF (declared from the round-9 profile, contract round 10): psi of tile nb+1 loaded during iteration
+  nb, before tile nb+1's TMA barrier wait, both headers; values / predicates / state / windows / accumulation order /
+  epilogue / the unconditional release barrier unchanged. Emitted: `@!P0 LDG.E` psi[nb+1] before the `TRYWAIT`
+  (`results/r10/psipf_1/code/order_cand.txt`). Resources: REG +0..2, STACK / LOCAL 0.
+- Gate job 21166328 (full, vs P2ST3, split grids as run): bitwise on all four routes vs the baseline and P2ST3;
+  re-analysed under the new rule (`results/r10/rule/rule_psipf_job1.json`, main + former held-out runs = the merged
+  grid): D128 pass 2 56.099 -> 54.296 ms (**-3.21%**), D256 pass 2 -3.52%, no shape slower beyond spread: ACCEPT.
+- Confirmation job 21166727 (`gate.py --mode confirm --target pass2`, merged grid, same candidate e1119aaaa89c vs
+  P2ST3 d2eee98774eb): D128 pass 2 **-3.14%**, all predicates pass; bench.py D128 matched fwd+bwd 4.495 / 4.454 /
+  4.466 -> 4.451 / 4.451 / 4.444 ms, D256 within noise.
+- Verdict: ACCEPTED. Accepted build: library e1119aaaa89c (`.local/frozen/r10_psipf`, stamp code_sha 2c31b6253617).
+- P2ST3 under the new rule (re-analysis of its two committed jobs, `results/r10/rule/`): job 2 ACCEPT (D128 pass 2
+  -6.71%); job 1 D128 pass 2 -7.57% but two D256 shapes register as slower beyond spread although P2ST3 leaves every
+  D256 kernel byte-identical (its SASS diff is the hd128 pass 2 only): measurement noise that the per-shape predicate
+  can still flag. P2ST3 stays committed (Hao).
+
+Current D128 ranking (accepted PSIPF arm of the confirmation, `results/r10/psipf_2/ab_all/B_median.json`, all D128
+shapes of the merged grid):
+
+D128 shapes: 39 configurations
+
+| kernel (D128) | measured ms | modeled SOL ms | modeled waste ms | % of modeled SOL |
+|---|---:|---:|---:|---:|
+| pass1 | 265.646 | 70.540 | 195.106 | 26.6% |
+| fwd | 102.105 | 35.044 | 67.062 | 34.3% |
+| glue | 22.434 | 7.892 | 14.542 | 35.2% |
+| pass0 | 21.693 | 8.761 | 12.931 | 40.4% |
+| pass2 | 54.316 | 45.112 | 9.204 | 83.1% |
+| prod_fwd | 8.242 | 5.862 | 2.379 | 71.1% |
+| prod_bwd | 4.137 | 2.973 | 1.165 | 71.8% |
+| twin | 3.119 | 2.731 | 0.389 | 87.5% |
+| kernel (D128 target) | eligible counter |
+|---|---:|
+| pass 1 | 0 (reopened) |
+| forward | 0 (reopened) |
+| pass 2 | 0 (PSIPF accepted; now 83% of its modeled D128 limit) |
+| glue | 0 |
+| pass 0 | 0 |
+
+Next: pass 1 at D128 (largest D128 waste), a new hypothesis from the existing D128 profile.

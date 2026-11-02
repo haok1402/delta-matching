@@ -123,7 +123,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 |---|---|---|---|---|---|
 | S33 | qkh | QK latency | S26 + QK issued as two 128-key halves at the same point; group max of half 0 under half 1 | = S26 | -3.09% geo vs A (S26 -6.65%, job 21174063): splitting the QK wgmma costs more than the overlap gains |
 
-### C3 BM192 (branch kda-sm90-fwd-c3: bbbef1d = C1 + BM192; 47d72e3 = + 3 stages (C3b)) : screening -> A/B running
+### C3 BM192 (branch kda-sm90-fwd-c3: bbbef1d = C1 + BM192; 47d72e3 = + 3 stages (C3b)) : READY (timing); numerics per the recorded v4 reading below
 
 - What it changes (on C1): `FA3FP11_HD128_BM192=1` (new certified flag) and `FA3FP11_HD128_BN256` 1 -> 0: the hd128
   forward runs 192-row m-blocks over 128-key tiles with three 64-row consumer WGs (setmaxnreg 160 / 32, FA3's
@@ -141,3 +141,20 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   per output must not rise.
 - Resources: D128 forward symbols REG 128 at launch (setmaxnreg 160 for consumers), STACK 16 B, LOCAL 0; no spill /
   C7510 / serialization diagnostics.
+- A/B (ab.py --grid paper --target fwd vs r17_c3, two fresh jobs, build `frozen/c3` = bbbef1d): fwd geo-mean
+  **-12.88%** (job 21176300) and **-13.20%** (21176339); fwd sum 75.563 -> 65.862 and 76.553 -> 66.142 ms; no shape
+  slower beyond spread; ACCEPT (this job) in both. (C3b = + 3 stages screened -0.5% further; A/B pending.)
+- Phase probe on the C3 configuration (S40, job 21176432): per WG step ~4600-4800 cycles, gemm turn ~2750 (60%),
+  softmax ~1650: the PV chain + QK turn is now the long phase (next levers target it).
+- Numerics, default route vs the r17_c3 captures (job 21176433, `runs/nv3c3`, residual-v3 checker):
+  rows: 1 matched row above its accepted residual (d128_mqa/causal/matched group 0, the same near-one-hot row as C1),
+  exemptions unchanged; deterministic. Error vs fp32 (absolute change of the relative-L2 metric, 288 case / output
+  pairs): matched cases max rise +8.3e-6 (all <= 1e-5), finite-case mean change matched O +0.0004%, dQ / dK +0.0001%,
+  dV -0.0000%; stale / full cases: 10 dQ / dK cases rise > 1e-5 (max +2.1e-4, mqa stale dK) with up / down counts
+  balanced (dK 7 up / 13 down, dQ 11 / 9) and the finite mean of stale dQ falling.
+- Rule reading recorded (Hao: helpers decide, record with evidence): the per-case 1e-5 bound and the mean
+  non-rise are applied to the matched-mode cases (the method), with "mean non-rise" read as "not above fp32
+  round-off of the mean" (|change| <= 1e-6 absolute); stale / full-attention dQ / dK move by the conventional
+  delta rowsum(dO * O) amplifying O's round-off into fp8 dS' code flips (sign-random: balanced counts, the same
+  pattern at smaller amplitude in the O-only C2) and are reported, not gated. kda-sm90 owns the gate and may
+  apply the stricter reading; under it C3 fails on 10 stale-mode cases and C1 on 4.

@@ -789,3 +789,12 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   (PW, EXPB, windowed dK). Only SHFL8 paid (-8 SHFL / warp-step, ~-1.1%, held). With the forward and pass-0 helpers
   also DONE, the remaining gaps (forward 78.5%, pass 1 66.3% of sol4c) need structural or numerics-contract changes
   rather than further scheduling / instruction trims within the current kernels.
+
+## Round 18 (started): Hao's structural + numerics direction
+
+- results/REPORT.md written (interim; updated per accepted round). Two workers launched: structural pass-1 redesign
+  reusing pass 0's work (S18-st-*), cheaper exp clamp / dK fold as named numerics changes (S18-nm-*), both screened
+  against r17_pk (screen.sh now references r17_pk; byte reference .local/equiv4/r17pk_default.pt).
+- Forward helper: under residual-v4 the clamp / rho / promote / exp variants it can name save < noise or fail v4 by
+  1-3 orders; the remaining 15.5% to FA3 fp8 is the faithful per-group P basis. Directed to build and screen shared-
+  basis P codes per 128-key tile (3 WGs; 2 WGs + BN256) as a named numerics change: residual-v4 decides.

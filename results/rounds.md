@@ -882,3 +882,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   softmax is NOT slack (corrects the S19 SASS-diff note); the shuffle latency cannot be hidden bitwise (each group's
   basis floor needs the whole tile max). FLOORPREV (floor from the previous max) is unsound (rho guards bind, O error
   0.27 -> 0.37 on scale10 / outliers) and +1% slower: rejected.
+- Forward layout worker (S20-fwd-01..06, results/screens/fwd_layout_log.md, 2-rep screens vs r19_fwd): K/V depth 2
+  / 4 +0.4..+1.0% / +0.1..+0.6%; consumers at 152 registers +5.7% (the 160 budget is binding); 2 CTAs / SM with
+  64-row tiles +23%; 128-row tiles x 2 WGs at 240 registers +18%; a producer WARP cannot free registers for the
+  consumers (released registers return only to its own CTA; 160 / 168-register consumers hang); 64-key tiles trade the
+  rho chain for an equal number of promotes; 192 / 256-key tiles exceed 160 registers; 4 WGs at 120 infeasible;
+  pre-transposed V worth <= 2.5%. The 3-WG BM192 x BN128 layout is the best point of the space. Remaining structural
+  option: an FA4-style split (softmax WG + PV WG per 64-row slice, P through shared memory), estimated 0-4%: prototype
+  launched (round 20).

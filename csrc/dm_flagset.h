@@ -11,8 +11,8 @@
 #if !defined(FA3FP11_HD128_BN256) || (FA3FP11_HD128_BN256) != 0
 #error "delta_matching: FA3FP11_HD128_BN256 must be 0 (the release flag set; kda-fwd BM192 uses 128-key tiles)"
 #endif
-#if !defined(FA3FP11_HD128_DOST) || (FA3FP11_HD128_DOST) != 1
-#error "delta_matching: FA3FP11_HD128_DOST must be 1 (the release flag set)"
+#if !defined(FA3FP11_HD128_DOST) || (FA3FP11_HD128_DOST) != 3
+#error "delta_matching: FA3FP11_HD128_DOST must be 3 (the release flag set; kda-pass1 C3 stack)"
 #endif
 #if !defined(FA3FP11_HD128_DOTST) || (FA3FP11_HD128_DOTST) != 1
 #error "delta_matching: FA3FP11_HD128_DOTST must be 1 (the release flag set)"
@@ -50,8 +50,8 @@
 #if !defined(FA3FP11_HD128_PVFIRST) || (FA3FP11_HD128_PVFIRST) != 1
 #error "delta_matching: FA3FP11_HD128_PVFIRST must be 1 (the release flag set)"
 #endif
-#if !defined(FA3FP11_HD128_QST) || (FA3FP11_HD128_QST) != 2
-#error "delta_matching: FA3FP11_HD128_QST must be 2 (the release flag set)"
+#if !defined(FA3FP11_HD128_QST) || (FA3FP11_HD128_QST) != 3
+#error "delta_matching: FA3FP11_HD128_QST must be 3 (the release flag set; kda-pass1 C3 stack)"
 #endif
 #if !defined(FA3FP11_M16_DO2) || (FA3FP11_M16_DO2) != 0
 #error "delta_matching: FA3FP11_M16_DO2 must be 0 (the release flag set)"

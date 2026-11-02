@@ -790,12 +790,24 @@ struct CollectiveMainloopBwdSm90Fp8R {
             warpgroup_wait<1>();   // S retired
             KP(5);
             auto const stage_q = [&] { if constexpr (kSt >= 0) { return Int<kSt>{}; } else { return smem_pipe_read.index(); } }();
+#if KDA_PK_EXPB == 6
+            // pass 0's need_mask for (this 64-row m-block, this WG's 64-key block nb = 2 n_block + wg): same formula, same tiles
+            [[maybe_unused]] bool const fq8_x64_orig = [&] {
+                int const nb64 = 2 * n_block + warp_group_idx;
+                return (Is_causal && (nb64 + 1) * 64 > m_block * 64 + (seqlen_k - seqlen_q)) || ((nb64 + 1) * 64 > seqlen_k);
+            }();
+#endif
             // rowcol view: (16 query rows, 2 keys) per thread.
             Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
             mask_fn(tSrS, m_block);
             #pragma unroll
             for (int mi = 0; mi < size<0>(scores); ++mi) {
-#if KDA_PK_EXPB >= 3
+#if KDA_PK_EXPB == 6
+                // ## KDA_PK_EXPB=6 (EXPBX64): certified line iff pass 0 masks this (64-row m-block, this WG's 64-key block)
+                // tile: the 64 x 64 diagonal tile or the seqlen_k tail; folded-bias line elsewhere (always in the unmasked loop).
+                float const lse_scaled = (kExpbx || !fq8_x64_orig) ? __fmaf_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E), -kFq8MoE)
+                                                                   : __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));
+#elif KDA_PK_EXPB >= 3
                 // ## KDA_PK_EXPB=3 / 4 / 5 (EXPBX): the folded-bias line on unmasked tiles only (pass 0: kda_expbx_mask_end).
                 float const lse_scaled = kExpbx ? __fmaf_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E), -kFq8MoE)
                                                 : __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));
@@ -810,7 +822,14 @@ struct CollectiveMainloopBwdSm90Fp8R {
 #endif
                 #pragma unroll
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
-#if KDA_PK_EXPB >= 3
+#if KDA_PK_EXPB == 6
+                    if constexpr (kExpbx) {
+                        scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
+                    } else {   // masked loop (rare): per-WG runtime choice
+                        float const y = __fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled);
+                        scores(mi, ni) = exp2f(fminf(fq8_x64_orig ? __fadd_rn(y, kFq8MoE) : y, kFq8MoE + 4.0f));
+                    }
+#elif KDA_PK_EXPB >= 3
                     if constexpr (kExpbx) {
                         scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
                     } else {

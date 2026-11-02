@@ -397,6 +397,28 @@ struct DeltaV6 {
                 if (need_mask) {
                     mask.template apply<true /*Seqlenk_mask*/, Is_causal, false /*Is_local*/>(tSrS, m_block, n_block);
                 }
+#if KDA_PK_EXPB == 6
+                // EXPB=6 (EXPBX64): the certified line exactly on the tiles this kernel masks (the 64 x 64 diagonal tile and
+                // the seqlen_k tail: need_mask above), the folded-bias line everywhere else; ONE code path, no new loop state.
+                {
+                    float const B0 = need_mask ? lse0 : bx0, B1 = need_mask ? lse1 : bx1;
+                    #pragma unroll
+                    for (int mi = 0; mi < 2; ++mi) {
+                        #pragma unroll
+                        for (int ni = 0; ni < 16; ++ni) {
+                            float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
+                            scores(mi, ni) = __fmaf_rn(scores(mi, ni), dsc, -(mi == 0 ? B0 : B1));
+                        }
+                    }
+                    if (need_mask) {
+                        #pragma unroll
+                        for (int i = 0; i < size(scores); ++i) { scores(i) = __fadd_rn(scores(i), kFq8MoE); }
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(fminf(scores(i), kFq8MoE + 4.0f)); }
+                    return;
+                }
+#endif
 #if KDA_PK_EXPB == 5
                 // EXPB=5: ONE line for both: y = fma(s, dsc, -B) with the per-row bias B = b (EXPB) or fl(lse log2e)
                 // (certified), then a warp-uniform branch adds the 2^8 offset only on the certified (diagonal) stages:

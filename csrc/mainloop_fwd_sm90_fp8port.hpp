@@ -222,12 +222,12 @@ struct CollectiveMainloopFwdSm90Fp8Port {
     static constexpr int kVarPV = kVar % 10;
     static constexpr int kVarLazy = kVar / 100000 % 10;
     static constexpr int kVarSP = kVar / 1000000 % 10;   // k-scale loads: 0 at use, 1 at step start, 2 none (ablation), 3 smem-staged with K
-    static_assert(kVarSP != 3 || (kGroups == 4 && kVarSched == 1), "FWDPORT: smem-staged scales need BN 256, PV-first");
     static_assert(!kVarLazy || (kVarSched == 1 && kVarPV != 0), "FWDPORT: lazy alpha is implemented for the PV-first weighted steps");
     static constexpr int kQuantKeys = 64;
     static constexpr int kQuantRowsQ = 128;
     static constexpr int kGroups = kBlockN % 64 == 0 ? kBlockN / 64 : 0;
     static constexpr int kGS = kGroups > 0 ? kGroups : 1;
+    static_assert(kVarSP != 3 || (kGroups == 4 && kVarSched == 1), "FWDPORT: smem-staged scales need BN 256, PV-first");
     static_assert(kGroups > 0 || (kVarDesc == 0 && kVarBasis == 0 && kVarPV == 0), "FWDPORT: BN 224 is the plain FA3 replica only");
     static constexpr int kRowcol = kBlockN / 4;
     static constexpr int kColsPerGroup = kGroups > 0 ? kRowcol / kGroups : kRowcol;

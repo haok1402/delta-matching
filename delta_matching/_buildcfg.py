@@ -50,10 +50,10 @@ FLAGS = {
     "FA3FP11_M17_GT": 1, "FA3FP11_M17_DOTST": 1, "FA3FP11_M17_P0V4": 1, "FA3FP11_M17_LSEK": 1, "FA3FP11_M17_P0MS": 32,
     "FA3FP11_M17_FASKIP": 0, "FA3FP11_M17_FWDIL2": 0, "FA3FP11_M17_FWDG4": 0,
     "FA3FP11_HD128": 1, "FA3FP11_HD128_PVFIRST": 1, "FA3FP11_HD128_BM128": 0, "FA3FP11_HD128_P0NBWG": 2,
-    "FA3FP11_HD128_DOTST": 1, "FA3FP11_HD128_BN256": 0, "FA3FP11_HD128_QST": 2, "FA3FP11_HD128_DOST": 1,
+    "FA3FP11_HD128_DOTST": 1, "FA3FP11_HD128_BN256": 1, "FA3FP11_HD128_QST": 2, "FA3FP11_HD128_DOST": 1,
     "FA3FP11_HD128_P2ST": 3, "FA3FP11_HD128_P0ST": 3, "FA3FP11_HD128_P1R": 1, "FA3FP11_HD128_P0V5": 1,
     "FA3FP11_P1R_SAGEDP": 1 if BF16_DP else 0,
-    "FA3FP11_HD128_BM192": 1,
+    "FA3FP11_HD128_BM192": 0,
     "FA3FP11_HD128_FWDST": 3,      # kda-fwd: hd128 forward K/V pipeline stages (bitwise knob)      # kda-fwd: forward 192 x 128 tiles, three consumer warpgroups (O order class)
     "FA3FP11_HD128_FWDSHB": 1,     # kda-fwd: shared per-tile P basis with folded V ratio (named numerics change; screening)
     "FA3FP11_HD128_FWDLAZY": 1,    # kda-fwd: forward lazy O rescale (named numerics change; O only)

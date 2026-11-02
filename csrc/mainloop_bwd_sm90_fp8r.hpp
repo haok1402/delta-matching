@@ -37,7 +37,7 @@
 // kda-pass1 KDA_NOCLAMP (named numerics change when on; pass 0 v6 and pass 1 together so the matched P^ stays identical):
 // drop the F1 cliff clamp min(t, 12) of the exp line.  Outputs change only where the clamp binds (t > 12).
 #ifndef KDA_NOCLAMP
-#define KDA_NOCLAMP 0
+#define KDA_NOCLAMP 4   // candidate C4
 #endif
 #define KDA_F1(x) (KDA_NOCLAMP == 1 ? (x) : fminf((x), 12.0f))
 #define KDA_F1C(x) (kClampC ? fminf((x), 12.0f) : (x))

@@ -390,3 +390,24 @@ Raw data (timing JSON, numerics captures, A/B directories) lives outside git und
   the original's, so the dS row residuals are the original's by construction).
 - Timing vs r19_fwd (3 reps, 4 shapes, job s42): **+4.80% geo** (the fold is worth ~4.8% on the current stack);
   i.e. about 1.16 x FA3 fp8 if C3g's fold has to go. Builds: `kda-work/frozen/nofold`, `nofold_dbg`.
+
+## Round 21: residual-v5 / TASK.md error clause: BN256 port of the accepted forward
+
+Directed by kda-sm90 (BM192 is suspect under the relative error clause; the two-tile PV temp does not fit at 3 WGs).
+Branches on e7fec9d: `kda-sm90-fwd-bn256` (fold on) and `kda-sm90-fwd-bn256nf` (fold off). 2 WGs x 128 x 256, 2 stages,
+FWDLAZY + RHOPRE; the 2-group pieces (PRETURN, PREW2, SMSC) are off at four groups, so ports were added: PRETURN4
+(rebase, three rho and the weight before the ring turn) and SMSC for 4 k + 4 v scales (window k8s[4n .. +4)), both bitwise.
+
+Timing vs r19_fwd (3 reps, 4 shapes, job s43): p256 +10.62% geo, q256 (+ PRETURN4 + SMSC4) **+8.94%**, p256nf +15.95%,
+q256nf **+13.45%**. REG 168 / STACK 24 (as the original tile), no diagnostics.
+
+Relative error vs the ORIGINAL kernel (frozen/base), per case, 66 finite cases, identical on all 4 routes (job ev1):
+
+| build | O > 1e-5 (worst) | dQ > 1e-5 (worst) | dK > 1e-5 (worst) | dV > 1e-5 (worst) | means (O / dQ / dK / dV) |
+|---|---|---|---|---|---|
+| r19_fwd (accepted) | 14 (+1.5e-4 outliers) | 11 (+2.3e-3 mqa) | 8 (+3.2e-3 mqa) | 0 (+4.1e-6) | +4.3e-6 / +1.4e-6 / +3.9e-6 / -4.1e-7 |
+| q256 | 0 (+1.2e-6) | 1 (+1.0e-5 scale10) | 0 (+6.7e-6) | 0 (+5.0e-6) | -2.0e-8 / +1.3e-6 / -8.3e-7 / -3.1e-7 |
+| q256nf | 0 (+1.1e-6) | 0 (+5.3e-6) | 1 (+1.2e-5 outliers) | 1 (+1.0e-5 gqa3) | +2.2e-9 / +6.1e-8 / -3.9e-7 / -3.1e-7 |
+
+O (the forward's own output) passes with both ports (worst +1.2e-6); the dQ / dK / dV movements of every build include
+the backward numerics changes already accepted on the head (pass 0 / pass 1), so they are not forward-attributable.

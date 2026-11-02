@@ -66,6 +66,11 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_PK_EXPB
 #define KDA_PK_EXPB 0
 #endif
+// TIMING PROBES ONLY (wrong outputs, never shipped): bit 0 = no dV window rescale, bit 1 = no psi multiply before the
+// dS' e4m3 conversion.  They bound what removing one instruction per element in those phases can save.
+#ifndef KDA_PK_PROBE
+#define KDA_PK_PROBE 0
+#endif
 #ifndef FA3FP11_P1R_DSDEFER
 #define FA3FP11_P1R_DSDEFER 0
 #endif
@@ -775,7 +780,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // S17 RESCALE-EARLY: the dV window rescale fills the S-retire bubble (the previous dV retired last step).
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
             float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
-            if (fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
+            if (!(KDA_PK_PROBE & 1) && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
             #pragma unroll
             for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) *= fq8_rf; }
             }
@@ -929,7 +934,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
             // dS' codes = e4m3(dS / psi) as the RS A operand of dK.
             #pragma unroll
-            for (int i = 0; i < size(tdPrdP); ++i) { tdPrdP(i) *= fq8_psi_inv; }
+            for (int i = 0; i < size(tdPrdP); ++i) { if constexpr (!(KDA_PK_PROBE & 2)) { tdPrdP(i) *= fq8_psi_inv; } }
             flash::permute_Cregs_fp8(tdPrdP);
             Tensor tdKrdS_acc = make_tensor(tdPrdP.data(), flash::convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
             Tensor rdS = make_tensor_like<Element>(tdKrdS_acc);

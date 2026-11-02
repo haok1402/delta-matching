@@ -135,7 +135,7 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 //     per-lane selector, before the dK issue as in H1b); a receiver interleaves its two words with a per-lane selector.
 //     8 PRMT + 8 SHFL + 8 PRMT instead of 8 + 16 + 8 (simulated byte-exact for all 32 lanes: pass1-aux/p1x/xpose_sim.py).
 #ifndef KDA_P1_SHFL8
-#define KDA_P1_SHFL8 0
+#define KDA_P1_SHFL8 1   // candidate C2
 #endif
 #define KDA_DSBUF (KDA_P1_FENCE2 ? 4 : 2)
 

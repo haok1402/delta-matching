@@ -85,12 +85,12 @@ namespace flash {
 
 using namespace cute;
 
-template <bool Is_causal>
+template <bool Is_causal, int kNWG_ = FA3FP11_P0NWG>
 struct DeltaV6 {
     using Element = cutlass::float_e4m3_t;
     using ElementAccum = float;
     static constexpr int kBlockM = 64;       // per warpgroup
-    static constexpr int kNWG = FA3FP11_P0NWG;
+    static constexpr int kNWG = kNWG_;
     static constexpr int kRowsCTA = 64 * kNWG;   // two warpgroups = one Q/dO scale block
     static constexpr int kBlockN = 64;       // per n-block (one K/V scale group)
     static constexpr int kNbPerStage = 2;    // 128 keys per stage
@@ -402,8 +402,7 @@ struct DeltaV6 {
                 acc_r += double(p0); acc_r += double(p1);
             };
 
-#if FA3FP11_P0NWG == 4
-            {
+            if constexpr (kNWG == 4) {
                 PipelineState smem_pipe_read;
                 Tensor tSrS = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
                 Tensor tdPrdP = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
@@ -435,8 +434,7 @@ struct DeltaV6 {
                     pipeline_kv.consumer_release(smem_pipe_read);
                     ++smem_pipe_read;
                 }
-            }
-#else
+            } else {
             // Warp-scheduler ping-pong: WG0 takes the first turn (WG1 pre-arrives on WG0's barrier).
             auto sched_sync = [&]() {
             };
@@ -521,7 +519,7 @@ struct DeltaV6 {
             CUTLASS_PRAGMA_NO_UNROLL
             for (int s = 0; s < nstages - 1; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}); }
             step(nstages - 1, cute::false_type{}, cute::Int<-1>{});
-#endif
+            }
             // One writer per row: quad lane 0 stores row0's fp64 fold rounded once to fp32, quad lane 2 row1's.
             if ((wtid & 1) == 0) {
                 int const r = m_block * kBlockM + (quad_hi ? row1 : row0);
@@ -533,9 +531,9 @@ struct DeltaV6 {
 
 }  // namespace flash
 
-template <bool Is_causal>
-void run_flash_delta_v6_fp11_hd128(Flash_bwd_fp8_params &params, cudaStream_t stream) {
-    using Kernel = flash::DeltaV6<Is_causal>;
+template <bool Is_causal, int kNWG>
+void run_flash_delta_v6_fp11_hd128_w(Flash_bwd_fp8_params &params, cudaStream_t stream) {
+    using Kernel = flash::DeltaV6<Is_causal, kNWG>;
     using Element = typename Kernel::Element;
     using namespace cute;
     int const seqlen_q = params.seqlen_q;
@@ -590,4 +588,12 @@ void run_flash_delta_v6_fp11_hd128(Flash_bwd_fp8_params &params, cudaStream_t st
     kernel<<<grid_dims, block_dims, smem_size, stream>>>(kp);
     { cudaError_t e_ = cudaGetLastError(); if (e_ != cudaSuccess) { fprintf(stderr, "[delta_matching pass 0] launch: %s\n", cudaGetErrorString(e_)); exit(1); } }
     // No pass 0.5: the fold ran in registers.
+}
+
+// The 256-row CTA needs seqlen_q % 256 == 0 (the public D128 contract); the raw delta_fp8 op also takes 128-multiples,
+// which run the 2-warpgroup (128-row) CTA.  Both are bitwise the same delta.
+template <bool Is_causal>
+void run_flash_delta_v6_fp11_hd128(Flash_bwd_fp8_params &params, cudaStream_t stream) {
+    if (FA3FP11_P0NWG == 4 && params.seqlen_q % 256 == 0) { run_flash_delta_v6_fp11_hd128_w<Is_causal, 4>(params, stream); }
+    else { run_flash_delta_v6_fp11_hd128_w<Is_causal, 2>(params, stream); }
 }

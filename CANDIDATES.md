@@ -54,7 +54,7 @@ separate row pass; levers are inside it.
 | # | name | commit / patch | change | bitwise | screen (geomean pass 0) | formal A/B (2 jobs) | REG / STACK / LOCAL | status |
 |---|---|---|---|---|---|---|---|---|
 | C1 | RTR | 9635adb (`rtr.patch`) | transposed quad reduce: 4 SHFL + 4 FADD instead of 8 + 8, one fp64 fold per lane | yes (default route, 72 cases) | -3.74% (job 21171179, 3 reps) | ab.py paper / pass0: **-3.88%** (job 21171446; per shape -3.83 / -3.62 / -4.40 / -3.68) and **-3.66%** (job 21171447; -3.83 / -3.85 / -3.40 / -3.57); ACCEPT in both, no shape slower beyond spread | 168 / 0 / 0, no spills, no ptxas diagnostics | **READY** |
-| C2 | RTR + SPF | 41bfa7b (on C1; `spf.patch`) | stage scales: one float2 load per tensor per stage at s + 1, no clamps (531 vs 544 instr / stage) | yes (72 cases) | -5.46% (job 21171431; -5.79 / -4.99 / -5.79 / -5.27) | running | 168 / 0 / 0 | pending |
+| C2 | RTR + SPF | 41bfa7b (on C1; `spf.patch`) | stage scales: one float2 load per tensor per stage at s + 1, no clamps (531 vs 544 instr / stage) | yes (72 cases) | -5.46% (job 21171431; -5.79 / -4.99 / -5.79 / -5.27) | ab.py: **-5.27%** (job 21171806; -4.99 / -5.29 / -5.33 / -5.46) and **-4.97%** (job 21171794; -4.61 / -4.87 / -5.03 / -5.36), ACCEPT in both | 168 / 0 / 0, no spills | **READY** (supersedes C1) |
 
 ## Screen log (every variant; 2-rep screens unless noted; geomean of per-shape pass-0 ratios vs frozen r14_h3)
 
@@ -72,3 +72,13 @@ separate row pass; levers are inside it.
 | rtr_spf | rtr + spf | yes | -5.46% | -5.79 / -4.99 / -5.79 / -5.27 | 21171431 | C2 |
 | u3 / rtr_spf_u3 | stage loop unrolled by 3 (compile-time slots) | yes | +3008% / +2948% | | 21171431 | REJECTED: the 3 step-lambda copies are outlined (CALL, ~1 KB stack, 2900 STL); needs a non-lambda design |
 | swp | rtr + spf + n-block software pipeline (exp(k) with rowsum(k-1), gemm k+1 in flight across iterations) | yes | +16.13% | +15.9 / +15.9 / +17.0 / +15.7 | 21171522 | REJECTED: ptxas injects warpgroup.wait 0 at the loop top (C7517: GMMA registers live across the back-edge), serializing every iteration |
+| c1w | rtr + spf + one consumer warpgroup per CTA (64 rows), 2 CTAs / SM | yes | +2.41% | -0.09 / +4.43 / +0.97 / +4.39 | 21171654 | REJECTED: decoupling the two warpgroups of an SM does not help; the warp count is what matters |
+| c1w_swp | c1w + swp | yes | +18.94% | | 21171654 | REJECTED (swp) |
+| lpt | rtr + spf + grid (bh, p): global longest-first dispatch | yes | -6.06% | -8.50 / -5.15 / -5.32 / -5.21 | 21171736 | LPT adds ~-3% on B2 H16 8k |
+| lpt_all | lpt + all-heads split pass 0 | yes | -6.96% | -8.56 / -7.45 / -5.80 / -6.01 | 21171736 | |
+| c1w_lpt | c1w + lpt | yes | +1.13% | | 21171736 | |
+| w4b | rtr + spf + 4 consumer warpgroups (256-row CTA, 112 regs, one S/dP pair, skip past-diagonal n-blocks) | yes | -8.21% | -5.53 / -9.19 / -8.81 / -9.27 | 21171573 | (first build w4 with setmaxnreg 120 hung: 4x128x(120-96) > 128x(96-24); cancelled at 4 min) |
+| w4b_all | w4b + all-heads split pass 0 | yes | -10.46% | -5.36 / -13.51 / -9.85 / -12.88 | 21171573 | |
+| mc2_all | mc2 + all-heads split pass 0 | yes | -4.00% | -5.03 / -4.24 / -2.97 / -3.76 | 21171530 | |
+| rtr_mc2_all | rtr + mc2_all | yes | -6.69% | -7.74 / -6.79 / -5.74 / -6.47 | 21171530 | |
+| rtr_st4_mc2_all | rtr + depth 4 + mc2_all | yes | -6.98% | -7.66 / -7.14 / -5.66 / -7.46 | 21171530 | |

@@ -934,3 +934,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   registers) and cannot reproduce whole-256-key-tile codes anyway. Prepared fallback: the ORIGINAL 2 WGs x 128 x 256
   tile with the later pieces ported (FWDLAZY, RHOPRE for 4 groups, PRETURN, SMSC; with / without FWDDFOLD); C1 on that
   tile measured -6.8% vs r14 with per-case O changes <= 4e-6 relative. The error-clause audit decides.
+- Forward BN256 port (kda-fwd; origin/kda-sm90-fwd-bn256 5235f74 with fold, -bn256nf d432c05 without; 2 WGs x 128 x
+  256 + FWDLAZY + RHOPRE + PRETURN4 + SMSC for 4 + 4 scales; REG 168, STACK 24): timing vs r19_fwd +8.94% / +13.45%.
+  Relative error vs the ORIGINAL per case (66 finite cases, identical on all four routes): r19_fwd fails O in 14 cases
+  (worst +1.5e-4 outliers), dQ 11 (+2.3e-3 mqa), dK 8 (+3.2e-3 mqa); q256: O 0 (worst +1.2e-6), dQ 1 case at +1.0e-5
+  (scale10), dQ mean +1.3e-6; q256nf: O 0, dK 1 (+1.2e-5 outliers), dV 1 (+1.0e-5 gqa3). The dQ / dK misses include the
+  backward numerics changes on the head; attribution pending (audit section f).

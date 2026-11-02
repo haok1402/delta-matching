@@ -385,23 +385,30 @@ struct DeltaV6 {
             // n-block's 64-key group) is applied once to each 8-key half partial instead of to every element: one rounding
             // per half instead of one per element, one FMUL per element less.
             double acc_q0 = 0.0, acc_q1 = 0.0;   // this lane's partial of row0 / row1
+            // ## P0NORM (named numerics change): delta = sum_j P_j dP_j / sum_j P_j, both sums in fp64 per lane and
+            // reduced once at the end.  sum_j P_j (dP_j - delta) = 0 then holds up to the rounding of the sums, whatever
+            // sum_j P_j is (the forward's LSE normalizes P only up to its own rounding): the matched zero-sum identity
+            // made exact instead of assuming sum_j P_j = 1.
+            double acc_s0 = 0.0, acc_s1 = 0.0;   // this lane's sum of P~ (the 2^8 basis) of row0 / row1
             double acc_r = 0.0;                  // the quad-reduced row value this lane stores (quad_hi: row1)
             bool const quad_hi = (wtid & 2) != 0;
             auto rowsum_step = [&](auto& tSrS, auto& tdPrdP, float dp_g0, float dp_g1) {
                 Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol(tSrS.layout()));
                 Tensor dPv = make_tensor(tdPrdP.data(), scores.layout());
-                float a[2][2];
+                float a[2][2], sp[2];
                 #pragma unroll
                 for (int mi = 0; mi < 2; ++mi) {
-                    float a0 = 0.f, a1 = 0.f;
+                    float a0 = 0.f, a1 = 0.f, s0 = 0.f, s1 = 0.f;
                     #pragma unroll
-                    for (int ni = 0; ni < 8; ++ni) { a0 = fmaf(scores(mi, ni), dPv(mi, ni), a0); }
+                    for (int ni = 0; ni < 8; ++ni) { a0 = fmaf(scores(mi, ni), dPv(mi, ni), a0); s0 += scores(mi, ni); }
                     #pragma unroll
-                    for (int ni = 8; ni < 16; ++ni) { a1 = fmaf(scores(mi, ni), dPv(mi, ni), a1); }
+                    for (int ni = 8; ni < 16; ++ni) { a1 = fmaf(scores(mi, ni), dPv(mi, ni), a1); s1 += scores(mi, ni); }
                     a[mi][0] = a0 * dp_g0; a[mi][1] = a1 * dp_g1;   // ## P0LAZY: the dP descale once per 8-key half partial
+                    sp[mi] = s0 + s1;
                 }
                 acc_q0 += double((a[0][0] + a[0][1]) * kFq8MoInv);
                 acc_q1 += double((a[1][0] + a[1][1]) * kFq8MoInv);
+                acc_s0 += double(sp[0]); acc_s1 += double(sp[1]);
             };
 
             if constexpr (kNWG == 4) {
@@ -527,7 +534,12 @@ struct DeltaV6 {
                 double r1 = acc_q1 + __shfl_xor_sync(uint32_t(-1), acc_q1, 1);
                 r0 = r0 + __shfl_xor_sync(uint32_t(-1), r0, 2);
                 r1 = r1 + __shfl_xor_sync(uint32_t(-1), r1, 2);
-                acc_r = quad_hi ? r1 : r0;
+                double t0 = acc_s0 + __shfl_xor_sync(uint32_t(-1), acc_s0, 1);
+                double t1 = acc_s1 + __shfl_xor_sync(uint32_t(-1), acc_s1, 1);
+                t0 = t0 + __shfl_xor_sync(uint32_t(-1), t0, 2);
+                t1 = t1 + __shfl_xor_sync(uint32_t(-1), t1, 2);
+                double const num = quad_hi ? r1 : r0, den = (quad_hi ? t1 : t0) * double(kFq8MoInv);
+                acc_r = den > 0.0 ? num / den : 0.0;   // ## P0NORM
             }
             // One writer per row: quad lane 0 stores row0's fp64 fold rounded once to fp32, quad lane 2 row1's.
             if ((wtid & 1) == 0) {

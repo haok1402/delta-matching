@@ -43,7 +43,7 @@ void run_flash_fwd_fp8f_impl(Flash_fwd_fp8_params &params, cudaStream_t stream) 
     static constexpr int kBlockN = (kHeadDim_ < 256 && FA3FP11_HD128_BN256) ? 256 : 128;
     static constexpr bool MmaPV_is_RS = true;
     static constexpr bool IntraWGOverlap = true;
-    static constexpr int kStages = 2;
+    static constexpr int kStages = kHeadDim_ < 256 ? FA3FP11_HD128_FWDST : 2;   // ## kda-fwd: hd128 forward K/V stages
 
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
     using TileShape_MNK_PV = cute::Shape<Int<kBlockM>, Int<kHeadDimV>, Int<kBlockN>>;

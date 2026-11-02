@@ -108,3 +108,74 @@ The unattainable bound averages about -8% over the shapes. Every real form is sl
   ordering cost, leaving at best the -6 / -11% bound above.
 
 Status: **REJECTED.** No form reaches -10% on pass 1 + pass 2, and the deterministic form is +34%.
+
+## The ledger: an FA3-fp8 skeleton plus each delta-matching addition (switch `KDA_SK`, TIMING ONLY)
+
+The skeleton is our kernel with every delta-matching addition taken out:
+- no psi: no amax / shuffles / slots / CTA barrier, dS' = e4m3(dS);
+- dK accumulated in place: no temp, no fold;
+- no dV window: no rescale, no promote;
+- no dS' transpose / stmatrix / gmem store.
+
+What remains is FA3's BF16 backward with fp8 operands, block scales and the matched exp / dS line.
+
+All probes were checked in SASS to keep the full 8 + 16 QGMMA set. The first round of SK4 / SK15 / SK16 lost the dV
+gemm: with the promote gone, ptxas dummied the dead dV wgmmas as `HGMMA.64x8x16 RZ`. Those probes now finish with one
+final promote, and the numbers below are the corrected ones (job 21203349 and later). Columns are pass 1 vs r19_fwd,
+B2 N8192 16/4 / 32/4, 2 alternating reps (`ab.py --smoke`).
+
+| build | what | pass 1 |
+|---|---|---:|
+| sk15 | skeleton (all four additions removed) | **-29.5% / -30.3%** |
+| sk14 | skeleton + psi | -21.9% / -22.4% |
+| sk13 | skeleton + dK temp / fold | -26.8% / -27.8% |
+| sk11 | skeleton + dV window | -22.9% / -23.4% |
+| sk7 | skeleton + dS' transpose / store | -21.6% / -22.5% |
+| sk1 | full minus psi | -10.8% / -10.6% |
+| sk8 | full minus dS' transpose / store | -8.1% / -8.3% |
+| sk4 | full minus dV window | -8.7% / -7.8% |
+| sk16 | full minus dV promote only | -7.5% / -6.0% |
+| sk32 | full minus dV rescale only | +0.4% / +0.0% |
+| sk2 | full minus dK fold (in-place dK) | -4.2% / -4.5% |
+
+**Reading.**
+- The FA3-fp8 skeleton is the ceiling of any FA3 port: 30% faster than r19_fwd.
+- The cost above it splits into four parts:
+  - psi, about 11%;
+  - the dS' hand-off to pass 2, about 8%;
+  - the dV window, about 8%, almost all of it the promote;
+  - the dK fold, about 4%.
+- psi, the fold and the dS' codes are the matched method's numerics contract. Their cheaper forms were measured by
+  earlier helpers:
+  - per-WG psi: pass 2 +7..9%;
+  - RIP / DKACC: slower, or fail residual-v4;
+  - DSNAT: 0%.
+- The one part that showed headroom is the dV promote. Its two variants:
+
+### REJECTED: PE, promote deferred into the next step (bitwise)
+
+- Commit 2c… (`KDA_PE=1`).
+- What it changes: a window promote that is not the tile's last runs right after the next step's S / dP issue, in the
+  S-retire bubble where RESCALE-EARLY paid, instead of at the end of its own step where nothing is in flight.
+- Bitwise: dQ / dK / dV are bitwise on the 4 dump shapes (job 21203555).
+- Resources: REG 168, STACK 0.
+- Timing: pass 1 +0.51% / -0.65%. Neutral.
+- Reason: the promote's cost is not exposed latency. It is throughput: 64 KB of LDS + 64 KB of STS per CTA per promote
+  (both WGs at once), against the wgmma smem operand reads.
+
+### PT32: dV promote window 8 -> 32 m-tiles (named numerics change, dV only)
+
+- Switch `KDA_PT=32`.
+- What it changes: dV promotes into the fp32 smem overlay every 32 m-tiles (2048 rows) instead of 8. The rescale chain
+  inside a window stays clamped exactly as before. dQ, dK, every dS row residual, psi and the dS' codes are bitwise
+  unchanged, so residual-v5's row check is unaffected. Only the dV error vs fp32 can move.
+- Screen, pass 1 (job 21203949): 8K 16/4 -3.80%, 8K 32/4 -4.63%, 64K 16/4 -3.24%.
+- PT16: -2.35% / -0.49% / -2.35%.
+- dV rel-L2 error vs fp32 on the 4 dump shapes:
+
+  | build | case 1 | case 2 | case 3 | case 4 | verdict |
+  |---|---|---|---|---|---|
+  | PT32 | 4.8325e-2 -> 4.8290e-2 | 4.9126e-2 -> 4.9123e-2 | 1.3031e-1 -> 1.3029e-1 | unchanged | lower or equal |
+  | PT16 | 4.8325e-2 -> 4.8338e-2 | | | | +1.3e-5 on case 1, over the 1e-5 per-case tolerance: rejected |
+
+- Resources: REG 168, STACK 0, no spills.

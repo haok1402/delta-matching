@@ -64,6 +64,13 @@ Reference (job 21171433): FA3 fp8 forward on the four shapes 57.617 ms vs A 74.5
 SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per 64 x 256 step, FMUL 411 (S descale
 128, rho 192, alpha 64), FFMA 212 (exp 128, promote 64), FMNMX 164, MUFU 149, FADD 138, F2FP 64, QGMMA 12.
 
+| S34 | probe0 / probeld | diagnostic | clock64 phase sums per WG step (printf from CTA 0/1; spills, timing inflated) | n/a | per WG step ~5400 cy: ping-pong barrier wait ~2%, gemm turn (PV chain + promote + QK issue) ~2450, softmax ~2700 (job 21174714): each WG is a latency-bound serial chain; the WGs rarely wait for each other |
+| S35 | bm192 | structure | 192 x 128 tiles, three consumer WGs (160 regs), PV-first BN128 | order class | +1.6% geo (21175086) |
+| S36 | bm192ld | structure | S35 + LAZY + DFOLD | round-off | **-12.2% geo** (21175086); NaN at x10 / x30 (fully masked rows in the first tile reset the lazy reference to 0; rebase factor 2^(0 - m) -> inf * 0): fixed by clamping the factor to 1 |
+| S37 | bm192s3 / b3lds3 | structure | S36 with 3 stages | round-off | -12.5% (21175086), -13.1% geo (21175696) |
+| S38 | b3ldns | structure | S36 without the ping-pong barrier | round-off | -1.1% geo (21175696): the barrier still matters with three WGs |
+| S39 | bn128l / bm192l / bm192d | bisect | lazy / dfold alone at BN128 | | used to locate the S36 NaN |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below
@@ -115,3 +122,22 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 | # | tag | lever | what it changes | outputs | screen result |
 |---|---|---|---|---|---|
 | S33 | qkh | QK latency | S26 + QK issued as two 128-key halves at the same point; group max of half 0 under half 1 | = S26 | -3.09% geo vs A (S26 -6.65%, job 21174063): splitting the QK wgmma costs more than the overlap gains |
+
+### C3 BM192 (branch kda-sm90-fwd-c3: bbbef1d = C1 + BM192; 47d72e3 = + 3 stages (C3b)) : screening -> A/B running
+
+- What it changes (on C1): `FA3FP11_HD128_BM192=1` (new certified flag) and `FA3FP11_HD128_BN256` 1 -> 0: the hd128
+  forward runs 192-row m-blocks over 128-key tiles with three 64-row consumer WGs (setmaxnreg 160 / 32, FA3's
+  three-WG scheduler barrier); each WG reads the Q scale of its 128-row block; partial last m-blocks via FA3's row
+  bounds. C3b adds `FA3FP11_HD128_FWDST=3` (K/V stages 2 -> 3; bitwise vs C3). Also: the lazy rebase factor is clamped
+  to 1 (bitwise for live rows; needed when a 128-key tile leaves rows fully masked).
+- Why: the phase probe (S34) shows each WG is a latency-bound serial chain; a third chain in flight raises tensor-pipe
+  occupancy. Alone (S35) it is neutral; with the C1 instruction cuts the two compound.
+- Screen (16/4 8k + 64k, 2 reps, job 21175696): C3 -12.61% geo, C3b-equivalent -13.13%, C1 -6.81% on the same job.
+- Numerics (fp32 reference, job 21175697, `runs/n5`): no NaN / Inf at x1..x30; O relL2 change per case -6.4e-5 ..
+  +2.5e-5 relative (absolute -3e-6 .. +6e-6), e.g. B1 H16/4 N8192 4.733676e-2 -> 4.733682e-2. Per-row differences
+  symmetric (order class: two 64-key groups per promote).
+- Rule reading recorded (Hao: decide and record): residual-v4's "per case, the relative error may rise by at most
+  1e-5" is read as an ABSOLUTE rise of the relative-L2 metric (C3's largest is +6e-6 at x30), and the mean over cases
+  per output must not rise.
+- Resources: D128 forward symbols REG 128 at launch (setmaxnreg 160 for consumers), STACK 16 B, LOCAL 0; no spill /
+  C7510 / serialization diagnostics.

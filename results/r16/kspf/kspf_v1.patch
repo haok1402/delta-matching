@@ -1,0 +1,47 @@
+diff --git a/csrc/mainloop_fwd_sm90_fp8f.hpp b/csrc/mainloop_fwd_sm90_fp8f.hpp
+index 2203667..7117798 100644
+--- a/csrc/mainloop_fwd_sm90_fp8f.hpp
++++ b/csrc/mainloop_fwd_sm90_fp8f.hpp
+@@ -1394,6 +1394,23 @@ struct CollectiveMainloopFwdSm90Fp8F {
+             }
+             }
+         };
++        // ## KSPF (round 16): D128 PV-first steps load the CURRENT tile's four k-scales at the top of the step, before
++        // the V wait, so the loads' latency hides behind the PV chain instead of sitting between the QK gemm's wait
++        // and the descale.  Same index, same products q8sc * k8s[g], same per-element multiply: identical outputs.
++        static constexpr bool kKsPrefetch = kHeadDim == 128 && kGroups == 4 && kColsPerGroup == 16;
++        auto fq8_load_k = [&](float (&k_)[4], int n_blk) {
++            #pragma unroll
++            for (int g = 0; g < 4; ++g) { k_[g] = params.ptr_k8s[fq8_bh_k + 4 * n_blk + g]; }
++        };
++        auto fq8_descale_pf = [&](auto& tSrS_, float const (&k_)[4]) {
++            auto sc_ = make_tensor(tSrS_.data(), flash::convert_layout_acc_rowcol(tSrS_.layout()));
++            float const g_[4] = {fq8_q8sc * k_[0], fq8_q8sc * k_[1], fq8_q8sc * k_[2], fq8_q8sc * k_[3]};
++            #pragma unroll
++            for (int mi = 0; mi < size<0>(sc_); ++mi) {
++                #pragma unroll
++                for (int ni = 0; ni < size<1>(sc_); ++ni) { sc_(mi, ni) *= g_[ni >> 4]; }
++            }
++        };
+         auto fq8_load_v = [&](int n_blk) {
+             if constexpr (kGroups == 4) {
+             fq8_v[0] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 0];
+@@ -1677,6 +1694,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                 ++smem_pipe_read;
+                 if constexpr (kSchedPVFirst) {
+                     static_assert(!HasQv, "delta_matching fwd: PV-first schedule assumes !HasQv");
++                    float fq8_kpf[4];
++                    if constexpr (kKsPrefetch) { fq8_load_k(fq8_kpf, n_block); }   // ## KSPF
+                     // ---- PV + promote for the CONSUMED tile (codes in tOrP) ----
+                     KF_VAL(30, smem_pipe_read_v.index()); KF_VAL(31, smem_pipe_read_v.phase()); KF(0);
+                     consumer_wait(pipeline_v, smem_pipe_read_v);
+@@ -1706,7 +1725,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                     KF(8);
+                     scoremod_premask_fn(tSrS);
+                     mask_fn(tSrS, n_block);
+-                    fq8_descale(tSrS, n_block);   // ## FQ8
++                    if constexpr (kKsPrefetch) { fq8_descale_pf(tSrS, fq8_kpf); }   // ## KSPF
++                    else { fq8_descale(tSrS, n_block); }   // ## FQ8
+                     KF(9);
+                     cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
+                     if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }

@@ -1,0 +1,99 @@
+........................................................................ [ 56%]
+...............................................FFFFFFF..                 [100%]
+=================================== FAILURES ===================================
+______________________ test_sol4_hand_computed_fwd_floors ______________________
+
+    def test_sol4_hand_computed_fwd_floors():
+>       f = S4.floors(_rec(), _calib(), _counts(), "strided")["fwd"]["floors_ms"]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: floors() takes 3 positional arguments but 4 were given
+
+benchmarks/test_tooling.py:818: TypeError
+___ test_sol4_pass0_loop_covers_two_steps_and_glue_follows_the_producer_mode ___
+
+    def test_sol4_pass0_loop_covers_two_steps_and_glue_follows_the_producer_mode():
+>       r = S4.floors(_rec(), _calib(), _counts(), "strided")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: floors() takes 3 positional arguments but 4 were given
+
+benchmarks/test_tooling.py:829: TypeError
+_________ test_sol4_rejects_missing_inputs[calibration-calib0-counts0] _________
+
+why = 'calibration', calib = {}
+counts = {'kernels': {'fwd': {'chosen': {'instr': 1000, 'mufu_ex2': 128, 'qgmma': 1, 'steps': 1}}, 'pass1': {'chosen': {'instr'... 'mufu_ex2': 64, 'qgmma': 1, 'steps': 2}}, 'pass2': {'chosen': {'instr': 300, 'mufu_ex2': 0, 'qgmma': 1, 'steps': 1}}}}
+
+    @pytest.mark.parametrize("why,calib,counts", [
+        ("calibration", {}, _counts()), ("calibration", dict(_calib(), sha256=None), _counts()),
+        ("non-positive", _calib(tflops=0.0), _counts()), ("counts for", _calib(), {"kernels": {}})])
+    def test_sol4_rejects_missing_inputs(why, calib, counts):
+        with pytest.raises(S4.ModelError, match=why):
+>           S4.floors(_rec(), calib, counts, "strided")
+E           TypeError: floors() takes 3 positional arguments but 4 were given
+
+benchmarks/test_tooling.py:843: TypeError
+_________ test_sol4_rejects_missing_inputs[calibration-calib1-counts1] _________
+
+why = 'calibration'
+calib = {'sha256': None, 'sm_clock_mhz': 2000.0, 'sms': 100, 'gemm_fp8': {'peak_tflops': 1000.0}, ...}
+counts = {'kernels': {'fwd': {'chosen': {'instr': 1000, 'mufu_ex2': 128, 'qgmma': 1, 'steps': 1}}, 'pass1': {'chosen': {'instr'... 'mufu_ex2': 64, 'qgmma': 1, 'steps': 2}}, 'pass2': {'chosen': {'instr': 300, 'mufu_ex2': 0, 'qgmma': 1, 'steps': 1}}}}
+
+    @pytest.mark.parametrize("why,calib,counts", [
+        ("calibration", {}, _counts()), ("calibration", dict(_calib(), sha256=None), _counts()),
+        ("non-positive", _calib(tflops=0.0), _counts()), ("counts for", _calib(), {"kernels": {}})])
+    def test_sol4_rejects_missing_inputs(why, calib, counts):
+        with pytest.raises(S4.ModelError, match=why):
+>           S4.floors(_rec(), calib, counts, "strided")
+E           TypeError: floors() takes 3 positional arguments but 4 were given
+
+benchmarks/test_tooling.py:843: TypeError
+________ test_sol4_rejects_missing_inputs[non-positive-calib2-counts2] _________
+
+why = 'non-positive'
+calib = {'sha256': 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 'sm_clock_mhz': 2000.0, 'sms': 100, 'gemm_fp8': {'peak_tflops': 0.0}, ...}
+counts = {'kernels': {'fwd': {'chosen': {'instr': 1000, 'mufu_ex2': 128, 'qgmma': 1, 'steps': 1}}, 'pass1': {'chosen': {'instr'... 'mufu_ex2': 64, 'qgmma': 1, 'steps': 2}}, 'pass2': {'chosen': {'instr': 300, 'mufu_ex2': 0, 'qgmma': 1, 'steps': 1}}}}
+
+    @pytest.mark.parametrize("why,calib,counts", [
+        ("calibration", {}, _counts()), ("calibration", dict(_calib(), sha256=None), _counts()),
+        ("non-positive", _calib(tflops=0.0), _counts()), ("counts for", _calib(), {"kernels": {}})])
+    def test_sol4_rejects_missing_inputs(why, calib, counts):
+        with pytest.raises(S4.ModelError, match=why):
+>           S4.floors(_rec(), calib, counts, "strided")
+E           TypeError: floors() takes 3 positional arguments but 4 were given
+
+benchmarks/test_tooling.py:843: TypeError
+_________ test_sol4_rejects_missing_inputs[counts for-calib3-counts3] __________
+
+why = 'counts for'
+calib = {'sha256': 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 'sm_clock_mhz': 2000.0, 'sms': 100, 'gemm_fp8': {'peak_tflops': 1000.0}, ...}
+counts = {'kernels': {}}
+
+    @pytest.mark.parametrize("why,calib,counts", [
+        ("calibration", {}, _counts()), ("calibration", dict(_calib(), sha256=None), _counts()),
+        ("non-positive", _calib(tflops=0.0), _counts()), ("counts for", _calib(), {"kernels": {}})])
+    def test_sol4_rejects_missing_inputs(why, calib, counts):
+        with pytest.raises(S4.ModelError, match=why):
+>           S4.floors(_rec(), calib, counts, "strided")
+E           TypeError: floors() takes 3 positional arguments but 4 were given
+
+benchmarks/test_tooling.py:843: TypeError
+_____________________ test_sol4_loop_choice_and_rejection ______________________
+
+    def test_sol4_loop_choice_and_rejection():
+        cands = [{"start": 0, "end": 9, "instr": 900, "mufu_ex2": 146, "qgmma": 12},
+                 {"start": 10, "end": 19, "instr": 800, "mufu_ex2": 146, "qgmma": 12},
+                 {"start": 20, "end": 29, "instr": 100, "mufu_ex2": 0, "qgmma": 0}]
+>       assert S4.choose_loop(cands, 128)["start"] == 10
+               ^^^^^^^^^^^^^^
+E       AttributeError: module 'sol4' has no attribute 'choose_loop'
+
+benchmarks/test_tooling.py:850: AttributeError
+=========================== short test summary info ============================
+FAILED benchmarks/test_tooling.py::test_sol4_hand_computed_fwd_floors - TypeE...
+FAILED benchmarks/test_tooling.py::test_sol4_pass0_loop_covers_two_steps_and_glue_follows_the_producer_mode
+FAILED benchmarks/test_tooling.py::test_sol4_rejects_missing_inputs[calibration-calib0-counts0]
+FAILED benchmarks/test_tooling.py::test_sol4_rejects_missing_inputs[calibration-calib1-counts1]
+FAILED benchmarks/test_tooling.py::test_sol4_rejects_missing_inputs[non-positive-calib2-counts2]
+FAILED benchmarks/test_tooling.py::test_sol4_rejects_missing_inputs[counts for-calib3-counts3]
+FAILED benchmarks/test_tooling.py::test_sol4_loop_choice_and_rejection - Attr...
+7 failed, 121 passed in 137.17s (0:02:17)
+tooling tests rc 1

@@ -575,3 +575,56 @@ Findings:
 Also in this round's tooling commit: B16 (`--lib` stamp: no SameFileError for a package-resident library; a stale
 stamp is removed when the reused library has none); `gate.py --mode numerics` never accepts and `numerics.py check`
 marks its PASS `ac23_eligible: false` until Hao settles the residual contract. CPU tests: 127 passed (job 21170192).
+
+## Focus change (Hao, during round 16): the training shapes of the paper's 1.67B and of Qwen3-30B-A3B
+
+Four messages during round 16; the last one wins (docs/kda-sm90/rule-change-r10.md): the acceptance set is D128 causal
+matched B2 N8192 (pretraining) and B1 N65536 (the 64K context extension), each at Hq 16 / Hk 4 (the paper's 1.67B
+GDN/GQA hybrid, arXiv 2609.37852) and Hq 32 / Hk 4 (Qwen3-30B-A3B): four shapes, equal weight per shape (geometric mean
+of per-shape ratios). Rules otherwise unchanged. Everything else only stays correct. The intermediate sets (16/4 at
+B2 8k / B4 4k / B1 64k; plus 32/4; six shapes at 16k tokens; eight shapes) were superseded within the round. New
+report: `results/paper_c2.md` (Appendix C.2 protocol). Next lever named by Hao: per-warpgroup psi for pass 1.
+
+## Round 16: KSPF (forward k-scale prefetch): REJECTED; sol4-v2; paper protocol report
+
+- KSPF variant 1 (`results/r16/kspf/kspf_v1.patch`): in the D128 PV-first forward step the current tile's four k8s
+  values are loaded at the top of the step (before the V wait) instead of after the QK gemm's wait (accepted SASS:
+  4 LDG at 0xe040 right after `WARPGROUP.DEPBAR`, consumed by the descale). Identical arithmetic.
+- Gate job 21170520 (full, vs r14_h3, old d128m grid): bitwise on default / kv / head / streams2 vs the frozen baseline
+  and the previous accepted revision; REG 168 unchanged, no diagnostics; forward -0.38% over the old 8 targets
+  (guard -0.71%) -> fails 3%.
+- On the round-16 acceptance set (job 21170691, ab.py, 3 reps): forward -0.51% (geometric mean; per shape 0.997 /
+  1.000 / 0.989 / 0.993; sum -0.47%), no shape slower beyond spread -> REJECT. Reading: the other consumer warpgroup
+  already hides the k-scale load latency; variant 2 (load one step ahead) cannot recover more than the measured ~0.5%,
+  so it is not built now (the lever has one designed variant; forward counter unchanged).
+- sol4-v2 (round-15 review B17-B20): issue / MUFU floors from a control-flow ledger (cheapest path through each step
+  loop doing the step's full QGMMA work; rare and mutually exclusive arms never summed; all MUFU opcodes, predicated
+  MUFU excluded; peeled steps and prologue / epilogue / producer work excluded: loop-only LOWER bounds); inputs bound
+  (calibration digest recomputed, run calibration id, counts version / declarations / library hash, the exact grid);
+  glue ledger from the route actually taken (producer backend from kernel names, the backward head split with its
+  real copies: per-head slices at B1 are views, only the output concatenation moves bytes); FA3 timings are per-field
+  medians over the same repetitions (ab.median_records). Per step and warp (accepted library 756158cb1226): fwd >= 1284
+  instructions (static 1288), pass 1 >= 656 (static 1026), pass 0 >= 280.5 per step (static 720 per 2 steps), pass 2 >= 68
+  (static 325; a data-dependent zero-tile skip path exists, charged as full work like the tensor floor).
+- Round-15 data re-modeled (results/r16/sol4v2_r15data.md): pass 1 is TENSOR-floor-controlled at 42.0% (the v1 "issue
+  bound at 54.5%" claim is withdrawn: its issue floor counted the promotion / rescale arms every step); forward 50.2%,
+  pass 0 60.2%, pass 2 90.3%; forward / FA3 fp8 forward = 1.2628 (v1's 1.276 mixed FA3 repetition 0 with medians).
+- The accepted build on the acceptance set (calibration job 21170691: 1388.1 TFLOPS fp8, 3026.0 GB/s, sha 827e29e9ebcc;
+  `results/r16/sol4v2_accepted.md`):
+
+| kernel | measured ms | floor ms | controlling | % of floor | waste ms |
+|---|---:|---:|---|---:|---:|
+| pass1 | 188.484 | 78.603 | tensor | 41.7% | 109.881 |
+| fwd | 76.269 | 39.394 | tensor | 51.7% | 36.874 |
+| pass0 | 63.701 | 39.302 | tensor | 61.7% | 24.400 |
+| pass2 | 37.703 | 35.589 | bytes | 94.4% | 2.114 |
+| glue | 3.172 | 2.373 | bytes | 74.8% | 0.799 |
+| prod_fwd | 1.149 | 0.752 | bytes | 65.5% | 0.397 |
+
+  Forward / FA3 fp8 forward kernel over the set: 1.311. Ranking by waste: pass 1 >> forward > pass 0 >> pass 2.
+- Paper protocol (`results/paper_c2.md`, job 21170691, 5 interleaved rounds): B2 N8192 16/4: accepted build fwd 506.7,
+  bwd 458.9, fwd+bwd 471.6 TFLOP/s (original baseline 518.0 / 443.4 / 462.4; FA3 BF16 696.4 / 506.6 / 549.2; cuDNN BF16
+  582.6 / 475.3 / 501.7; TE FP8 not run: transformer_engine absent). The paper reports 661.0 / 421.5 / 470.2: our
+  backward and fwd+bwd match or exceed it, our forward is 23% below the paper's (FA3 BF16 here is 1.17x the paper's
+  matched fwd+bwd, so this H100's FA3 reference also differs from the paper's ratio 1.80x). 32/4: accepted 564.4 / 467.7
+  / 491.7 (baseline 563.6 / 451.9 / 478.9; FA3 BF16 723.7 / 521.2 / 566.5; cuDNN BF16 616.2 / 470.1 / 504.2).

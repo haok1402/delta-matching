@@ -76,3 +76,16 @@ Extends the D128-only, all-shapes rule above:
 - 2k only has to stay correct (tests, equivalence); not measured.
 - `kernels.py --grid d128m` = target + guard (16 configurations, causal matched); `ab.py decision()` sums the target
   over the target set and checks shape slowdowns over target + guard.
+
+## Round 16: training-shape focus (Hao, final of four messages during round 16)
+
+- Acceptance set: the models' TRAINING shapes (paper arXiv 2609.37852, B.2.4): D128 causal matched B2 N8192
+  (pretraining, per-GPU batch 2 x 8192) and B1 N65536 (the 8K-to-64K context extension), each at Hq 16 / Hk 4 (the
+  paper's 1.67B GDN/GQA hybrid) and Hq 32 / Hk 4 (Qwen3-30B-A3B attention): four shapes, equal weight per shape.
+- Acceptance: the target kernel >= 3% faster over the set (equal weight: the geometric mean of the per-shape median
+  ratios; the plain sum is recorded too), stacking of confirmed >= 1% bitwise gains, a second fresh job, no shape of the
+  set slower beyond its spread. 4k / 16k / 32k (evaluation lengths), other head counts, D256, stale and full attention
+  only stay correct. The 64K shapes may run with fewer repetitions if a job gets too long, but run in both jobs.
+- Report: `results/paper_c2.md`, the paper's Appendix C.2 protocol at B2 N8192 for 16/4 and 32/4, after every accepted
+  round (first: the accepted build and the original baseline).
+- `kernels.py --grid paper` = the four shapes; `ab.py decision()` gates them (no separate guard); gate.py A/Bs on it.

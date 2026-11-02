@@ -240,6 +240,17 @@ static at::Tensor kda_prof_buffer() {
     return *g_kda_prof;
 }
 #endif
+#if KDA_TRACE
+void kda_fwd_buf_info_d128(void** ptr, long* words);
+void kda_fwd_buf_info_d256(void** ptr, long* words);
+// timeline-only build: the forward trace buffer of the head_dim's translation unit, as a non-owning int64 view
+static at::Tensor kda_prof_fwd_buffer(int64_t head_dim) {
+    void* ptr = nullptr; long words = 0;
+    if (head_dim == 128) { kda_fwd_buf_info_d128(&ptr, &words); } else { kda_fwd_buf_info_d256(&ptr, &words); }
+    TORCH_CHECK(ptr != nullptr && words > 0, "prof_fwd_buffer: no forward trace buffer");
+    return torch::from_blob(ptr, {words}, at::TensorOptions().device(at::kCUDA).dtype(at::kLong));
+}
+#endif
 #ifdef FA3FP11_DBG
 // ## DBG: capture of the pass-1 -> pass-2 workspaces (the realized dS' e4m3 codes and the per-tile psi) for
 // bwd_fp8_dbg_ds (the row-sum residual AFTER dS quantization).  Null outside that op: every other op is unchanged.
@@ -733,6 +744,9 @@ TORCH_LIBRARY(delta_matching, m) {
 #if KDA_PROF || KDA_TRACE
     m.def("prof_buffer() -> Tensor");
 #endif
+#if KDA_TRACE
+    m.def("prof_fwd_buffer(int head_dim) -> Tensor");
+#endif
 #ifdef FA3FP11_DBG
     m.def("bwd_fp8_dbg(Tensor dout8, Tensor q8, Tensor k8, Tensor v8, Tensor lse, Tensor delta,"
           " Tensor kt8, Tensor q8s, Tensor k8s, Tensor v8s, Tensor do8s,"
@@ -752,6 +766,9 @@ TORCH_LIBRARY_IMPL(delta_matching, CompositeExplicitAutograd, m) {
     m.impl("build_hd128", &fp11_build_hd128);
 #if KDA_PROF || KDA_TRACE
     m.impl("prof_buffer", &kda_prof_buffer);
+#endif
+#if KDA_TRACE
+    m.impl("prof_fwd_buffer", &kda_prof_fwd_buffer);
 #endif
 }
 

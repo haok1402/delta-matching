@@ -3,6 +3,7 @@
  ******************************************************************************/
 
 #pragma once
+#include "kda_prof.h"
 
 #include <cutlass/cutlass.h>
 #include <cutlass/array.h>
@@ -821,6 +822,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
         Tensor sQv = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_qv.data()), SmemLayoutQv{});
 
         int const thread_idx = threadIdx.x % NumProducerThreads;
+        KFP_BEGIN();
         int const bidh_kv = !PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh;
         int const bidb_kv = params.kv_batch_idx == nullptr ? bidb : params.kv_batch_idx[bidb];
 
@@ -1046,8 +1048,11 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 } else {
                     paged_kv_manager.load_page_table_TMA(n_block);
                 }
+                KFP_VAL(30, smem_pipe_write.index()); KFP_VAL(31, smem_pipe_write.phase()); KFP(1);
                 if constexpr (Transpose_V) { load_V(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/); }
+                KFP(3);
                 load_K(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/);
+                KFP(6);
                 if constexpr (!Transpose_V) {
                     if constexpr (IntraWGOverlap) {
                         load_V(n_block_prev, smem_pipe_write_v, cute::true_type{} /*Seqlenk_mask*/);
@@ -1058,6 +1063,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
             }
             n_block_prev = n_block;
             if constexpr (Transpose_V) { copy_Vt_to_V(smem_pipe_write_v); }
+            KFP(11); KFP_STEP();
         }
         scheduler_prefetch();
         if constexpr (!Transpose_V && IntraWGOverlap) {
@@ -1217,6 +1223,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                                                       make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
 
         int warp_group_idx = __shfl_sync(0xFFFFFFFF, thread_idx / cutlass::NumThreadsPerWarpGroup, 0);
+        KF_BEGIN();
         TiledMmaQK tiled_mma_qk;
         TiledMmaPV tiled_mma_pv;
         TiledMmaQV tiled_mma_qv;
@@ -1259,6 +1266,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
         int const seqlen_q = seqlen_info.seqlen_q;
         int const seqlen_k = seqlen_info.seqlen_k;
         int n_block = n_block_max - 1;
+        KF_HEADER(get<0>(block_coord), get<1>(block_coord), get<2>(block_coord), n_block_max, n_block_min);
 
         flash::Mask<kBlockM, kBlockN, PackGQA, TiledMmaQK> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/,
@@ -1670,28 +1678,39 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 if constexpr (kSchedPVFirst) {
                     static_assert(!HasQv, "delta_matching fwd: PV-first schedule assumes !HasQv");
                     // ---- PV + promote for the CONSUMED tile (codes in tOrP) ----
+                    KF_VAL(30, smem_pipe_read_v.index()); KF_VAL(31, smem_pipe_read_v.phase()); KF(0);
                     consumer_wait(pipeline_v, smem_pipe_read_v);
+                    KF(1);
                     warp_scheduler_barrier_sync();
+                    KF(2);
                     auto tOrD = make_tOrD();
                     fq8_pv_tile(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD);
+                    KF(3);
                     warpgroup_wait<0>();
+                    KF(4);
                     // w_3 = v8sc_3 * 2^(ms_3 - m*l2) needs the CONSUMED tile's
                     // ms_[3] AND its running max; max_get_scale_grouped below
                     // destroys both, so every promote of this tile must precede it.
                     fq8_promote_last(tOrD);
                     pipeline_v.consumer_release(smem_pipe_read_v);  // release V
+                    KF(5);
                     // ---- tOrD is dead here; QK reuses its registers ----
                     Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
                     consumer_wait(pipeline_k, smem_pipe_read);
+                    KF(6);
                     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
                     warp_scheduler_barrier_arrive();
+                    KF(7);
                     warpgroup_wait<0>();
                     pipeline_k.consumer_release(smem_pipe_read);  // release K
+                    KF(8);
                     scoremod_premask_fn(tSrS);
                     mask_fn(tSrS, n_block);
                     fq8_descale(tSrS, n_block);   // ## FQ8
+                    KF(9);
                     cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
                     if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
+                    KF(10);
                     // Cross-tile rescale: tOrO is in TRUE exp(-m_prev) units
                     // after the promote above; alpha = scores_scale rebases it
                     // onto this tile's running max, as upstream FA3 and
@@ -1699,13 +1718,17 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // denominator invariant (row_sum *= scores_scale,
                     // softmax_fq8f.h:195) is untouched.
                     softmax.rescale_o(tOrO, scores_scale);
+                    KF(11);
                     softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS);
+                    KF(12);
                     if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
                     convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
                     if constexpr (Is_FP8 && V_colmajor) { flash::permute_Aregs_fp8(tOrP); }
                     if constexpr (!MmaPV_is_RS) { write_P_to_smem(tOrP); }
+                    KF(13);
                     fq8_load_v(n_block);           // this tile's four v-scales
                     if constexpr (!MmaPV_is_RS) { arrive_on_P_write_barrier(); }
+                    KF(14); KF_STEP();
                 } else {
                     Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
                     if (!UseSchedulerBarrier || warp_group_idx == 0) { consumer_wait(pipeline_k, smem_pipe_read); }

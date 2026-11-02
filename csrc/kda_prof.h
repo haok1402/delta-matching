@@ -95,3 +95,39 @@ __device__ __forceinline__ unsigned long long kt_smid() { unsigned r; asm volati
 #define KTP_END() do {} while (0)
 #define KT_MEMBERS
 #endif
+
+// ## KDA_TRACE forward section: the same sparse-sample idea for the FORWARD kernel (separate per-translation-unit buffer,
+// since the forward params carry no debug pointer; read through the prof_fwd_buffer op).  Sample CTAs as above (the
+// persistent grid's blocks 0, 17, ..., 119), first tile only, the first KF_M n-block steps; actors: consumer warpgroups
+// 0 / 1 (first thread) and the producer warpgroup's thread 0.  Layout: [KF_S][KF_M][3][KF_E] + [KF_S][KF_HDR].
+#if KDA_TRACE
+#define KF_S 8
+#define KF_M 12
+#define KF_E 32
+#define KF_HDR 16
+#define KF_EVENTS (KF_S * KF_M * 3 * KF_E)
+#define KF_WORDS (KF_EVENTS + KF_S * KF_HDR)
+static __device__ unsigned long long kda_fwd_buf[KF_WORDS];
+#define KF_BEGIN() int const kf_s = kt_sample_idx(); \
+    bool const kf_rec = kf_s >= 0 && work_idx == 0 && (thread_idx % cutlass::NumThreadsPerWarpGroup) == 0; int kf_j = 0
+#define KF(e) do { if (kf_rec && kf_j < KF_M) { kda_fwd_buf[((kf_s * KF_M + kf_j) * 3 + warp_group_idx) * KF_E + (e)] = (unsigned long long)clock64(); } } while (0)
+#define KF_VAL(e, v) do { if (kf_rec && kf_j < KF_M) { kda_fwd_buf[((kf_s * KF_M + kf_j) * 3 + warp_group_idx) * KF_E + (e)] = (unsigned long long)(v); } } while (0)
+#define KF_STEP() do { ++kf_j; } while (0)
+#define KF_HEADER(mb, h, b, nmax, nmin) do { if (kf_rec && warp_group_idx == 0) { unsigned long long* const kh_ = kda_fwd_buf + KF_EVENTS + kf_s * KF_HDR; \
+    kh_[0] = 1ull; kh_[1] = (mb); kh_[2] = (h); kh_[3] = (b); kh_[4] = kt_smid(); kh_[5] = (nmax); kh_[6] = (nmin); \
+    kh_[7] = (unsigned long long)clock64(); kh_[8] = kt_linear_block(); } } while (0)
+#define KFP_BEGIN() int const kfp_s = kt_sample_idx(); bool const kfp_rec = kfp_s >= 0 && work_idx == 0 && thread_idx == 0; int kfp_j = 0
+#define KFP(e) do { if (kfp_rec && kfp_j < KF_M) { kda_fwd_buf[((kfp_s * KF_M + kfp_j) * 3 + 2) * KF_E + (e)] = (unsigned long long)clock64(); } } while (0)
+#define KFP_VAL(e, v) do { if (kfp_rec && kfp_j < KF_M) { kda_fwd_buf[((kfp_s * KF_M + kfp_j) * 3 + 2) * KF_E + (e)] = (unsigned long long)(v); } } while (0)
+#define KFP_STEP() do { ++kfp_j; } while (0)
+#else
+#define KF_BEGIN() do {} while (0)
+#define KF(e) do {} while (0)
+#define KF_VAL(e, v) do {} while (0)
+#define KF_STEP() do {} while (0)
+#define KF_HEADER(mb, h, b, nmax, nmin) do {} while (0)
+#define KFP_BEGIN() do {} while (0)
+#define KFP(e) do {} while (0)
+#define KFP_VAL(e, v) do {} while (0)
+#define KFP_STEP() do {} while (0)
+#endif

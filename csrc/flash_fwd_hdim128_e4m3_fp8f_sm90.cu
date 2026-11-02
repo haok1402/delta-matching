@@ -5,3 +5,8 @@
 
 template void run_flash_fwd_fp8f_d128<true>(Flash_fwd_fp8_params &params, cudaStream_t stream);
 template void run_flash_fwd_fp8f_d128<false>(Flash_fwd_fp8_params &params, cudaStream_t stream);
+
+#if KDA_TRACE
+// timeline-only build: the address and size of this translation unit's forward trace buffer (kda_prof.h)
+void kda_fwd_buf_info_d128(void** ptr, long* words) { cudaGetSymbolAddress(ptr, kda_fwd_buf); *words = KF_WORDS; }
+#endif

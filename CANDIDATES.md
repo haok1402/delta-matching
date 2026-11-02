@@ -215,3 +215,15 @@ identity exact and improves 4x more rows than it worsens, regresses a handful of
 k 2^-23 and raises the mean dQ error by ~2e-8. Strict per-row non-regression therefore rejects all pass-0 numerics
 changes. The numerics path for pass 0 is closed under v4; FOLD's -13% (the largest single pass-0 gain found) and NORM
 (the identity-exact delta) stay documented for a future rule. Pass-0 work continues on bitwise levers only.
+
+## Status (end of the residual-v4 round)
+
+- Accepted into kda-sm90 from this helper: C1 RTR, C2 SPF, C3 LPT + W4 (+ fallback). Pass 0 ~66% of its sol4-v2 floor
+  (kda-sm90 round-17 report: 65.9%).
+- READY, waiting on kda-sm90 tooling: C4 P0ALL (kda-sm90-pass0, b864956; equivalence.py all-heads delta schema).
+- Closed under strict residual-v4: DEFER, LAZY, FOLD, NORM. Measured: FOLD stack -13.1%, the largest pass-0 gain found.
+- Bitwise levers exhausted with measurements:
+  - Structure: W4's tensor-only and vector-only times each sit at the floor; the remaining 1.44x is overlap.
+  - Registers: one S / dP pair per warpgroup at 112 regs, 3-accumulator variants spill.
+  - ptxas: cross-iteration pipelining gets C7517 full waits.
+  - Instruction trims: unrolling (W4U3, -17 instr / stage) gains nothing.

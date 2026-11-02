@@ -333,3 +333,19 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   longer helps. All bitwise (O identical).
 - Reading: at 3 WGs every added per-thread state or branch in the step spills; the turn's content (two PV sub-gemm
   waits, the rescale and the promote, the QK issue) is fixed by the per-group basis and the register budget.
+
+## Round 18 (cont.): one more piece for the C4 + SMSC stack (Hao: stack measured -3.24 / -2.90%)
+
+Stack rebased on r18_c4 as kda-sm90-fwd-stk (30a05d9 + switches commit); four bitwise turn levers built in parallel
+(all O identical to r18_c4, resources unchanged), screened 3 reps on the four shapes vs r18_c4 (jobs s37 / s38):
+
+| variant | change | geo vs r18_c4 | stack control in the same job |
+|---|---|---:|---:|
+| sl1 | group-0 PV sub-gemm issued before the ring sync | -2.51% | -2.45% |
+| sl2 | + its retire and the rho rescale before the sync | -2.32% | -2.45% |
+| vrel | V stage released after the turn's arrive | -2.55% | -2.30% |
+| sl2v | sl2 + vrel | -2.51% | -2.30% |
+
+None adds >= 1% (all within +-0.25% of the stack). Removing the rescale and one wait from the turn (sl2) changes
+nothing, so the light probe's "turn-bound" reading was distorted by its own spills. Per-step cost is the same at 8K and
+64K (~1.93 us per step per SM, from kernel time / causal step count), so per-tile overheads are not a lever either.

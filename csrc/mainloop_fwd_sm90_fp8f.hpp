@@ -509,7 +509,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
 // the hd128 instantiation ONLY; the d256 pin FA3FP8F_TP_PVFIRST is untouched.  Issue order only: O bitwise expected.
     static constexpr bool kSchedPVFirst = ((kHeadDimV >= 256 ? FA3FP8F_TP_PVFIRST : FA3FP11_HD128_PVFIRST) != 0) && IntraWGOverlap && !HasQv;
 // ## kda-fwd FWDLD (two flags, hd128 PV-first only; d256 untouched), NAMED NUMERICS CHANGES (round-off class):
-//   FA3FP11_HD128_FWDDFOLD: the S descale q8sc * k8sc_g is folded into the code argument: the group maxima are taken on the raw QK
+//   FA3FP11_HD128_FWDDFOLD (unmasked steps only; masked steps keep the exact descale so short causal rows keep
+//            their accepted p values): the S descale q8sc * k8sc_g is folded into the code argument: the group maxima are taken on the raw QK
 //            codes and descaled once per row and group (RN is monotonic, so gm_g, ms_g, row_max and alpha are bitwise
 //            the shipped ones), and the code is exp2(fma(x, RN(g * l2), -ms_g)) instead of exp2(fma(RN(x * g), l2, -ms_g)):
 //            one fp32 rounding fewer in the exp argument, no FMUL per score.
@@ -1460,10 +1461,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
             scoremod_premask_fn(tSrS);
             mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block);
             float fq8_g0_[kGroups];
-            if constexpr (kFwdDfold) { fq8_gsc(n_block, fq8_g0_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8: codes -> true S (mask's -inf survives)
+            if constexpr (false) { fq8_gsc(n_block, fq8_g0_); }   // ## C3g: the first (masked) tile keeps the exact descale else { fq8_descale(tSrS, n_block); }   // ## FQ8: codes -> true S (mask's -inf survives)
 
             Tensor scores_scale = [&] {
-                if constexpr (kFwdDfold) { return softmax.template max_get_scale_grouped_raw</*Is_first=*/true, /*Check_inf=*/true>(tSrS, fq8_g0_); }
+                if constexpr (false) { return softmax.template max_get_scale_grouped_raw</*Is_first=*/true, /*Check_inf=*/true>(tSrS, fq8_g0_); }
                 else { return softmax.template max_get_scale_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS); }
             }();
             // Don't need to store scales to send to WG1 (in the case of LargeHeadDimV) since it's 1.f
@@ -1472,7 +1473,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // e4m3-bound codes on them.  No V-fold: the per-32 V descale is
             // carried by the accumulator's basis instead (see rho above).
             if constexpr (kFwdLazy) { softmax.init_ref(); }
-            if constexpr (kFwdDfold) {
+            if constexpr (false) {
                 softmax.template online_softmax_grouped_raw</*Is_first=*/true, /*Check_inf=*/true>(tSrS, fq8_g0_);
             } else {
                 softmax.template online_softmax_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
@@ -1766,9 +1767,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     scoremod_premask_fn(tSrS);
                     mask_fn(tSrS, n_block);
                     float fq8_g_[kGroups];
-                    if constexpr (kFwdDfold) { fq8_gsc(n_block, fq8_g_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
+                    if constexpr (kFwdDfold && !Check_inf) { fq8_gsc(n_block, fq8_g_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
                     KF(9);
-                    if constexpr (kFwdDfold) { cute::copy(softmax.template max_get_scale_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_), scores_scale); }
+                    if constexpr (kFwdDfold && !Check_inf) { cute::copy(softmax.template max_get_scale_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_), scores_scale); }
                     else { cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale); }
                     if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
                     KF(10);
@@ -1780,7 +1781,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // softmax_fq8f.h:195) is untouched.
                     if constexpr (!kFwdLazy) { softmax.rescale_o(tOrO, scores_scale); }
                     KF(11);
-                    if constexpr (kFwdDfold) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
+                    if constexpr (kFwdDfold && !Check_inf) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
                     else { softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS); }
                     KF(12);
                     if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }

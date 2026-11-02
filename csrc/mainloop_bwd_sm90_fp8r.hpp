@@ -41,6 +41,9 @@
 #endif
 #define KDA_F1(x) (KDA_NOCLAMP == 1 ? (x) : fminf((x), 12.0f))
 #define KDA_F1C(x) (kClampC ? fminf((x), 12.0f) : (x))
+// NOCLAMP=4: the clamp stays on the certified (pass-0-masked tile) line, where masked -inf scores times an underflowed
+// descale give NaN that the clamp maps to 12; the folded line (never masked) runs unclamped.  Same tiles in both passes.
+#define KDA_F1U(x) (KDA_NOCLAMP == 4 ? (x) : KDA_F1C(x))
 
 #include <climits>
 #include <cutlass/cutlass.h>
@@ -849,10 +852,14 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
 #if KDA_PK_EXPB == 6
                     if constexpr (kExpbx) {
-                        scores(mi, ni) = exp2f(KDA_F1C(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
+                        scores(mi, ni) = exp2f(KDA_F1U(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
                     } else {   // masked loop (rare): per-WG runtime choice
                         float const y = __fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled);
+#if KDA_NOCLAMP == 4
+                        scores(mi, ni) = exp2f(fq8_x64_orig ? fminf(__fadd_rn(y, kFq8MoE), 12.0f) : y);
+#else
                         scores(mi, ni) = exp2f(KDA_F1C(fq8_x64_orig ? __fadd_rn(y, kFq8MoE) : y));
+#endif
                     }
 #elif KDA_PK_EXPB >= 3
                     if constexpr (kExpbx) {
@@ -877,7 +884,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             for (int mi = 0; mi < size<0>(scores); ++mi) { kda_chk += tLSEsLSE(mi, stage_q); }
             if (isfinite(kda_chk)) { kda_exp_all(cute::false_type{}); } else { kda_exp_all(cute::true_type{}); }
 #else
-            kda_exp_all(cute::bool_constant<!KDA_NOCLAMP>{});
+            kda_exp_all(cute::bool_constant<KDA_NOCLAMP != 1>{});
 #endif
 #endif
 #if KDA_PK_PROBE & 4

@@ -128,7 +128,7 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #define KDA_S_CDP 0       // PIPE: the next tile's dP accumulator IS the carried dS fragment (dS line in place)
 #endif
 #ifndef KDA_S_ABL
-#define KDA_S_ABL 0       // TIMING-ONLY ablations (wrong outputs): 1 = drop all dV work (dK + dS' kernel), 2 = drop dP / dS / psi / dS' / dK work (dV kernel); 4 = PIPE+DKSM without the smem dK fold
+#define KDA_S_ABL 0       // TIMING-ONLY ablations (wrong outputs): 1 = drop all dV work (dK + dS' kernel), 2 = drop dP / dS / psi / dS' / dK work (dV kernel); 4 = PIPE+DKSM without the smem dK fold; 8 = no S gemm / exp line
 #endif
 #ifndef KDA_S_PIPEDBG
 #define KDA_S_PIPEDBG 0   // compile-analysis bits for PIPE (1: S(m+1) after C(m); 2: P codes straight into rPc; 4: dP(m+1) at the top)
@@ -866,6 +866,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             [[maybe_unused]] constexpr bool kExpbx = decltype(expbx_c)::value;
             constexpr bool kAblK = (KDA_S_ABL & 1) != 0;   // no dV work
             constexpr bool kAblV = (KDA_S_ABL & 2) != 0;   // no dP / dS / psi / dS' / dK work
+            constexpr bool kAblS = (KDA_S_ABL & 8) != 0;   // no S gemm, no exp line (P arrives from elsewhere)
             Tensor fq8_tmpK = make_fragment_like(tdKrdK);
             float fq8_g_fold = 0.0f;
             // (kBlockN, kBlockM) = the swapAB fragment: rows = keys, columns = query rows.
@@ -873,7 +874,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
             KT_VAL(30, smem_pipe_read.index()); KT_VAL(31, smem_pipe_read.phase()); KT(0);
             consumer_wait(pipeline_q, smem_pipe_read);
             KP(3);
-            if constexpr (kSt >= 0) {
+            if constexpr (kAblS) {
+            } else if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, Int<kSt>{}), tSrS);
             } else {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, smem_pipe_read.index()), tSrS);
@@ -1160,9 +1162,16 @@ struct CollectiveMainloopBwdSm90Fp8R {
             KT(25);
             consumer_wait(pipeline_qt, smem_pipe_read_qt);
             KT(26);
+#if KDA_S_DKH
+            Tensor fq8_tmpK0 = partition_fragment_C(tiled_mma_dKh, Shape<Int<kBlockN>, Int<kHeadDim / 2>>{});
+#endif
             if constexpr (kAblV) {
             } else if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, Int<kSt>{}), fq8_tmpK);
+            } else if constexpr (KDA_S_DKH != 0) {
+#if KDA_S_DKH
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKh, rdS, tdKrQt0(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK0);
+#endif
             } else {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK);
             }
@@ -1191,14 +1200,26 @@ struct CollectiveMainloopBwdSm90Fp8R {
             pipeline_dot.consumer_release(smem_pipe_read_dot);
             ++smem_pipe_read_dot;
             KP(16);
+#if KDA_S_DKH
             warpgroup_wait<0>();
+            fq8_dk_fold_h(fq8_tmpK0, fq8_g_fold, 0);
+            {
+                Tensor fq8_tmpK1 = partition_fragment_C(tiled_mma_dKh, Shape<Int<kBlockN>, Int<kHeadDim / 2>>{});
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKh, rdS, tdKrQt1(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK1);
+                warpgroup_wait<0>();
+                fq8_dk_fold_h(fq8_tmpK1, fq8_g_fold, 1);
+            }
+#else
+            warpgroup_wait<0>();
+#endif
             pipeline_qt.consumer_release(smem_pipe_read_qt);
             ++smem_pipe_read_qt;
             KP(17);
             ++smem_pipe_read;
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
             // plan-A dK fold: one fp32 FMA per element per tile in the tile's own g basis.
-#if KDA_S_DKSM
+#if KDA_S_DKSM && KDA_S_DKH
+#elif KDA_S_DKSM
             fq8_dk_fold(fq8_tmpK, fq8_g_fold);
 #else
             if constexpr (!kAblV) {

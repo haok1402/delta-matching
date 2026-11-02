@@ -760,3 +760,6 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Accepted build r17_p0s (job 21179953): % of calibrated limit pass1 42.7%, forward 58.2%, pass0 70.6%, pass2 94.3%;
   forward / FA3 fp8 1.146 (FA3-referenced 87%); original -> now e2e fwd -12.9%, fwd+bwd -8.9% (this job; job-to-job
   calibration / clock spread ~1%); paper C.2 16/4 fwd+bwd 505.7 (cuDNN BF16 505.8), 32/4 528.5 TFLOP/s.
+- Forward helper: C4 + SMSC stack stays at -2.46% / -2.42% (not READY); the STACK 16 -> 40 growth is in the
+  non-causal instantiation (nothing to recover); two masked-step pieces failed (+18% / +20%, in-step branches spill;
+  S52-S53). Pointed it at a third bitwise piece on BM192 and at the ~0.3 ms fwd_fp8 host path (end-to-end lever).

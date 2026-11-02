@@ -97,3 +97,33 @@ work runs under the other's wgmma. Next pass-1 hypothesis: H1b (task4 review fir
 | forward | 0 | 0 |
 | pass 2 | 0 | 0 |
 | torch glue | 0 | 0 |
+
+## Round 5: H1b, pass 1 hd128, dS' transpose / store deferred under the dK gemm: REJECTED (profile-based)
+
+- Hypothesis (timeline-based, results/timeline_pass1.md): the ~220-255-cycle dK issue-to-retire/release tail region
+  can absorb the dS' transpose / stmatrix / TMA store.
+- Review first (task4, results/r5/task4_codex_review.md): SAFE at the source / PTX level (no access to rdS / rP /
+  accumulators while outstanding; dV / dK retirement before dOt / Qt release and the fold; the sdS reuse sequence
+  intact); register budget near 240, so the 8 packed words are overwritten in place.
+- Change (results/r5/h1b.patch): the 8 natural dS' words are packed from rdS before the dV / dK issues; after the dK
+  issue the shuffles, stmatrix, WG barriers, proxy fence and TMA store run from those words.
+- Resources: identical to DO2 (REG 168, STACK 8 / 0, LOCAL 0; QGMMA 48, DEPBAR 16, ARRIVE 16; +16 SASS lines), no ptxas
+  spill / serialization diagnostics.
+- Correctness (job 21161224): pytest 49 / 3; captured-intermediate equivalence BITWISE EQUAL, FULL SUITE, 72 cases on
+  default / kv / head / streams2 vs BOTH the frozen baseline and the accepted DO2 revision.
+- Performance (job 21161224, A = DO2, B = H1b, 3 alternating reps): D128 pass 1 248.145 -> 244.075 ms (-1.64%) main,
+  20.626 -> 20.136 ms (-2.38%) held-out; one D256 main shape +3.05% within its spread (D256 kernels unchanged).
+  bench.py N8192 matched fwd+bwd D128 4.505 / 4.523 / 4.618 -> 4.487 / 4.479 / 4.544 ms.
+- Verdict: below the 3% gate; not merged (developed in a worktree). The dK tail region is only partly recoverable this
+  way (~60 of ~250 cycles per step).
+- Counters: pass 1 eligible 0 -> 1.
+
+| kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
+|---|---:|---|
+| pass 1 | 1 (H1b) | 1 (H1a, round 1) |
+| forward | 0 | 0 |
+| pass 2 | 0 | 0 |
+| torch glue | 0 | 0 |
+
+Next (Hao, round 5): pass-1 warpgroup ping-pong with per-warpgroup psi, then partial FMA-polynomial exp2 (both
+non-bitwise: the Q2 numerics gate and Q3 workspace capture are their acceptance prerequisites).

@@ -1,0 +1,12 @@
+bench A rep 0 D128  delta_matching (matched) forward 1.096 forward+backward 4.505  delta_matching (stale) forward 1.100 forward+backward 3.880 
+bench A rep 0 D256  delta_matching (matched) forward 2.025 forward+backward 8.754  delta_matching (stale) forward 2.052 forward+backward 7.639 
+bench B rep 0 D128  delta_matching (matched) forward 1.096 forward+backward 4.487  delta_matching (stale) forward 1.098 forward+backward 3.884 
+bench B rep 0 D256  delta_matching (matched) forward 2.022 forward+backward 8.706  delta_matching (stale) forward 2.055 forward+backward 7.680 
+bench B rep 1 D128  delta_matching (matched) forward 1.093 forward+backward 4.479  delta_matching (stale) forward 1.093 forward+backward 3.871 
+bench B rep 1 D256  delta_matching (matched) forward 2.023 forward+backward 8.607  delta_matching (stale) forward 2.033 forward+backward 7.600 
+bench A rep 1 D128  delta_matching (matched) forward 1.096 forward+backward 4.523  delta_matching (stale) forward 1.102 forward+backward 3.868 
+bench A rep 1 D256  delta_matching (matched) forward 2.025 forward+backward 8.686  delta_matching (stale) forward 2.067 forward+backward 7.574 
+bench A rep 2 D128  delta_matching (matched) forward 1.098 forward+backward 4.618  delta_matching (stale) forward 1.097 forward+backward 3.891 
+bench A rep 2 D256  delta_matching (matched) forward 2.020 forward+backward 8.673  delta_matching (stale) forward 2.066 forward+backward 7.608 
+bench B rep 2 D128  delta_matching (matched) forward 1.094 forward+backward 4.544  delta_matching (stale) forward 1.095 forward+backward 3.861 
+bench B rep 2 D256  delta_matching (matched) forward 2.020 forward+backward 8.595  delta_matching (stale) forward 2.060 forward+backward 7.611 

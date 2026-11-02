@@ -1,0 +1,21 @@
+28 passed in 56.59s
+ptxas spill/stack/serialization lines: 0
+prev target: REG:168 STACK:8 LOCAL:0 REG:168 STACK:0 LOCAL:0 | QGMMA 48 STL 1 LDL 1 WARPGROUP.DEPBAR 16 WARPGROUP.ARRIVE 16 lines 14709
+cand target: REG:168 STACK:8 LOCAL:0 REG:168 STACK:0 LOCAL:0 | QGMMA 48 STL 1 LDL 1 WARPGROUP.DEPBAR 16 WARPGROUP.ARRIVE 16 lines 14725
+49 passed, 3 skipped, 14 warnings in 14.89s
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs base default exit 0
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs prev default exit 0
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs base kv exit 0
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs prev kv exit 0
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs base head exit 0
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs prev head exit 0
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs base streams2 exit 0
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs
+equivalence vs prev streams2 exit 0

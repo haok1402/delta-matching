@@ -204,9 +204,12 @@ struct DeltaV6 {
         MainloopPipeline pipeline_kv(shared_storage.pipelines.pipeline_kv, pipeline_params, ClusterShape{});
         __syncthreads();
 
-        // CTA = (m-pair p, bh); longest first for the causal tail (as pass 2).
-        int const p = params.npairs - 1 - int(blockIdx.x);
-        int const bh = int(blockIdx.y);
+        // CTA = (m-pair p, bh); longest first for the causal tail.  ## P0LPT: grid (bh, p): blocks dispatch in linear
+        // order (x fastest), so every head's longest row block goes first, then the next-longest of every head, ...: a
+        // global longest-processing-time order instead of head by head (where the last heads' longest CTAs started near
+        // the end of the grid and ran alone).
+        int const p = params.npairs - 1 - int(blockIdx.y);
+        int const bh = int(blockIdx.x);
         int const bidb = bh / params.num_heads;
         int const bidh = bh - bidb * params.num_heads;
         int const bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
@@ -525,7 +528,7 @@ void run_flash_delta_v6_fp11_hd128(Flash_bwd_fp8_params &params, cudaStream_t st
         params.dlt_ptr,
         nbm, nbn, npairs, params.b, params.h
     };
-    dim3 grid_dims(npairs, params.b * params.h, 1);
+    dim3 grid_dims(params.b * params.h, npairs, 1);
     dim3 block_dims(Kernel::MaxThreadsPerBlock, 1, 1);
     int smem_size = Kernel::SharedStorageSize;
     auto kernel = cutlass::device_kernel<Kernel>;

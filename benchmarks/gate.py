@@ -227,6 +227,10 @@ def main():
                     help="numerics: whether the candidate's dS' / psi workspaces are declared unchanged")
     ap.add_argument("--routes", default=",".join(ROUTES), help="numerics: must be all four routes (certification)")
     ap.add_argument("--defects", default=None, help="numerics: the frozen defect manifest ({route} expands per route)")
+    ap.add_argument("--lse-envelope-roots", default=None,
+                    help="numerics: PLUS,MINUS DBG roots of the previous build with its forward LSE moved +-1 ulp")
+    ap.add_argument("--allow-defect-repair", action="store_true",
+                    help="numerics: a frozen inherited defect may be repaired (finite output, error not larger)")
     ap.add_argument("--base-dumps", default=""); ap.add_argument("--prev-dumps", default="")
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--reps", type=int, default=3)
@@ -323,6 +327,9 @@ def main():
             roles = {"base": (a.base_root, False), "prev": (a.prev_root, False), "cand": (wt, False),
                      "cand-repeat": (wt, False), "cand-dbg": (a.cand_dbg_root, True), "cand-dbg-repeat": (a.cand_dbg_root, True),
                      "prev-dbg": (a.prev_dbg_root, True)}
+            if a.lse_envelope_roots:   # residual-v4: the accepted DBG build with its LSE moved +-1 ulp
+                plus, minus = a.lse_envelope_roots.split(",")
+                roles.update({"env-plus": (plus, True), "env-minus": (minus, True)})
             for r in routes:
                 files = {}
                 for tag, (root, dbg) in roles.items():
@@ -336,7 +343,8 @@ def main():
                              + (["--dbg"] if dbg else []), env=dict(env, PYTHONPATH=root))
                     files[tag] = out
                 defects = a.defects.replace("{route}", r)
-                gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws, "--defects", defects,
+                gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws, "--defects", defects]
+                         + (["--allow-repair"] if a.allow_defect_repair else []) + [
                                            "--report", os.path.join(run_dir, f"num_{r}_report.json")]
                          + [x for tag, f in files.items() for x in (f"--{tag}", f)])
             # residual-v3 (Hao's per-row contract, round 17): every route's check must report AC-2.3 eligibility

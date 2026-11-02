@@ -713,3 +713,10 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   non-regression keeps pass 0's numerics effectively frozen unless a change makes delta closer to pass 1's sum row
   by row. Bitwise pass-0 levers (the pass-0 worker's nomaskloop / skipdead / register split, ported onto r17_p1) are
   the next pass-0 candidates.
+- Forward C3f (3565487: BM192 + FWDLAZY + FWDDFOLD + RHOPRE + 3 K/V stages + FLT_MIN floor; -12.8% forward in the
+  helper's A/B) and C3n (b1613d8: the same without FWDDFOLD; -5.82% / -5.88% in two helper jobs) re-gated with the
+  recorded decisions (LSE +-1 ulp envelope from my own r17_p1 control builds, inherited-defect repair, mean-error noise
+  1e-6; jobs 21177735 / 21177736): C3f FAILS on one d128_mqa row beyond accepted + round-off + envelope; C3n FAILS
+  only because its zero-input NaN pattern moved (the zero-scale floor is on the fold path only). Requested C3n2 with a
+  zero-scale guard on the non-fold path. Pass-0 helper: FOLD (-13.1%) and the identity-exact NORM also fail v4; it
+  concludes the pass-0 numerics path is closed under strict per-row non-regression and returns to bitwise levers.

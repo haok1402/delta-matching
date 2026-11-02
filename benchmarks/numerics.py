@@ -45,6 +45,7 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 RESIDUAL_VERSION = "residual-v4"   # Hao, round 17: v3 + ill-conditioned rows + fp32-error tolerance
 ILL_CONDITIONED = 1e-3             # rows whose ACCEPTED residual exceeds this are exempt from per-row non-regression
 ERR_ABS_TOL = 1e-5                 # per matched case / output: rel-L2 error may rise by at most this (absolute)
+ERR_MEAN_TOL = 1e-6                # per output: the mean error over cases may rise by at most this (noise; 1/10 per case)
 ERR_ABS_TOL_OTHER = 1e-3           # stale / full cases ("stay correct"): the stale delta rowsum(dO * O) amplifies O round-off
 RESIDUAL_FLOOR = 1e-30
 
@@ -396,8 +397,9 @@ def _load(path, route, label, dbg, probs, manifest):
     return d
 
 
-def residual_rows_check(k, desc, ncg, npg, C, R, P, probs):
-    """residual-v3 on every row of every matched group of case k: candidate DBG (C), its repeat (R), previous DBG (P)."""
+def residual_rows_check(k, desc, ncg, npg, C, R, P, probs, EP=None, EM=None):
+    """residual-v4 on every row of every matched group of case k: candidate DBG (C), its repeat (R), previous DBG (P);
+    EP / EM: the previous DBG build with its forward LSE moved by +1 / -1 ulp (the LSE round-off envelope)."""
     import torch
     out = {"rows": 0, "exempt": 0, "prev_exempt": 0, "violations": 0, "regressions": 0}
     if ncg != npg or C is None or R is None or P is None:
@@ -422,7 +424,16 @@ def residual_rows_check(k, desc, ncg, npg, C, R, P, probs):
         exc, rc, bound, viol, zc = residual_v2(c["num"], c["den"], keys)
         exp, rp, _, _, zp = residual_v2(p["num"], p["den"], keys)
         ill = (~exp) & (rp > ILL_CONDITIONED)              # fixed by the accepted build
-        reg = (~exc) & (~ill) & (rc > rp + bound)
+        env = torch.zeros_like(rp)
+        if EP is not None and EM is not None:              # propagated round-off of the forward input LSE
+            for E in (EP, EM):
+                if g not in E or E[g]["num"].shape != p["num"].shape:
+                    probs.append(f"{k} group {i}: LSE envelope rows missing")
+                    continue
+                _, re_, _, _, _ = residual_v2(E[g]["num"], E[g]["den"], keys)
+                env = torch.maximum(env, (re_ - rp).abs())
+            out["envelope"] = True
+        reg = (~exc) & (~ill) & (rc > rp + bound + env)
         grow = exc & ~exp
         out["ill_conditioned"] = out.get("ill_conditioned", 0) + int(ill.sum())
         if bool(ill.any()):
@@ -459,6 +470,14 @@ def check(a):
             manifest = json.load(open(a.defects))
         except Exception as e:
             probs.append(f"defect manifest unreadable: {e}")
+    if a.allow_repair:
+        manifest["allow_repair"] = True    # residual-v4 decision: a repaired inherited defect (finite, error not larger) passes
+    env_rows = None
+    if a.env_plus or a.env_minus:
+        ep = _load(a.env_plus, a.route, "env-plus", True, probs, manifest)
+        em = _load(a.env_minus, a.route, "env-minus", True, probs, manifest)
+        if ep and em:
+            env_rows = (ep.get("_rows"), em.get("_rows"))
     caps = {}
     for tag, path, dbg in (("base", a.base, False), ("prev", a.prev, False), ("cand", a.cand, False),
                            ("cand-repeat", a.cand_repeat, False), ("cand-dbg", a.cand_dbg, True),
@@ -526,13 +545,13 @@ def check(a):
                 row["residual_plan_max"] = max((x.get("residual_plan", 0) for x in cg), default=0.0)
                 row["residual_centered_max"] = max((x.get("residual_centered", 0) for x in cg), default=0.0)
                 row.update(residual_rows_check(k, desc, len(cg), len(pg), cd.get("_rows"), cd2.get("_rows"),
-                                               pd.get("_rows"), probs))
+                                               pd.get("_rows"), probs, *(env_rows or (None, None))))
             report["cases"][k] = row
     if all(caps.values()):
         report["error_means"] = {}
         for o, (c_, p_, n_) in err_sums.items():
             report["error_means"][o] = {"cand": c_ / n_, "prev": p_ / n_}
-            if c_ > p_:   # residual-v4: the mean error over cases (per output tensor) may not rise
+            if c_ / n_ > p_ / n_ + ERR_MEAN_TOL:   # residual-v4: the mean error over cases (per output) may not rise
                 probs.append(f"mean {o} error over {n_} cases rises: {c_ / n_:.6e} > {p_ / n_:.6e}")
     report["ws_declaration"] = a.ws
     report["problems"] = probs
@@ -581,6 +600,9 @@ def main():
         k.add_argument(f"--{n}", default=None)
     k.add_argument("--ws", choices=("same", "differs"), default="differs")
     k.add_argument("--rel-tol", type=float, default=0.0)
+    k.add_argument("--env-plus", default=None, help="DBG capture of the previous build with its LSE moved +1 ulp")
+    k.add_argument("--env-minus", default=None, help="DBG capture of the previous build with its LSE moved -1 ulp")
+    k.add_argument("--allow-repair", action="store_true", help="a frozen defect may be repaired (finite, error not larger)")
     m = sp.add_parser("manifest")
     m.add_argument("--base", required=True); m.add_argument("--base-dbg", default=None)
     m.add_argument("--route", choices=sorted(EQ.ROUTES), default="default"); m.add_argument("--out", required=True)

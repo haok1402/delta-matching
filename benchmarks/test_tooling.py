@@ -801,8 +801,10 @@ def test_numerics_v4_error_tolerance_and_mean(tmp_path):
     up_down = lambda f, m: (_err(f, "d128_gqa4/causal/matched", "dK", 1e-3 + 5e-6), _err(f, k2, "dK", 1e-3 - 6e-6))
     assert _numcheck(tmp_path, up_down).returncode == 0                     # +5e-6 in tolerance, mean not rising
     d = tmp_path / "mean"; d.mkdir()
-    r = _numcheck(d, lambda f, m: _err(f, "d128_gqa4/causal/matched", "dK", 1e-3 + 5e-6))
-    assert r.returncode == 1 and "mean dK error" in r.stdout, r.stdout[-600:]
+    r = _numcheck(d, lambda f, m: [_err(f, k_, "dK", 1e-3 + 5e-6) for k_, _ in EQ.selected_cases("default")])
+    assert r.returncode == 1 and "mean dK error" in r.stdout, r.stdout[-600:]        # every case +5e-6: mean +5e-6
+    d = tmp_path / "noise"; d.mkdir()                                                # one case +5e-6: mean +7e-8 (noise)
+    assert _numcheck(d, lambda f, m: _err(f, "d128_gqa4/causal/matched", "dK", 1e-3 + 5e-6)).returncode == 0
     d = tmp_path / "big"; d.mkdir()
     r = _numcheck(d, lambda f, m: (_err(f, "d128_gqa4/causal/matched", "dK", 1e-3 + 2e-5), _err(f, k2, "dK", 1e-3 - 5e-5)))
     assert r.returncode == 1 and "+ 1e-05" in r.stdout, r.stdout[-600:]

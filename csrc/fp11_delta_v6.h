@@ -24,7 +24,7 @@
 // as in v4b.  Deterministic by construction (one writer per row, one fixed order).
 #pragma once
 #ifndef KDA_PK_EXPB
-#define KDA_PK_EXPB 0
+#define KDA_PK_EXPB 6
 #endif
 // EXPBX predicate (pass 1's masked-loop bound for its 128-key n-block n128, in 64-row m-blocks): tiles with
 // m_block < this keep the certified exp line in both passes.

@@ -119,6 +119,14 @@ constexpr int kBK = 128;     // contraction depth per tile (= pass-1 kBlockN at 
 #ifndef FA3FP11_HALFPSI
 #define FA3FP11_HALFPSI 0
 #endif
+// ## kda-pass1 KDA_P2_HALFPSI: the consumer of pass 1's per-(tile, warpgroup half) psi [BH, nbm, nbn, 2]
+// (KDA_P1_HALFPSI).  Every 64-key half is its own entry in the window chain (F2 / F2b predicates per half, psi_max
+// row-global over halves in key order).  1 = two accumulators (one window chain per half, both gemms in one batch,
+// promote acc0 * psi_w0 then acc1 * psi_w1); 2 = one accumulator, the halves in key order (the in-window ratio rescale
+// between them, a wgmma wait per half).
+#ifndef KDA_P2_HALFPSI
+#define KDA_P2_HALFPSI 0
+#endif
 #ifndef FA3FP11_HALFPSI_OVERLAP   // M23c: the second accumulator's rescale between the two wgmma batches (HALFPSI only)
 #define FA3FP11_HALFPSI_OVERLAP 0
 #endif
@@ -274,6 +282,112 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
     #pragma unroll 1
     for (int t = 0; t < (kStages < nb_end ? kStages : nb_end); ++t) { issue(t); }
 
+#if KDA_P2_HALFPSI
+    float const* psi_row = params.ptr_psi + (int64_t(bh) * params.nbm + mb) * params.nbn * 2;
+    auto gemm_half = [&](auto& accx, int s, int h, bool fresh) {
+        warpgroup_fence_operand(accx);
+        warpgroup_arrive();
+        tiled_mma.accumulate_ = fresh ? GMMA::ScaleOut::Zero : GMMA::ScaleOut::One;
+        #pragma unroll
+        for (int kb = 0; kb < 2; ++kb) {
+            cute::gemm(tiled_mma, tCrA(_, _, 2 * h + kb, s), tCrB(_, _, 2 * h + kb, s), accx);
+            tiled_mma.accumulate_ = GMMA::ScaleOut::One;
+        }
+        warpgroup_commit_batch();
+        warpgroup_fence_operand(accx);
+    };
+    static_assert(decltype(size<2>(tCrA))::value == 4, "pass 2 hd128: 4 k-blocks of 32 keys per 128-key tile");
+    float psi_max = 0.0f;
+    float2 psi_pf = nb_end > 0 ? *reinterpret_cast<float2 const*>(psi_row) : make_float2(0.0f, 0.0f);
+#if KDA_P2_HALFPSI == 1
+    Tensor acc1 = partition_fragment_C(tiled_mma, select<0, 1>(TileShapeMNK{}));
+    clear(acc1);
+    float psi_w0 = 0.0f, psi_w1 = 0.0f;
+#else
+    float psi_w = 0.0f;
+#endif
+    #pragma unroll 1
+    for (int nb = 0; nb < nb_end; ++nb) {
+        int const s = nb % kStages;
+        float2 const psi_cur = psi_pf;
+        if (nb + 1 < nb_end) { psi_pf = *reinterpret_cast<float2 const*>(psi_row + 2 * (nb + 1)); }
+        shared.full_bar[s].wait((nb / kStages) & 1);
+        bool const take0 = psi_cur.x != 0.0f && !(psi_cur.x < psi_max * 1e-8f);
+        if (take0) { psi_max = fmaxf(psi_max, psi_cur.x); }
+        bool const take1 = psi_cur.y != 0.0f && !(psi_cur.y < psi_max * 1e-8f);
+        if (take1) { psi_max = fmaxf(psi_max, psi_cur.y); }
+#if KDA_P2_HALFPSI == 1
+        if (take0 && psi_w0 != 0.0f) {
+            float const r = fminf(fmaxf(psi_w0 / psi_cur.x, 1e-8f), 1e8f);
+            #pragma unroll
+            for (int i = 0; i < size(acc); ++i) { acc(i) *= r; }
+        }
+        if (take1 && psi_w1 != 0.0f) {
+            float const r = fminf(fmaxf(psi_w1 / psi_cur.y, 1e-8f), 1e8f);
+            #pragma unroll
+            for (int i = 0; i < size(acc1); ++i) { acc1(i) *= r; }
+        }
+        if (take0) { gemm_half(acc, s, 0, psi_w0 == 0.0f); psi_w0 = psi_cur.x; }
+        if (take1) { gemm_half(acc1, s, 1, psi_w1 == 0.0f); psi_w1 = psi_cur.y; }
+        if (take0 || take1) { warpgroup_wait<0>(); }
+#else
+        if (take0) {
+            if (psi_w != 0.0f) {
+                float const r = fminf(fmaxf(psi_w / psi_cur.x, 1e-8f), 1e8f);
+                #pragma unroll
+                for (int i = 0; i < size(acc); ++i) { acc(i) *= r; }
+            }
+            gemm_half(acc, s, 0, psi_w == 0.0f);
+            warpgroup_wait<0>();
+            psi_w = psi_cur.x;
+        }
+        if (take1) {
+            if (psi_w != 0.0f) {
+                float const r = fminf(fmaxf(psi_w / psi_cur.y, 1e-8f), 1e8f);
+                #pragma unroll
+                for (int i = 0; i < size(acc); ++i) { acc(i) *= r; }
+            }
+            gemm_half(acc, s, 1, psi_w == 0.0f);
+            warpgroup_wait<0>();
+            psi_w = psi_cur.y;
+        }
+#endif
+        __syncthreads();   // FP11-M10: the unconditional consumer-release barrier (see the certified loop)
+        int const nxt = nb + kStages;
+        if (nxt < nb_end) { issue(nxt); }
+        if ((nb & (kPromoteTiles - 1)) == kPromoteTiles - 1 || nb == nb_end - 1) {
+#if KDA_P2_HALFPSI == 1
+            if (psi_w0 != 0.0f || psi_w1 != 0.0f) {
+                #pragma unroll
+                for (int i = 0; i < size(acc); i += 2) {
+                    int const m = get<0>(tCcC(i));
+                    int const d = get<1>(tCcC(i));
+                    float2* const slot = reinterpret_cast<float2*>(&smem_dq[m * kDqPitch + d]);
+                    float2 v2 = *slot;
+                    if (psi_w0 != 0.0f) { v2.x = fmaf(acc(i), psi_w0, v2.x); v2.y = fmaf(acc(i + 1), psi_w0, v2.y); }
+                    if (psi_w1 != 0.0f) { v2.x = fmaf(acc1(i), psi_w1, v2.x); v2.y = fmaf(acc1(i + 1), psi_w1, v2.y); }
+                    *slot = v2;
+                }
+                psi_w0 = 0.0f; psi_w1 = 0.0f;
+            }
+#else
+            if (psi_w != 0.0f) {
+                #pragma unroll
+                for (int i = 0; i < size(acc); i += 2) {
+                    int const m = get<0>(tCcC(i));
+                    int const d = get<1>(tCcC(i));
+                    float2* const slot = reinterpret_cast<float2*>(&smem_dq[m * kDqPitch + d]);
+                    float2 v2 = *slot;
+                    v2.x = fmaf(acc(i), psi_w, v2.x);
+                    v2.y = fmaf(acc(i + 1), psi_w, v2.y);
+                    *slot = v2;
+                }
+                psi_w = 0.0f;
+            }
+#endif
+        }
+    }
+#else
     float const* psi_row = params.ptr_psi + (int64_t(bh) * params.nbm + mb) * params.nbn;
     // ## FP11-M3 window state: psi_w = the last TAKEN psi in the CURRENT
     // window (acc's units), 0.0f = window empty (no taken tile yet: skip the
@@ -377,6 +491,8 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
             }
         }
     }
+
+#endif
 
     // Epilogue: smem_dq already holds TRUE unnormalized dQ (psi folded per
     // window); apply final_scale = sm/256 ONLY.  A row whose every tile was

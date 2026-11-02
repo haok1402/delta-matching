@@ -330,7 +330,16 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     // pointer is never dereferenced (plumbing only).
     at::Tensor dq_accum = torch::empty({4}, opts.dtype(at::kFloat));
     // ## FP11-M17 LSEK: the kernels form lse*log2e in-register (bitwise the host prep).
-    at::Tensor lse_log2 = lse;
+#ifndef KDA_P1_LSEPRE
+#define KDA_P1_LSEPRE 0
+#endif
+    // KDA_P1_LSEPRE: the hd128 pass 1 reads lse * log2e formed here once (the same rounded fp32 multiply); pass 2 and
+    // the d256 pass 1 never read this buffer as a product.
+#ifndef KDA_EXPB
+#define KDA_EXPB 0
+#endif
+    at::Tensor lse_log2 = (KDA_P1_LSEPRE && head_size == 128)
+        ? (KDA_EXPB ? lse.mul(double(float(M_LOG2E))).sub_(8.0) : lse.mul(double(float(M_LOG2E)))) : lse;
     // The SingleTile schedulers never read the semaphore: no memset launch.
     at::Tensor tile_count_sem = torch::empty({1}, opts.dtype(at::kInt));
     // Pass-1 -> pass-2 workspaces: tile-contiguous dS' codes + per-tile psi.
@@ -340,8 +349,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
 #ifndef FA3FP11_HALFPSI
 #define FA3FP11_HALFPSI 0
 #endif
+#ifndef KDA_P1_HALFPSI
+#define KDA_P1_HALFPSI 0
+#endif
     // ## M23 HALFPSI: at head_dim 128 pass 1 publishes one psi per (tile, warpgroup half): [BH, nbm, nbn, 2].
-    at::Tensor psi = torch::empty({int64_t(batch_size) * num_heads, nbm, nbn, (FA3FP11_HALFPSI && head_size == 128) ? 2 : 1}, opts.dtype(at::kFloat));
+    at::Tensor psi = torch::empty({int64_t(batch_size) * num_heads, nbm, nbn, ((FA3FP11_HALFPSI || KDA_P1_HALFPSI) && head_size == 128) ? 2 : 1}, opts.dtype(at::kFloat));
     if (ds8_out != nullptr) { *ds8_out = ds8; }
     if (psi_out != nullptr) { *psi_out = psi; }
 

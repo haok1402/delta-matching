@@ -73,6 +73,12 @@ inline bool fp11_hd_supported(int d) { return d == 256 || (FA3FP11_HD128 && d ==
 void fp11_make_twin_pi(void const* x8, void* xt8, int b, int s, int h, int d,
                        int64_t sb, int64_t ss, int64_t sh, cudaStream_t stream);
 
+#if KDA_TRACE
+// defined in the forward translation units (global linkage)
+void kda_fwd_buf_info_d128(void** ptr, long* words);
+void kda_fwd_buf_info_d256(void** ptr, long* words);
+#endif
+
 namespace {
 
 // ---- input checks shared by the ops (host side only; the kernels are unchanged) ----
@@ -241,8 +247,6 @@ static at::Tensor kda_prof_buffer() {
 }
 #endif
 #if KDA_TRACE
-void kda_fwd_buf_info_d128(void** ptr, long* words);
-void kda_fwd_buf_info_d256(void** ptr, long* words);
 // timeline-only build: the forward trace buffer of the head_dim's translation unit, as a non-owning int64 view
 static at::Tensor kda_prof_fwd_buffer(int64_t head_dim) {
     void* ptr = nullptr; long words = 0;

@@ -518,6 +518,13 @@ struct CollectiveMainloopFwdSm90Fp8F {
 //            weight is v8sc_3 * 2^(ms_3 - mref) (same op count as basis_last), the per-tile tOrO *= alpha is dropped,
 //            and tOrO is rebased (O *= 2^(mref - m l2), mref = m l2) only when |m l2 - mref| > 8 for some row of the
 //            warp; finalize folds 2^(mref - m l2) into 1 / l.  Codes, ms_g, row_max, row_sum and LSE are unchanged.
+#ifndef FA3FP11_HD128_FWDSHB
+#define FA3FP11_HD128_FWDSHB 0
+#endif
+    // ## kda-fwd FWDSHB (screening; named numerics change): P codes of all groups of a tile on ONE shared per-row basis
+    // ms_S = max_g ms_g, with the V-scale ratio folded in (group g's basis ms_S - log2(v_g / v_max)), so the PV chain is one
+    // gemm with no rho rescale and one promote; the row sum (sigma_g * part_g) and the promote weight are unchanged code.
+    static constexpr bool kShb = FA3FP11_HD128_FWDSHB && kHeadDim == 128;
     static constexpr bool kFwdLazy = FA3FP11_HD128_FWDLAZY && kHeadDim == 128 && kSchedPVFirst;
     static constexpr bool kFwdDfold = FA3FP11_HD128_FWDDFOLD && kHeadDim == 128 && kSchedPVFirst;
 
@@ -1437,6 +1444,24 @@ struct CollectiveMainloopFwdSm90Fp8F {
         // tOrO, and its chain is at most 3 steps long (one 128-key tile) instead
         // of the whole row.  Cross-tile there is no rho at all: tOrO is in true
         // exp(-m_run) units and takes alpha instead.
+        auto fq8_shared_basis = [&]() __attribute__((always_inline)) {
+            if constexpr (kShb) {
+                float vmax_ = fq8_v[0];
+                #pragma unroll
+                for (int g = 1; g < kGroups; ++g) { vmax_ = fmaxf(vmax_, fq8_v[g]); }
+                float lr_[kGroups];
+                #pragma unroll
+                for (int g = 0; g < kGroups; ++g) { lr_[g] = (fq8_v[g] > 0.f && vmax_ > 0.f) ? __log2f(fq8_v[g] / vmax_) : 0.f; }
+                #pragma unroll
+                for (int mi = 0; mi < size(softmax.row_max); ++mi) {
+                    float msS = softmax.ms_[0](mi);
+                    #pragma unroll
+                    for (int g = 1; g < kGroups; ++g) { msS = fmaxf(msS, softmax.ms_[g](mi)); }
+                    #pragma unroll
+                    for (int g = 0; g < kGroups; ++g) { softmax.ms_[g](mi) = msS - lr_[g]; }
+                }
+            }
+        };
         auto fq8_rho = [&](auto& sm_, int g) {
             typename Softmax::TensorT r_;
             float const vr_ = fq8_v[g - 1] / fq8_v[g];
@@ -1472,8 +1497,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // e4m3-bound codes on them.  No V-fold: the per-32 V descale is
             // carried by the accumulator's basis instead (see rho above).
             if constexpr (kFwdLazy) { softmax.init_ref(); }
+            if constexpr (kShb) { fq8_load_v(n_block); fq8_shared_basis(); }
             softmax.template online_softmax_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
-            fq8_load_v(n_block);   // ## FQ8: this P-hat tile's four v-scales
+            if constexpr (!kShb) { fq8_load_v(n_block); }   // ## FQ8: this P-hat tile's four v-scales
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
             Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV>(tSrS.layout()));
             Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
@@ -1553,7 +1579,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 static constexpr bool Defer = decltype(defer_c)::value;
                 auto B_ = pv_B_slab(ni_c, tOrV_stage);
                 auto O_ = pv_O_slab(ni_c);
-                if constexpr (kGroups == 2) {
+                if constexpr (kShb) {
+                    fq8_gemm_krange</*zero_init=*/true, /*wg_wait=*/Defer ? -1 : 0, 0, 2 * kGroups>(tiled_mma_pv, tOrP, B_, D_);
+                } else if constexpr (kGroups == 2) {
                     // ## Delta-Matching-128: two 64-key groups per 128-key tile = two 2-atom sub-gemms into the
                     // zero-init temp, ONE rho rescale (group 1 onto group 0's basis) and one promote per tile
                     // (the d256 chain below with 4 groups: three rho rescales).  Same realization class.
@@ -1775,6 +1803,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // denominator invariant (row_sum *= scores_scale,
                     // softmax_fq8f.h:195) is untouched.
                     if constexpr (!kFwdLazy) { softmax.rescale_o(tOrO, scores_scale); }
+                    if constexpr (kShb) { fq8_load_v(n_block); fq8_shared_basis(); }
                     KF(11);
                     if constexpr (kFwdDfold && !Check_inf) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
                     else { softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS); }
@@ -1784,7 +1813,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     if constexpr (Is_FP8 && V_colmajor) { flash::permute_Aregs_fp8(tOrP); }
                     if constexpr (!MmaPV_is_RS) { write_P_to_smem(tOrP); }
                     KF(13);
-                    fq8_load_v(n_block);           // this tile's four v-scales
+                    if constexpr (!kShb) { fq8_load_v(n_block); }   // this tile's four v-scales
                     if constexpr (!MmaPV_is_RS) { arrive_on_P_write_barrier(); }
                     KF(14); KF_STEP();
                 } else {

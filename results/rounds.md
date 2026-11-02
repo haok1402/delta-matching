@@ -733,3 +733,6 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   nomaskloop + register split (-1.27% / -1.42%). 64K split route (Hao via kda-fuse): forced per-KV-group splits and
   workspace limits 40 / 72 GB change the 64K fwd+bwd by <= +-0.5% (job 21177857; glue 0.5-3 ms of 115-230 ms);
   in-place outputs (~1%) need an out= path in the ops (queued).
+- Accepted build r17_fwd (job 21178641; results/r17/accepted_fwd/sol4v2.md): % of calibrated limit pass1 43.9%,
+  forward 59.0%, pass0 68.0%, pass2 94.5%; forward / FA3 fp8 forward kernel 1.163 (was 1.32); original -> now e2e fwd
+  -13.59%, fwd+bwd -9.19%; paper C.2 16/4 fwd 581.6 / fwd+bwd 502.4 TFLOP/s, 32/4 fwd+bwd 523.1 (cuDNN BF16 500.0).

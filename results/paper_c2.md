@@ -89,3 +89,9 @@ repeated KV heads), not this H100. Our matched fwd+bwd (491.7) is above the pape
 16/4: accepted 516.9 / 498.6 / 503.7 TFLOP/s fwd / bwd / fwd+bwd (original 517.2 / 448.0 / 465.6; FA3 BF16 696.9 / 511.1 /
 553.2; cuDNN BF16 590.7 / 487.7 / 513.2). 32/4: accepted 569.7 / 501.1 / 518.9 (original 580.6 / 456.5 / 486.1; FA3 BF16
 723.0 / 525.4 / 569.9; cuDNN BF16 621.1 / 475.1 / 509.3; we now exceed cuDNN BF16 at 32/4).
+
+## After round 17's accepted forward C3g (`results/paper_c2/r17_fwd_table.md`, job 21178641)
+
+16/4: accepted 581.6 / 476.6 / 502.4 TFLOP/s fwd / bwd / fwd+bwd (original 517.0 / 446.4 / 464.4; FA3 BF16 688.3 / 496.3 /
+539.2; cuDNN BF16 588.2 / 482.3 / 508.2). 32/4: accepted 619.5 / 492.5 / 523.1 (original 569.5 / 453.7 / 481.6; FA3 BF16
+712.1 / 518.5 / 562.2; cuDNN BF16 609.1 / 466.6 / 500.0). The forward TFLOP/s here still include the ~0.3 ms host window.

@@ -824,3 +824,7 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Accepted build r18_c4 (job 21191934, same-job calibration 1454.9 TFLOP/s): sol4c pass1 70.0% (68.8% at the fixed
   1481.2 reference), forward 80.1% (78.6%), pass0 100.2% (98.4%), pass2 94.3%; forward / FA3 fp8 1.162; original ->
   now e2e fwd -14.0%, fwd+bwd -13.1%; paper C.2 16/4 fwd+bwd 521.9 TFLOP/s (cuDNN BF16 510.2), 32/4 548.6.
+- Pass-1 helper on r18_c4: GUARDLITE (drop the F2b psi floor and / or the dV ratio clamp) bitwise on all 72 default
+  cases but neutral (pass 1 -0.60 .. +0.45%, the guards are off the critical path); the rest of the per-element path
+  (exp, dS, amax, scale, e4m3, dK fold) cannot pass residual-v4 (P^ changes move per-row residuals; dS' code / dK
+  accumulation changes move per-case errors well past 1e-5). DONE again (CANDIDATES.md on kda-sm90-pass1-v2 85ac5c6).

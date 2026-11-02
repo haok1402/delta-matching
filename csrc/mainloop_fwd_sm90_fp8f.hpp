@@ -1748,8 +1748,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // and ptxas then reports C7510, "wgmma instructions are serialized
             // due to wgmma pipeline crossing function boundary".  Measured cost
             // of letting it outline: 37.5 ms vs 0.69 ms for the parent.
-            auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) __attribute__((always_inline)) {
+            auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type, auto fold_type) __attribute__((always_inline)) {
                 static constexpr bool Check_inf = decltype(check_inf_type)::value;
+                static constexpr bool FoldStep = decltype(fold_type)::value;   // FWDDFOLD only on steps that are unmasked for every row
                 PipelineState smem_pipe_read_v(smem_pipe_read.index(), smem_pipe_read.phase(), smem_pipe_read.count());
                 ++smem_pipe_read;
                 if constexpr (kSchedPVFirst) {
@@ -1802,9 +1803,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     scoremod_premask_fn(tSrS);
                     mask_fn(tSrS, n_block);
                     float fq8_g_[kGroups];
-                    if constexpr (kFwdDfold && !Check_inf) { fq8_gsc(n_block, fq8_g_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
+                    if constexpr (kFwdDfold && FoldStep) { fq8_gsc(n_block, fq8_g_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
                     KF(9);
-                    if constexpr (kFwdDfold && !Check_inf) { cute::copy(softmax.template max_get_scale_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_), scores_scale); }
+                    if constexpr (kFwdDfold && FoldStep) { cute::copy(softmax.template max_get_scale_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_), scores_scale); }
                     else { cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale); }
                     if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
                     KF(10);
@@ -1816,7 +1817,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // softmax_fq8f.h:195) is untouched.
                     if constexpr (!kFwdLazy) { softmax.rescale_o(tOrO, scores_scale); }
                     KF(11);
-                    if constexpr (kFwdDfold && !Check_inf) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
+                    if constexpr (kFwdDfold && FoldStep) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
                     else { softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS); }
                     KF(12);
                     if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
@@ -1871,9 +1872,17 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 int const n_block_min_causal_local_mask = BlockMN_t::get_n_block_min_causal_local_mask(
                     seqlen_info, m_block, n_block_min, params.window_size_right,
                     params.attention_chunk_divmod, params.qhead_per_khead_divmod);
+                // ## kda-fwd MSKIP (bitwise): a masked-range tile that is fully visible for THIS warpgroup's 64 rows runs the
+                // unmasked step body (no mask, no -inf checks; Check_inf changes nothing when every row max is finite)
+                // with the exact descale (no fold), so its arithmetic is the masked step's.
+                int const wg_row0 = m_block * kBlockM + warp_group_idx * 64;
                 #pragma unroll 1
                 for (; n_block >= n_block_min_causal_local_mask; --n_block) {
-                    fwd_step(n_block, mask_fn, cute::true_type{} /*check_inf*/);
+                    if (Is_causal && !Is_local && (n_block + 1) * kBlockN - 1 <= wg_row0) {
+                        fwd_step(n_block, [](auto& tSrS, int n_block) {}, cute::false_type{} /*check_inf*/, cute::false_type{} /*fold*/);
+                    } else {
+                        fwd_step(n_block, mask_fn, cute::true_type{} /*check_inf*/, cute::false_type{} /*fold*/);
+                    }
                 }
             }
 
@@ -1883,14 +1892,14 @@ struct CollectiveMainloopFwdSm90Fp8F {
             auto no_mask_fn = [](auto& tSrS, int n_block) { };
             #pragma unroll 1
             for (; n_block >= n_block_min_before_local_mask; --n_block) {
-                fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
+                fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/, cute::true_type{} /*fold*/);
             }
             // Separate masking iterations on the left for local attention
             if constexpr (Is_local) {
                 auto local_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
                 #pragma unroll 1
                 for (; n_block >= n_block_min; --n_block) {
-                    fwd_step(n_block, local_mask_fn, cute::bool_constant<Is_local>{} /*check_inf*/);
+                    fwd_step(n_block, local_mask_fn, cute::bool_constant<Is_local>{} /*check_inf*/, cute::false_type{} /*fold*/);
                 }
             }
             // Tell producers that smem_q is ready

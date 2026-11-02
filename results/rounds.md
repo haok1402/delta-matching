@@ -765,3 +765,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   S52-S53). Pointed it at a third bitwise piece on BM192 and at the ~0.3 ms fwd_fp8 host path (end-to-end lever).
 - Forward host-path lever withdrawn: fwd_fp8 host time is 0.015 ms per call (forward helper, job 21180725, nsys);
   the ~0.3 ms in paper C.2's per-call window is idle-GPU launch latency (results/paper_c2.md correction).
+- EXPBX64 (kda-p1packed helper; named numerics change: the pass 0 + pass 1 exp line with the 2^8 offset folded into the
+  per-row bias off the masked diagonal 64-key range, the certified line exactly on it): numerics gate 21181579 PASS on
+  all four routes (residual-v4 vs r17_p0s with its DBG pair and LSE +-1 ulp envelope), pass 0 -4.50% geomean, bench
+  -1.4%; confirmation 21181901 (library 5bbf85214faa) -4.04%: ACCEPTED (accepted root r17_pk).
+- Pass-1 stack (kda-pass1-c3: SHFL8 + QST 3 / DOST 3, bitwise): full gate 21181578 bitwise on all four routes, pass 1
+  -2.26% (< 3%) -> not accepted alone; held for stacking.

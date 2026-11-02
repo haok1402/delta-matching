@@ -154,7 +154,7 @@ B2 N8192 16/4 / 32/4, 2 alternating reps (`ab.py --smoke`).
 
 ### REJECTED: PE, promote deferred into the next step (bitwise)
 
-- Commit 2c… (`KDA_PE=1`).
+- Switch `KDA_PE=1` (default 0).
 - What it changes: a window promote that is not the tile's last runs right after the next step's S / dP issue, in the
   S-retire bubble where RESCALE-EARLY paid, instead of at the end of its own step where nothing is in flight.
 - Bitwise: dQ / dK / dV are bitwise on the 4 dump shapes (job 21203555).
@@ -163,7 +163,7 @@ B2 N8192 16/4 / 32/4, 2 alternating reps (`ab.py --smoke`).
 - Reason: the promote's cost is not exposed latency. It is throughput: 64 KB of LDS + 64 KB of STS per CTA per promote
   (both WGs at once), against the wgmma smem operand reads.
 
-### PT32: dV promote window 8 -> 32 m-tiles (named numerics change, dV only)
+### REJECTED: PT32 / PT16, dV promote window 8 -> 32 / 16 m-tiles (named numerics change, dV only)
 
 - Switch `KDA_PT=32`.
 - What it changes: dV promotes into the fp32 smem overlay every 32 m-tiles (2048 rows) instead of 8. The rescale chain
@@ -179,3 +179,54 @@ B2 N8192 16/4 / 32/4, 2 alternating reps (`ab.py --smoke`).
   | PT16 | 4.8325e-2 -> 4.8338e-2 | | | | +1.3e-5 on case 1, over the 1e-5 per-case tolerance: rejected |
 
 - Resources: REG 168, STACK 0, no spills.
+- Status: **REJECTED.** This is the same lever as kda-pass1's PW16 / PW32 (origin/kda-sm90-pass1-v2), which already
+  failed the per-case dV tolerance on the 72-case default route: d128_bhnd dV +1.67e-5, gqa3_promote dV +3.3e-5. PT32 is
+  the same code change, so there is no new reason to expect a different verdict. PT16 already fails it on my own dump
+  shapes. The paper-grid A/B pair (jobs 21203959 / 21203960) was cancelled once this was found.
+- Even if the numerics passed, PT32 gives -3..-5% on pass 1, under the 10% bar for this brief.
+
+## Final summary (kda-bwdport)
+
+**No READY candidate.** No FA3-derived design comes within reach of a 10% gain on pass 1 or on pass 1 + pass 2.
+
+**What FA3's backward offers here.** The accepted pass 1 already has FA3's hdim-128 backward geometry and step order:
+- 64 x 128 tiles, 2 MMA warpgroups, 24 / 240 registers, a TMA producer warp;
+- SdP_swapAB and RS dV / dK.
+
+What it lacks:
+- **FA3's in-kernel dQ** is a measured loss in every form tried:
+  - The 5th gemm alone costs +8..+12% of pass 1.
+  - The hand-off costs ~+9% more.
+  - FA3's deterministic ordering costs +34% more.
+  - The best non-deterministic form is +3% vs pass 1 + pass 2, and the deterministic form is +34%.
+  - The reason: FA3 BF16 is tensor-bound, so its 5th gemm hides under the gemms. Our fp8 step is bound by the vector
+    stream, and pass 2, the work being removed, is a cheap bytes-bound kernel at 94% of its floor.
+- **FA3's simpler numerics** (no psi, no dK fold, no dV window, no dS' hand-off) are worth 30% of pass 1 together. That
+  is the skeleton bound, and the ceiling of any port. Each piece is part of the matched method's numerics contract:
+  - psi, about 11%;
+  - the dS' hand-off, about 8%;
+  - the dV window, about 8%;
+  - the fold, about 4%.
+
+**Levers and variants tried here:**
+- **dQ fusion**: dQ issued at the start or end of the step; smem + bulk-reduce writer warp vs register atomics;
+  non-deterministic vs ordered-semaphore vs lagged-release determinism; SPT dispatch. Analytic: a dQ warpgroup, int64
+  exact accumulation. **REJECTED.**
+- **Warp specialization**: a dQ writer warp, measured inside FQ. The 4th-warpgroup forms are register-infeasible and
+  were measured slower by p1fresh (FR66 / FR67).
+- **Tile shapes**: FA3 uses 64 x 128 for causal hdim 128, which is ours. Its non-causal 80-row tile breaks the 64-row
+  psi / 128-row q8s block contract. 128-row and 64-key variants were priced by p1redesign / p1fresh and fail.
+- **dV window promote**: PE (bitwise, neutral); PT16 / PT32 (dV numerics, a repeat of PW; rejected).
+- **psi / dS' / fold**: priced by the skeleton ledger. Their cheaper forms are covered by the earlier helpers'
+  measurements (WGPSI, DSNAT, RIP, DKACC), all rejected.
+
+**For whoever continues.**
+- The 30% between r19_fwd's pass 1 and the FA3-fp8 skeleton sits in four pieces of the numerics contract, not in the
+  schedule.
+- A 10% pass-1 gain needs one of two things:
+  - a contract change that removes a piece outright, for example psi per larger tile or no dS' hand-off. Such a change
+    would have to pass residual-v5 against the original kernel.
+  - a cheaper form of the dV window that keeps the dV error inside 1e-5 per case. The promote's cost is smem
+    bandwidth (128 KB per CTA per promote), so the form has to move fewer bytes, not just fewer instructions.
+- All switches (`KDA_FQ`, `KDA_FQX`, `KDA_FQPOS`, `KDA_SK`, `KDA_PE`, `KDA_PT`) default to the accepted kernel. FQ, SK
+  and PT builds are timing or numerics probes; do not gate them.

@@ -800,6 +800,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // rowcol view: (16 query rows, 2 keys) per thread.
             Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
             mask_fn(tSrS, m_block);
+#if KDA_PK_PROBE & 4
+            auto tSrS_probe = [&](int mi, int ni) { return scores(mi, ni); };
+            static_assert(decltype(size<1>(scores))::value == 2, "probe: two keys per row per thread");
+#else
             #pragma unroll
             for (int mi = 0; mi < size<0>(scores); ++mi) {
 #if KDA_PK_EXPB == 6
@@ -843,6 +847,25 @@ struct CollectiveMainloopBwdSm90Fp8R {
 #endif
                 }
             }
+#endif
+#if KDA_PK_PROBE & 4
+            // TIMING PROBE (packed exp line, pass 1 only: breaks the matched identity): per row, the two keys' fp32 arguments
+            // fma(s, dsc, -L) packed to f16x2, then +8 (HADD2), min 12 (HMNMX2), ex2.approx.f16x2, unpacked for the dS line.
+            #pragma unroll
+            for (int mi = 0; mi < size<0>(scores); ++mi) {
+                float const L = __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));
+                float const y0 = __fmaf_rn(tSrS_probe(mi, 0), fq8_s_descale_log2, -L);
+                float const y1 = __fmaf_rn(tSrS_probe(mi, 1), fq8_s_descale_log2, -L);
+                uint32_t h;
+                asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(h) : "f"(y1), "f"(y0));
+                asm("add.rn.f16x2 %0, %0, %1;" : "+r"(h) : "r"(0x48004800u));
+                asm("min.f16x2 %0, %0, %1;" : "+r"(h) : "r"(0x4A004A00u));
+                asm("ex2.approx.f16x2 %0, %0;" : "+r"(h));
+                float p0, p1;
+                asm("{.reg .f16 a, b; mov.b32 {a, b}, %2; cvt.f32.f16 %0, a; cvt.f32.f16 %1, b;}" : "=f"(p0), "=f"(p1) : "r"(h));
+                scores(mi, 0) = p0; scores(mi, 1) = p1;
+            }
+#endif
             // The stage's LSE rows were read by the loop above and the S gemm has retired: raw Q's readers are done.
             pipeline_q.consumer_release(smem_pipe_read);
             KP(6);

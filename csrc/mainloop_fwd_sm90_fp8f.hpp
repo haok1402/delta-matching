@@ -408,7 +408,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
     // K stage: the producer bulk-copies the 16-byte aligned windows k8s / v8s[4*(n/2) .. +4) (2 x 16 B) on the K barrier
     // and the consumers read the tile's pair from smem after the K wait.  Same values: bitwise; removes the per-tile
     // global scale-load latency from the softmax's critical path.
-    static constexpr bool kSmemSc = kHeadDim < 256 && kGroups == 2 && FA3FP11_HD128_PVFIRST;
+    static constexpr bool kSmemSc = kHeadDim < 256 && (kGroups == 2 || kGroups == 4) && FA3FP11_HD128_PVFIRST;   // ## kda-fwd: + the 256-key tile (4 scales, window k8s[4n .. +4))
     static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8) + (kSmemSc ? 32u : 0u);
     static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutVt{})) * cutlass::sizeof_bits_v<Element> / 8);
     static constexpr uint32_t TmaTransactionBytesQv = static_cast<uint32_t>(size(SmemLayoutQv{}) * cutlass::sizeof_bits_v<Element> / 8);
@@ -953,7 +953,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                 copy(params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                     tKgK_TMA(_, n_block_idx, bidb_kv_idx), tKsK_TMA(_, smem_pipe_write.index()));
                 if constexpr (kSmemSc) {
-                    int const sc_off = (bidb * get<2>(params.shape_K) + params.qhead_per_khead_divmod.divide(bidh)) * params.nblk_k + 4 * (n_block >> 1);
+                    int const sc_off = (bidb * get<2>(params.shape_K) + params.qhead_per_khead_divmod.divide(bidh)) * params.nblk_k + (kGroups == 4 ? 4 * n_block : 4 * (n_block >> 1));
                     float* sc_dst = shared_storage.tensors.mainloop.smem_kvsc.data() + 8 * smem_pipe_write.index();
                     cute::SM90_BULK_COPY_G2S::copy(params.ptr_k8s + sc_off, pipeline_k.producer_get_barrier(smem_pipe_write), sc_dst, 16);
                     cute::SM90_BULK_COPY_G2S::copy(params.ptr_v8s + sc_off, pipeline_k.producer_get_barrier(smem_pipe_write), sc_dst + 4, 16);
@@ -1382,11 +1382,17 @@ struct CollectiveMainloopFwdSm90Fp8F {
         // reproduces the M10 index arithmetic exactly.
         int const fq8_bh_k = (bidb * get<2>(params.shape_K) + bidh_kv) * params.nblk_k;
         float fq8_v[4] = {1.f, 1.f, 1.f, 1.f};
-        float fq8_ksc[2] = {1.f, 1.f}, fq8_vsc[2] = {1.f, 1.f};   // ## SMSC: the tile's scales, read from smem after the K wait
+        float fq8_ksc[4] = {1.f, 1.f, 1.f, 1.f}, fq8_vsc[4] = {1.f, 1.f, 1.f, 1.f};   // ## SMSC: the tile's scales, read from smem after the K wait
         auto fq8_read_sc = [&](int stage, int n_blk) {
             if constexpr (kSmemSc) {
+                if constexpr (kGroups == 4) {
+                    float const* sc = shared_storage.tensors.mainloop.smem_kvsc.data() + 8 * stage;
+                    #pragma unroll
+                    for (int g = 0; g < 4; ++g) { fq8_ksc[g] = sc[g]; fq8_vsc[g] = sc[4 + g]; }
+                } else {
                 float const* sc = shared_storage.tensors.mainloop.smem_kvsc.data() + 8 * stage + 2 * (n_blk & 1);
                 fq8_ksc[0] = sc[0]; fq8_ksc[1] = sc[1]; fq8_vsc[0] = sc[4]; fq8_vsc[1] = sc[5];
+                }
             }
         };
         auto fq8_descale = [&](auto& tSrS_, int n_blk) {
@@ -1408,10 +1414,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // ## kda-fwd: scales floored at FLT_MIN (bitwise for nonzero scales; a zero Q / K scale block would give
             // -inf * 0 = NaN for the masked scores, the inherited zero-input defect).
             float const g_[4] = {
-                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 0], 1.17549435e-38f),
-                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 1], 1.17549435e-38f),
-                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 2], 1.17549435e-38f),
-                fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + 4 * n_blk + 3], 1.17549435e-38f)};
+                fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[0] : params.ptr_k8s[fq8_bh_k + 4 * n_blk + 0]), 1.17549435e-38f),
+                fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[1] : params.ptr_k8s[fq8_bh_k + 4 * n_blk + 1]), 1.17549435e-38f),
+                fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[2] : params.ptr_k8s[fq8_bh_k + 4 * n_blk + 2]), 1.17549435e-38f),
+                fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[3] : params.ptr_k8s[fq8_bh_k + 4 * n_blk + 3]), 1.17549435e-38f)};
             #pragma unroll
             for (int mi = 0; mi < size<0>(sc_); ++mi) {
                 #pragma unroll
@@ -1434,10 +1440,12 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // floored at FLT_MIN: bitwise for every nonzero scale; an all-zero Q or K block (scale 0) would otherwise give
             // -inf * 0 = NaN for the masked scores (the inherited zero-input defect); with the floor, masked scores stay -inf
             // and the zero codes give the uniform softmax (O = 0 for zero V).
-            for (int g = 0; g < kGroups; ++g) { g_[g] = fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[g & 1] : params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g]), 1.17549435e-38f); }
+            for (int g = 0; g < kGroups; ++g) { g_[g] = fmaxf(fq8_q8sc * (kSmemSc ? fq8_ksc[g] : params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g]), 1.17549435e-38f); }
         };
         auto fq8_load_v = [&](int n_blk) {
-            if constexpr (kGroups == 4) {
+            if constexpr (kGroups == 4 && kSmemSc) {
+            fq8_v[0] = fq8_vsc[0]; fq8_v[1] = fq8_vsc[1]; fq8_v[2] = fq8_vsc[2]; fq8_v[3] = fq8_vsc[3];
+            } else if constexpr (kGroups == 4) {
             fq8_v[0] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 0];
             fq8_v[1] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 1];
             fq8_v[2] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 2];
@@ -1790,10 +1798,30 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     static_assert(!kPreTurn || kPreW);
                     typename Softmax::TensorT pre_r1_, pre_w_;   // ## S19 PREW2
                     pre_r1_(0) = fq8_pre_r1[0]; pre_r1_(1) = fq8_pre_r1[1]; pre_w_(0) = fq8_pre_w[0]; pre_w_(1) = fq8_pre_w[1];
+                    // ## kda-fwd PRETURN4 (bitwise): the 256-key tile's lazy rebase, three rho and promote weight before the turn.
+                    // Without FWDLAZY: no rebase, the weight is basis_last (the consumed tile's ms_[3] and running max are intact
+                    // until max_get_scale_grouped below), the same expression fq8_promote_last uses: bitwise either way.
+                    static constexpr bool kPreTurn4 = kGroups == 4 && kAtomsPerGroup == 2 && kPVNSplit == 1 && kHeadDim < 256;
+                    if constexpr (kPreTurn4) { fq8_lazy_rebase(cute::bool_constant<Check_inf>{}); }
+                    auto const p4r1_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 1); } else { return typename Softmax::TensorT{}; } }();
+                    auto const p4r2_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 2); } else { return typename Softmax::TensorT{}; } }();
+                    auto const p4r3_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 3); } else { return typename Softmax::TensorT{}; } }();
+                    auto const p4w_ = [&] { if constexpr (kPreTurn4) { if constexpr (kFwdLazy) { return softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1]); } else { return softmax.basis_last(fq8_v[kGroups - 1]); } } else { return typename Softmax::TensorT{}; } }();
                     if constexpr (UseSchedulerBarrier) { cutlass::arch::NamedBarrier::sync(2 * cutlass::NumThreadsPerWarpGroup, fq8_bar_sync_id); }   // ## S19 WGID
                     KF(2);
                     auto tOrD = make_tOrD();
-                    if constexpr (kPreTurn) {
+                    if constexpr (kPreTurn4) {
+                        auto B_ = pv_B_slab(cute::Int<0>{}, tOrV(_, _, _, smem_pipe_read_v.index()));
+                        fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, tOrD);
+                        softmax.rescale_o(tOrD, p4r1_);
+                        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 2, 4>(tiled_mma_pv, tOrP, B_, tOrD);
+                        softmax.rescale_o(tOrD, p4r2_);
+                        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 4, 6>(tiled_mma_pv, tOrP, B_, tOrD);
+                        softmax.rescale_o(tOrD, p4r3_);
+                        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 6, 8>(tiled_mma_pv, tOrP, B_, tOrD);
+                        auto O0_ = pv_O_slab(cute::Int<0>{});
+                        softmax.promote_o(O0_, tOrD, p4w_);
+                    } else if constexpr (kPreTurn) {
                         auto B_ = pv_B_slab(cute::Int<0>{}, tOrV(_, _, _, smem_pipe_read_v.index()));
                         fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, tOrD);
                         softmax.rescale_o(tOrD, pre_r1_);

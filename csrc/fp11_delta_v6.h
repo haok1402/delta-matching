@@ -30,7 +30,7 @@
 #endif
 #define KDA_F1(x) (KDA_NOCLAMP == 1 ? (x) : fminf((x), 12.0f))
 #ifndef KDA_PK_EXPB
-#define KDA_PK_EXPB 6
+#define KDA_PK_EXPB 0   // EXPBX64 reverted (decision 8ec1517)
 #endif
 #if KDA_PK_EXPB >= 3 && KDA_PK_EXPB <= 5
 #error "KDA_PK_EXPB 3 / 4 / 5 were built on the pre-P0NML pass 0 (branch kda-sm90-p1packed-r1) and are superseded by 6"

@@ -78,6 +78,19 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #endif
 // TIMING PROBES ONLY (wrong outputs, never shipped): bit 0 = no dV window rescale, bit 1 = no psi multiply before the
 // dS' e4m3 conversion.  They bound what removing one instruction per element in those phases can save.
+// ## kda-p1fresh KDA_FR (TIMING-ONLY decomposition probes, wrong outputs; default 0 = the accepted kernel):
+//   1  DKOUT : no dK gemm / fold in the compute WGs; the dS' A-layout codes go to an smem hand-off tile (2 STS.128)
+//   2  DVOUT : no dV gemm / rescale / promote; the P codes go to an smem hand-off tile (2 STS.128)
+//   4  NOCVDS: no psi multiply and no e4m3 conversion for dS' (raw fp32 bits feed the A operand / transpose)
+//   8  NOCVP : no e4m3 conversion for P (raw fp32 bits feed the dV A operand)
+//   16 WGPSI : each WG takes its own psi (WG-local barrier, the 64-key-CTA decoupling bound)
+//   32 NOFOLD: no dK fold (the dK gemm stays)
+//   64 PHANTOM (with 3): a fourth warpgroup (the gemm role) takes the hand-off codes through double-buffered smem tiles
+//      (mbarriers fullP / fullD / empty) and issues the dV / dK wgmmas for all 128 keys, the dV rescale / promote and the
+//      dK fold (128 FFMA per thread per step); compute WGs 120 registers, gemm WG 248.  Timing prototype of the role split.
+#ifndef KDA_FR
+#define KDA_FR 0
+#endif
 #ifndef KDA_PK_PROBE
 #define KDA_PK_PROBE 0
 #endif
@@ -173,7 +186,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
     static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp;
     // FA3's bwd split for two MMA warpgroups: the producer warpgroup only issues TMA.
     static constexpr uint32_t LoadRegisterRequirement = 24;
+#ifdef KDA_FR_MMAREG   // kda-p1fresh: register-demand probe (compile only)
+    static constexpr uint32_t MmaRegisterRequirement = KDA_FR_MMAREG;
+#else
     static constexpr uint32_t MmaRegisterRequirement = 240;
+#endif
 
     using SeqlenInfo_t = flash::SeqlenInfoQK<Varlen, kBlockM>;
     using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, Is_causal, Is_local>;
@@ -303,6 +320,12 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_lse;
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_dpsum;
         cute::array_aligned<ElementAccum, 16, 16> smem_psired;   // 8 warps x 2 tile parities
+#if KDA_FR & 64
+        cute::array_aligned<uint32_t, 2 * 2 * NumMmaThreads * 8, 128> smem_fr_ho;   // kda-p1fresh hand-off tiles [buf][P | dS'][thread][8 words]
+        cute::array_aligned<uint64_t, 6, 16> fr_bar;   // fullP[2], fullD[2], empty[2]
+#elif KDA_FR & 3
+        cute::array_aligned<uint32_t, 2 * NumMmaThreads * 8, 128> smem_fr_ho;   // kda-p1fresh hand-off tiles [P | dS'][thread][8 words]
+#endif
 #ifdef FA3FP11_DBG
         cute::array_aligned<ElementAccum, NumMmaWarpGroups * 4 * 2 * kBlockM, 16> smem_dbg_rows;   // [wg][warp][sum|abs][row]
 #endif
@@ -804,7 +827,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // S17 RESCALE-EARLY: the dV window rescale fills the S-retire bubble (the previous dV retired last step).
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
             float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
-            if (!(KDA_PK_PROBE & 1) && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
+            if (!(KDA_PK_PROBE & 1) && !(KDA_FR & 2) && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
             #pragma unroll
             for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) *= fq8_rf; }
             }
@@ -993,16 +1016,41 @@ struct CollectiveMainloopBwdSm90Fp8R {
             flash::permute_Cregs_fp8(tSrS);
             Tensor tdVrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmadKV>(tSrS.layout()));
             Tensor rP = make_tensor_like<Element>(tdVrP_acc);
+#if KDA_FR & 8
+            { Tensor rP32 = recast<uint32_t>(rP);
+              #pragma unroll
+              for (int j = 0; j < size(rP32); ++j) { rP32(j) = __float_as_uint(tdVrP_acc(4 * j)) ^ __float_as_uint(tdVrP_acc(4 * j + 3)); } }
+#else
             flash::convert_type_out(tdVrP_acc, rP);
+#endif
             // dV += P^T dO (RS): issued now, retired first (FIFO) after the dK gemm below.
             KT(23);
             consumer_wait(pipeline_dot, smem_pipe_read_dot);
             KT(24);
+#if KDA_FR & 2
+            {   // hand-off: this thread's 8 P-code words -> smem (a gemm warpgroup would read them)
+                Tensor rP32 = recast<uint32_t>(rP);
+#if KDA_FR & 64
+                int const fr_s = m_block - fq8_m_first;
+                uint64_t* const fr_bar = shared_storage.tensors.mainloop.fr_bar.data();
+                if (fr_s >= 2) { cutlass::arch::ClusterBarrier::wait(&fr_bar[4 + (fr_s & 1)], ((fr_s - 2) >> 1) & 1); }
+                uint32_t const a = cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_fr_ho.data() + (fr_s & 1) * (2 * NumMmaThreads * 8) + thread_idx * 8);
+#else
+                uint32_t const a = cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_fr_ho.data() + thread_idx * 8);
+#endif
+                asm volatile("st.shared.v4.u32 [%0], {%1, %2, %3, %4};\n" :: "r"(a), "r"(rP32(0)), "r"(rP32(1)), "r"(rP32(2)), "r"(rP32(3)));
+                asm volatile("st.shared.v4.u32 [%0], {%1, %2, %3, %4};\n" :: "r"(a + 16), "r"(rP32(4)), "r"(rP32(5)), "r"(rP32(6)), "r"(rP32(7)));
+#if KDA_FR & 64
+                cutlass::arch::ClusterBarrier::arrive(&fr_bar[fr_s & 1]);
+#endif
+            }
+#else
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, Int<0>{}), tdVrdV);
             } else {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, smem_pipe_read_dot.index()), tdVrdV);
             }
+#endif
             // psi = amax(|dS_tile|) / 448 across BOTH warpgroups (the tile is column-split per WG); parity-buffered slots.
             float fq8_amax = 0.f;
             #pragma unroll
@@ -1013,11 +1061,18 @@ struct CollectiveMainloopBwdSm90Fp8R {
             if (lane == 0) { fq8_psi_slots[thread_idx / cutlass::NumThreadsPerWarp] = fq8_amax; }
             KP(9);
             if (wg_thread == 0) { cute::tma_store_wait<0>(); }   // S17 DSDEFER-CTA: store(m - 2) drained (buffer m & 1)
+#if KDA_FR & 16
+            cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, wg_barrier_id);
+            if (wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[4 * warp_group_idx + w]); }
+#else
             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
             if (wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
             KP(10);
             #pragma unroll
             for (int w = 0; w < NumMmaThreads / cutlass::NumThreadsPerWarp; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[w]); }
+#endif
             bool const fq8_tile_zero = fq8_amax * (1.0f / 448.0f) < 1e-30f;
             float const fq8_psi_raw = fmaxf(fq8_amax * (1.0f / 448.0f), 1e-30f);
             float const fq8_psi = fmaxf(fq8_psi_raw, fq8_g_max * (256.0f * 1e-8f) / fq8_q8sc);
@@ -1027,11 +1082,17 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
             // dS' codes = e4m3(dS / psi) as the RS A operand of dK.
             #pragma unroll
-            for (int i = 0; i < size(tdPrdP); ++i) { if constexpr (!(KDA_PK_PROBE & 2)) { tdPrdP(i) *= fq8_psi_inv; } }
+            for (int i = 0; i < size(tdPrdP); ++i) { if constexpr (!(KDA_PK_PROBE & 2) && !(KDA_FR & 4)) { tdPrdP(i) *= fq8_psi_inv; } }
             flash::permute_Cregs_fp8(tdPrdP);
             Tensor tdKrdS_acc = make_tensor(tdPrdP.data(), flash::convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
             Tensor rdS = make_tensor_like<Element>(tdKrdS_acc);
+#if KDA_FR & 4
+            { Tensor rdS32 = recast<uint32_t>(rdS);
+              #pragma unroll
+              for (int j = 0; j < size(rdS32); ++j) { rdS32(j) = __float_as_uint(tdKrdS_acc(4 * j)) ^ __float_as_uint(tdKrdS_acc(4 * j + 3)) ^ __float_as_uint(fq8_psi_inv); } }
+#else
             flash::convert_type_out(tdKrdS_acc, rdS);
+#endif
             static_assert(decltype(size(rdS))::value == 32, "P1-R: 32 dS' codes per thread per tile");
             KP(11);
             // ## M25 (H1b): pre-pack the 8 natural dS' words from rdS NOW, before rdS becomes the in-flight A operand of the
@@ -1060,11 +1121,29 @@ struct CollectiveMainloopBwdSm90Fp8R {
             KT(25);
             consumer_wait(pipeline_qt, smem_pipe_read_qt);
             KT(26);
+#if KDA_FR & 1
+            {   // hand-off: this thread's 8 dS'-code words (A layout) -> smem (a dK warpgroup would read them)
+                Tensor rdS32 = recast<uint32_t>(rdS);
+#if KDA_FR & 64
+                int const fr_s = m_block - fq8_m_first;
+                uint64_t* const fr_bar = shared_storage.tensors.mainloop.fr_bar.data();
+                uint32_t const a = cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_fr_ho.data() + (fr_s & 1) * (2 * NumMmaThreads * 8) + (NumMmaThreads + thread_idx) * 8);
+#else
+                uint32_t const a = cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_fr_ho.data() + (NumMmaThreads + thread_idx) * 8);
+#endif
+                asm volatile("st.shared.v4.u32 [%0], {%1, %2, %3, %4};\n" :: "r"(a), "r"(rdS32(0)), "r"(rdS32(1)), "r"(rdS32(2)), "r"(rdS32(3)));
+                asm volatile("st.shared.v4.u32 [%0], {%1, %2, %3, %4};\n" :: "r"(a + 16), "r"(rdS32(4)), "r"(rdS32(5)), "r"(rdS32(6)), "r"(rdS32(7)));
+#if KDA_FR & 64
+                cutlass::arch::ClusterBarrier::arrive(&fr_bar[2 + (fr_s & 1)]);
+#endif
+            }
+#else
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, Int<kSt>{}), fq8_tmpK);
             } else {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK);
             }
+#endif
             KP(15);
             // ## M25 (H1b): dS' natural (rows x keys) for pass 2, the ONE transpose, from the pre-packed words while the dV
             // and dK gemms are outstanding (sdS is not an operand of either: they read the dOt / Qt stages).  The key pair
@@ -1105,10 +1184,12 @@ struct CollectiveMainloopBwdSm90Fp8R {
             ++smem_pipe_read;
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
             // plan-A dK fold: one fp32 FMA per element per tile in the tile's own g basis.
+            if constexpr (!(KDA_FR & 33)) {
             #pragma unroll
             for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) = fmaf(fq8_tmpK(i), fq8_g_fold, tdKrdK(i)); }
+            }
             // dV window boundary (geometry-fixed): promote in TRUE units into the overlay, re-zero the window.
-            if ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1) {
+            if (!(KDA_FR & 2) && (m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1) {
                 #pragma unroll
                 for (int i = 0; i < size(tdVrdV); ++i) {
                     float* const slot = fq8_smem_dv + i * NumMmaThreads;
@@ -1151,6 +1232,92 @@ struct CollectiveMainloopBwdSm90Fp8R {
         ++work_idx;
         return true;
     }
+
+#if KDA_FR & 64
+    // ## kda-p1fresh PHANTOM: the gemm warpgroup of the role-split prototype (timing only; results are discarded).
+    template <typename SharedStorage>
+    CUTLASS_DEVICE void
+    mma_phantom(Params const& params, int t /*0..127*/, cute::tuple<int32_t, int32_t, int32_t> block_coord, SharedStorage& shared_storage) {
+        static_assert((KDA_FR & 3) == 3, "PHANTOM needs DKOUT + DVOUT");
+        int const n_block = get<0>(block_coord);
+        int const bidb = get<2>(block_coord);
+        SeqlenInfo_t seqlen_info{bidb, get<0>(params.shape_Q), size<0>(params.shape_K),
+                                 params.cu_seqlens_q, params.cu_seqlens_k, params.seqused_q, params.seqused_k};
+        auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(
+            seqlen_info, n_block, bidb, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/);
+        if constexpr (Is_causal) { if (m_block_max <= m_block_min) { return; } }
+        Tensor sQt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_qt.data()), SmemLayoutQt{});
+        Tensor sdOt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dot.data()), SmemLayoutdOt{});
+        TiledMmaSdP tiled_mma_SdP;
+        TiledMmadKV tiled_mma_dKV;
+        Layout warp_group_thread_layout = make_layout(make_shape(Int<NumMmaWarpGroups>{}), make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
+        auto wg_mma_dKV = tiled_mma_dKV.get_slice(warp_group_thread_layout(0));
+        Tensor tdVrdOt = wg_mma_dKV.partition_fragment_B(sdOt);
+        Tensor tdKrQt = wg_mma_dKV.partition_fragment_B(sQt);
+        auto aregs_layout = flash::convert_layout_acc_Aregs<TiledMmadKV>(
+            partition_fragment_C(tiled_mma_SdP, select<1, 0>(TileShape_MNK{})).layout());
+        Tensor rA0 = make_tensor<Element>(aregs_layout);
+        Tensor rA1 = make_tensor<Element>(aregs_layout);
+        Tensor accV = partition_fragment_C(tiled_mma_dKV, select<1, 2>(TileShape_MNK{}));
+        Tensor accK = partition_fragment_C(tiled_mma_dKV, select<1, 2>(TileShape_MNK{}));
+        Tensor dKp = make_fragment_like(accK);
+        clear(accV); clear(dKp);
+        uint64_t* const fr_bar = shared_storage.tensors.mainloop.fr_bar.data();
+        uint32_t const ho = cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_fr_ho.data());
+        float* const sdv = shared_storage.tensors.mainloop.smem_dvacc.data() + t;
+        auto lds8 = [&](auto& rA, uint32_t a) {
+            Tensor r32 = recast<uint32_t>(rA);
+            asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];\n" : "=r"(r32(0)), "=r"(r32(1)), "=r"(r32(2)), "=r"(r32(3)) : "r"(a));
+            asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];\n" : "=r"(r32(4)), "=r"(r32(5)), "=r"(r32(6)), "=r"(r32(7)) : "r"(a + 16));
+        };
+        float g = 1.0f;
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (int m_block = m_block_min; m_block < m_block_max; ++m_block) {
+            int const s = m_block - m_block_min;
+            int const b = s & 1;
+            int const st_dot = s % kStages_dOt;
+            int const st_qt = s % kStages_qt;
+            uint32_t const hb = ho + b * (2 * NumMmaThreads * 8 * 4);
+            if ((m_block & 1) == 0) {   // dV window rescale (the do8s block changes every 2 m-blocks), both key halves
+                #pragma unroll
+                for (int i = 0; i < size(accV); ++i) { accV(i) *= 1.0001f; }
+                #pragma unroll
+                for (int i = 0; i < size(accV); ++i) { accV(i) *= 0.9999f; }
+            }
+            cutlass::arch::ClusterBarrier::wait(&fr_bar[b], (s >> 1) & 1);
+            lds8(rA0, hb + (0 * 128 + t) * 32);
+            lds8(rA1, hb + (1 * 128 + t) * 32);
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rA0, tdVrdOt(_, _, _, st_dot), accV);
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rA1, tdVrdOt(_, _, _, st_dot), accV);
+            cutlass::arch::ClusterBarrier::wait(&fr_bar[2 + b], (s >> 1) & 1);
+            lds8(rA0, hb + (NumMmaThreads + 0 * 128 + t) * 32);
+            lds8(rA1, hb + (NumMmaThreads + 1 * 128 + t) * 32);
+            g = g * 1.0000001f;
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rA0, tdKrQt(_, _, _, st_qt), accK);
+            warpgroup_wait<0>();
+            #pragma unroll
+            for (int i = 0; i < size(dKp); ++i) { dKp(i) = fmaf(accK(i), g, dKp(i)); }
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rA1, tdKrQt(_, _, _, st_qt), accK);
+            cutlass::arch::ClusterBarrier::arrive(&fr_bar[4 + b]);   // both halves' codes are in registers / consumed
+            warpgroup_wait<0>();
+            #pragma unroll
+            for (int i = 0; i < size(dKp); ++i) { dKp(i) = fmaf(accK(i), g, dKp(i)); }
+            if ((m_block & 7) == 7 || m_block == m_block_max - 1) {   // dV promote of both key halves (128 values per thread)
+                #pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    #pragma unroll
+                    for (int i = 0; i < size(accV); ++i) { float* const slot = sdv + (i * 2 + h) * 128; *slot = fmaf(accV(i), g, *slot); }
+                }
+                #pragma unroll
+                for (int i = 0; i < size(accV); ++i) { accV(i) = 0.0f; }
+            }
+        }
+        float cs = 0.f;
+        #pragma unroll
+        for (int i = 0; i < size(dKp); ++i) { cs += dKp(i) + accV(i); }
+        if (__float_as_uint(cs) == 0x7fc00001u) { params.ptr_psi[0] = cs; }   // keeps the fold alive; never true in practice
+    }
+#endif
 };
 
 }  // namespace flash

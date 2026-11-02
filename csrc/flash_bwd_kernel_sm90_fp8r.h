@@ -59,13 +59,26 @@ public:
 
     static constexpr uint32_t NumLoadWarpGroups = 1;
     static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaSdP{})) / cutlass::NumThreadsPerWarpGroup;
+#if KDA_FR & 64
+    static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaSdP{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup) + cutlass::NumThreadsPerWarpGroup;
+#else
     static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaSdP{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
+#endif
     static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
     static_assert(NumMmaWarpGroups == 2);
 
     static constexpr uint32_t LoadRegisterRequirement = CollectiveMainloop::LoadRegisterRequirement;
     static constexpr uint32_t MmaRegisterRequirement = CollectiveMainloop::MmaRegisterRequirement;
 
+#if KDA_FR & 64
+#ifndef KDA_FR_CREG
+#define KDA_FR_CREG 120
+#endif
+#ifndef KDA_FR_PREG
+#define KDA_FR_PREG 248
+#endif
+    static_assert(LoadRegisterRequirement + 2 * KDA_FR_CREG + KDA_FR_PREG <= 512, "PHANTOM: register file");
+#endif
     struct TensorStorageFull : cute::aligned_struct<128> {
         union {
             typename CollectiveMainloop::TensorStorage mainloop;
@@ -136,6 +149,14 @@ public:
         pipeline_params.is_leader = warp_group_thread_idx == 0;
         pipeline_params.num_consumers = NumMmaThreads;
         if (warp_idx == 0 && lane_predicate) { shared_storage.pipelines.barrier_KV.init(1 /*numThreads*/); }
+#if KDA_FR & 64
+        if (warp_idx == 0 && lane_predicate) {
+            uint64_t* const fr_bar = shared_storage.tensors.mainloop.fr_bar.data();
+            for (int b = 0; b < 4; ++b) { cutlass::arch::ClusterBarrier::init(&fr_bar[b], NumMmaThreads); }
+            for (int b = 4; b < 6; ++b) { cutlass::arch::ClusterBarrier::init(&fr_bar[b], cutlass::NumThreadsPerWarpGroup); }
+            cutlass::arch::fence_barrier_init();
+        }
+#endif
         MainloopPipeline pipeline_q(shared_storage.pipelines.pipeline_q, pipeline_params, ClusterShape{});
         auto role_dO = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
         // The dO pipeline carries raw dO + dPsum. Its transaction count tracked Q's while both were e4m3;
@@ -183,8 +204,21 @@ public:
                 mainloop.load_tail_gt(pipeline_q, pipeline_do, pipeline_qt, pipeline_dot,
                                       smem_pipe_write, smem_pipe_write_do, smem_pipe_write_qt, smem_pipe_write_dot);
             }
+#if KDA_FR & 64
+        } else if (warp_group_idx == 3) {   // kda-p1fresh PHANTOM gemm warpgroup
+            cutlass::arch::warpgroup_reg_alloc<KDA_FR_PREG>();
+            auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+            if (work_tile_info.is_valid(params.scheduler)) {
+                auto [n_block, bidh, bidb, _ /*split_idx*/] = work_tile_info.get_block_coord(params.scheduler);
+                mainloop.mma_phantom(params.mainloop, warp_group_thread_idx, cute::tuple<int32_t, int32_t, int32_t>{n_block, bidh, bidb}, shared_storage);
+            }
+#endif
         } else {  // Consumer
+#if KDA_FR & 64
+            cutlass::arch::warpgroup_reg_dealloc<KDA_FR_CREG>();
+#else
             cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
+#endif
             TiledMmadKV tiled_mma_dKV;
             PipelineState smem_pipe_read;
             PipelineState_dO smem_pipe_read_do;

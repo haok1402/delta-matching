@@ -59,6 +59,9 @@ FLAGS = {
     "FA3FP11_HD128_FWDDFOLD": 1,   # kda-fwd: forward S-descale fold (named numerics change; O and LSE)
 }
 EXTRA_DEFINES = ["-DFA3FP11_M16_P0V2_ATOMN=64", "-DFA3FP11_HD128_P0V6=1", "-DFA3FP11_P1R_MASKDIAG=1", "-DFA3FP11_P1R_RFSKIP=1"]
+# DM_XDEFS (development only, never in a release build): extra -D defines for what-if / screen variants; stamped into the
+# build info.
+XDEFS = os.environ.get("DM_XDEFS", "").split()
 
 
 def defines():
@@ -78,6 +81,7 @@ def defines():
         d.append("-DKDA_TRACE=1")
     d += [f"-D{k}={v}" for k, v in FLAGS.items()]
     d += EXTRA_DEFINES
+    d += XDEFS
     return d
 
 
@@ -172,7 +176,7 @@ def csrc_sha():
 def write_build_info():
     """Stamp this build into the package (read by delta_matching.kernel_version()); rewritten by every build."""
     info = {"code_sha": csrc_sha(), "dbg": DBG, "bf16_dp": BF16_DP, "prof": PROF, "trace": TRACE, "lineinfo": LINEINFO, "flags": FLAGS,
-            "extra_defines": EXTRA_DEFINES}
+            "extra_defines": EXTRA_DEFINES + XDEFS}
     with open(os.path.join(PACKAGE_DIR, "_build_info.py"), "w") as f:
         f.write("# written by the build (setup.py / delta_matching.jit); not hand-edited\n")
         f.write(f"BUILD_INFO = {info!r}\n")

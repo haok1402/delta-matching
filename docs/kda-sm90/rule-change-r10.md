@@ -234,3 +234,8 @@ exhausted levers report DONE; pass-0 work stops (it meets the target).
 3. Held stacks are combined across helpers (forward PRETURN + k/v-scale staging with any further forward piece;
    pass-1 SHFL8 with the new pass-1 work) and gated when a combination clears 3% in two jobs.
 4. results/REPORT.md is written now as an interim report and updated after every accepted round.
+- Decided (round 18), changes that touch two kernels: a single change that alters two kernels (e.g. kda-pass1 C4:
+  SHFL8 + the exp clamp kept only on pass 0's masked-tile predicate, affecting pass 0 and pass 1) is gated with the
+  kernel that clears 3% as the --target; the other touched kernel must not be slower beyond spread and the e2e fwd+bwd
+  must improve. A clamp change that is bitwise on all 72 x 4 certification cases is still recorded as a named numerics
+  change (outputs may differ only where the clamp would have bound); the bitwise full gate certifies it.

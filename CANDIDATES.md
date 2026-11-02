@@ -187,3 +187,18 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - A/B vs r17_p1: fwd geo-mean -5.82% (job 21177596), -5.88% (21177597); no shape slower beyond spread.
 - C3f (3565487) vs r17_p1: -12.81% (21177598); the fold carries ~7 points on top of C3n.
 - Strict v4 rows: 23 up / 14 down (C3f 70 / 180); beyond the +-1 ulp LSE envelope: 0 (C3f 1, excess 2.5e-7).
+
+### C3g (kda-sm90-fwd-c3g b0db717 on 9be3622) : READY (timing and my residual-v4 + LSE-envelope reproduction)
+
+- C3f + C3n2's zero-scale floor, with FWDDFOLD applied on UNMASKED steps only (the first tile and masked / diagonal
+  steps keep the exact descale). Reason: the one row that kept C3f out (d128_mqa group 0, row 4098) has 3 visible keys;
+  its softmax lives in the diagonal tile and the fold moved its 3-term sum (LSE +-1 ulp controls and C3n leave it
+  bitwise). Short causal rows live in masked tiles, so they keep the accepted p / LSE.
+- Numerics reproduction (kda-sm90's checker 9be3622-era numerics.py on its ngate_nfwd3_1 captures, `runs/nv4g`):
+  0 rows beyond the LSE envelope (strict v4: 41, all scale3 / scale10 / outliers); no mean-error failures; zero-input
+  O finite (repaired defect).
+- A/B vs r17_p1: fwd geo-mean **-12.66%** (job 21178095), **-13.09%** (21178096); no shape slower beyond spread.
+- C3n2 (f96a26b, C3n + the non-fold scale floor): -9.02% in one job (21178008); C3n measured -5.8% twice with identical
+  code apart from the floor, so treat as unconfirmed.
+- An edit error in the first C3g build (prologue descale commented out; O garbage, job 21178005) was caught by the
+  numerics run and fixed before any timing was used.

@@ -238,3 +238,31 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - C4b = C4 + KTOK: -0.58% (21178996), -0.75% (21178997): rejected.
 - Reference after C3g (job 21178656): FA3 fp8 is 13.9% faster (geo-mean; 11.4% by sum) than r17_fwd on the four shapes
   (r17_fwd ~1.16 x FA3 geo-mean).
+
+## Forward floor: evidence and a proposed corrected floor (Hao: "show the evidence and propose a corrected floor")
+
+- The calibrated sol4 forward floor is the TENSOR floor (tile-granular fp8 FLOPs at the cuBLASLt-measured 1386 TFLOPS).
+  The accepted forward (r17_fwd = C3g) is at 59.0% of it and at 1.163 x FA3 fp8 (kda-sm90, 822b827). FA3's own fp8
+  forward, with strictly less work on the same shapes and hardware, is therefore at 59.0 x 1.163 = **68.6% of the same
+  floor**: the floor assumes the QK / PV gemms run back to back at GEMM efficiency, which no attention forward with a
+  dependent softmax between its two gemms reaches here.
+- Work the method needs that the floor does not count (measured): the issue floor of the faithful forward is 81% of
+  the tensor floor (sol4 counts), versus ~55% for FA3; per 256 keys the faithful P basis adds ~2 ops / score (rho +
+  promote) plus the descale / group bookkeeping; kda-fwdport measures exactly this work at +24% over FA3 without scale
+  loads (+30% with), and its FA3 replica runs within -3% of FA3, so the harness and building blocks are not the gap.
+- Proposed corrected floor: floor_fwd = max(sol4 tensor floor, measured FA3 fp8 forward time on the same shapes)
+  (the audit's "FA3 fp8 forward is the practical reference"). Under it the accepted forward is at 1 / 1.163 = 86% of
+  the floor; the 90% goal means <= 1.111 x FA3, i.e. ~4.5% more (C4 gives 1.1%; k / v scale staging by kda-fwdport is
+  the measured next ~3-7%).
+
+## Final status (kda-fwd, after round 3)
+
+- Accepted: C3g (c1ceece): forward -12.89% / -12.68%, residual-v4 pass on four routes. Before it: C1 (folded into C3g).
+- Held for stacking: C4 PRETURN (b7d70a0, bitwise, -1.10% / -1.12%).
+- Every lever of the brief has at least two designed variants measured (ledger S1-S51): rho rescale (PVIL, GRPFOLD,
+  SPLIT2, IL2, RHOPRE, BN64 / no rho, PRETURN), S descale (DFOLD, fold-on-unmasked, ablation), per-group basis work
+  (NOMAX / NOEXP ablations, POLY exp2, BN64), FA3 overlap schemes (BN128 FA3 order, OVL3 / OVL3B, QKSPLIT, QKPRE, QKH,
+  OSMEM, OVL1), ping-pong (NOSCHED, ARVEARLY, TT2 / TT3, QKRING, KWEARLY, KTOK), tiles / warpgroups (BN128, BM192,
+  BN64, stages 2 / 3 / 4), layout (VCOL), scale loads (VPF; KSPF and smem staging owned by kda-sm90 / kda-fwdport).
+- Open: k / v scale staging through smem (kda-fwdport) to stack with C4 toward 3%; FA3 parity needs ~14% more and,
+  by the measurements above, latency hiding beyond FA3's own under this numerics contract.

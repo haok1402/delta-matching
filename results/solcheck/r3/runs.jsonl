@@ -1,0 +1,613 @@
+{"mark": "syn_fwd_dep", "t": 1793620699.517741839}
+{"kernel": "syn_fwd_dep", "rep": 0, "steps": 1096, "launches": 20, "sms": 132, "ms": 38.452641, "cyc_per_launch": 3276487.9, "cyc_max": 3394589, "ns_last": 1830499.9, "mhz_last": 1789.9}
+{"kernel": "syn_fwd_dep", "rep": 1, "steps": 1096, "launches": 20, "sms": 132, "ms": 38.395489, "cyc_per_launch": 3276518.1, "cyc_max": 3367979, "ns_last": 1813261.1, "mhz_last": 1807.0}
+{"kernel": "syn_fwd_dep", "rep": 2, "steps": 1096, "launches": 20, "sms": 132, "ms": 39.224510, "cyc_per_launch": 3276477.2, "cyc_max": 3387908, "ns_last": 1873174.1, "mhz_last": 1749.2}
+{"kernel": "syn_fwd_dep", "rep": 3, "steps": 1096, "launches": 20, "sms": 132, "ms": 39.251938, "cyc_per_launch": 3275909.4, "cyc_max": 3343244, "ns_last": 1870790.3, "mhz_last": 1751.1}
+{"kernel": "syn_fwd_dep", "rep": 4, "steps": 1096, "launches": 20, "sms": 132, "ms": 39.342560, "cyc_per_launch": 3277027.5, "cyc_max": 3421125, "ns_last": 1873115.9, "mhz_last": 1749.5}
+{"mark": "syn_fwd_free", "t": 1793620700.721096362}
+{"kernel": "syn_fwd_free", "rep": 0, "steps": 1150, "launches": 20, "sms": 132, "ms": 38.052383, "cyc_per_launch": 3359148.4, "cyc_max": 3370154, "ns_last": 1871309.8, "mhz_last": 1795.1}
+{"kernel": "syn_fwd_free", "rep": 1, "steps": 1150, "launches": 20, "sms": 132, "ms": 38.061790, "cyc_per_launch": 3359198.3, "cyc_max": 3375154, "ns_last": 1872249.9, "mhz_last": 1794.2}
+{"kernel": "syn_fwd_free", "rep": 2, "steps": 1150, "launches": 20, "sms": 132, "ms": 37.999359, "cyc_per_launch": 3359137.4, "cyc_max": 3370154, "ns_last": 1855673.7, "mhz_last": 1810.2}
+{"kernel": "syn_fwd_free", "rep": 3, "steps": 1150, "launches": 20, "sms": 132, "ms": 38.051422, "cyc_per_launch": 3359208.2, "cyc_max": 3375154, "ns_last": 1871917.3, "mhz_last": 1794.5}
+{"kernel": "syn_fwd_free", "rep": 4, "steps": 1150, "launches": 20, "sms": 132, "ms": 38.036510, "cyc_per_launch": 3359156.3, "cyc_max": 3370154, "ns_last": 1872081.0, "mhz_last": 1794.3}
+{"mark": "syn_pass1_dep", "t": 1793620701.782456927}
+{"kernel": "syn_pass1_dep", "rep": 0, "steps": 1475, "launches": 20, "sms": 132, "ms": 37.072895, "cyc_per_launch": 3273760.5, "cyc_max": 3284967, "ns_last": 1822441.7, "mhz_last": 1796.4}
+{"kernel": "syn_pass1_dep", "rep": 1, "steps": 1475, "launches": 20, "sms": 132, "ms": 37.014687, "cyc_per_launch": 3274218.5, "cyc_max": 3283969, "ns_last": 1822726.3, "mhz_last": 1796.3}
+{"kernel": "syn_pass1_dep", "rep": 2, "steps": 1475, "launches": 20, "sms": 132, "ms": 37.078400, "cyc_per_launch": 3274313.2, "cyc_max": 3283969, "ns_last": 1823120.7, "mhz_last": 1796.0}
+{"kernel": "syn_pass1_dep", "rep": 3, "steps": 1475, "launches": 20, "sms": 132, "ms": 37.071136, "cyc_per_launch": 3274060.4, "cyc_max": 3283969, "ns_last": 1823129.2, "mhz_last": 1795.8}
+{"kernel": "syn_pass1_dep", "rep": 4, "steps": 1475, "launches": 20, "sms": 132, "ms": 37.060062, "cyc_per_launch": 3273851.1, "cyc_max": 3283969, "ns_last": 1822783.3, "mhz_last": 1796.1}
+{"mark": "syn_pass1_free", "t": 1793620702.896610043}
+{"kernel": "syn_pass1_free", "rep": 0, "steps": 1382, "launches": 20, "sms": 132, "ms": 37.267937, "cyc_per_launch": 3290886.4, "cyc_max": 3293782, "ns_last": 1834206.5, "mhz_last": 1794.2}
+{"kernel": "syn_pass1_free", "rep": 1, "steps": 1382, "launches": 20, "sms": 132, "ms": 37.122082, "cyc_per_launch": 3290872.0, "cyc_max": 3293426, "ns_last": 1817110.5, "mhz_last": 1811.0}
+{"kernel": "syn_pass1_free", "rep": 2, "steps": 1382, "launches": 20, "sms": 132, "ms": 36.906178, "cyc_per_launch": 3290896.6, "cyc_max": 3293782, "ns_last": 1817030.3, "mhz_last": 1811.1}
+{"kernel": "syn_pass1_free", "rep": 3, "steps": 1382, "launches": 20, "sms": 132, "ms": 36.899361, "cyc_per_launch": 3290880.9, "cyc_max": 3293626, "ns_last": 1817209.0, "mhz_last": 1811.0}
+{"kernel": "syn_pass1_free", "rep": 4, "steps": 1382, "launches": 20, "sms": 132, "ms": 36.894817, "cyc_per_launch": 3290892.3, "cyc_max": 3293782, "ns_last": 1817060.6, "mhz_last": 1811.1}
+{"mark": "syn_pass0_dep", "t": 1793620705.216467795}
+{"kernel": "syn_pass0_dep", "rep": 0, "steps": 1790, "launches": 20, "sms": 132, "ms": 36.378048, "cyc_per_launch": 3210803.3, "cyc_max": 3215651, "ns_last": 1791950.8, "mhz_last": 1791.8}
+{"kernel": "syn_pass0_dep", "rep": 1, "steps": 1790, "launches": 20, "sms": 132, "ms": 37.443840, "cyc_per_launch": 3210881.8, "cyc_max": 3215651, "ns_last": 1894810.9, "mhz_last": 1694.6}
+{"kernel": "syn_pass0_dep", "rep": 2, "steps": 1790, "launches": 20, "sms": 132, "ms": 38.493343, "cyc_per_launch": 3210757.2, "cyc_max": 3215651, "ns_last": 1911937.7, "mhz_last": 1679.3}
+{"kernel": "syn_pass0_dep", "rep": 3, "steps": 1790, "launches": 20, "sms": 132, "ms": 38.753471, "cyc_per_launch": 3210694.3, "cyc_max": 3215651, "ns_last": 1912793.5, "mhz_last": 1678.5}
+{"kernel": "syn_pass0_dep", "rep": 4, "steps": 1790, "launches": 20, "sms": 132, "ms": 38.765663, "cyc_per_launch": 3210826.0, "cyc_max": 3215651, "ns_last": 1912927.3, "mhz_last": 1678.5}
+{"mark": "syn_pass0_free", "t": 1793620707.333338024}
+{"kernel": "syn_pass0_free", "rep": 0, "steps": 1858, "launches": 20, "sms": 132, "ms": 36.224064, "cyc_per_launch": 3183579.0, "cyc_max": 3184780, "ns_last": 1780439.3, "mhz_last": 1788.1}
+{"kernel": "syn_pass0_free", "rep": 1, "steps": 1858, "launches": 20, "sms": 132, "ms": 36.737022, "cyc_per_launch": 3183631.4, "cyc_max": 3184711, "ns_last": 1854701.3, "mhz_last": 1716.5}
+{"kernel": "syn_pass0_free", "rep": 2, "steps": 1858, "launches": 20, "sms": 132, "ms": 38.077984, "cyc_per_launch": 3183585.7, "cyc_max": 3184780, "ns_last": 1883498.2, "mhz_last": 1690.3}
+{"kernel": "syn_pass0_free", "rep": 3, "steps": 1858, "launches": 20, "sms": 132, "ms": 38.089054, "cyc_per_launch": 3183547.1, "cyc_max": 3184780, "ns_last": 1879529.5, "mhz_last": 1693.8}
+{"kernel": "syn_pass0_free", "rep": 4, "steps": 1858, "launches": 20, "sms": 132, "ms": 38.083775, "cyc_per_launch": 3183591.8, "cyc_max": 3184711, "ns_last": 1879522.7, "mhz_last": 1693.8}
+{"mark": "t_SS64_w1", "t": 1793620708.472314089}
+{"kernel": "t_SS64_w1", "rep": 0, "steps": 10773, "launches": 20, "sms": 132, "ms": 40.201153, "cyc_per_launch": 3426007.0, "cyc_max": 3426007, "ns_last": 2045121.0, "mhz_last": 1675.2}
+{"kernel": "t_SS64_w1", "rep": 1, "steps": 10773, "launches": 20, "sms": 132, "ms": 41.552383, "cyc_per_launch": 3426007.0, "cyc_max": 3426007, "ns_last": 2049155.9, "mhz_last": 1671.9}
+{"kernel": "t_SS64_w1", "rep": 2, "steps": 10773, "launches": 20, "sms": 132, "ms": 41.542591, "cyc_per_launch": 3426007.0, "cyc_max": 3426007, "ns_last": 2049114.9, "mhz_last": 1671.9}
+{"kernel": "t_SS64_w1", "rep": 3, "steps": 10773, "launches": 20, "sms": 132, "ms": 41.540577, "cyc_per_launch": 3426007.0, "cyc_max": 3426007, "ns_last": 2048942.3, "mhz_last": 1672.1}
+{"kernel": "t_SS64_w1", "rep": 4, "steps": 10773, "launches": 20, "sms": 132, "ms": 41.536449, "cyc_per_launch": 3426007.0, "cyc_max": 3426007, "ns_last": 2048909.8, "mhz_last": 1672.1}
+{"mark": "t_SS64_w1_dbl", "t": 1793620709.524204005}
+{"kernel": "t_SS64_w1_dbl", "rep": 0, "steps": 12851, "launches": 20, "sms": 132, "ms": 40.085567, "cyc_per_launch": 3290122.0, "cyc_max": 3290122, "ns_last": 2130041.2, "mhz_last": 1544.6}
+{"kernel": "t_SS64_w1_dbl", "rep": 1, "steps": 12851, "launches": 20, "sms": 132, "ms": 43.891842, "cyc_per_launch": 3290122.0, "cyc_max": 3290122, "ns_last": 2172105.7, "mhz_last": 1514.7}
+{"kernel": "t_SS64_w1_dbl", "rep": 2, "steps": 12851, "launches": 20, "sms": 132, "ms": 43.969761, "cyc_per_launch": 3290122.0, "cyc_max": 3290122, "ns_last": 2172133.6, "mhz_last": 1514.7}
+{"kernel": "t_SS64_w1_dbl", "rep": 3, "steps": 12851, "launches": 20, "sms": 132, "ms": 44.000706, "cyc_per_launch": 3290122.0, "cyc_max": 3290122, "ns_last": 2173905.5, "mhz_last": 1513.5}
+{"kernel": "t_SS64_w1_dbl", "rep": 4, "steps": 12851, "launches": 20, "sms": 132, "ms": 44.177090, "cyc_per_launch": 3290122.0, "cyc_max": 3290122, "ns_last": 2173926.3, "mhz_last": 1513.4}
+{"mark": "t_SS128_w1", "t": 1793620710.688636978}
+{"kernel": "t_SS128_w1", "rep": 0, "steps": 5678, "launches": 20, "sms": 132, "ms": 37.357121, "cyc_per_launch": 3259397.0, "cyc_max": 3259397, "ns_last": 1949951.5, "mhz_last": 1671.5}
+{"kernel": "t_SS128_w1", "rep": 1, "steps": 5678, "launches": 20, "sms": 132, "ms": 40.389088, "cyc_per_launch": 3259397.0, "cyc_max": 3259397, "ns_last": 2000291.9, "mhz_last": 1629.5}
+{"kernel": "t_SS128_w1", "rep": 2, "steps": 5678, "launches": 20, "sms": 132, "ms": 40.436577, "cyc_per_launch": 3259397.0, "cyc_max": 3259397, "ns_last": 2000241.5, "mhz_last": 1629.5}
+{"kernel": "t_SS128_w1", "rep": 3, "steps": 5678, "launches": 20, "sms": 132, "ms": 40.607487, "cyc_per_launch": 3259397.0, "cyc_max": 3259397, "ns_last": 2000300.8, "mhz_last": 1629.5}
+{"kernel": "t_SS128_w1", "rep": 4, "steps": 5678, "launches": 20, "sms": 132, "ms": 40.480671, "cyc_per_launch": 3259397.0, "cyc_max": 3259397, "ns_last": 1980177.9, "mhz_last": 1646.0}
+{"mark": "t_SS128_w1_dbl", "t": 1793620711.633129908}
+{"kernel": "t_SS128_w1_dbl", "rep": 0, "steps": 6228, "launches": 20, "sms": 132, "ms": 37.323425, "cyc_per_launch": 3189123.5, "cyc_max": 3189126, "ns_last": 1827521.9, "mhz_last": 1745.1}
+{"kernel": "t_SS128_w1_dbl", "rep": 1, "steps": 6228, "launches": 20, "sms": 132, "ms": 38.502209, "cyc_per_launch": 3189123.5, "cyc_max": 3189126, "ns_last": 2025010.7, "mhz_last": 1574.9}
+{"kernel": "t_SS128_w1_dbl", "rep": 2, "steps": 6228, "launches": 20, "sms": 132, "ms": 41.250786, "cyc_per_launch": 3189123.5, "cyc_max": 3189126, "ns_last": 2044509.8, "mhz_last": 1559.8}
+{"kernel": "t_SS128_w1_dbl", "rep": 3, "steps": 6228, "launches": 20, "sms": 132, "ms": 41.406017, "cyc_per_launch": 3189123.5, "cyc_max": 3189126, "ns_last": 2044956.1, "mhz_last": 1559.5}
+{"kernel": "t_SS128_w1_dbl", "rep": 4, "steps": 6228, "launches": 20, "sms": 132, "ms": 41.421600, "cyc_per_launch": 3189123.5, "cyc_max": 3189126, "ns_last": 2044947.4, "mhz_last": 1559.5}
+{"mark": "t_SS256_w1", "t": 1793620712.781385920}
+{"kernel": "t_SS256_w1", "rep": 0, "steps": 3124, "launches": 20, "sms": 132, "ms": 38.878273, "cyc_per_launch": 3393004.4, "cyc_max": 3393007, "ns_last": 2005625.0, "mhz_last": 1691.7}
+{"kernel": "t_SS256_w1", "rep": 1, "steps": 3124, "launches": 20, "sms": 132, "ms": 42.290337, "cyc_per_launch": 3393004.4, "cyc_max": 3393007, "ns_last": 2114604.6, "mhz_last": 1604.6}
+{"kernel": "t_SS256_w1", "rep": 2, "steps": 3124, "launches": 20, "sms": 132, "ms": 42.664993, "cyc_per_launch": 3393004.4, "cyc_max": 3393007, "ns_last": 2096166.8, "mhz_last": 1618.7}
+{"kernel": "t_SS256_w1", "rep": 3, "steps": 3124, "launches": 20, "sms": 132, "ms": 42.493855, "cyc_per_launch": 3393004.4, "cyc_max": 3393007, "ns_last": 2096144.0, "mhz_last": 1618.7}
+{"kernel": "t_SS256_w1", "rep": 4, "steps": 3124, "launches": 20, "sms": 132, "ms": 42.480576, "cyc_per_launch": 3393004.4, "cyc_max": 3393007, "ns_last": 2096075.4, "mhz_last": 1618.7}
+{"mark": "t_RS128_w1", "t": 1793620714.207017273}
+{"kernel": "t_RS128_w1", "rep": 0, "steps": 5382, "launches": 20, "sms": 132, "ms": 37.627071, "cyc_per_launch": 3347846.0, "cyc_max": 3347846, "ns_last": 1852449.5, "mhz_last": 1807.3}
+{"kernel": "t_RS128_w1", "rep": 1, "steps": 5382, "launches": 20, "sms": 132, "ms": 38.845825, "cyc_per_launch": 3347846.0, "cyc_max": 3347846, "ns_last": 1954041.2, "mhz_last": 1713.3}
+{"kernel": "t_RS128_w1", "rep": 2, "steps": 5382, "launches": 20, "sms": 132, "ms": 39.910686, "cyc_per_launch": 3347846.0, "cyc_max": 3347846, "ns_last": 1971347.6, "mhz_last": 1698.3}
+{"kernel": "t_RS128_w1", "rep": 3, "steps": 5382, "launches": 20, "sms": 132, "ms": 40.026302, "cyc_per_launch": 3347846.0, "cyc_max": 3347846, "ns_last": 1970888.2, "mhz_last": 1698.6}
+{"kernel": "t_RS128_w1", "rep": 4, "steps": 5382, "launches": 20, "sms": 132, "ms": 40.018848, "cyc_per_launch": 3347846.0, "cyc_max": 3347846, "ns_last": 1970667.4, "mhz_last": 1698.8}
+{"mark": "t_RS128_w1_dbl", "t": 1793620715.262114949}
+{"kernel": "t_RS128_w1_dbl", "rep": 0, "steps": 6336, "launches": 20, "sms": 132, "ms": 37.610462, "cyc_per_launch": 3244475.1, "cyc_max": 3244477, "ns_last": 1882686.8, "mhz_last": 1723.3}
+{"kernel": "t_RS128_w1_dbl", "rep": 1, "steps": 6336, "launches": 20, "sms": 132, "ms": 40.131359, "cyc_per_launch": 3244475.1, "cyc_max": 3244477, "ns_last": 1990598.8, "mhz_last": 1629.9}
+{"kernel": "t_RS128_w1_dbl", "rep": 2, "steps": 6336, "launches": 20, "sms": 132, "ms": 40.772350, "cyc_per_launch": 3244475.1, "cyc_max": 3244477, "ns_last": 2022035.9, "mhz_last": 1604.6}
+{"kernel": "t_RS128_w1_dbl", "rep": 3, "steps": 6336, "launches": 20, "sms": 132, "ms": 40.955585, "cyc_per_launch": 3244475.1, "cyc_max": 3244477, "ns_last": 2022049.7, "mhz_last": 1604.5}
+{"kernel": "t_RS128_w1_dbl", "rep": 4, "steps": 6336, "launches": 20, "sms": 132, "ms": 40.948639, "cyc_per_launch": 3244475.1, "cyc_max": 3244477, "ns_last": 2022058.2, "mhz_last": 1604.5}
+{"mark": "t_SS64_w2", "t": 1793620716.417251279}
+{"kernel": "t_SS64_w2", "rep": 0, "steps": 6186, "launches": 20, "sms": 132, "ms": 38.171425, "cyc_per_launch": 3167313.4, "cyc_max": 3167517, "ns_last": 2070444.8, "mhz_last": 1529.8}
+{"kernel": "t_SS64_w2", "rep": 1, "steps": 6186, "launches": 20, "sms": 132, "ms": 41.883232, "cyc_per_launch": 3167313.4, "cyc_max": 3167517, "ns_last": 2087835.4, "mhz_last": 1517.0}
+{"kernel": "t_SS64_w2", "rep": 2, "steps": 6186, "launches": 20, "sms": 132, "ms": 42.264191, "cyc_per_launch": 3167313.4, "cyc_max": 3167517, "ns_last": 2090869.1, "mhz_last": 1514.8}
+{"kernel": "t_SS64_w2", "rep": 3, "steps": 6186, "launches": 20, "sms": 132, "ms": 42.263199, "cyc_per_launch": 3167313.4, "cyc_max": 3167517, "ns_last": 2090873.9, "mhz_last": 1514.8}
+{"kernel": "t_SS64_w2", "rep": 4, "steps": 6186, "launches": 20, "sms": 132, "ms": 42.437439, "cyc_per_launch": 3167313.4, "cyc_max": 3167517, "ns_last": 2092694.8, "mhz_last": 1513.5}
+{"mark": "t_SS64_w2_dbl", "t": 1793620717.416416403}
+{"kernel": "t_SS64_w2_dbl", "rep": 0, "steps": 6226, "launches": 20, "sms": 132, "ms": 37.606911, "cyc_per_launch": 3188081.4, "cyc_max": 3188104, "ns_last": 1849452.4, "mhz_last": 1723.8}
+{"kernel": "t_SS64_w2_dbl", "rep": 1, "steps": 6226, "launches": 20, "sms": 132, "ms": 39.292000, "cyc_per_launch": 3188081.6, "cyc_max": 3188104, "ns_last": 2083861.6, "mhz_last": 1529.9}
+{"kernel": "t_SS64_w2_dbl", "rep": 2, "steps": 6226, "launches": 20, "sms": 132, "ms": 42.407330, "cyc_per_launch": 3188081.8, "cyc_max": 3188104, "ns_last": 2104552.7, "mhz_last": 1514.9}
+{"kernel": "t_SS64_w2_dbl", "rep": 3, "steps": 6226, "launches": 20, "sms": 132, "ms": 42.546658, "cyc_per_launch": 3188080.9, "cyc_max": 3188103, "ns_last": 2104959.5, "mhz_last": 1514.6}
+{"kernel": "t_SS64_w2_dbl", "rep": 4, "steps": 6226, "launches": 20, "sms": 132, "ms": 42.553696, "cyc_per_launch": 3188081.7, "cyc_max": 3188104, "ns_last": 2105028.8, "mhz_last": 1514.5}
+{"mark": "t_SS128_w2", "t": 1793620718.574290664}
+{"kernel": "t_SS128_w2", "rep": 0, "steps": 3246, "launches": 20, "sms": 132, "ms": 39.081856, "cyc_per_launch": 3324290.3, "cyc_max": 3324318, "ns_last": 1918246.8, "mhz_last": 1733.0}
+{"kernel": "t_SS128_w2", "rep": 1, "steps": 3246, "launches": 20, "sms": 132, "ms": 41.699905, "cyc_per_launch": 3324290.2, "cyc_max": 3324318, "ns_last": 2113942.3, "mhz_last": 1572.6}
+{"kernel": "t_SS128_w2", "rep": 2, "steps": 3246, "launches": 20, "sms": 132, "ms": 43.060543, "cyc_per_launch": 3324290.8, "cyc_max": 3324318, "ns_last": 2131193.0, "mhz_last": 1559.8}
+{"kernel": "t_SS128_w2", "rep": 3, "steps": 3246, "launches": 20, "sms": 132, "ms": 43.067295, "cyc_per_launch": 3324289.2, "cyc_max": 3324318, "ns_last": 2131518.8, "mhz_last": 1559.6}
+{"kernel": "t_SS128_w2", "rep": 4, "steps": 3246, "launches": 20, "sms": 132, "ms": 43.071873, "cyc_per_launch": 3324291.1, "cyc_max": 3324318, "ns_last": 2131496.7, "mhz_last": 1559.6}
+{"mark": "t_SS128_w2_dbl", "t": 1793620719.539356654}
+{"kernel": "t_SS128_w2_dbl", "rep": 0, "steps": 3268, "launches": 20, "sms": 132, "ms": 39.106464, "cyc_per_launch": 3347065.1, "cyc_max": 3347074, "ns_last": 1919441.0, "mhz_last": 1743.8}
+{"kernel": "t_SS128_w2_dbl", "rep": 1, "steps": 3268, "launches": 20, "sms": 132, "ms": 41.755936, "cyc_per_launch": 3347065.0, "cyc_max": 3347074, "ns_last": 2125646.5, "mhz_last": 1574.6}
+{"kernel": "t_SS128_w2_dbl", "rep": 2, "steps": 3268, "launches": 20, "sms": 132, "ms": 42.946175, "cyc_per_launch": 3347064.5, "cyc_max": 3347074, "ns_last": 2125344.7, "mhz_last": 1574.8}
+{"kernel": "t_SS128_w2_dbl", "rep": 3, "steps": 3268, "launches": 20, "sms": 132, "ms": 42.938946, "cyc_per_launch": 3347065.1, "cyc_max": 3347074, "ns_last": 2125358.5, "mhz_last": 1574.8}
+{"kernel": "t_SS128_w2_dbl", "rep": 4, "steps": 3268, "launches": 20, "sms": 132, "ms": 43.004929, "cyc_per_launch": 3347065.0, "cyc_max": 3347074, "ns_last": 2127227.2, "mhz_last": 1573.4}
+{"mark": "t_SS256_w2", "t": 1793620720.616008467}
+{"kernel": "t_SS256_w2", "rep": 0, "steps": 1564, "launches": 20, "sms": 132, "ms": 37.712353, "cyc_per_launch": 3203282.0, "cyc_max": 3203727, "ns_last": 1959490.4, "mhz_last": 1634.8}
+{"kernel": "t_SS256_w2", "rep": 1, "steps": 1564, "launches": 20, "sms": 132, "ms": 40.281311, "cyc_per_launch": 3203275.3, "cyc_max": 3203727, "ns_last": 2015098.9, "mhz_last": 1589.6}
+{"kernel": "t_SS256_w2", "rep": 2, "steps": 1564, "launches": 20, "sms": 132, "ms": 40.736801, "cyc_per_launch": 3203302.5, "cyc_max": 3203727, "ns_last": 2014918.8, "mhz_last": 1589.8}
+{"kernel": "t_SS256_w2", "rep": 3, "steps": 1564, "launches": 20, "sms": 132, "ms": 40.733410, "cyc_per_launch": 3203282.0, "cyc_max": 3203727, "ns_last": 2014904.5, "mhz_last": 1589.8}
+{"kernel": "t_SS256_w2", "rep": 4, "steps": 1564, "launches": 20, "sms": 132, "ms": 40.733665, "cyc_per_launch": 3203275.3, "cyc_max": 3203727, "ns_last": 2015124.6, "mhz_last": 1589.6}
+{"mark": "t_RS128_w2", "t": 1793620721.570659177}
+{"kernel": "t_RS128_w2", "rep": 0, "steps": 3343, "launches": 20, "sms": 132, "ms": 39.720863, "cyc_per_launch": 3423726.6, "cyc_max": 3423729, "ns_last": 1946120.7, "mhz_last": 1759.3}
+{"kernel": "t_RS128_w2", "rep": 1, "steps": 3343, "launches": 20, "sms": 132, "ms": 41.765442, "cyc_per_launch": 3423726.7, "cyc_max": 3423729, "ns_last": 2153433.5, "mhz_last": 1589.9}
+{"kernel": "t_RS128_w2", "rep": 2, "steps": 3343, "launches": 20, "sms": 132, "ms": 43.494656, "cyc_per_launch": 3423726.6, "cyc_max": 3423729, "ns_last": 2153473.9, "mhz_last": 1589.9}
+{"kernel": "t_RS128_w2", "rep": 3, "steps": 3343, "launches": 20, "sms": 132, "ms": 43.502304, "cyc_per_launch": 3423726.6, "cyc_max": 3423729, "ns_last": 2153743.0, "mhz_last": 1589.7}
+{"kernel": "t_RS128_w2", "rep": 4, "steps": 3343, "launches": 20, "sms": 132, "ms": 43.503105, "cyc_per_launch": 3423726.6, "cyc_max": 3423729, "ns_last": 2153729.2, "mhz_last": 1589.7}
+{"mark": "t_RS128_w2_dbl", "t": 1793620722.562763012}
+{"kernel": "t_RS128_w2_dbl", "rep": 0, "steps": 3343, "launches": 20, "sms": 132, "ms": 39.609249, "cyc_per_launch": 3423951.6, "cyc_max": 3423952, "ns_last": 2054909.1, "mhz_last": 1666.2}
+{"kernel": "t_RS128_w2_dbl", "rep": 1, "steps": 3343, "launches": 20, "sms": 132, "ms": 42.583103, "cyc_per_launch": 3423951.6, "cyc_max": 3423952, "ns_last": 2133637.8, "mhz_last": 1604.7}
+{"kernel": "t_RS128_w2_dbl", "rep": 2, "steps": 3343, "launches": 20, "sms": 132, "ms": 43.469090, "cyc_per_launch": 3423951.6, "cyc_max": 3423952, "ns_last": 2153736.5, "mhz_last": 1589.8}
+{"kernel": "t_RS128_w2_dbl", "rep": 3, "steps": 3343, "launches": 20, "sms": 132, "ms": 43.507233, "cyc_per_launch": 3423951.6, "cyc_max": 3423952, "ns_last": 2153876.4, "mhz_last": 1589.7}
+{"kernel": "t_RS128_w2_dbl", "rep": 4, "steps": 3343, "launches": 20, "sms": 132, "ms": 43.167648, "cyc_per_launch": 3423951.6, "cyc_max": 3423952, "ns_last": 2133772.8, "mhz_last": 1604.6}
+{"mark": "t_SS64_w3", "t": 1793620723.755928613}
+{"kernel": "t_SS64_w3", "rep": 0, "steps": 4239, "launches": 20, "sms": 132, "ms": 38.655041, "cyc_per_launch": 3255865.3, "cyc_max": 3255977, "ns_last": 1903576.7, "mhz_last": 1710.4}
+{"kernel": "t_SS64_w3", "rep": 1, "steps": 4239, "launches": 20, "sms": 132, "ms": 41.451454, "cyc_per_launch": 3255864.3, "cyc_max": 3255929, "ns_last": 2149354.2, "mhz_last": 1514.8}
+{"kernel": "t_SS64_w3", "rep": 2, "steps": 4239, "launches": 20, "sms": 132, "ms": 43.432350, "cyc_per_launch": 3255865.4, "cyc_max": 3255929, "ns_last": 2149445.3, "mhz_last": 1514.7}
+{"kernel": "t_SS64_w3", "rep": 3, "steps": 4239, "launches": 20, "sms": 132, "ms": 43.634880, "cyc_per_launch": 3255864.9, "cyc_max": 3255929, "ns_last": 2171176.7, "mhz_last": 1499.6}
+{"kernel": "t_SS64_w3", "rep": 4, "steps": 4239, "launches": 20, "sms": 132, "ms": 43.878178, "cyc_per_launch": 3255865.5, "cyc_max": 3255929, "ns_last": 2171188.8, "mhz_last": 1499.6}
+{"mark": "t_SS64_w3_dbl", "t": 1793620724.867384064}
+{"kernel": "t_SS64_w3_dbl", "rep": 0, "steps": 4258, "launches": 20, "sms": 132, "ms": 38.667393, "cyc_per_launch": 3270638.4, "cyc_max": 3270669, "ns_last": 1896418.2, "mhz_last": 1724.6}
+{"kernel": "t_SS64_w3_dbl", "rep": 1, "steps": 4258, "launches": 20, "sms": 132, "ms": 42.618847, "cyc_per_launch": 3270638.7, "cyc_max": 3270669, "ns_last": 2180575.0, "mhz_last": 1499.9}
+{"kernel": "t_SS64_w3_dbl", "rep": 2, "steps": 4258, "launches": 20, "sms": 132, "ms": 43.848415, "cyc_per_launch": 3270638.3, "cyc_max": 3270669, "ns_last": 2159011.4, "mhz_last": 1514.9}
+{"kernel": "t_SS64_w3_dbl", "rep": 3, "steps": 4258, "launches": 20, "sms": 132, "ms": 43.630432, "cyc_per_launch": 3270638.7, "cyc_max": 3270669, "ns_last": 2159443.2, "mhz_last": 1514.6}
+{"kernel": "t_SS64_w3_dbl", "rep": 4, "steps": 4258, "launches": 20, "sms": 132, "ms": 43.641342, "cyc_per_launch": 3270637.8, "cyc_max": 3270669, "ns_last": 2159487.5, "mhz_last": 1514.5}
+{"mark": "t_SS128_w3", "t": 1793620726.125794226}
+{"kernel": "t_SS128_w3", "rep": 0, "steps": 2028, "launches": 20, "sms": 132, "ms": 36.671360, "cyc_per_launch": 3115517.7, "cyc_max": 3115545, "ns_last": 1798283.4, "mhz_last": 1732.5}
+{"kernel": "t_SS128_w3", "rep": 1, "steps": 2028, "launches": 20, "sms": 132, "ms": 39.204128, "cyc_per_launch": 3115517.5, "cyc_max": 3115545, "ns_last": 1997415.8, "mhz_last": 1559.8}
+{"kernel": "t_SS128_w3", "rep": 2, "steps": 2028, "launches": 20, "sms": 132, "ms": 40.378624, "cyc_per_launch": 3115516.2, "cyc_max": 3115551, "ns_last": 1997417.2, "mhz_last": 1559.8}
+{"kernel": "t_SS128_w3", "rep": 3, "steps": 2028, "launches": 20, "sms": 132, "ms": 40.025024, "cyc_per_launch": 3115517.2, "cyc_max": 3115545, "ns_last": 1978438.8, "mhz_last": 1574.7}
+{"kernel": "t_SS128_w3", "rep": 4, "steps": 2028, "launches": 20, "sms": 132, "ms": 39.996609, "cyc_per_launch": 3115518.3, "cyc_max": 3115545, "ns_last": 1978441.9, "mhz_last": 1574.7}
+{"mark": "t_SS128_w3_dbl", "t": 1793620727.181530026}
+{"kernel": "t_SS128_w3_dbl", "rep": 0, "steps": 2024, "launches": 20, "sms": 132, "ms": 36.410881, "cyc_per_launch": 3109730.8, "cyc_max": 3109767, "ns_last": 1793907.2, "mhz_last": 1733.5}
+{"kernel": "t_SS128_w3_dbl", "rep": 1, "steps": 2024, "launches": 20, "sms": 132, "ms": 38.952065, "cyc_per_launch": 3109731.0, "cyc_max": 3109767, "ns_last": 1956097.9, "mhz_last": 1589.8}
+{"kernel": "t_SS128_w3_dbl", "rep": 2, "steps": 2024, "launches": 20, "sms": 132, "ms": 39.885216, "cyc_per_launch": 3109732.3, "cyc_max": 3109767, "ns_last": 1974846.3, "mhz_last": 1574.7}
+{"kernel": "t_SS128_w3_dbl", "rep": 3, "steps": 2024, "launches": 20, "sms": 132, "ms": 39.929665, "cyc_per_launch": 3109732.4, "cyc_max": 3109770, "ns_last": 1974844.4, "mhz_last": 1574.7}
+{"kernel": "t_SS128_w3_dbl", "rep": 4, "steps": 2024, "launches": 20, "sms": 132, "ms": 40.084160, "cyc_per_launch": 3109732.1, "cyc_max": 3109770, "ns_last": 1976316.8, "mhz_last": 1573.5}
+{"mark": "t_RS128_w3", "t": 1793620728.099290491}
+{"kernel": "t_RS128_w3", "rep": 0, "steps": 2245, "launches": 20, "sms": 132, "ms": 40.383007, "cyc_per_launch": 3449009.1, "cyc_max": 3449016, "ns_last": 2035551.3, "mhz_last": 1694.4}
+{"kernel": "t_RS128_w3", "rep": 1, "steps": 2245, "launches": 20, "sms": 132, "ms": 42.888031, "cyc_per_launch": 3449009.1, "cyc_max": 3449016, "ns_last": 2129578.4, "mhz_last": 1619.6}
+{"kernel": "t_RS128_w3", "rep": 2, "steps": 2245, "launches": 20, "sms": 132, "ms": 43.405762, "cyc_per_launch": 3449009.0, "cyc_max": 3449016, "ns_last": 2149395.6, "mhz_last": 1604.6}
+{"kernel": "t_RS128_w3", "rep": 3, "steps": 2245, "launches": 20, "sms": 132, "ms": 43.417088, "cyc_per_launch": 3449009.1, "cyc_max": 3449016, "ns_last": 2149396.4, "mhz_last": 1604.6}
+{"kernel": "t_RS128_w3", "rep": 4, "steps": 2245, "launches": 20, "sms": 132, "ms": 43.417599, "cyc_per_launch": 3449008.9, "cyc_max": 3449016, "ns_last": 2149407.8, "mhz_last": 1604.6}
+{"mark": "t_RS128_w3_dbl", "t": 1793620730.595528158}
+{"kernel": "t_RS128_w3_dbl", "rep": 0, "steps": 1997, "launches": 20, "sms": 132, "ms": 36.334686, "cyc_per_launch": 3138290.0, "cyc_max": 3154366, "ns_last": 1777684.1, "mhz_last": 1765.4}
+{"kernel": "t_RS128_w3_dbl", "rep": 1, "steps": 1997, "launches": 20, "sms": 132, "ms": 39.166943, "cyc_per_launch": 3135932.5, "cyc_max": 3154366, "ns_last": 1972542.3, "mhz_last": 1589.8}
+{"kernel": "t_RS128_w3_dbl", "rep": 2, "steps": 1997, "launches": 20, "sms": 132, "ms": 40.388607, "cyc_per_launch": 3137564.2, "cyc_max": 3154366, "ns_last": 1992483.4, "mhz_last": 1574.7}
+{"kernel": "t_RS128_w3_dbl", "rep": 3, "steps": 1997, "launches": 20, "sms": 132, "ms": 40.140865, "cyc_per_launch": 3135478.6, "cyc_max": 3154366, "ns_last": 1972451.2, "mhz_last": 1589.6}
+{"kernel": "t_RS128_w3_dbl", "rep": 4, "steps": 1997, "launches": 20, "sms": 132, "ms": 40.123234, "cyc_per_launch": 3137654.4, "cyc_max": 3154366, "ns_last": 1973797.1, "mhz_last": 1589.7}
+{"mark": "t_SS64_w4", "t": 1793620731.734261782}
+{"kernel": "t_SS64_w4", "rep": 0, "steps": 3213, "launches": 20, "sms": 132, "ms": 39.013920, "cyc_per_launch": 3290561.4, "cyc_max": 3290608, "ns_last": 1919734.8, "mhz_last": 1714.1}
+{"kernel": "t_SS64_w4", "rep": 1, "steps": 3213, "launches": 20, "sms": 132, "ms": 42.619743, "cyc_per_launch": 3290559.2, "cyc_max": 3290608, "ns_last": 2172190.1, "mhz_last": 1514.9}
+{"kernel": "t_SS64_w4", "rep": 2, "steps": 3213, "launches": 20, "sms": 132, "ms": 43.888256, "cyc_per_launch": 3290559.6, "cyc_max": 3290608, "ns_last": 2172219.6, "mhz_last": 1514.8}
+{"kernel": "t_SS64_w4", "rep": 3, "steps": 3213, "launches": 20, "sms": 132, "ms": 44.065632, "cyc_per_launch": 3290559.7, "cyc_max": 3290608, "ns_last": 2174136.2, "mhz_last": 1513.5}
+{"kernel": "t_SS64_w4", "rep": 4, "steps": 3213, "launches": 20, "sms": 132, "ms": 44.100033, "cyc_per_launch": 3290557.9, "cyc_max": 3290608, "ns_last": 2174098.7, "mhz_last": 1513.5}
+{"mark": "t_SS64_w4_dbl", "t": 1793620732.850171513}
+{"kernel": "t_SS64_w4_dbl", "rep": 0, "steps": 3231, "launches": 20, "sms": 132, "ms": 40.382111, "cyc_per_launch": 3309192.9, "cyc_max": 3309217, "ns_last": 2121627.6, "mhz_last": 1559.7}
+{"kernel": "t_SS64_w4_dbl", "rep": 1, "steps": 3231, "launches": 20, "sms": 132, "ms": 44.000481, "cyc_per_launch": 3309192.5, "cyc_max": 3309211, "ns_last": 2184841.5, "mhz_last": 1514.6}
+{"kernel": "t_SS64_w4_dbl", "rep": 2, "steps": 3231, "launches": 20, "sms": 132, "ms": 44.142879, "cyc_per_launch": 3309194.2, "cyc_max": 3309215, "ns_last": 2184602.7, "mhz_last": 1514.8}
+{"kernel": "t_SS64_w4_dbl", "rep": 3, "steps": 3231, "launches": 20, "sms": 132, "ms": 44.134464, "cyc_per_launch": 3309192.5, "cyc_max": 3309211, "ns_last": 2184591.8, "mhz_last": 1514.8}
+{"kernel": "t_SS64_w4_dbl", "rep": 4, "steps": 3231, "launches": 20, "sms": 132, "ms": 44.265568, "cyc_per_launch": 3309194.3, "cyc_max": 3309217, "ns_last": 2191616.0, "mhz_last": 1509.9}
+{"mark": "t_SS128_w4", "t": 1793620734.085974521}
+{"kernel": "t_SS128_w4", "rep": 0, "steps": 1555, "launches": 20, "sms": 132, "ms": 37.441025, "cyc_per_launch": 3185305.0, "cyc_max": 3185319, "ns_last": 1838923.2, "mhz_last": 1732.2}
+{"kernel": "t_SS128_w4", "rep": 1, "steps": 1555, "launches": 20, "sms": 132, "ms": 38.587746, "cyc_per_launch": 3185305.3, "cyc_max": 3185327, "ns_last": 1984746.2, "mhz_last": 1604.9}
+{"kernel": "t_SS128_w4", "rep": 2, "steps": 1555, "launches": 20, "sms": 132, "ms": 41.111038, "cyc_per_launch": 3185306.1, "cyc_max": 3185328, "ns_last": 2042028.6, "mhz_last": 1559.9}
+{"kernel": "t_SS128_w4", "rep": 3, "steps": 1555, "launches": 20, "sms": 132, "ms": 41.274143, "cyc_per_launch": 3185304.7, "cyc_max": 3185319, "ns_last": 2042033.2, "mhz_last": 1559.9}
+{"kernel": "t_SS128_w4", "rep": 4, "steps": 1555, "launches": 20, "sms": 132, "ms": 41.283905, "cyc_per_launch": 3185305.2, "cyc_max": 3185328, "ns_last": 2042391.0, "mhz_last": 1559.6}
+{"mark": "t_SS128_w4_dbl", "t": 1793620735.255510691}
+{"kernel": "t_SS128_w4_dbl", "rep": 0, "steps": 249, "launches": 20, "sms": 132, "ms": 36.392513, "cyc_per_launch": 2987232.2, "cyc_max": 3252524, "ns_last": 1651635.9, "mhz_last": 1808.7}
+{"kernel": "t_SS128_w4_dbl", "rep": 1, "steps": 249, "launches": 20, "sms": 132, "ms": 36.387615, "cyc_per_launch": 2992332.5, "cyc_max": 3256099, "ns_last": 1653751.0, "mhz_last": 1809.4}
+{"kernel": "t_SS128_w4_dbl", "rep": 2, "steps": 249, "launches": 20, "sms": 132, "ms": 36.398594, "cyc_per_launch": 2975719.0, "cyc_max": 3225468, "ns_last": 1653419.4, "mhz_last": 1799.7}
+{"kernel": "t_SS128_w4_dbl", "rep": 3, "steps": 249, "launches": 20, "sms": 132, "ms": 36.394272, "cyc_per_launch": 2983285.5, "cyc_max": 3242090, "ns_last": 1653097.9, "mhz_last": 1804.7}
+{"kernel": "t_SS128_w4_dbl", "rep": 4, "steps": 249, "launches": 20, "sms": 132, "ms": 36.398594, "cyc_per_launch": 2982518.3, "cyc_max": 3245923, "ns_last": 1652709.1, "mhz_last": 1804.6}
+{"mark": "t_RS128_w4", "t": 1793620736.253442645}
+{"kernel": "t_RS128_w4", "rep": 0, "steps": 1594, "launches": 20, "sms": 132, "ms": 37.499233, "cyc_per_launch": 3265412.9, "cyc_max": 3265473, "ns_last": 1838169.2, "mhz_last": 1776.4}
+{"kernel": "t_RS128_w4", "rep": 1, "steps": 1594, "launches": 20, "sms": 132, "ms": 39.416031, "cyc_per_launch": 3265415.5, "cyc_max": 3265473, "ns_last": 1997507.4, "mhz_last": 1634.7}
+{"kernel": "t_RS128_w4", "rep": 2, "steps": 1594, "launches": 20, "sms": 132, "ms": 41.505856, "cyc_per_launch": 3265414.0, "cyc_max": 3265473, "ns_last": 2053924.4, "mhz_last": 1589.8}
+{"kernel": "t_RS128_w4", "rep": 3, "steps": 1594, "launches": 20, "sms": 132, "ms": 41.503296, "cyc_per_launch": 3265412.1, "cyc_max": 3265473, "ns_last": 2046068.8, "mhz_last": 1595.9}
+{"kernel": "t_RS128_w4", "rep": 4, "steps": 1594, "launches": 20, "sms": 132, "ms": 41.133663, "cyc_per_launch": 3265411.2, "cyc_max": 3265473, "ns_last": 2034971.2, "mhz_last": 1604.6}
+{"mark": "t_RS128_w4_dbl", "t": 1793620737.349224083}
+{"kernel": "t_RS128_w4_dbl", "rep": 0, "steps": 154, "launches": 20, "sms": 132, "ms": 38.116959, "cyc_per_launch": 3079807.5, "cyc_max": 3394393, "ns_last": 1701959.8, "mhz_last": 1809.6}
+{"kernel": "t_RS128_w4_dbl", "rep": 1, "steps": 154, "launches": 20, "sms": 132, "ms": 38.076546, "cyc_per_launch": 3074828.3, "cyc_max": 3408729, "ns_last": 1699877.3, "mhz_last": 1808.9}
+{"kernel": "t_RS128_w4_dbl", "rep": 2, "steps": 154, "launches": 20, "sms": 132, "ms": 38.061089, "cyc_per_launch": 3068359.3, "cyc_max": 3402200, "ns_last": 1695359.3, "mhz_last": 1809.9}
+{"kernel": "t_RS128_w4_dbl", "rep": 3, "steps": 154, "launches": 20, "sms": 132, "ms": 38.117760, "cyc_per_launch": 3072755.9, "cyc_max": 3407723, "ns_last": 1698672.2, "mhz_last": 1808.9}
+{"kernel": "t_RS128_w4_dbl", "rep": 4, "steps": 154, "launches": 20, "sms": 132, "ms": 38.089439, "cyc_per_launch": 3080588.2, "cyc_max": 3415791, "ns_last": 1703043.9, "mhz_last": 1808.9}
+{"mark": "t_fwd_dep", "t": 1793620738.371386823}
+{"kernel": "t_fwd_dep", "rep": 0, "steps": 2233, "launches": 20, "sms": 132, "ms": 40.455009, "cyc_per_launch": 3430578.3, "cyc_max": 3430648, "ns_last": 2098581.3, "mhz_last": 1634.7}
+{"kernel": "t_fwd_dep", "rep": 1, "steps": 2233, "launches": 20, "sms": 132, "ms": 43.675327, "cyc_per_launch": 3430580.0, "cyc_max": 3430648, "ns_last": 2178857.7, "mhz_last": 1574.5}
+{"kernel": "t_fwd_dep", "rep": 2, "steps": 2233, "launches": 20, "sms": 132, "ms": 43.723553, "cyc_per_launch": 3430579.0, "cyc_max": 3430648, "ns_last": 2157830.5, "mhz_last": 1589.8}
+{"kernel": "t_fwd_dep", "rep": 3, "steps": 2233, "launches": 20, "sms": 132, "ms": 43.583809, "cyc_per_launch": 3430580.1, "cyc_max": 3430648, "ns_last": 2158073.5, "mhz_last": 1589.6}
+{"kernel": "t_fwd_dep", "rep": 4, "steps": 2233, "launches": 20, "sms": 132, "ms": 43.590305, "cyc_per_launch": 3430579.2, "cyc_max": 3430648, "ns_last": 2158049.7, "mhz_last": 1589.7}
+{"mark": "x_fwd_dep", "t": 1793620739.569752823}
+{"kernel": "x_fwd_dep", "rep": 0, "steps": 1813, "launches": 20, "sms": 132, "ms": 36.647232, "cyc_per_launch": 3578969.1, "cyc_max": 3581446, "ns_last": 1807693.3, "mhz_last": 1979.9}
+{"kernel": "x_fwd_dep", "rep": 1, "steps": 1813, "launches": 20, "sms": 132, "ms": 36.640320, "cyc_per_launch": 3579018.9, "cyc_max": 3581606, "ns_last": 1807711.5, "mhz_last": 1979.9}
+{"kernel": "x_fwd_dep", "rep": 2, "steps": 1813, "launches": 20, "sms": 132, "ms": 36.641216, "cyc_per_launch": 3578910.2, "cyc_max": 3581836, "ns_last": 1807625.9, "mhz_last": 1979.9}
+{"kernel": "x_fwd_dep", "rep": 3, "steps": 1813, "launches": 20, "sms": 132, "ms": 36.730560, "cyc_per_launch": 3579087.5, "cyc_max": 3581788, "ns_last": 1807604.6, "mhz_last": 1980.0}
+{"kernel": "x_fwd_dep", "rep": 4, "steps": 1813, "launches": 20, "sms": 132, "ms": 36.630207, "cyc_per_launch": 3579039.2, "cyc_max": 3581788, "ns_last": 1807584.2, "mhz_last": 1980.0}
+{"mark": "t_pass1_dep", "t": 1793620740.594331750}
+{"kernel": "t_pass1_dep", "rep": 0, "steps": 3267, "launches": 20, "sms": 132, "ms": 39.769184, "cyc_per_launch": 3392071.5, "cyc_max": 3392087, "ns_last": 2094144.2, "mhz_last": 1619.8}
+{"kernel": "t_pass1_dep", "rep": 1, "steps": 3267, "launches": 20, "sms": 132, "ms": 42.504513, "cyc_per_launch": 3392072.2, "cyc_max": 3392087, "ns_last": 2154102.8, "mhz_last": 1574.7}
+{"kernel": "t_pass1_dep", "rep": 2, "steps": 3267, "launches": 20, "sms": 132, "ms": 43.517506, "cyc_per_launch": 3392071.5, "cyc_max": 3392087, "ns_last": 2154098.4, "mhz_last": 1574.7}
+{"kernel": "t_pass1_dep", "rep": 3, "steps": 3267, "launches": 20, "sms": 132, "ms": 43.517792, "cyc_per_launch": 3392072.5, "cyc_max": 3392087, "ns_last": 2154111.8, "mhz_last": 1574.7}
+{"kernel": "t_pass1_dep", "rep": 4, "steps": 3267, "launches": 20, "sms": 132, "ms": 43.701218, "cyc_per_launch": 3392071.2, "cyc_max": 3392087, "ns_last": 2156189.6, "mhz_last": 1573.2}
+{"mark": "x_pass1_dep", "t": 1793620741.784017412}
+{"kernel": "x_pass1_dep", "rep": 0, "steps": 2783, "launches": 20, "sms": 132, "ms": 39.049728, "cyc_per_launch": 3821776.5, "cyc_max": 3823688, "ns_last": 1930394.9, "mhz_last": 1979.8}
+{"kernel": "x_pass1_dep", "rep": 1, "steps": 2783, "launches": 20, "sms": 132, "ms": 39.051521, "cyc_per_launch": 3821845.5, "cyc_max": 3824132, "ns_last": 1930395.2, "mhz_last": 1979.8}
+{"kernel": "x_pass1_dep", "rep": 2, "steps": 2783, "launches": 20, "sms": 132, "ms": 39.048000, "cyc_per_launch": 3821833.5, "cyc_max": 3823814, "ns_last": 1930403.4, "mhz_last": 1979.8}
+{"kernel": "x_pass1_dep", "rep": 3, "steps": 2783, "launches": 20, "sms": 132, "ms": 39.116928, "cyc_per_launch": 3821874.9, "cyc_max": 3824602, "ns_last": 1930254.3, "mhz_last": 1980.0}
+{"kernel": "x_pass1_dep", "rep": 4, "steps": 2783, "launches": 20, "sms": 132, "ms": 39.030495, "cyc_per_launch": 3821857.2, "cyc_max": 3823966, "ns_last": 1930246.8, "mhz_last": 1980.0}
+{"mark": "t_pass0_dep", "t": 1793620743.273679610}
+{"kernel": "t_pass0_dep", "rep": 0, "steps": 3228, "launches": 20, "sms": 132, "ms": 39.541599, "cyc_per_launch": 3306079.5, "cyc_max": 3306301, "ns_last": 2140017.5, "mhz_last": 1544.9}
+{"kernel": "t_pass0_dep", "rep": 1, "steps": 3228, "launches": 20, "sms": 132, "ms": 44.505825, "cyc_per_launch": 3306075.1, "cyc_max": 3306242, "ns_last": 2204451.9, "mhz_last": 1499.7}
+{"kernel": "t_pass0_dep", "rep": 2, "steps": 3228, "launches": 20, "sms": 132, "ms": 44.444862, "cyc_per_launch": 3306071.9, "cyc_max": 3306196, "ns_last": 2184290.7, "mhz_last": 1513.6}
+{"kernel": "t_pass0_dep", "rep": 3, "steps": 3228, "launches": 20, "sms": 132, "ms": 44.310432, "cyc_per_launch": 3306078.7, "cyc_max": 3306301, "ns_last": 2184329.9, "mhz_last": 1513.5}
+{"kernel": "t_pass0_dep", "rep": 4, "steps": 3228, "launches": 20, "sms": 132, "ms": 44.309536, "cyc_per_launch": 3306075.5, "cyc_max": 3306196, "ns_last": 2184333.1, "mhz_last": 1513.5}
+{"mark": "x_pass0_dep", "t": 1793620744.493982279}
+{"kernel": "x_pass0_dep", "rep": 0, "steps": 3360, "launches": 20, "sms": 132, "ms": 38.872993, "cyc_per_launch": 3802980.1, "cyc_max": 3808481, "ns_last": 1920708.1, "mhz_last": 1980.0}
+{"kernel": "x_pass0_dep", "rep": 1, "steps": 3360, "launches": 20, "sms": 132, "ms": 38.874146, "cyc_per_launch": 3801950.4, "cyc_max": 3808481, "ns_last": 1920175.5, "mhz_last": 1980.0}
+{"kernel": "x_pass0_dep", "rep": 2, "steps": 3360, "launches": 20, "sms": 132, "ms": 38.871391, "cyc_per_launch": 3803172.8, "cyc_max": 3808481, "ns_last": 1920804.8, "mhz_last": 1980.0}
+{"kernel": "x_pass0_dep", "rep": 3, "steps": 3360, "launches": 20, "sms": 132, "ms": 38.871712, "cyc_per_launch": 3802455.0, "cyc_max": 3808481, "ns_last": 1920433.7, "mhz_last": 1980.0}
+{"kernel": "x_pass0_dep", "rep": 4, "steps": 3360, "launches": 20, "sms": 132, "ms": 38.871681, "cyc_per_launch": 3802486.7, "cyc_max": 3808481, "ns_last": 1920457.7, "mhz_last": 1980.0}
+{"mark": "a_MUFU_EX2", "t": 1793620745.728715442}
+{"kernel": "a_MUFU_EX2", "rep": 0, "steps": 420, "launches": 20, "sms": 132, "ms": 35.146721, "cyc_per_launch": 3440772.0, "cyc_max": 3440856, "ns_last": 1737762.9, "mhz_last": 1980.0}
+{"kernel": "a_MUFU_EX2", "rep": 1, "steps": 420, "launches": 20, "sms": 132, "ms": 35.147423, "cyc_per_launch": 3440774.3, "cyc_max": 3440858, "ns_last": 1737757.8, "mhz_last": 1980.0}
+{"kernel": "a_MUFU_EX2", "rep": 2, "steps": 420, "launches": 20, "sms": 132, "ms": 35.145599, "cyc_per_launch": 3440772.2, "cyc_max": 3440856, "ns_last": 1737754.7, "mhz_last": 1980.0}
+{"kernel": "a_MUFU_EX2", "rep": 3, "steps": 420, "launches": 20, "sms": 132, "ms": 35.144993, "cyc_per_launch": 3440773.9, "cyc_max": 3440861, "ns_last": 1737757.3, "mhz_last": 1980.0}
+{"kernel": "a_MUFU_EX2", "rep": 4, "steps": 420, "launches": 20, "sms": 132, "ms": 35.145184, "cyc_per_launch": 3440775.7, "cyc_max": 3440856, "ns_last": 1737758.8, "mhz_last": 1980.0}
+{"mark": "a_FFMA", "t": 1793620746.813668238}
+{"kernel": "a_FFMA", "rep": 0, "steps": 3613, "launches": 20, "sms": 132, "ms": 38.632095, "cyc_per_launch": 3775264.4, "cyc_max": 3775380, "ns_last": 1906939.2, "mhz_last": 1979.8}
+{"kernel": "a_FFMA", "rep": 1, "steps": 3613, "launches": 20, "sms": 132, "ms": 38.620129, "cyc_per_launch": 3775268.8, "cyc_max": 3775382, "ns_last": 1906882.4, "mhz_last": 1979.8}
+{"kernel": "a_FFMA", "rep": 2, "steps": 3613, "launches": 20, "sms": 132, "ms": 38.607136, "cyc_per_launch": 3775261.5, "cyc_max": 3775354, "ns_last": 1906889.7, "mhz_last": 1979.8}
+{"kernel": "a_FFMA", "rep": 3, "steps": 3613, "launches": 20, "sms": 132, "ms": 38.616768, "cyc_per_launch": 3775261.5, "cyc_max": 3775384, "ns_last": 1906915.9, "mhz_last": 1979.8}
+{"kernel": "a_FFMA", "rep": 4, "steps": 3613, "launches": 20, "sms": 132, "ms": 38.611744, "cyc_per_launch": 3775267.0, "cyc_max": 3775380, "ns_last": 1906830.8, "mhz_last": 1979.9}
+{"mark": "a_FMUL", "t": 1793620747.962157885}
+{"kernel": "a_FMUL", "rep": 0, "steps": 3612, "launches": 20, "sms": 132, "ms": 38.613857, "cyc_per_launch": 3774133.9, "cyc_max": 3774202, "ns_last": 1906399.8, "mhz_last": 1979.7}
+{"kernel": "a_FMUL", "rep": 1, "steps": 3612, "launches": 20, "sms": 132, "ms": 38.617249, "cyc_per_launch": 3774126.6, "cyc_max": 3774192, "ns_last": 1906364.8, "mhz_last": 1979.8}
+{"kernel": "a_FMUL", "rep": 2, "steps": 3612, "launches": 20, "sms": 132, "ms": 38.613953, "cyc_per_launch": 3774129.0, "cyc_max": 3774193, "ns_last": 1906394.4, "mhz_last": 1979.7}
+{"kernel": "a_FMUL", "rep": 3, "steps": 3612, "launches": 20, "sms": 132, "ms": 38.610367, "cyc_per_launch": 3774136.5, "cyc_max": 3774211, "ns_last": 1906437.1, "mhz_last": 1979.7}
+{"kernel": "a_FMUL", "rep": 4, "steps": 3612, "launches": 20, "sms": 132, "ms": 38.614048, "cyc_per_launch": 3774134.2, "cyc_max": 3774193, "ns_last": 1906377.2, "mhz_last": 1979.7}
+{"mark": "a_FADD", "t": 1793620748.982856949}
+{"kernel": "a_FADD", "rep": 0, "steps": 3611, "launches": 20, "sms": 132, "ms": 38.608768, "cyc_per_launch": 3773088.1, "cyc_max": 3773162, "ns_last": 1905782.5, "mhz_last": 1979.8}
+{"kernel": "a_FADD", "rep": 1, "steps": 3611, "launches": 20, "sms": 132, "ms": 38.611393, "cyc_per_launch": 3773082.3, "cyc_max": 3773162, "ns_last": 1905937.5, "mhz_last": 1979.6}
+{"kernel": "a_FADD", "rep": 2, "steps": 3611, "launches": 20, "sms": 132, "ms": 38.608994, "cyc_per_launch": 3773091.8, "cyc_max": 3773162, "ns_last": 1905808.7, "mhz_last": 1979.8}
+{"kernel": "a_FADD", "rep": 3, "steps": 3611, "launches": 20, "sms": 132, "ms": 38.607872, "cyc_per_launch": 3773088.5, "cyc_max": 3773162, "ns_last": 1905896.2, "mhz_last": 1979.7}
+{"kernel": "a_FADD", "rep": 4, "steps": 3611, "launches": 20, "sms": 132, "ms": 38.607010, "cyc_per_launch": 3773084.1, "cyc_max": 3773162, "ns_last": 1905851.9, "mhz_last": 1979.7}
+{"mark": "a_FMNMX", "t": 1793620750.040896887}
+{"kernel": "a_FMNMX", "rep": 0, "steps": 1767, "launches": 20, "sms": 132, "ms": 37.150463, "cyc_per_launch": 3634665.2, "cyc_max": 3634938, "ns_last": 1835929.2, "mhz_last": 1979.7}
+{"kernel": "a_FMNMX", "rep": 1, "steps": 1767, "launches": 20, "sms": 132, "ms": 37.161087, "cyc_per_launch": 3634673.3, "cyc_max": 3634939, "ns_last": 1835940.6, "mhz_last": 1979.7}
+{"kernel": "a_FMNMX", "rep": 2, "steps": 1767, "launches": 20, "sms": 132, "ms": 37.157536, "cyc_per_launch": 3634661.0, "cyc_max": 3634939, "ns_last": 1835937.2, "mhz_last": 1979.7}
+{"kernel": "a_FMNMX", "rep": 3, "steps": 1767, "launches": 20, "sms": 132, "ms": 37.154625, "cyc_per_launch": 3634659.5, "cyc_max": 3634938, "ns_last": 1835936.7, "mhz_last": 1979.7}
+{"kernel": "a_FMNMX", "rep": 4, "steps": 1767, "launches": 20, "sms": 132, "ms": 37.148354, "cyc_per_launch": 3634664.2, "cyc_max": 3634938, "ns_last": 1835889.9, "mhz_last": 1979.8}
+{"mark": "a_ALU", "t": 1793620750.957569710}
+{"kernel": "a_ALU", "rep": 0, "steps": 1768, "launches": 20, "sms": 132, "ms": 37.177921, "cyc_per_launch": 3637284.7, "cyc_max": 3637306, "ns_last": 1837266.7, "mhz_last": 1979.7}
+{"kernel": "a_ALU", "rep": 1, "steps": 1768, "launches": 20, "sms": 132, "ms": 37.183998, "cyc_per_launch": 3637284.7, "cyc_max": 3637310, "ns_last": 1837319.0, "mhz_last": 1979.7}
+{"kernel": "a_ALU", "rep": 2, "steps": 1768, "launches": 20, "sms": 132, "ms": 37.167873, "cyc_per_launch": 3637285.0, "cyc_max": 3637305, "ns_last": 1837255.0, "mhz_last": 1979.7}
+{"kernel": "a_ALU", "rep": 3, "steps": 1768, "launches": 20, "sms": 132, "ms": 37.175201, "cyc_per_launch": 3637285.5, "cyc_max": 3637305, "ns_last": 1837378.4, "mhz_last": 1979.6}
+{"kernel": "a_ALU", "rep": 4, "steps": 1768, "launches": 20, "sms": 132, "ms": 37.174591, "cyc_per_launch": 3637285.0, "cyc_max": 3637322, "ns_last": 1837359.5, "mhz_last": 1979.6}
+{"mark": "a_IMAD", "t": 1793620752.197701304}
+{"kernel": "a_IMAD", "rep": 0, "steps": 1756, "launches": 20, "sms": 132, "ms": 36.824833, "cyc_per_launch": 3598349.4, "cyc_max": 3598529, "ns_last": 1817518.3, "mhz_last": 1979.8}
+{"kernel": "a_IMAD", "rep": 1, "steps": 1756, "launches": 20, "sms": 132, "ms": 36.826656, "cyc_per_launch": 3598349.8, "cyc_max": 3598529, "ns_last": 1817614.8, "mhz_last": 1979.7}
+{"kernel": "a_IMAD", "rep": 2, "steps": 1756, "launches": 20, "sms": 132, "ms": 36.830849, "cyc_per_launch": 3598349.1, "cyc_max": 3598529, "ns_last": 1817569.9, "mhz_last": 1979.8}
+{"kernel": "a_IMAD", "rep": 3, "steps": 1756, "launches": 20, "sms": 132, "ms": 36.828705, "cyc_per_launch": 3598349.8, "cyc_max": 3598529, "ns_last": 1817656.2, "mhz_last": 1979.7}
+{"kernel": "a_IMAD", "rep": 4, "steps": 1756, "launches": 20, "sms": 132, "ms": 36.834080, "cyc_per_launch": 3598349.7, "cyc_max": 3598529, "ns_last": 1817591.5, "mhz_last": 1979.7}
+{"mark": "a_SHFL", "t": 1793620754.093528488}
+{"kernel": "a_SHFL", "rep": 0, "steps": 923, "launches": 20, "sms": 132, "ms": 38.656574, "cyc_per_launch": 3780817.5, "cyc_max": 3780912, "ns_last": 1909995.2, "mhz_last": 1979.5}
+{"kernel": "a_SHFL", "rep": 1, "steps": 923, "launches": 20, "sms": 132, "ms": 38.661983, "cyc_per_launch": 3780819.8, "cyc_max": 3780906, "ns_last": 1909897.5, "mhz_last": 1979.6}
+{"kernel": "a_SHFL", "rep": 2, "steps": 923, "launches": 20, "sms": 132, "ms": 38.653023, "cyc_per_launch": 3780819.9, "cyc_max": 3780937, "ns_last": 1909925.6, "mhz_last": 1979.6}
+{"kernel": "a_SHFL", "rep": 3, "steps": 923, "launches": 20, "sms": 132, "ms": 38.660736, "cyc_per_launch": 3780811.4, "cyc_max": 3780891, "ns_last": 1909927.8, "mhz_last": 1979.6}
+{"kernel": "a_SHFL", "rep": 4, "steps": 923, "launches": 20, "sms": 132, "ms": 38.654785, "cyc_per_launch": 3780811.8, "cyc_max": 3780912, "ns_last": 1909899.4, "mhz_last": 1979.6}
+{"mark": "a_LDS", "t": 1793620755.393549926}
+{"kernel": "a_LDS", "rep": 0, "steps": 414, "launches": 20, "sms": 132, "ms": 34.766495, "cyc_per_launch": 3392004.9, "cyc_max": 3392372, "ns_last": 1713464.7, "mhz_last": 1979.6}
+{"kernel": "a_LDS", "rep": 1, "steps": 414, "launches": 20, "sms": 132, "ms": 34.761726, "cyc_per_launch": 3392011.8, "cyc_max": 3392372, "ns_last": 1713388.1, "mhz_last": 1979.7}
+{"kernel": "a_LDS", "rep": 2, "steps": 414, "launches": 20, "sms": 132, "ms": 34.757793, "cyc_per_launch": 3392018.7, "cyc_max": 3392372, "ns_last": 1713455.0, "mhz_last": 1979.6}
+{"kernel": "a_LDS", "rep": 3, "steps": 414, "launches": 20, "sms": 132, "ms": 34.763615, "cyc_per_launch": 3392018.3, "cyc_max": 3392372, "ns_last": 1713448.7, "mhz_last": 1979.6}
+{"kernel": "a_LDS", "rep": 4, "steps": 414, "launches": 20, "sms": 132, "ms": 34.905025, "cyc_per_launch": 3392010.3, "cyc_max": 3392372, "ns_last": 1726437.6, "mhz_last": 1964.7}
+{"mark": "a_FSEL", "t": 1793620756.650775077}
+{"kernel": "a_FSEL", "rep": 0, "steps": 1757, "launches": 20, "sms": 132, "ms": 37.167488, "cyc_per_launch": 3635659.0, "cyc_max": 3635862, "ns_last": 1836525.1, "mhz_last": 1979.6}
+{"kernel": "a_FSEL", "rep": 1, "steps": 1757, "launches": 20, "sms": 132, "ms": 37.170944, "cyc_per_launch": 3635679.9, "cyc_max": 3635867, "ns_last": 1836516.4, "mhz_last": 1979.7}
+{"kernel": "a_FSEL", "rep": 2, "steps": 1757, "launches": 20, "sms": 132, "ms": 37.173569, "cyc_per_launch": 3635673.0, "cyc_max": 3635862, "ns_last": 1836559.0, "mhz_last": 1979.6}
+{"kernel": "a_FSEL", "rep": 3, "steps": 1757, "launches": 20, "sms": 132, "ms": 37.169857, "cyc_per_launch": 3635674.1, "cyc_max": 3635860, "ns_last": 1836567.0, "mhz_last": 1979.6}
+{"kernel": "a_FSEL", "rep": 4, "steps": 1757, "launches": 20, "sms": 132, "ms": 37.164417, "cyc_per_launch": 3635675.1, "cyc_max": 3635860, "ns_last": 1836466.4, "mhz_last": 1979.7}
+{"mark": "a_F2FP", "t": 1793620757.665944938}
+{"kernel": "a_F2FP", "rep": 0, "steps": 14225, "launches": 20, "sms": 132, "ms": 38.803230, "cyc_per_launch": 3776643.5, "cyc_max": 3798573, "ns_last": 1907827.2, "mhz_last": 1979.6}
+{"kernel": "a_F2FP", "rep": 1, "steps": 14225, "launches": 20, "sms": 132, "ms": 38.797951, "cyc_per_launch": 3777877.1, "cyc_max": 3798547, "ns_last": 1908257.2, "mhz_last": 1979.8}
+{"kernel": "a_F2FP", "rep": 2, "steps": 14225, "launches": 20, "sms": 132, "ms": 38.794624, "cyc_per_launch": 3774978.3, "cyc_max": 3798535, "ns_last": 1906788.8, "mhz_last": 1979.8}
+{"kernel": "a_F2FP", "rep": 3, "steps": 14225, "launches": 20, "sms": 132, "ms": 38.799713, "cyc_per_launch": 3776911.8, "cyc_max": 3798573, "ns_last": 1907801.7, "mhz_last": 1979.7}
+{"kernel": "a_F2FP", "rep": 4, "steps": 14225, "launches": 20, "sms": 132, "ms": 38.800350, "cyc_per_launch": 3776965.0, "cyc_max": 3798573, "ns_last": 1907806.3, "mhz_last": 1979.7}
+{"mark": "a_MUFU_EX2_FFMA_1to1", "t": 1793620758.732115797}
+{"kernel": "a_MUFU_EX2_FFMA_1to1", "rep": 0, "steps": 1745, "launches": 20, "sms": 132, "ms": 37.094593, "cyc_per_launch": 3621921.4, "cyc_max": 3624392, "ns_last": 1829643.9, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FFMA_1to1", "rep": 1, "steps": 1745, "launches": 20, "sms": 132, "ms": 37.094017, "cyc_per_launch": 3622099.3, "cyc_max": 3624392, "ns_last": 1829727.5, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FFMA_1to1", "rep": 2, "steps": 1745, "launches": 20, "sms": 132, "ms": 37.093662, "cyc_per_launch": 3621959.9, "cyc_max": 3624392, "ns_last": 1829700.6, "mhz_last": 1979.5}
+{"kernel": "a_MUFU_EX2_FFMA_1to1", "rep": 3, "steps": 1745, "launches": 20, "sms": 132, "ms": 37.102497, "cyc_per_launch": 3622026.7, "cyc_max": 3624392, "ns_last": 1829754.9, "mhz_last": 1979.5}
+{"kernel": "a_MUFU_EX2_FFMA_1to1", "rep": 4, "steps": 1745, "launches": 20, "sms": 132, "ms": 37.093887, "cyc_per_launch": 3621987.2, "cyc_max": 3624392, "ns_last": 1829707.2, "mhz_last": 1979.5}
+{"mark": "a_MUFU_EX2_FFMA_1to4", "t": 1793620759.661664369}
+{"kernel": "a_MUFU_EX2_FFMA_1to4", "rep": 0, "steps": 1701, "launches": 20, "sms": 132, "ms": 36.998432, "cyc_per_launch": 3612271.1, "cyc_max": 3612272, "ns_last": 1824718.1, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FFMA_1to4", "rep": 1, "steps": 1701, "launches": 20, "sms": 132, "ms": 36.993568, "cyc_per_launch": 3611994.8, "cyc_max": 3612272, "ns_last": 1824546.7, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_FFMA_1to4", "rep": 2, "steps": 1701, "launches": 20, "sms": 132, "ms": 36.993057, "cyc_per_launch": 3612271.0, "cyc_max": 3612272, "ns_last": 1824708.1, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FFMA_1to4", "rep": 3, "steps": 1701, "launches": 20, "sms": 132, "ms": 36.994785, "cyc_per_launch": 3612017.5, "cyc_max": 3615260, "ns_last": 1824520.5, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_FFMA_1to4", "rep": 4, "steps": 1701, "launches": 20, "sms": 132, "ms": 36.992512, "cyc_per_launch": 3612271.1, "cyc_max": 3612272, "ns_last": 1824706.2, "mhz_last": 1979.6}
+{"mark": "a_MUFU_EX2_FFMA_1to8", "t": 1793620760.620914103}
+{"kernel": "a_MUFU_EX2_FFMA_1to8", "rep": 0, "steps": 1498, "launches": 20, "sms": 132, "ms": 37.345470, "cyc_per_launch": 3647460.6, "cyc_max": 3649482, "ns_last": 1842219.2, "mhz_last": 1979.9}
+{"kernel": "a_MUFU_EX2_FFMA_1to8", "rep": 1, "steps": 1498, "launches": 20, "sms": 132, "ms": 37.343426, "cyc_per_launch": 3647469.2, "cyc_max": 3649292, "ns_last": 1842300.1, "mhz_last": 1979.8}
+{"kernel": "a_MUFU_EX2_FFMA_1to8", "rep": 2, "steps": 1498, "launches": 20, "sms": 132, "ms": 37.345985, "cyc_per_launch": 3647502.5, "cyc_max": 3649974, "ns_last": 1842247.0, "mhz_last": 1979.9}
+{"kernel": "a_MUFU_EX2_FFMA_1to8", "rep": 3, "steps": 1498, "launches": 20, "sms": 132, "ms": 37.341343, "cyc_per_launch": 3647434.9, "cyc_max": 3649350, "ns_last": 1842267.6, "mhz_last": 1979.9}
+{"kernel": "a_MUFU_EX2_FFMA_1to8", "rep": 4, "steps": 1498, "launches": 20, "sms": 132, "ms": 37.341282, "cyc_per_launch": 3647474.4, "cyc_max": 3649350, "ns_last": 1842311.5, "mhz_last": 1979.8}
+{"mark": "a_MUFU_EX2_FMNMX_1to1", "t": 1793620761.691072732}
+{"kernel": "a_MUFU_EX2_FMNMX_1to1", "rep": 0, "steps": 1777, "launches": 20, "sms": 132, "ms": 37.216991, "cyc_per_launch": 3639431.0, "cyc_max": 3639516, "ns_last": 1838458.2, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FMNMX_1to1", "rep": 1, "steps": 1777, "launches": 20, "sms": 132, "ms": 37.222015, "cyc_per_launch": 3639435.9, "cyc_max": 3639516, "ns_last": 1838515.9, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FMNMX_1to1", "rep": 2, "steps": 1777, "launches": 20, "sms": 132, "ms": 37.217152, "cyc_per_launch": 3639434.2, "cyc_max": 3639516, "ns_last": 1838499.2, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FMNMX_1to1", "rep": 3, "steps": 1777, "launches": 20, "sms": 132, "ms": 37.215904, "cyc_per_launch": 3639431.3, "cyc_max": 3639512, "ns_last": 1838494.3, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_FMNMX_1to1", "rep": 4, "steps": 1777, "launches": 20, "sms": 132, "ms": 37.217342, "cyc_per_launch": 3639434.0, "cyc_max": 3639516, "ns_last": 1838475.9, "mhz_last": 1979.6}
+{"mark": "a_MUFU_EX2_FMNMX_1to4", "t": 1793620762.623174244}
+{"kernel": "a_MUFU_EX2_FMNMX_1to4", "rep": 0, "steps": 1749, "launches": 20, "sms": 132, "ms": 37.298527, "cyc_per_launch": 3635685.2, "cyc_max": 3651311, "ns_last": 1836411.2, "mhz_last": 1979.8}
+{"kernel": "a_MUFU_EX2_FMNMX_1to4", "rep": 1, "steps": 1749, "launches": 20, "sms": 132, "ms": 37.306110, "cyc_per_launch": 3635094.3, "cyc_max": 3651315, "ns_last": 1836141.1, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_FMNMX_1to4", "rep": 2, "steps": 1749, "launches": 20, "sms": 132, "ms": 37.304222, "cyc_per_launch": 3635984.5, "cyc_max": 3651313, "ns_last": 1836552.7, "mhz_last": 1979.8}
+{"kernel": "a_MUFU_EX2_FMNMX_1to4", "rep": 3, "steps": 1749, "launches": 20, "sms": 132, "ms": 37.294720, "cyc_per_launch": 3635434.4, "cyc_max": 3651311, "ns_last": 1836347.9, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_FMNMX_1to4", "rep": 4, "steps": 1749, "launches": 20, "sms": 132, "ms": 37.296062, "cyc_per_launch": 3635681.1, "cyc_max": 3651312, "ns_last": 1836449.9, "mhz_last": 1979.7}
+{"mark": "a_MUFU_EX2_FMNMX_1to8", "t": 1793620763.567366155}
+{"kernel": "a_MUFU_EX2_FMNMX_1to8", "rep": 0, "steps": 921, "launches": 20, "sms": 132, "ms": 38.743137, "cyc_per_launch": 3788404.2, "cyc_max": 3791078, "ns_last": 1913662.8, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_FMNMX_1to8", "rep": 1, "steps": 921, "launches": 20, "sms": 132, "ms": 38.740353, "cyc_per_launch": 3788359.5, "cyc_max": 3791632, "ns_last": 1913604.8, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_FMNMX_1to8", "rep": 2, "steps": 921, "launches": 20, "sms": 132, "ms": 38.728863, "cyc_per_launch": 3788420.1, "cyc_max": 3791078, "ns_last": 1913572.4, "mhz_last": 1979.8}
+{"kernel": "a_MUFU_EX2_FMNMX_1to8", "rep": 3, "steps": 921, "launches": 20, "sms": 132, "ms": 38.737568, "cyc_per_launch": 3788482.3, "cyc_max": 3791406, "ns_last": 1913667.6, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_FMNMX_1to8", "rep": 4, "steps": 921, "launches": 20, "sms": 132, "ms": 38.738113, "cyc_per_launch": 3788239.0, "cyc_max": 3792084, "ns_last": 1913522.2, "mhz_last": 1979.7}
+{"mark": "a_FFMA_FMNMX_1to1", "t": 1793620764.721555162}
+{"kernel": "a_FFMA_FMNMX_1to1", "rep": 0, "steps": 6845, "launches": 20, "sms": 132, "ms": 37.261185, "cyc_per_launch": 3648161.3, "cyc_max": 3648237, "ns_last": 1842621.3, "mhz_last": 1979.9}
+{"kernel": "a_FFMA_FMNMX_1to1", "rep": 1, "steps": 6845, "launches": 20, "sms": 132, "ms": 37.266369, "cyc_per_launch": 3648162.0, "cyc_max": 3648217, "ns_last": 1842670.3, "mhz_last": 1979.8}
+{"kernel": "a_FFMA_FMNMX_1to1", "rep": 2, "steps": 6845, "launches": 20, "sms": 132, "ms": 37.266273, "cyc_per_launch": 3648165.2, "cyc_max": 3648249, "ns_last": 1842648.7, "mhz_last": 1979.8}
+{"kernel": "a_FFMA_FMNMX_1to1", "rep": 3, "steps": 6845, "launches": 20, "sms": 132, "ms": 37.266048, "cyc_per_launch": 3648161.7, "cyc_max": 3648218, "ns_last": 1842605.8, "mhz_last": 1979.9}
+{"kernel": "a_FFMA_FMNMX_1to1", "rep": 4, "steps": 6845, "launches": 20, "sms": 132, "ms": 37.261536, "cyc_per_launch": 3648159.8, "cyc_max": 3648233, "ns_last": 1842605.1, "mhz_last": 1979.9}
+{"mark": "a_FFMA_FMNMX_1to4", "t": 1793620765.735846339}
+{"kernel": "a_FFMA_FMNMX_1to4", "rep": 0, "steps": 1770, "launches": 20, "sms": 132, "ms": 37.198784, "cyc_per_launch": 3639405.5, "cyc_max": 3639743, "ns_last": 1838365.8, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_FMNMX_1to4", "rep": 1, "steps": 1770, "launches": 20, "sms": 132, "ms": 37.200191, "cyc_per_launch": 3639425.2, "cyc_max": 3639782, "ns_last": 1838326.3, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_FMNMX_1to4", "rep": 2, "steps": 1770, "launches": 20, "sms": 132, "ms": 37.196064, "cyc_per_launch": 3639414.6, "cyc_max": 3639786, "ns_last": 1838349.6, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_FMNMX_1to4", "rep": 3, "steps": 1770, "launches": 20, "sms": 132, "ms": 37.197025, "cyc_per_launch": 3639410.3, "cyc_max": 3639756, "ns_last": 1838390.8, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_FMNMX_1to4", "rep": 4, "steps": 1770, "launches": 20, "sms": 132, "ms": 37.199711, "cyc_per_launch": 3639419.2, "cyc_max": 3639778, "ns_last": 1838391.5, "mhz_last": 1979.7}
+{"mark": "a_FFMA_FMNMX_1to8", "t": 1793620766.882164452}
+{"kernel": "a_FFMA_FMNMX_1to8", "rep": 0, "steps": 922, "launches": 20, "sms": 132, "ms": 38.662174, "cyc_per_launch": 3784300.1, "cyc_max": 3784570, "ns_last": 1911524.8, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_FMNMX_1to8", "rep": 1, "steps": 922, "launches": 20, "sms": 132, "ms": 38.662464, "cyc_per_launch": 3784306.7, "cyc_max": 3784510, "ns_last": 1911504.2, "mhz_last": 1979.8}
+{"kernel": "a_FFMA_FMNMX_1to8", "rep": 2, "steps": 922, "launches": 20, "sms": 132, "ms": 38.655682, "cyc_per_launch": 3784294.7, "cyc_max": 3784555, "ns_last": 1911495.3, "mhz_last": 1979.8}
+{"kernel": "a_FFMA_FMNMX_1to8", "rep": 3, "steps": 922, "launches": 20, "sms": 132, "ms": 38.657696, "cyc_per_launch": 3784307.9, "cyc_max": 3784545, "ns_last": 1911532.6, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_FMNMX_1to8", "rep": 4, "steps": 922, "launches": 20, "sms": 132, "ms": 38.656609, "cyc_per_launch": 3784309.0, "cyc_max": 3784537, "ns_last": 1911551.5, "mhz_last": 1979.7}
+{"mark": "a_FFMA_ALU_1to1", "t": 1793620767.815920920}
+{"kernel": "a_FFMA_ALU_1to1", "rep": 0, "steps": 6130, "launches": 20, "sms": 132, "ms": 37.641441, "cyc_per_launch": 3684413.5, "cyc_max": 3684529, "ns_last": 1861072.2, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_ALU_1to1", "rep": 1, "steps": 6130, "launches": 20, "sms": 132, "ms": 37.637951, "cyc_per_launch": 3684405.3, "cyc_max": 3684503, "ns_last": 1861063.8, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_ALU_1to1", "rep": 2, "steps": 6130, "launches": 20, "sms": 132, "ms": 37.636738, "cyc_per_launch": 3684406.6, "cyc_max": 3684505, "ns_last": 1861029.6, "mhz_last": 1979.8}
+{"kernel": "a_FFMA_ALU_1to1", "rep": 3, "steps": 6130, "launches": 20, "sms": 132, "ms": 37.637215, "cyc_per_launch": 3684409.7, "cyc_max": 3684508, "ns_last": 1861040.2, "mhz_last": 1979.8}
+{"kernel": "a_FFMA_ALU_1to1", "rep": 4, "steps": 6130, "launches": 20, "sms": 132, "ms": 37.637791, "cyc_per_launch": 3684411.0, "cyc_max": 3684518, "ns_last": 1861027.6, "mhz_last": 1979.8}
+{"mark": "a_FFMA_ALU_1to4", "t": 1793620768.750296975}
+{"kernel": "a_FFMA_ALU_1to4", "rep": 0, "steps": 1690, "launches": 20, "sms": 132, "ms": 37.395905, "cyc_per_launch": 3658817.3, "cyc_max": 3658930, "ns_last": 1848280.5, "mhz_last": 1979.6}
+{"kernel": "a_FFMA_ALU_1to4", "rep": 1, "steps": 1690, "launches": 20, "sms": 132, "ms": 37.399551, "cyc_per_launch": 3658807.3, "cyc_max": 3658921, "ns_last": 1848262.3, "mhz_last": 1979.6}
+{"kernel": "a_FFMA_ALU_1to4", "rep": 2, "steps": 1690, "launches": 20, "sms": 132, "ms": 37.397503, "cyc_per_launch": 3658816.7, "cyc_max": 3658930, "ns_last": 1848247.5, "mhz_last": 1979.6}
+{"kernel": "a_FFMA_ALU_1to4", "rep": 3, "steps": 1690, "launches": 20, "sms": 132, "ms": 37.394142, "cyc_per_launch": 3658809.3, "cyc_max": 3658927, "ns_last": 1848279.3, "mhz_last": 1979.6}
+{"kernel": "a_FFMA_ALU_1to4", "rep": 4, "steps": 1690, "launches": 20, "sms": 132, "ms": 37.397377, "cyc_per_launch": 3658815.4, "cyc_max": 3658921, "ns_last": 1848267.6, "mhz_last": 1979.6}
+{"mark": "a_FFMA_ALU_1to8", "t": 1793620769.769975254}
+{"kernel": "a_FFMA_ALU_1to8", "rep": 0, "steps": 915, "launches": 20, "sms": 132, "ms": 38.756126, "cyc_per_launch": 3793630.8, "cyc_max": 3794203, "ns_last": 1916345.5, "mhz_last": 1979.6}
+{"kernel": "a_FFMA_ALU_1to8", "rep": 1, "steps": 915, "launches": 20, "sms": 132, "ms": 38.758846, "cyc_per_launch": 3793585.2, "cyc_max": 3794057, "ns_last": 1916279.8, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_ALU_1to8", "rep": 2, "steps": 915, "launches": 20, "sms": 132, "ms": 38.755009, "cyc_per_launch": 3793613.0, "cyc_max": 3794047, "ns_last": 1916272.7, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_ALU_1to8", "rep": 3, "steps": 915, "launches": 20, "sms": 132, "ms": 38.757729, "cyc_per_launch": 3793614.0, "cyc_max": 3794111, "ns_last": 1916279.5, "mhz_last": 1979.7}
+{"kernel": "a_FFMA_ALU_1to8", "rep": 4, "steps": 915, "launches": 20, "sms": 132, "ms": 38.756321, "cyc_per_launch": 3793603.7, "cyc_max": 3794004, "ns_last": 1916262.8, "mhz_last": 1979.7}
+{"mark": "a_MUFU_EX2_ALU_1to1", "t": 1793620770.774671970}
+{"kernel": "a_MUFU_EX2_ALU_1to1", "rep": 0, "steps": 1778, "launches": 20, "sms": 132, "ms": 37.232319, "cyc_per_launch": 3641497.8, "cyc_max": 3641587, "ns_last": 1839545.9, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_ALU_1to1", "rep": 1, "steps": 1778, "launches": 20, "sms": 132, "ms": 37.232895, "cyc_per_launch": 3641489.9, "cyc_max": 3641587, "ns_last": 1839519.5, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_ALU_1to1", "rep": 2, "steps": 1778, "launches": 20, "sms": 132, "ms": 37.233727, "cyc_per_launch": 3641501.0, "cyc_max": 3641587, "ns_last": 1839518.1, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_ALU_1to1", "rep": 3, "steps": 1778, "launches": 20, "sms": 132, "ms": 37.231487, "cyc_per_launch": 3641494.0, "cyc_max": 3641587, "ns_last": 1839480.7, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_ALU_1to1", "rep": 4, "steps": 1778, "launches": 20, "sms": 132, "ms": 37.233791, "cyc_per_launch": 3641491.2, "cyc_max": 3641587, "ns_last": 1839517.8, "mhz_last": 1979.6}
+{"mark": "a_MUFU_EX2_ALU_1to4", "t": 1793620771.687721666}
+{"kernel": "a_MUFU_EX2_ALU_1to4", "rep": 0, "steps": 1764, "launches": 20, "sms": 132, "ms": 37.323360, "cyc_per_launch": 3640376.4, "cyc_max": 3653217, "ns_last": 1838825.9, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_ALU_1to4", "rep": 1, "steps": 1764, "launches": 20, "sms": 132, "ms": 37.321056, "cyc_per_launch": 3639038.8, "cyc_max": 3653203, "ns_last": 1838160.5, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_ALU_1to4", "rep": 2, "steps": 1764, "launches": 20, "sms": 132, "ms": 37.320511, "cyc_per_launch": 3640149.7, "cyc_max": 3653217, "ns_last": 1838697.0, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_ALU_1to4", "rep": 3, "steps": 1764, "launches": 20, "sms": 132, "ms": 37.319679, "cyc_per_launch": 3640524.5, "cyc_max": 3653177, "ns_last": 1838953.9, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_ALU_1to4", "rep": 4, "steps": 1764, "launches": 20, "sms": 132, "ms": 37.323521, "cyc_per_launch": 3640464.8, "cyc_max": 3653222, "ns_last": 1838901.3, "mhz_last": 1979.7}
+{"mark": "a_MUFU_EX2_ALU_1to8", "t": 1793620772.756772464}
+{"kernel": "a_MUFU_EX2_ALU_1to8", "rep": 0, "steps": 915, "launches": 20, "sms": 132, "ms": 38.742592, "cyc_per_launch": 3782736.6, "cyc_max": 3796407, "ns_last": 1910789.8, "mhz_last": 1979.7}
+{"kernel": "a_MUFU_EX2_ALU_1to8", "rep": 1, "steps": 915, "launches": 20, "sms": 132, "ms": 38.751457, "cyc_per_launch": 3782506.1, "cyc_max": 3793492, "ns_last": 1910762.4, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_ALU_1to8", "rep": 2, "steps": 915, "launches": 20, "sms": 132, "ms": 38.752319, "cyc_per_launch": 3782357.4, "cyc_max": 3792142, "ns_last": 1910654.1, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_ALU_1to8", "rep": 3, "steps": 915, "launches": 20, "sms": 132, "ms": 38.754177, "cyc_per_launch": 3782226.1, "cyc_max": 3796120, "ns_last": 1910569.0, "mhz_last": 1979.6}
+{"kernel": "a_MUFU_EX2_ALU_1to8", "rep": 4, "steps": 915, "launches": 20, "sms": 132, "ms": 38.751518, "cyc_per_launch": 3782511.0, "cyc_max": 3793084, "ns_last": 1910537.5, "mhz_last": 1979.8}
+{"mark": "w_MUFU_EX2_64", "t": 1793620774.221676963}
+{"kernel": "w_MUFU_EX2_64", "rep": 0, "steps": 2639, "launches": 20, "sms": 132, "ms": 39.190048, "cyc_per_launch": 3433875.4, "cyc_max": 3433902, "ns_last": 1982334.3, "mhz_last": 1732.2}
+{"kernel": "w_MUFU_EX2_64", "rep": 1, "steps": 2639, "launches": 20, "sms": 132, "ms": 40.291679, "cyc_per_launch": 3433876.3, "cyc_max": 3433902, "ns_last": 2046061.3, "mhz_last": 1678.3}
+{"kernel": "w_MUFU_EX2_64", "rep": 2, "steps": 2639, "launches": 20, "sms": 132, "ms": 41.443680, "cyc_per_launch": 3433875.4, "cyc_max": 3433902, "ns_last": 2047485.1, "mhz_last": 1677.1}
+{"kernel": "w_MUFU_EX2_64", "rep": 3, "steps": 2639, "launches": 20, "sms": 132, "ms": 41.444321, "cyc_per_launch": 3433876.3, "cyc_max": 3433902, "ns_last": 2047658.4, "mhz_last": 1677.0}
+{"kernel": "w_MUFU_EX2_64", "rep": 4, "steps": 2639, "launches": 20, "sms": 132, "ms": 41.440224, "cyc_per_launch": 3433877.3, "cyc_max": 3433902, "ns_last": 2047677.1, "mhz_last": 1677.0}
+{"mark": "w_MUFU_EX2_128", "t": 1793620776.429041303}
+{"kernel": "w_MUFU_EX2_128", "rep": 0, "steps": 1451, "launches": 20, "sms": 132, "ms": 37.786945, "cyc_per_launch": 3335900.4, "cyc_max": 3335968, "ns_last": 1865116.8, "mhz_last": 1788.6}
+{"kernel": "w_MUFU_EX2_128", "rep": 1, "steps": 1451, "launches": 20, "sms": 132, "ms": 37.845310, "cyc_per_launch": 3335900.5, "cyc_max": 3335968, "ns_last": 1870121.9, "mhz_last": 1783.8}
+{"kernel": "w_MUFU_EX2_128", "rep": 2, "steps": 1451, "launches": 20, "sms": 132, "ms": 37.654049, "cyc_per_launch": 3335900.5, "cyc_max": 3335968, "ns_last": 1851355.6, "mhz_last": 1801.9}
+{"kernel": "w_MUFU_EX2_128", "rep": 3, "steps": 1451, "launches": 20, "sms": 132, "ms": 37.524319, "cyc_per_launch": 3335900.6, "cyc_max": 3335968, "ns_last": 1850801.2, "mhz_last": 1802.4}
+{"kernel": "w_MUFU_EX2_128", "rep": 4, "steps": 1451, "launches": 20, "sms": 132, "ms": 37.435169, "cyc_per_launch": 3335900.5, "cyc_max": 3335968, "ns_last": 1847203.2, "mhz_last": 1805.9}
+{"mark": "w_MUFU_EX2_256", "t": 1793620778.345446988}
+{"kernel": "w_MUFU_EX2_256", "rep": 0, "steps": 772, "launches": 20, "sms": 132, "ms": 38.707809, "cyc_per_launch": 3358809.2, "cyc_max": 3359791, "ns_last": 1904309.1, "mhz_last": 1763.8}
+{"kernel": "w_MUFU_EX2_256", "rep": 1, "steps": 772, "launches": 20, "sms": 132, "ms": 38.747456, "cyc_per_launch": 3358815.3, "cyc_max": 3359791, "ns_last": 1903168.0, "mhz_last": 1764.9}
+{"kernel": "w_MUFU_EX2_256", "rep": 2, "steps": 772, "launches": 20, "sms": 132, "ms": 38.756737, "cyc_per_launch": 3358825.7, "cyc_max": 3359791, "ns_last": 1906404.1, "mhz_last": 1761.9}
+{"kernel": "w_MUFU_EX2_256", "rep": 3, "steps": 772, "launches": 20, "sms": 132, "ms": 38.768993, "cyc_per_launch": 3358809.2, "cyc_max": 3359791, "ns_last": 1904249.2, "mhz_last": 1763.8}
+{"kernel": "w_MUFU_EX2_256", "rep": 4, "steps": 772, "launches": 20, "sms": 132, "ms": 38.745186, "cyc_per_launch": 3358810.5, "cyc_max": 3359791, "ns_last": 1905050.7, "mhz_last": 1763.1}
+{"mark": "w_MUFU_EX2_512", "t": 1793620779.957884063}
+{"kernel": "w_MUFU_EX2_512", "rep": 0, "steps": 368, "launches": 20, "sms": 132, "ms": 35.682175, "cyc_per_launch": 3108721.5, "cyc_max": 3108911, "ns_last": 1761647.0, "mhz_last": 1764.7}
+{"kernel": "w_MUFU_EX2_512", "rep": 1, "steps": 368, "launches": 20, "sms": 132, "ms": 35.676674, "cyc_per_launch": 3108722.0, "cyc_max": 3108911, "ns_last": 1762082.9, "mhz_last": 1764.2}
+{"kernel": "w_MUFU_EX2_512", "rep": 2, "steps": 368, "launches": 20, "sms": 132, "ms": 35.678783, "cyc_per_launch": 3108720.1, "cyc_max": 3108911, "ns_last": 1761809.2, "mhz_last": 1764.5}
+{"kernel": "w_MUFU_EX2_512", "rep": 3, "steps": 368, "launches": 20, "sms": 132, "ms": 35.676384, "cyc_per_launch": 3108723.9, "cyc_max": 3108911, "ns_last": 1761861.3, "mhz_last": 1764.5}
+{"kernel": "w_MUFU_EX2_512", "rep": 4, "steps": 368, "launches": 20, "sms": 132, "ms": 35.677055, "cyc_per_launch": 3108719.3, "cyc_max": 3108911, "ns_last": 1761169.2, "mhz_last": 1765.1}
+{"mark": "w_FFMA_64", "t": 1793620782.286048728}
+{"kernel": "w_FFMA_64", "rep": 0, "steps": 3123, "launches": 20, "sms": 132, "ms": 39.062977, "cyc_per_launch": 3307657.6, "cyc_max": 3307663, "ns_last": 1914190.1, "mhz_last": 1728.0}
+{"kernel": "w_FFMA_64", "rep": 1, "steps": 3123, "launches": 20, "sms": 132, "ms": 42.202686, "cyc_per_launch": 3307657.6, "cyc_max": 3307663, "ns_last": 2120608.5, "mhz_last": 1559.8}
+{"kernel": "w_FFMA_64", "rep": 2, "steps": 3123, "launches": 20, "sms": 132, "ms": 42.909439, "cyc_per_launch": 3307657.6, "cyc_max": 3307663, "ns_last": 2120650.4, "mhz_last": 1559.7}
+{"kernel": "w_FFMA_64", "rep": 3, "steps": 3123, "launches": 20, "sms": 132, "ms": 43.015072, "cyc_per_launch": 3307657.6, "cyc_max": 3307663, "ns_last": 2122379.4, "mhz_last": 1558.5}
+{"kernel": "w_FFMA_64", "rep": 4, "steps": 3123, "launches": 20, "sms": 132, "ms": 43.055809, "cyc_per_launch": 3307657.6, "cyc_max": 3307663, "ns_last": 2122404.8, "mhz_last": 1558.4}
+{"mark": "w_FFMA_128", "t": 1793620784.552106001}
+{"kernel": "w_FFMA_128", "rep": 0, "steps": 3078, "launches": 20, "sms": 132, "ms": 39.622559, "cyc_per_launch": 3293777.4, "cyc_max": 3293931, "ns_last": 2071898.2, "mhz_last": 1589.7}
+{"kernel": "w_FFMA_128", "rep": 1, "steps": 3078, "launches": 20, "sms": 132, "ms": 42.022400, "cyc_per_launch": 3293777.1, "cyc_max": 3293931, "ns_last": 2111684.6, "mhz_last": 1559.8}
+{"kernel": "w_FFMA_128", "rep": 2, "steps": 3078, "launches": 20, "sms": 132, "ms": 42.740479, "cyc_per_launch": 3293779.9, "cyc_max": 3293931, "ns_last": 2111763.2, "mhz_last": 1559.7}
+{"kernel": "w_FFMA_128", "rep": 3, "steps": 3078, "launches": 20, "sms": 132, "ms": 42.740479, "cyc_per_launch": 3293784.1, "cyc_max": 3293931, "ns_last": 2111772.4, "mhz_last": 1559.7}
+{"kernel": "w_FFMA_128", "rep": 4, "steps": 3078, "launches": 20, "sms": 132, "ms": 42.873314, "cyc_per_launch": 3293765.7, "cyc_max": 3293931, "ns_last": 2113645.6, "mhz_last": 1558.3}
+{"mark": "w_FFMA_256", "t": 1793620786.097017862}
+{"kernel": "w_FFMA_256", "rep": 0, "steps": 2696, "launches": 20, "sms": 132, "ms": 40.133858, "cyc_per_launch": 3432512.1, "cyc_max": 3432513, "ns_last": 2049320.2, "mhz_last": 1675.0}
+{"kernel": "w_FFMA_256", "rep": 1, "steps": 2696, "launches": 20, "sms": 132, "ms": 42.128834, "cyc_per_launch": 3432511.9, "cyc_max": 3432513, "ns_last": 2104914.4, "mhz_last": 1630.7}
+{"kernel": "w_FFMA_256", "rep": 2, "steps": 2696, "launches": 20, "sms": 132, "ms": 42.705280, "cyc_per_launch": 3432512.0, "cyc_max": 3432513, "ns_last": 2105086.1, "mhz_last": 1630.6}
+{"kernel": "w_FFMA_256", "rep": 3, "steps": 2696, "launches": 20, "sms": 132, "ms": 42.638496, "cyc_per_launch": 3432512.0, "cyc_max": 3432513, "ns_last": 2102253.1, "mhz_last": 1632.8}
+{"kernel": "w_FFMA_256", "rep": 4, "steps": 2696, "launches": 20, "sms": 132, "ms": 42.600033, "cyc_per_launch": 3432512.1, "cyc_max": 3432513, "ns_last": 2101944.0, "mhz_last": 1633.0}
+{"mark": "w_FFMA_512", "t": 1793620787.424014468}
+{"kernel": "w_FFMA_512", "rep": 0, "steps": 1781, "launches": 20, "sms": 132, "ms": 34.652702, "cyc_per_launch": 3021671.6, "cyc_max": 3062189, "ns_last": 1689880.0, "mhz_last": 1788.1}
+{"kernel": "w_FFMA_512", "rep": 1, "steps": 1781, "launches": 20, "sms": 132, "ms": 34.616482, "cyc_per_launch": 3021703.7, "cyc_max": 3062189, "ns_last": 1673035.9, "mhz_last": 1806.1}
+{"kernel": "w_FFMA_512", "rep": 2, "steps": 1781, "launches": 20, "sms": 132, "ms": 35.724705, "cyc_per_launch": 3021101.8, "cyc_max": 3036860, "ns_last": 1759096.0, "mhz_last": 1717.4}
+{"kernel": "w_FFMA_512", "rep": 3, "steps": 1781, "launches": 20, "sms": 132, "ms": 36.067871, "cyc_per_launch": 3021597.3, "cyc_max": 3062189, "ns_last": 1757396.1, "mhz_last": 1719.4}
+{"kernel": "w_FFMA_512", "rep": 4, "steps": 1781, "launches": 20, "sms": 132, "ms": 36.024960, "cyc_per_launch": 3021056.0, "cyc_max": 3036860, "ns_last": 1756914.2, "mhz_last": 1719.5}
+{"mark": "w_FMNMX_64", "t": 1793620788.911656863}
+{"kernel": "w_FMNMX_64", "rep": 0, "steps": 3209, "launches": 20, "sms": 132, "ms": 39.792545, "cyc_per_launch": 3286520.6, "cyc_max": 3286668, "ns_last": 2107025.2, "mhz_last": 1559.8}
+{"kernel": "w_FMNMX_64", "rep": 1, "steps": 3209, "launches": 20, "sms": 132, "ms": 42.611488, "cyc_per_launch": 3286519.5, "cyc_max": 3286668, "ns_last": 2127358.3, "mhz_last": 1544.9}
+{"kernel": "w_FMNMX_64", "rep": 2, "steps": 3209, "launches": 20, "sms": 132, "ms": 42.986881, "cyc_per_launch": 3286519.4, "cyc_max": 3286668, "ns_last": 2127398.5, "mhz_last": 1544.9}
+{"kernel": "w_FMNMX_64", "rep": 3, "steps": 3209, "launches": 20, "sms": 132, "ms": 43.046463, "cyc_per_launch": 3286519.9, "cyc_max": 3286668, "ns_last": 2128781.1, "mhz_last": 1543.9}
+{"kernel": "w_FMNMX_64", "rep": 4, "steps": 3209, "launches": 20, "sms": 132, "ms": 43.142208, "cyc_per_launch": 3286519.4, "cyc_max": 3286668, "ns_last": 2128852.6, "mhz_last": 1543.8}
+{"mark": "w_FMNMX_128", "t": 1793620789.936957627}
+{"kernel": "w_FMNMX_128", "rep": 0, "steps": 3175, "launches": 20, "sms": 132, "ms": 39.913601, "cyc_per_launch": 3252038.3, "cyc_max": 3252070, "ns_last": 2105160.7, "mhz_last": 1544.8}
+{"kernel": "w_FMNMX_128", "rep": 1, "steps": 3175, "launches": 20, "sms": 132, "ms": 42.706047, "cyc_per_launch": 3252038.4, "cyc_max": 3252070, "ns_last": 2147142.8, "mhz_last": 1514.6}
+{"kernel": "w_FMNMX_128", "rep": 2, "steps": 3175, "launches": 20, "sms": 132, "ms": 43.382465, "cyc_per_launch": 3252038.1, "cyc_max": 3252070, "ns_last": 2146722.4, "mhz_last": 1514.9}
+{"kernel": "w_FMNMX_128", "rep": 3, "steps": 3175, "launches": 20, "sms": 132, "ms": 43.379105, "cyc_per_launch": 3252038.4, "cyc_max": 3252070, "ns_last": 2146736.5, "mhz_last": 1514.9}
+{"kernel": "w_FMNMX_128", "rep": 4, "steps": 3175, "launches": 20, "sms": 132, "ms": 43.491455, "cyc_per_launch": 3252038.1, "cyc_max": 3252070, "ns_last": 2148640.2, "mhz_last": 1513.5}
+{"mark": "w_FMNMX_256", "t": 1793620791.078576893}
+{"kernel": "w_FMNMX_256", "rep": 0, "steps": 2255, "launches": 20, "sms": 132, "ms": 39.358528, "cyc_per_launch": 3495851.2, "cyc_max": 3496004, "ns_last": 1971106.2, "mhz_last": 1773.5}
+{"kernel": "w_FMNMX_256", "rep": 1, "steps": 2255, "launches": 20, "sms": 132, "ms": 39.999073, "cyc_per_launch": 3495848.2, "cyc_max": 3496004, "ns_last": 1976758.5, "mhz_last": 1768.5}
+{"kernel": "w_FMNMX_256", "rep": 2, "steps": 2255, "launches": 20, "sms": 132, "ms": 40.499393, "cyc_per_launch": 3495850.7, "cyc_max": 3496004, "ns_last": 2000333.1, "mhz_last": 1747.6}
+{"kernel": "w_FMNMX_256", "rep": 3, "steps": 2255, "launches": 20, "sms": 132, "ms": 40.827007, "cyc_per_launch": 3495848.8, "cyc_max": 3496004, "ns_last": 2026594.4, "mhz_last": 1725.0}
+{"kernel": "w_FMNMX_256", "rep": 4, "steps": 2255, "launches": 20, "sms": 132, "ms": 41.072830, "cyc_per_launch": 3495850.7, "cyc_max": 3496004, "ns_last": 2026220.8, "mhz_last": 1725.3}
+{"mark": "w_FMNMX_512", "t": 1793620792.027805491}
+{"kernel": "w_FMNMX_512", "rep": 0, "steps": 1298, "launches": 20, "sms": 132, "ms": 38.003391, "cyc_per_launch": 3357988.2, "cyc_max": 3358506, "ns_last": 1878562.2, "mhz_last": 1787.5}
+{"kernel": "w_FMNMX_512", "rep": 1, "steps": 1298, "launches": 20, "sms": 132, "ms": 37.967262, "cyc_per_launch": 3357989.5, "cyc_max": 3358506, "ns_last": 1859969.0, "mhz_last": 1805.4}
+{"kernel": "w_FMNMX_512", "rep": 2, "steps": 1298, "launches": 20, "sms": 132, "ms": 37.725727, "cyc_per_launch": 3357990.5, "cyc_max": 3358506, "ns_last": 1859718.1, "mhz_last": 1805.6}
+{"kernel": "w_FMNMX_512", "rep": 3, "steps": 1298, "launches": 20, "sms": 132, "ms": 37.663647, "cyc_per_launch": 3357993.7, "cyc_max": 3358506, "ns_last": 1856288.7, "mhz_last": 1809.0}
+{"kernel": "w_FMNMX_512", "rep": 4, "steps": 1298, "launches": 20, "sms": 132, "ms": 37.604130, "cyc_per_launch": 3357982.6, "cyc_max": 3358506, "ns_last": 1856315.4, "mhz_last": 1809.0}
+{"mark": "b_wait_SS64_w1", "t": 1793620792.922814032}
+{"kernel": "b_wait_SS64_w1", "rep": 0, "steps": 30832, "launches": 20, "sms": 132, "ms": 36.734718, "cyc_per_launch": 3237544.0, "cyc_max": 3237544, "ns_last": 1811396.4, "mhz_last": 1787.3}
+{"kernel": "b_wait_SS64_w1", "rep": 1, "steps": 30832, "launches": 20, "sms": 132, "ms": 36.741280, "cyc_per_launch": 3237544.0, "cyc_max": 3237544, "ns_last": 1811026.2, "mhz_last": 1787.7}
+{"kernel": "b_wait_SS64_w1", "rep": 2, "steps": 30832, "launches": 20, "sms": 132, "ms": 36.740768, "cyc_per_launch": 3237544.0, "cyc_max": 3237544, "ns_last": 1811318.1, "mhz_last": 1787.4}
+{"kernel": "b_wait_SS64_w1", "rep": 3, "steps": 30832, "launches": 20, "sms": 132, "ms": 36.739967, "cyc_per_launch": 3237544.0, "cyc_max": 3237544, "ns_last": 1811094.5, "mhz_last": 1787.6}
+{"kernel": "b_wait_SS64_w1", "rep": 4, "steps": 30832, "launches": 20, "sms": 132, "ms": 36.743393, "cyc_per_launch": 3237544.0, "cyc_max": 3237544, "ns_last": 1811355.2, "mhz_last": 1787.4}
+{"mark": "b_wait4_SS64_w1", "t": 1793620793.954978298}
+{"kernel": "b_wait4_SS64_w1", "rep": 0, "steps": 17723, "launches": 20, "sms": 132, "ms": 38.207905, "cyc_per_launch": 3367557.0, "cyc_max": 3367557, "ns_last": 1883953.7, "mhz_last": 1787.5}
+{"kernel": "b_wait4_SS64_w1", "rep": 1, "steps": 17723, "launches": 20, "sms": 132, "ms": 38.236095, "cyc_per_launch": 3367557.0, "cyc_max": 3367557, "ns_last": 1885182.8, "mhz_last": 1786.3}
+{"kernel": "b_wait4_SS64_w1", "rep": 2, "steps": 17723, "launches": 20, "sms": 132, "ms": 38.106655, "cyc_per_launch": 3367557.0, "cyc_max": 3367557, "ns_last": 1880552.5, "mhz_last": 1790.7}
+{"kernel": "b_wait4_SS64_w1", "rep": 3, "steps": 17723, "launches": 20, "sms": 132, "ms": 38.097343, "cyc_per_launch": 3367557.0, "cyc_max": 3367557, "ns_last": 1880821.8, "mhz_last": 1790.5}
+{"kernel": "b_wait4_SS64_w1", "rep": 4, "steps": 17723, "launches": 20, "sms": 132, "ms": 38.095966, "cyc_per_launch": 3367557.0, "cyc_max": 3367557, "ns_last": 1880509.3, "mhz_last": 1790.8}
+{"mark": "b_wait_SS64_w2", "t": 1793620795.059443562}
+{"kernel": "b_wait_SS64_w2", "rep": 0, "steps": 31944, "launches": 20, "sms": 132, "ms": 36.877663, "cyc_per_launch": 3290566.8, "cyc_max": 3290583, "ns_last": 1820984.0, "mhz_last": 1807.0}
+{"kernel": "b_wait_SS64_w2", "rep": 1, "steps": 31944, "launches": 20, "sms": 132, "ms": 36.974014, "cyc_per_launch": 3290566.8, "cyc_max": 3290583, "ns_last": 1820654.3, "mhz_last": 1807.4}
+{"kernel": "b_wait_SS64_w2", "rep": 2, "steps": 31944, "launches": 20, "sms": 132, "ms": 36.968544, "cyc_per_launch": 3290566.8, "cyc_max": 3290583, "ns_last": 1821082.7, "mhz_last": 1806.9}
+{"kernel": "b_wait_SS64_w2", "rep": 3, "steps": 31944, "launches": 20, "sms": 132, "ms": 36.851231, "cyc_per_launch": 3290567.5, "cyc_max": 3290627, "ns_last": 1814761.9, "mhz_last": 1813.2}
+{"kernel": "b_wait_SS64_w2", "rep": 4, "steps": 31944, "launches": 20, "sms": 132, "ms": 36.767937, "cyc_per_launch": 3290566.8, "cyc_max": 3290583, "ns_last": 1814769.0, "mhz_last": 1813.2}
+{"mark": "b_wait4_SS64_w2", "t": 1793620796.196009537}
+{"kernel": "b_wait4_SS64_w2", "rep": 0, "steps": 12900, "launches": 20, "sms": 132, "ms": 39.313919, "cyc_per_launch": 3302754.1, "cyc_max": 3302817, "ns_last": 1966283.9, "mhz_last": 1679.7}
+{"kernel": "b_wait4_SS64_w2", "rep": 1, "steps": 12900, "launches": 20, "sms": 132, "ms": 43.301186, "cyc_per_launch": 3302754.1, "cyc_max": 3302817, "ns_last": 2158922.7, "mhz_last": 1529.8}
+{"kernel": "b_wait4_SS64_w2", "rep": 2, "steps": 12900, "launches": 20, "sms": 132, "ms": 43.827583, "cyc_per_launch": 3302754.1, "cyc_max": 3302817, "ns_last": 2181972.4, "mhz_last": 1513.7}
+{"kernel": "b_wait4_SS64_w2", "rep": 3, "steps": 12900, "launches": 20, "sms": 132, "ms": 44.245407, "cyc_per_launch": 3302754.1, "cyc_max": 3302817, "ns_last": 2182101.6, "mhz_last": 1513.6}
+{"kernel": "b_wait4_SS64_w2", "rep": 4, "steps": 12900, "launches": 20, "sms": 132, "ms": 44.244766, "cyc_per_launch": 3302754.1, "cyc_max": 3302817, "ns_last": 2182107.9, "mhz_last": 1513.6}
+{"mark": "b_wait_SS128_w1", "t": 1793620797.246738276}
+{"kernel": "b_wait_SS128_w1", "rep": 0, "steps": 24297, "launches": 20, "sms": 132, "ms": 37.240578, "cyc_per_launch": 3328902.1, "cyc_max": 3328903, "ns_last": 1835822.1, "mhz_last": 1813.3}
+{"kernel": "b_wait_SS128_w1", "rep": 1, "steps": 24297, "launches": 20, "sms": 132, "ms": 37.232353, "cyc_per_launch": 3328902.1, "cyc_max": 3328903, "ns_last": 1835784.2, "mhz_last": 1813.3}
+{"kernel": "b_wait_SS128_w1", "rep": 2, "steps": 24297, "launches": 20, "sms": 132, "ms": 37.227936, "cyc_per_launch": 3328902.1, "cyc_max": 3328903, "ns_last": 1835822.3, "mhz_last": 1813.3}
+{"kernel": "b_wait_SS128_w1", "rep": 3, "steps": 24297, "launches": 20, "sms": 132, "ms": 37.229919, "cyc_per_launch": 3328902.1, "cyc_max": 3328903, "ns_last": 1835758.1, "mhz_last": 1813.4}
+{"kernel": "b_wait_SS128_w1", "rep": 4, "steps": 24297, "launches": 20, "sms": 132, "ms": 37.221088, "cyc_per_launch": 3328902.1, "cyc_max": 3328903, "ns_last": 1835790.1, "mhz_last": 1813.3}
+{"mark": "b_wait4_SS128_w1", "t": 1793620798.246531105}
+{"kernel": "b_wait4_SS128_w1", "rep": 0, "steps": 10718, "launches": 20, "sms": 132, "ms": 38.693630, "cyc_per_launch": 3408539.2, "cyc_max": 3408540, "ns_last": 1904940.6, "mhz_last": 1789.3}
+{"kernel": "b_wait4_SS128_w1", "rep": 1, "steps": 10718, "launches": 20, "sms": 132, "ms": 39.944992, "cyc_per_launch": 3408539.2, "cyc_max": 3408540, "ns_last": 2013874.2, "mhz_last": 1692.5}
+{"kernel": "b_wait4_SS128_w1", "rep": 2, "steps": 10718, "launches": 20, "sms": 132, "ms": 40.889919, "cyc_per_launch": 3408539.2, "cyc_max": 3408540, "ns_last": 2017461.1, "mhz_last": 1689.5}
+{"kernel": "b_wait4_SS128_w1", "rep": 3, "steps": 10718, "launches": 20, "sms": 132, "ms": 40.897152, "cyc_per_launch": 3408539.2, "cyc_max": 3408540, "ns_last": 2017516.4, "mhz_last": 1689.5}
+{"kernel": "b_wait4_SS128_w1", "rep": 4, "steps": 10718, "launches": 20, "sms": 132, "ms": 40.896225, "cyc_per_launch": 3408539.2, "cyc_max": 3408540, "ns_last": 2017643.4, "mhz_last": 1689.4}
+{"mark": "b_wait_SS128_w2", "t": 1793620800.585149094}
+{"kernel": "b_wait_SS128_w2", "rep": 0, "steps": 23426, "launches": 20, "sms": 132, "ms": 37.652542, "cyc_per_launch": 3350276.3, "cyc_max": 3350318, "ns_last": 1929194.9, "mhz_last": 1736.6}
+{"kernel": "b_wait_SS128_w2", "rep": 1, "steps": 23426, "launches": 20, "sms": 132, "ms": 39.677727, "cyc_per_launch": 3350276.3, "cyc_max": 3350318, "ns_last": 1977761.5, "mhz_last": 1694.0}
+{"kernel": "b_wait_SS128_w2", "rep": 2, "steps": 23426, "launches": 20, "sms": 132, "ms": 40.394367, "cyc_per_launch": 3350276.3, "cyc_max": 3350318, "ns_last": 1997057.9, "mhz_last": 1677.6}
+{"kernel": "b_wait_SS128_w2", "rep": 3, "steps": 23426, "launches": 20, "sms": 132, "ms": 40.448097, "cyc_per_launch": 3350276.3, "cyc_max": 3350318, "ns_last": 1997141.3, "mhz_last": 1677.5}
+{"kernel": "b_wait_SS128_w2", "rep": 4, "steps": 23426, "launches": 20, "sms": 132, "ms": 40.388962, "cyc_per_launch": 3350276.3, "cyc_max": 3350318, "ns_last": 1995113.9, "mhz_last": 1679.2}
+{"mark": "b_wait4_SS128_w2", "t": 1793620801.606172521}
+{"kernel": "b_wait4_SS128_w2", "rep": 0, "steps": 6294, "launches": 20, "sms": 132, "ms": 37.841663, "cyc_per_launch": 3222883.2, "cyc_max": 3222940, "ns_last": 1885054.8, "mhz_last": 1709.7}
+{"kernel": "b_wait4_SS128_w2", "rep": 1, "steps": 6294, "launches": 20, "sms": 132, "ms": 40.959202, "cyc_per_launch": 3222883.2, "cyc_max": 3222940, "ns_last": 2086350.5, "mhz_last": 1544.7}
+{"kernel": "b_wait4_SS128_w2", "rep": 2, "steps": 6294, "launches": 20, "sms": 132, "ms": 41.952671, "cyc_per_launch": 3222883.2, "cyc_max": 3222940, "ns_last": 2066350.3, "mhz_last": 1559.7}
+{"kernel": "b_wait4_SS128_w2", "rep": 3, "steps": 6294, "launches": 20, "sms": 132, "ms": 41.760319, "cyc_per_launch": 3222883.2, "cyc_max": 3222940, "ns_last": 2066499.6, "mhz_last": 1559.6}
+{"kernel": "b_wait4_SS128_w2", "rep": 4, "steps": 6294, "launches": 20, "sms": 132, "ms": 41.763294, "cyc_per_launch": 3222883.2, "cyc_max": 3222940, "ns_last": 2066482.9, "mhz_last": 1559.6}
+{"mark": "b_pingpong_w2", "t": 1793620802.858813755}
+{"kernel": "b_pingpong_w2", "rep": 0, "steps": 51421, "launches": 20, "sms": 132, "ms": 38.908642, "cyc_per_launch": 3805248.4, "cyc_max": 3805266, "ns_last": 1922283.4, "mhz_last": 1979.5}
+{"kernel": "b_pingpong_w2", "rep": 1, "steps": 51421, "launches": 20, "sms": 132, "ms": 38.912800, "cyc_per_launch": 3805247.7, "cyc_max": 3805261, "ns_last": 1922262.8, "mhz_last": 1979.6}
+{"kernel": "b_pingpong_w2", "rep": 2, "steps": 51421, "launches": 20, "sms": 132, "ms": 38.909313, "cyc_per_launch": 3805248.7, "cyc_max": 3805266, "ns_last": 1922225.9, "mhz_last": 1979.6}
+{"kernel": "b_pingpong_w2", "rep": 3, "steps": 51421, "launches": 20, "sms": 132, "ms": 38.908096, "cyc_per_launch": 3805247.5, "cyc_max": 3805261, "ns_last": 1922176.5, "mhz_last": 1979.7}
+{"kernel": "b_pingpong_w2", "rep": 4, "steps": 51421, "launches": 20, "sms": 132, "ms": 38.904705, "cyc_per_launch": 3805248.4, "cyc_max": 3805266, "ns_last": 1922237.1, "mhz_last": 1979.6}
+{"mark": "b_pingpong_w3", "t": 1793620804.207178414}
+{"kernel": "b_pingpong_w3", "rep": 0, "steps": 31746, "launches": 20, "sms": 132, "ms": 37.000031, "cyc_per_launch": 3619158.3, "cyc_max": 3619173, "ns_last": 1828270.1, "mhz_last": 1979.6}
+{"kernel": "b_pingpong_w3", "rep": 1, "steps": 31746, "launches": 20, "sms": 132, "ms": 37.005470, "cyc_per_launch": 3619158.8, "cyc_max": 3619176, "ns_last": 1828190.3, "mhz_last": 1979.6}
+{"kernel": "b_pingpong_w3", "rep": 2, "steps": 31746, "launches": 20, "sms": 132, "ms": 37.004002, "cyc_per_launch": 3619158.3, "cyc_max": 3619173, "ns_last": 1828295.8, "mhz_last": 1979.5}
+{"kernel": "b_pingpong_w3", "rep": 3, "steps": 31746, "launches": 20, "sms": 132, "ms": 37.004288, "cyc_per_launch": 3619158.9, "cyc_max": 3619176, "ns_last": 1828235.2, "mhz_last": 1979.6}
+{"kernel": "b_pingpong_w3", "rep": 4, "steps": 31746, "launches": 20, "sms": 132, "ms": 37.002434, "cyc_per_launch": 3619158.3, "cyc_max": 3619173, "ns_last": 1828263.0, "mhz_last": 1979.6}
+{"mark": "v_fwd_ilv", "t": 1793620805.100098491}
+{"kernel": "v_fwd_ilv", "rep": 0, "steps": 1080, "launches": 20, "sms": 132, "ms": 37.987713, "cyc_per_launch": 3357543.9, "cyc_max": 3358568, "ns_last": 1871044.1, "mhz_last": 1794.5}
+{"kernel": "v_fwd_ilv", "rep": 1, "steps": 1080, "launches": 20, "sms": 132, "ms": 37.993313, "cyc_per_launch": 3357633.3, "cyc_max": 3358572, "ns_last": 1871387.9, "mhz_last": 1794.2}
+{"kernel": "v_fwd_ilv", "rep": 2, "steps": 1080, "launches": 20, "sms": 132, "ms": 37.852322, "cyc_per_launch": 3357540.8, "cyc_max": 3358568, "ns_last": 1854109.1, "mhz_last": 1810.9}
+{"kernel": "v_fwd_ilv", "rep": 3, "steps": 1080, "launches": 20, "sms": 132, "ms": 37.611263, "cyc_per_launch": 3357641.5, "cyc_max": 3358924, "ns_last": 1853999.8, "mhz_last": 1811.0}
+{"kernel": "v_fwd_ilv", "rep": 4, "steps": 1080, "launches": 20, "sms": 132, "ms": 37.899586, "cyc_per_launch": 3357515.9, "cyc_max": 3358568, "ns_last": 1871433.5, "mhz_last": 1794.1}
+{"mark": "v_fwd_spec", "t": 1793620806.118424280}
+{"kernel": "v_fwd_spec", "rep": 0, "steps": 1151, "launches": 20, "sms": 132, "ms": 38.051647, "cyc_per_launch": 1768734.7, "cyc_max": 1768776, "ns_last": 1071573.6, "mhz_last": 1650.6}
+{"kernel": "v_fwd_spec", "rep": 1, "steps": 1151, "launches": 20, "sms": 132, "ms": 38.065151, "cyc_per_launch": 1768735.9, "cyc_max": 1768776, "ns_last": 1071992.7, "mhz_last": 1650.0}
+{"kernel": "v_fwd_spec", "rep": 2, "steps": 1151, "launches": 20, "sms": 132, "ms": 38.221214, "cyc_per_launch": 1768736.1, "cyc_max": 1768776, "ns_last": 1070497.0, "mhz_last": 1652.3}
+{"kernel": "v_fwd_spec", "rep": 3, "steps": 1151, "launches": 20, "sms": 132, "ms": 38.176640, "cyc_per_launch": 1768734.5, "cyc_max": 1768785, "ns_last": 1072455.0, "mhz_last": 1649.2}
+{"kernel": "v_fwd_spec", "rep": 4, "steps": 1151, "launches": 20, "sms": 132, "ms": 38.180672, "cyc_per_launch": 1768735.1, "cyc_max": 1768776, "ns_last": 1073110.1, "mhz_last": 1648.2}
+{"mark": "v_pass1_ilv", "t": 1793620807.170550723}
+{"kernel": "v_pass1_ilv", "rep": 0, "steps": 1493, "launches": 20, "sms": 132, "ms": 36.521378, "cyc_per_launch": 3237798.8, "cyc_max": 3255812, "ns_last": 1790196.1, "mhz_last": 1808.6}
+{"kernel": "v_pass1_ilv", "rep": 1, "steps": 1493, "launches": 20, "sms": 132, "ms": 36.667839, "cyc_per_launch": 3237721.7, "cyc_max": 3256545, "ns_last": 1821139.2, "mhz_last": 1777.9}
+{"kernel": "v_pass1_ilv", "rep": 2, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.006817, "cyc_per_launch": 3238386.9, "cyc_max": 3260480, "ns_last": 1816817.9, "mhz_last": 1782.4}
+{"kernel": "v_pass1_ilv", "rep": 3, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.005154, "cyc_per_launch": 3237996.6, "cyc_max": 3255812, "ns_last": 1816425.5, "mhz_last": 1782.6}
+{"kernel": "v_pass1_ilv", "rep": 4, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.043201, "cyc_per_launch": 3238097.8, "cyc_max": 3255812, "ns_last": 1821947.4, "mhz_last": 1777.3}
+{"mark": "v_pass1_spec", "t": 1793620808.300519443}
+{"kernel": "v_pass1_spec", "rep": 0, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.018303, "cyc_per_launch": 1776235.9, "cyc_max": 1784385, "ns_last": 1023820.6, "mhz_last": 1734.9}
+{"kernel": "v_pass1_spec", "rep": 1, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.031742, "cyc_per_launch": 1776460.4, "cyc_max": 1786361, "ns_last": 1023286.8, "mhz_last": 1736.0}
+{"kernel": "v_pass1_spec", "rep": 2, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.104927, "cyc_per_launch": 1775363.0, "cyc_max": 1784385, "ns_last": 1023014.3, "mhz_last": 1735.4}
+{"kernel": "v_pass1_spec", "rep": 3, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.115646, "cyc_per_launch": 1775718.4, "cyc_max": 1786292, "ns_last": 1023463.5, "mhz_last": 1735.0}
+{"kernel": "v_pass1_spec", "rep": 4, "steps": 1493, "launches": 20, "sms": 132, "ms": 37.127361, "cyc_per_launch": 1776402.4, "cyc_max": 1785087, "ns_last": 1024188.8, "mhz_last": 1734.4}
+{"mark": "v_pass0_ilv", "t": 1793620809.299200854}
+{"kernel": "v_pass0_ilv", "rep": 0, "steps": 1879, "launches": 20, "sms": 132, "ms": 36.217087, "cyc_per_launch": 3219585.1, "cyc_max": 3220582, "ns_last": 1808629.1, "mhz_last": 1780.1}
+{"kernel": "v_pass0_ilv", "rep": 1, "steps": 1879, "launches": 20, "sms": 132, "ms": 36.834209, "cyc_per_launch": 3219707.7, "cyc_max": 3220582, "ns_last": 1885131.4, "mhz_last": 1707.9}
+{"kernel": "v_pass0_ilv", "rep": 2, "steps": 1879, "launches": 20, "sms": 132, "ms": 38.332226, "cyc_per_launch": 3219618.5, "cyc_max": 3220582, "ns_last": 1919156.4, "mhz_last": 1677.6}
+{"kernel": "v_pass0_ilv", "rep": 3, "steps": 1879, "launches": 20, "sms": 132, "ms": 38.916576, "cyc_per_launch": 3219610.5, "cyc_max": 3220582, "ns_last": 1921193.7, "mhz_last": 1675.8}
+{"kernel": "v_pass0_ilv", "rep": 4, "steps": 1879, "launches": 20, "sms": 132, "ms": 38.972672, "cyc_per_launch": 3219632.0, "cyc_max": 3220582, "ns_last": 1921290.2, "mhz_last": 1675.8}
+{"mark": "v_pass0_spec", "t": 1793620810.210001875}
+{"kernel": "v_pass0_spec", "rep": 0, "steps": 1759, "launches": 20, "sms": 132, "ms": 35.948257, "cyc_per_launch": 2059332.7, "cyc_max": 2062481, "ns_last": 1207655.5, "mhz_last": 1705.2}
+{"kernel": "v_pass0_spec", "rep": 1, "steps": 1759, "launches": 20, "sms": 132, "ms": 36.074112, "cyc_per_launch": 2059118.6, "cyc_max": 2061915, "ns_last": 1210217.5, "mhz_last": 1701.4}
+{"kernel": "v_pass0_spec", "rep": 2, "steps": 1759, "launches": 20, "sms": 132, "ms": 36.463360, "cyc_per_launch": 2059279.4, "cyc_max": 2062849, "ns_last": 1213380.8, "mhz_last": 1697.1}
+{"kernel": "v_pass0_spec", "rep": 3, "steps": 1759, "launches": 20, "sms": 132, "ms": 36.495457, "cyc_per_launch": 2059359.5, "cyc_max": 2061915, "ns_last": 1211723.6, "mhz_last": 1699.5}
+{"kernel": "v_pass0_spec", "rep": 4, "steps": 1759, "launches": 20, "sms": 132, "ms": 36.537502, "cyc_per_launch": 2059071.9, "cyc_max": 2061915, "ns_last": 1215605.6, "mhz_last": 1693.9}
+{"mark": "v_fwd_pp", "t": 1793620811.101604515}
+{"kernel": "v_fwd_pp", "rep": 0, "steps": 1135, "launches": 20, "sms": 132, "ms": 37.869858, "cyc_per_launch": 3378687.8, "cyc_max": 3385027, "ns_last": 1863514.2, "mhz_last": 1813.1}
+{"kernel": "v_fwd_pp", "rep": 1, "steps": 1135, "launches": 20, "sms": 132, "ms": 38.782112, "cyc_per_launch": 3378743.9, "cyc_max": 3385027, "ns_last": 1927881.2, "mhz_last": 1752.6}
+{"kernel": "v_fwd_pp", "rep": 2, "steps": 1135, "launches": 20, "sms": 132, "ms": 39.384254, "cyc_per_launch": 3378669.9, "cyc_max": 3385027, "ns_last": 1946833.7, "mhz_last": 1735.5}
+{"kernel": "v_fwd_pp", "rep": 3, "steps": 1135, "launches": 20, "sms": 132, "ms": 39.640736, "cyc_per_launch": 3378852.9, "cyc_max": 3385027, "ns_last": 1952724.6, "mhz_last": 1730.3}
+{"kernel": "v_fwd_pp", "rep": 4, "steps": 1135, "launches": 20, "sms": 132, "ms": 39.753761, "cyc_per_launch": 3378721.4, "cyc_max": 3385027, "ns_last": 1952279.8, "mhz_last": 1730.7}
+{"mark": "syn_fwd_dep_z", "t": 1793620812.020690418}
+{"kernel": "syn_fwd_dep_z", "rep": 0, "steps": 1131, "launches": 20, "sms": 132, "ms": 38.401279, "cyc_per_launch": 3389900.3, "cyc_max": 3409171, "ns_last": 1868017.5, "mhz_last": 1814.7}
+{"kernel": "syn_fwd_dep_z", "rep": 1, "steps": 1131, "launches": 20, "sms": 132, "ms": 38.133183, "cyc_per_launch": 3392372.6, "cyc_max": 3565132, "ns_last": 1869557.1, "mhz_last": 1814.5}
+{"kernel": "syn_fwd_dep_z", "rep": 2, "steps": 1131, "launches": 20, "sms": 132, "ms": 38.468929, "cyc_per_launch": 3392226.2, "cyc_max": 3628720, "ns_last": 1869356.1, "mhz_last": 1814.6}
+{"kernel": "syn_fwd_dep_z", "rep": 3, "steps": 1131, "launches": 20, "sms": 132, "ms": 38.308414, "cyc_per_launch": 3392462.4, "cyc_max": 3576208, "ns_last": 1869412.1, "mhz_last": 1814.7}
+{"kernel": "syn_fwd_dep_z", "rep": 4, "steps": 1131, "launches": 20, "sms": 132, "ms": 38.212479, "cyc_per_launch": 3390490.8, "cyc_max": 3407916, "ns_last": 1868309.8, "mhz_last": 1814.7}
+{"mark": "syn_pass1_dep_z", "t": 1793620812.999734911}
+{"kernel": "syn_pass1_dep_z", "rep": 0, "steps": 1578, "launches": 20, "sms": 132, "ms": 39.270721, "cyc_per_launch": 3510942.1, "cyc_max": 3529575, "ns_last": 1951077.6, "mhz_last": 1799.5}
+{"kernel": "syn_pass1_dep_z", "rep": 1, "steps": 1578, "launches": 20, "sms": 132, "ms": 39.273888, "cyc_per_launch": 3511241.2, "cyc_max": 3529575, "ns_last": 1951150.5, "mhz_last": 1799.6}
+{"kernel": "syn_pass1_dep_z", "rep": 2, "steps": 1578, "launches": 20, "sms": 132, "ms": 39.271969, "cyc_per_launch": 3511127.9, "cyc_max": 3529575, "ns_last": 1951170.9, "mhz_last": 1799.5}
+{"kernel": "syn_pass1_dep_z", "rep": 3, "steps": 1578, "launches": 20, "sms": 132, "ms": 39.272736, "cyc_per_launch": 3511174.2, "cyc_max": 3529575, "ns_last": 1951196.1, "mhz_last": 1799.5}
+{"kernel": "syn_pass1_dep_z", "rep": 4, "steps": 1578, "launches": 20, "sms": 132, "ms": 39.271969, "cyc_per_launch": 3511082.6, "cyc_max": 3529575, "ns_last": 1949589.1, "mhz_last": 1800.9}
+{"mark": "syn_pass0_dep_z", "t": 1793620814.106672840}
+{"kernel": "syn_pass0_dep_z", "rep": 0, "steps": 1942, "launches": 20, "sms": 132, "ms": 38.973953, "cyc_per_launch": 3494417.3, "cyc_max": 3496783, "ns_last": 1941872.7, "mhz_last": 1799.5}
+{"kernel": "syn_pass0_dep_z", "rep": 1, "steps": 1942, "launches": 20, "sms": 132, "ms": 38.975071, "cyc_per_launch": 3494297.1, "cyc_max": 3496401, "ns_last": 1941803.2, "mhz_last": 1799.5}
+{"kernel": "syn_pass0_dep_z", "rep": 2, "steps": 1942, "launches": 20, "sms": 132, "ms": 38.964832, "cyc_per_launch": 3494366.2, "cyc_max": 3496351, "ns_last": 1941815.3, "mhz_last": 1799.5}
+{"kernel": "syn_pass0_dep_z", "rep": 3, "steps": 1942, "launches": 20, "sms": 132, "ms": 38.968353, "cyc_per_launch": 3494464.0, "cyc_max": 3507986, "ns_last": 1941910.8, "mhz_last": 1799.5}
+{"kernel": "syn_pass0_dep_z", "rep": 4, "steps": 1942, "launches": 20, "sms": 132, "ms": 38.975872, "cyc_per_launch": 3494546.4, "cyc_max": 3507986, "ns_last": 1941925.8, "mhz_last": 1799.5}
+{"mark": "t_SS128_w2_z", "t": 1793620815.165443397}
+{"kernel": "t_SS128_w2_z", "rep": 0, "steps": 3466, "launches": 20, "sms": 132, "ms": 39.607456, "cyc_per_launch": 3549678.7, "cyc_max": 3549732, "ns_last": 1972789.6, "mhz_last": 1799.3}
+{"kernel": "t_SS128_w2_z", "rep": 1, "steps": 3466, "launches": 20, "sms": 132, "ms": 42.934719, "cyc_per_launch": 3549667.8, "cyc_max": 3549717, "ns_last": 2156828.1, "mhz_last": 1645.8}
+{"kernel": "t_SS128_w2_z", "rep": 2, "steps": 3466, "launches": 20, "sms": 132, "ms": 43.649406, "cyc_per_launch": 3549666.2, "cyc_max": 3549716, "ns_last": 2173726.5, "mhz_last": 1633.0}
+{"kernel": "t_SS128_w2_z", "rep": 3, "steps": 3466, "launches": 20, "sms": 132, "ms": 43.677441, "cyc_per_launch": 3549667.8, "cyc_max": 3549718, "ns_last": 2173686.5, "mhz_last": 1633.0}
+{"kernel": "t_SS128_w2_z", "rep": 4, "steps": 3466, "launches": 20, "sms": 132, "ms": 43.657024, "cyc_per_launch": 3549667.2, "cyc_max": 3549715, "ns_last": 2172103.5, "mhz_last": 1634.2}
+{"mark": "t_RS128_w3_z", "t": 1793620816.274000896}
+{"kernel": "t_RS128_w3_z", "rep": 0, "steps": 2320, "launches": 20, "sms": 132, "ms": 40.167934, "cyc_per_launch": 3563853.5, "cyc_max": 3564283, "ns_last": 2084243.4, "mhz_last": 1709.9}
+{"kernel": "t_RS128_w3_z", "rep": 1, "steps": 2320, "launches": 20, "sms": 132, "ms": 42.407265, "cyc_per_launch": 3563777.4, "cyc_max": 3564281, "ns_last": 2121590.8, "mhz_last": 1679.8}
+{"kernel": "t_RS128_w3_z", "rep": 2, "steps": 2320, "launches": 20, "sms": 132, "ms": 42.470528, "cyc_per_launch": 3563798.1, "cyc_max": 3564282, "ns_last": 2105569.2, "mhz_last": 1692.6}
+{"kernel": "t_RS128_w3_z", "rep": 3, "steps": 2320, "launches": 20, "sms": 132, "ms": 42.336063, "cyc_per_launch": 3563800.0, "cyc_max": 3564282, "ns_last": 2105753.5, "mhz_last": 1692.4}
+{"kernel": "t_RS128_w3_z", "rep": 4, "steps": 2320, "launches": 20, "sms": 132, "ms": 42.326401, "cyc_per_launch": 3563796.5, "cyc_max": 3564284, "ns_last": 2103646.5, "mhz_last": 1694.1}
+{"mark": "t_SS64_w4_z", "t": 1793620817.164730592}
+{"kernel": "t_SS64_w4_z", "rep": 0, "steps": 3468, "launches": 20, "sms": 132, "ms": 40.396896, "cyc_per_launch": 3551696.5, "cyc_max": 3551762, "ns_last": 2233887.5, "mhz_last": 1589.9}
+{"kernel": "t_SS64_w4_z", "rep": 1, "steps": 3468, "launches": 20, "sms": 132, "ms": 45.529442, "cyc_per_launch": 3551687.4, "cyc_max": 3551761, "ns_last": 2276841.0, "mhz_last": 1559.9}
+{"kernel": "t_SS64_w4_z", "rep": 2, "steps": 3468, "launches": 20, "sms": 132, "ms": 45.598370, "cyc_per_launch": 3551700.0, "cyc_max": 3551761, "ns_last": 2277101.1, "mhz_last": 1559.7}
+{"kernel": "t_SS64_w4_z", "rep": 3, "steps": 3468, "launches": 20, "sms": 132, "ms": 45.626976, "cyc_per_launch": 3551689.6, "cyc_max": 3551784, "ns_last": 2277155.4, "mhz_last": 1559.7}
+{"kernel": "t_SS64_w4_z", "rep": 4, "steps": 3468, "launches": 20, "sms": 132, "ms": 45.624416, "cyc_per_launch": 3551695.8, "cyc_max": 3551757, "ns_last": 2277050.4, "mhz_last": 1559.8}
+{"mark": "t_fwd_dep_z", "t": 1793620818.066481198}
+{"kernel": "t_fwd_dep_z", "rep": 0, "steps": 2319, "launches": 20, "sms": 132, "ms": 40.891457, "cyc_per_launch": 3562410.5, "cyc_max": 3562801, "ns_last": 2102845.6, "mhz_last": 1694.1}
+{"kernel": "t_fwd_dep_z", "rep": 1, "steps": 2319, "launches": 20, "sms": 132, "ms": 42.263294, "cyc_per_launch": 3562424.1, "cyc_max": 3562795, "ns_last": 2102879.3, "mhz_last": 1694.1}
+{"kernel": "t_fwd_dep_z", "rep": 2, "steps": 2319, "launches": 20, "sms": 132, "ms": 42.257153, "cyc_per_launch": 3562424.6, "cyc_max": 3562788, "ns_last": 2102838.8, "mhz_last": 1694.1}
+{"kernel": "t_fwd_dep_z", "rep": 3, "steps": 2319, "launches": 20, "sms": 132, "ms": 42.257118, "cyc_per_launch": 3562447.6, "cyc_max": 3562790, "ns_last": 2102858.4, "mhz_last": 1694.1}
+{"kernel": "t_fwd_dep_z", "rep": 4, "steps": 2319, "launches": 20, "sms": 132, "ms": 42.260128, "cyc_per_launch": 3562450.2, "cyc_max": 3562786, "ns_last": 2102903.5, "mhz_last": 1694.1}
+{"mark": "t_pass1_dep_z", "t": 1793620818.981194654}
+{"kernel": "t_pass1_dep_z", "rep": 0, "steps": 3420, "launches": 20, "sms": 132, "ms": 39.877441, "cyc_per_launch": 3550937.0, "cyc_max": 3550950, "ns_last": 2132918.8, "mhz_last": 1664.8}
+{"kernel": "t_pass1_dep_z", "rep": 1, "steps": 3420, "launches": 20, "sms": 132, "ms": 43.636002, "cyc_per_launch": 3550937.1, "cyc_max": 3550950, "ns_last": 2192030.8, "mhz_last": 1619.9}
+{"kernel": "t_pass1_dep_z", "rep": 2, "steps": 3420, "launches": 20, "sms": 132, "ms": 43.601696, "cyc_per_launch": 3550937.5, "cyc_max": 3550950, "ns_last": 2152272.5, "mhz_last": 1649.9}
+{"kernel": "t_pass1_dep_z", "rep": 3, "steps": 3420, "launches": 20, "sms": 132, "ms": 42.814720, "cyc_per_launch": 3550937.0, "cyc_max": 3550950, "ns_last": 2132901.1, "mhz_last": 1664.8}
+{"kernel": "t_pass1_dep_z", "rep": 4, "steps": 3420, "launches": 20, "sms": 132, "ms": 42.727489, "cyc_per_launch": 3550937.1, "cyc_max": 3550950, "ns_last": 2132904.0, "mhz_last": 1664.8}
+{"mark": "t_pass0_dep_z", "t": 1793620819.915243287}
+{"kernel": "t_pass0_dep_z", "rep": 0, "steps": 3465, "launches": 20, "sms": 132, "ms": 40.184193, "cyc_per_launch": 3548779.4, "cyc_max": 3548870, "ns_last": 2211178.4, "mhz_last": 1604.9}
+{"kernel": "t_pass0_dep_z", "rep": 1, "steps": 3465, "launches": 20, "sms": 132, "ms": 45.630302, "cyc_per_launch": 3548782.3, "cyc_max": 3548870, "ns_last": 2297052.6, "mhz_last": 1544.9}
+{"kernel": "t_pass0_dep_z", "rep": 2, "steps": 3465, "launches": 20, "sms": 132, "ms": 45.166046, "cyc_per_launch": 3548780.9, "cyc_max": 3548870, "ns_last": 2232040.0, "mhz_last": 1589.9}
+{"kernel": "t_pass0_dep_z", "rep": 3, "steps": 3465, "launches": 20, "sms": 132, "ms": 44.859810, "cyc_per_launch": 3548778.7, "cyc_max": 3548870, "ns_last": 2233234.9, "mhz_last": 1589.1}
+{"kernel": "t_pass0_dep_z", "rep": 4, "steps": 3465, "launches": 20, "sms": 132, "ms": 44.877342, "cyc_per_launch": 3548779.2, "cyc_max": 3548870, "ns_last": 2233237.3, "mhz_last": 1589.1}
+{"mark": "end", "t": 1793620820.916030766}

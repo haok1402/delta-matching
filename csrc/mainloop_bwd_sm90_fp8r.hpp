@@ -732,8 +732,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
             cute::tma_store_arrive();
         };
-        auto bwd_step = [&](int m_block, auto mask_fn, auto stage_c) {
+        auto bwd_step = [&](int m_block, auto mask_fn, auto stage_c, auto expbx_c) {
             constexpr int kSt = decltype(stage_c)::value;   // compile-time Q / Qt stage under UNROLL2 (-1 = runtime)
+            // EXPBX: the unmasked loop (no_mask_fn) is exactly m_block >= fq8_mask_m_end, pass 0's kda_expbx_mask_end.
+            [[maybe_unused]] constexpr bool kExpbx = decltype(expbx_c)::value;
             Tensor fq8_tmpK = make_fragment_like(tdKrdK);
             float fq8_g_fold = 0.0f;
             // (kBlockN, kBlockM) = the swapAB fragment: rows = keys, columns = query rows.
@@ -793,7 +795,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
             mask_fn(tSrS, m_block);
             #pragma unroll
             for (int mi = 0; mi < size<0>(scores); ++mi) {
-#if KDA_PK_EXPB == 1
+#if KDA_PK_EXPB == 3
+                // ## KDA_PK_EXPB=3 (EXPBX): the folded-bias line on unmasked tiles only (pass 0: kda_expbx_mask_end).
+                float const lse_scaled = kExpbx ? __fmaf_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E), -kFq8MoE)
+                                                : __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));
+#elif KDA_PK_EXPB == 1
                 // ## KDA_PK_EXPB (named numerics arm; pass 0 does the same): b = fma(lse, log2e, -8) per row,
                 // P-hat = exp2(min(fma(s, dsc, -b), 12)): the per-element FADD of the 2^8 offset is gone.
                 float const lse_scaled = __fmaf_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E), -kFq8MoE);
@@ -804,7 +810,13 @@ struct CollectiveMainloopBwdSm90Fp8R {
 #endif
                 #pragma unroll
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
-#if KDA_PK_EXPB
+#if KDA_PK_EXPB == 3
+                    if constexpr (kExpbx) {
+                        scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
+                    } else {
+                        scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+                    }
+#elif KDA_PK_EXPB
                     scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
 #else
                     // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
@@ -1029,9 +1041,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
         KT_HEADER(n_block, get<1>(block_coord), bidb, m_block_min);
         KP(2);
         CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block < m_block_max && m_block < fq8_mask_m_end; ++m_block) { bwd_step(m_block, mask_fn, Int<-1>{}); }
+        for (; m_block < m_block_max && m_block < fq8_mask_m_end; ++m_block) { bwd_step(m_block, mask_fn, Int<-1>{}, cute::false_type{}); }
         CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block < m_block_max; ++m_block) { bwd_step(m_block, no_mask_fn, Int<-1>{}); }
+        for (; m_block < m_block_max; ++m_block) { bwd_step(m_block, no_mask_fn, Int<-1>{}, cute::true_type{}); }
 
         // S17 DSDEFER-CTA: the last tile's halves, after a CTA-wide rendezvous (every stmatrix + fence of it done).
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);

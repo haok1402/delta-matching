@@ -26,7 +26,13 @@
 #ifndef KDA_PK_EXPB
 #define KDA_PK_EXPB 0
 #endif
+// EXPBX predicate (pass 1's masked-loop bound for its 128-key n-block n128, in 64-row m-blocks): tiles with
+// m_block < this keep the certified exp line in both passes.
+__device__ __forceinline__ int kda_expbx_mask_end(int n128, int seqlen_q, int seqlen_k) {
+    return ((n128 + 1) * 128 > seqlen_k) ? INT_MAX : ((n128 + 1) * 128 - (seqlen_k - seqlen_q) + 64 - 1) / 64;
+}
 
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 
@@ -359,6 +365,15 @@ struct DeltaV6 {
             float const lse0 = __fmul_rn(sLSE(row0, wg), float(M_LOG2E));   // the host prep's exact multiply
             float const lse1 = __fmul_rn(sLSE(row1, wg), float(M_LOG2E));
 #endif
+#if KDA_PK_EXPB == 3
+            // ## KDA_PK_EXPB=3 (EXPBX, named numerics arm, pass 0 + pass 1 identically): the folded-bias line
+            // P-hat = exp2(min(fma(s, dsc, -b), 12)), b = fma(lse, log2e, -8), on every (64-row m-block, 128-key block)
+            // tile OUTSIDE pass 1's masked range (m_block < kda_expbx_mask_end(n128)); the certified line on the diagonal
+            // 128 x 128 block (and the seqlen_k tail), where the rows with the fewest visible keys (smallest per-row
+            // tolerance) live.  The predicate is pass 1's own masked-loop bound, so both passes form the same P-hat.
+            float const bx0 = __fmaf_rn(sLSE(row0, wg), float(M_LOG2E), -kFq8MoE);
+            float const bx1 = __fmaf_rn(sLSE(row1, wg), float(M_LOG2E), -kFq8MoE);
+#endif
             // The v4b per-tile arithmetic, VERBATIM: (1) S~ -> P~ (mask, descale, LSE, F1 clamp, exp2), (2) the fixed-order
             // half row sums; (3) the M5 reduce's fp64 fold (n-block ascending, half 0 then half 1) in registers.
             // ## M21 diet: the mask is a no-op on every n-block whose keys all lie at or below the row block's diagonal and
@@ -373,13 +388,27 @@ struct DeltaV6 {
                 if (need_mask) {
                     mask.template apply<true /*Seqlenk_mask*/, Is_causal, false /*Is_local*/>(tSrS, m_block, n_block);
                 }
+#if KDA_PK_EXPB == 3
+                if (m_block >= kda_expbx_mask_end(n_block >> 1, seqlen_q, seqlen_k)) {
+                    #pragma unroll
+                    for (int mi = 0; mi < 2; ++mi) {
+                        float const bx = mi == 0 ? bx0 : bx1;
+                        #pragma unroll
+                        for (int ni = 0; ni < 16; ++ni) {
+                            float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
+                            scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), dsc, -bx), kFq8MoE + 4.0f));
+                        }
+                    }
+                    return;
+                }
+#endif
                 #pragma unroll
                 for (int mi = 0; mi < 2; ++mi) {
                     float const lse_scaled = mi == 0 ? lse0 : lse1;
                     #pragma unroll
                     for (int ni = 0; ni < 16; ++ni) {
                         float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
-#if KDA_PK_EXPB
+#if KDA_PK_EXPB == 1 || KDA_PK_EXPB == 2
                         scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), dsc, -lse_scaled), kFq8MoE + 4.0f));
 #else
                         scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));

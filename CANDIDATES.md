@@ -283,3 +283,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   shapes (screen s27). A/B vs r17_fwd: fwd geo-mean -2.46% (job 21179751), -2.42% (21179752); job 1 flags B2 32/4
   N8192 e2e fwd+bwd slower beyond spread (its forward is faster). Causal D128 symbol STACK 16 -> 40 B (kda-fwdport
   investigating). Needs ~0.6% more bitwise to clear the 3% stacking bar.
+
+- Tile-temp lever closed (kda-fwdport analysis, agreed): an fp16 temp does not fit FA3 order at 3 WGs (O 64 + S 64 +
+  P 16 + T 32 = 176 > 160), needs a ~2^-9 prescale of P (products reach ~1.3e7 > 65504), and its accumulation error
+  (~+2e-5 per case) fails residual-v4's 1e-5; a per-WG O slab in smem has S45's LDS / FFMA / STS promote cost.

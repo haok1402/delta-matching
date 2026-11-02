@@ -190,7 +190,7 @@ The order is unchanged since round 3. Forward is the largest eligible gap: the n
   code generation), so the profile rests on static SASS against FA3's fp8 forward and on timing-only ablations (job
   21163152). Largest measured cost: the rho rescale between the serialized PV sub-gemm groups, -19.8 .. -20.2% of the
   D256 forward and -7.7 .. -8.1% of D128 when removed; S descale -2.9 .. -9.0%; exposed k-scale loads -0.8 .. -3.2%
-  (the only bitwise knob, below 3%).
+  (the only knob expected bitwise, not equivalence-tested, below 3%).
 - Hypothesis PVIL (from that profile): run the PV temp as two half-width temps driven as interleaved rho chains (each
   temp's rescale under the other's sub-gemm). D128 NSPLIT 1 -> 2 (one pair of 32-register temps), D256 NSPLIT 2 -> 4
   (two pairs); PV-phase registers unchanged (D128 160, D256 208 fp32 / thread). Certified flag set changed in the
@@ -208,9 +208,13 @@ The order is unchanged since round 3. Forward is the largest eligible gap: the n
   1.999 / 1.999 / 2.002 ms.
 - Verdict: REJECTED (the change affects the forward at both head dims; -1.55% on its affected sum, below 3%); not
   merged. Reading: interleaving two chains does not shorten either chain; each temp still runs four dependent
-  sub-gemm -> wait -> rescale stages, so the PV phase stays latency-bound. The ablation bound (knob 2 / 3) is reached
-  only by removing the dependency between the groups (independent group temps), which changes the accumulation order
-  (non-bitwise; needs the numerics gate Q2 / Q3).
+  sub-gemm -> wait -> rescale stages (a reading of the emitted order, not a measured attribution). The knob-2 / 3
+  removal timings size the remaining opportunity; independent group temps are one way to approach it (accumulation
+  order changes: non-bitwise, needs the numerics gate Q2 / Q3), not a proven or exclusive one.
+- Resources per symbol (review correction): the round-7 gate printed sorted stack lists, which hid the correspondence.
+  Per symbol, D256 causal STACK 24 -> 40 B (new STL / LDL inside the steady-state loop), D256 full 32 -> 24 B; aggregate
+  STL / LDL 35 / 59 -> 53 / 75. Absence of ptxas warnings is not an AC-3.3 pass; the gate now checks per-symbol STACK /
+  LOCAL growth and fails full mode on it.
 - Counters: forward eligible 0 -> 1.
 
 | kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
@@ -219,3 +223,67 @@ The order is unchanged since round 3. Forward is the largest eligible gap: the n
 | forward | 1 (PVIL) | 0 |
 | pass 2 | 0 | 0 |
 | torch glue | 0 | 0 |
+
+## Round 8: PVIL-D256 (Hao's ruling) and GRPFOLD (the rho lever): both REJECTED; forward closes
+
+User direction at the start of the round (Hao): (1) a D256-only PVIL is a fair candidate gated on the D256 forward
+subset, like DO2; (2) make the rho rescale between the serialized PV sub-gemms the next forward hypothesis.
+
+Gate change first (B7, 51587fc): every selected target symbol must have one ELF `.text` section, one resource row and
+one SASS record with unique contiguous 16-byte offsets from 0 to the exact section end; per-symbol STACK / LOCAL growth
+is recorded and fails full mode (the acceptance predicate "no new spills / stack").
+
+### PVIL-D256 (`results/r8/pvil256/`, job 21164633)
+
+- Change: round-7 PVIL with `kPVIL` restricted to kHeadDimV >= 256 (FA3FP8F_TP_NSPLIT 2 -> 4, FA3FP11_FWD_PVIL 1;
+  hd128 flags and code path unchanged). Two pre-declared variants (A as round 7; B with rho_1..3 computed once per
+  tile), the first without per-symbol stack / local growth to be gated.
+- Result: both variants grow the D256 causal (dynamic-scheduler) forward symbol's stack: 24 -> 40 B (A), 24 -> 48 B
+  (B), with STL / LDL inside the steady-state loop (round-7 PVIL binary: STL at 0x4b.., 0xa0c0 ..). The gate ran on A
+  and stopped at the resource predicate (`FAILED: per-symbol stack / local growth ... STACK 24 -> 40`) before pytest /
+  A/B. Timing evidence for this code at D256 is round 7's: -3.03% main, -2.57% held-out D256 forward.
+- Verdict: REJECTED (new loop spills in a changed symbol; AC-3.3). Counted with round-7 PVIL as one hypothesis.
+
+### GRPFOLD (`results/r8/grpfold/`, job 21164677)
+
+- Change: independent group PV accumulators. Products k = 0 .. 4*NSPLIT-1 (slab k/4, group k%4), each into a
+  zero-initialised half-width temp T[k%2] (32 fp32 regs); ledger per step: issue(k) -> `wait<1>` (retires k-1) ->
+  fold O_slab(k-1) += T * w_g with w_g = v8sc_g * 2^(ms_g - m*l2) (softmax.basis<g>), ascending group order per slab;
+  the last product stays in flight to the shipped `wait<0>` + promote_last; no Horner rho. Also applied to the tail
+  tile. D128 NSPLIT 1 -> 2, D256 2 -> 4. Register plan, PV phase: D128 tOrO 64 + 2 x 32 + P 32 + w 8 = 168; D256 128 +
+  64 + 16 + 8 = 216 (shipped 160 / 208). Accumulation-order class (not bitwise). Declared footprint: the forward at both
+  head dims (all-grid `fwd`).
+- Two pre-declared weight variants (w once per tile / per fold): neither grows any symbol's STACK or LOCAL; the
+  per-tile variant was gated (`--mode timing`, stage 1). Resources per symbol unchanged (REG 168, STACK 24 / 24 / 32 /
+  24), STL / LDL 35 / 59 -> 33 / 57, QGMMA 140 -> 220.
+- Stage 1 (A = DO2, B = GRPFOLD, 3 alternating reps): forward main 185.746 -> 185.969 ms (**+0.12%**; D256 -2.18%,
+  D128 slower), held-out 17.168 -> 17.133 ms (-0.21%; D256 -2.41%); e2e fwd+bwd +0.29% main; four D128 causal main
+  shapes +1.33 .. +1.90% fwd+bwd beyond their spreads; bench.py matched forward D128 1.088 / 1.091 / 1.094 -> 1.145 /
+  1.147 / 1.144 ms, D256 2.004 / 2.018 / 2.024 -> 1.964 / 1.951 / 1.960 ms.
+- Verdict: REJECTED at stage 1 (no gain on its declared footprint); numerical certification (Q2 / Q3) not built for a
+  candidate that cannot ship. Reading: like PVIL, it keeps the same number of per-element vector operations (four
+  FMA folds instead of three rescales + one promote) and only reorders them; neither reordering recovers the knob-2
+  removal timing.
+
+### Counters and ranking
+
+Forward eligible 1 -> 2 (PVIL incl. its D256 variant; GRPFOLD): forward has reached the stop condition. Hao's other
+rho-lever ideas (folding rho into the P quantization or the V-side scale; deferring the rescale) and the S-descale fold
+are recorded as unexecuted forward backlog. Next: pass 2 (largest remaining eligible waste), profile first.
+
+| kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
+|---|---:|---|
+| pass 1 | 2 (H1b, PINGPONG): closed (reopens only with a new profile-based hypothesis, Hao) | 1 (H1a, round 1) |
+| forward | 2 (PVIL / PVIL-D256, GRPFOLD): closed | 0 |
+| pass 2 | 0 | 0 |
+| torch glue | 0 | 0 |
+
+Current ranking (accepted DO2 arm of the round-8 GRPFOLD A/B, `results/r8/grpfold/ab_main/A_median.json`, main grid):
+
+| kernel | measured ms | modeled SOL ms | modeled waste ms | % of modeled SOL |
+|---|---:|---:|---:|---:|
+| pass1 | 493.298 | 128.810 | 364.487 | 26.1% |
+| fwd | 185.746 | 64.167 | 121.579 | 34.5% |
+| pass2 | 105.897 | 63.061 | 42.836 | 59.5% |
+| glue | 36.474 | 13.822 | 22.652 | 37.9% |
+| pass0 | 35.804 | 16.042 | 19.762 | 44.8% |

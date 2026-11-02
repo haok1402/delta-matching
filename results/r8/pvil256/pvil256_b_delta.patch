@@ -1,0 +1,40 @@
+diff --git a/csrc/mainloop_fwd_sm90_fp8f.hpp b/csrc/mainloop_fwd_sm90_fp8f.hpp
+index 93ee9e4..fa23b88 100644
+--- a/csrc/mainloop_fwd_sm90_fp8f.hpp
++++ b/csrc/mainloop_fwd_sm90_fp8f.hpp
+@@ -1652,21 +1652,21 @@ struct CollectiveMainloopFwdSm90Fp8F {
+         auto Oa_ = pv_O_slab(NA_C);                                                                         \
+         fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/-1, 0 * A_, 1 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
+         fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/-1, 0 * A_, 1 * A_>(tiled_mma_pv, tOrP, Bb_, Db);  \
+-        auto rho1_ = fq8_rho(softmax, 1);                                                                   \
++        auto const& rho1_ = fq8_rhot1;                                                                      \
+         warpgroup_wait<1>(); warpgroup_fence_operand(Da);                                                   \
+         softmax.rescale_o(Da, rho1_);                                                                       \
+         fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 1 * A_, 2 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
+         warpgroup_wait<1>(); warpgroup_fence_operand(Db);                                                   \
+         softmax.rescale_o(Db, rho1_);                                                                       \
+         fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 1 * A_, 2 * A_>(tiled_mma_pv, tOrP, Bb_, Db);  \
+-        auto rho2_ = fq8_rho(softmax, 2);                                                                   \
++        auto const& rho2_ = fq8_rhot2;                                                                      \
+         warpgroup_wait<1>(); warpgroup_fence_operand(Da);                                                   \
+         softmax.rescale_o(Da, rho2_);                                                                       \
+         fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 2 * A_, 3 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
+         warpgroup_wait<1>(); warpgroup_fence_operand(Db);                                                   \
+         softmax.rescale_o(Db, rho2_);                                                                       \
+         fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 2 * A_, 3 * A_>(tiled_mma_pv, tOrP, Bb_, Db);  \
+-        auto rho3_ = fq8_rho(softmax, 3);                                                                   \
++        auto const& rho3_ = fq8_rhot3;                                                                      \
+         warpgroup_wait<1>(); warpgroup_fence_operand(Da);                                                   \
+         softmax.rescale_o(Da, rho3_);                                                                       \
+         fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 3 * A_, 4 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
+@@ -1737,6 +1737,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                                       "PVIL: four groups per tile, one promote per tile, two or four slabs");
+                         auto tOrV_st = tOrV(_, _, _, smem_pipe_read_v.index());
+                         auto tOrDx = make_tOrD();
++                        // variant B: the three per-row rho ratios once per tile, shared by both pairs
++                        auto const fq8_rhot1 = fq8_rho(softmax, 1);
++                        auto const fq8_rhot2 = fq8_rho(softmax, 2);
++                        auto const fq8_rhot3 = fq8_rho(softmax, 3);
+                         if constexpr (kPVNSplit == 2) {
+                             FQ8_PV_PAIR_APG(cute::Int<0>{}, cute::Int<1>{}, tOrV_st, true, tOrDx, tOrD)
+                         } else {

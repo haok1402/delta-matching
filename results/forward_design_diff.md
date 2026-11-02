@@ -61,9 +61,10 @@ every step's serial path ahead of the descale.
 ## Where the extra time can come from (hypotheses to measure)
 
 1. Loss of intra-warpgroup overlap (PV-first): each warpgroup's step is a serial chain PV chain -> QK -> vector work.
-2. PV chain serialization: four retired sub-gemms per tile with rho work between them (~750 cycles of the ~1263-cycle
-   PV region in the (perturbing) trace at D128 full, against ~512 cycles of tensor work).
+2. PV chain serialization: four retired sub-gemms per tile with rho work between them (static SASS; no cycle
+   attribution: the trace that suggested one changed the code and is not used).
 3. Extra vector work: S descale FMULs, grouped max (4 reductions), group fold, promote FMAs, rho rescales.
 4. Exposed scale-load latency (k-scales after the QK retire).
 
-Measured by timing-only ablations (results/r7/wi) and the forward trace (results/timeline_fwd.md).
+Measured by timing-only ablations (results/r7/forward_whatif.md); the forward trace is a failed diagnostic and is not
+used for any of these (results/timeline_fwd.md section 1).

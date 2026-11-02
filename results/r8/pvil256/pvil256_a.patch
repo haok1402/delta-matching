@@ -1,0 +1,134 @@
+diff --git a/csrc/dm_flagset.h b/csrc/dm_flagset.h
+index 9111bad..484df0f 100644
+--- a/csrc/dm_flagset.h
++++ b/csrc/dm_flagset.h
+@@ -110,8 +110,8 @@
+ #if !defined(FA3FP8F_TP_GPP) || (FA3FP8F_TP_GPP) != 4
+ #error "delta_matching: FA3FP8F_TP_GPP must be 4 (the release flag set)"
+ #endif
+-#if !defined(FA3FP8F_TP_NSPLIT) || (FA3FP8F_TP_NSPLIT) != 2
+-#error "delta_matching: FA3FP8F_TP_NSPLIT must be 2 (the release flag set)"
++#if !defined(FA3FP8F_TP_NSPLIT) || (FA3FP8F_TP_NSPLIT) != 4
++#error "delta_matching: FA3FP8F_TP_NSPLIT must be 4 (the release flag set; r8 PVIL-D256)"
+ #endif
+ #if !defined(FA3FP8F_TP_PVFIRST) || (FA3FP8F_TP_PVFIRST) != 1
+ #error "delta_matching: FA3FP8F_TP_PVFIRST must be 1 (the release flag set)"
+@@ -173,6 +173,9 @@
+ #if defined(FA3FP11_HD128_NSPLIT) && (FA3FP11_HD128_NSPLIT) != 1
+ #error "delta_matching: FA3FP11_HD128_NSPLIT is fixed at 1 in this release"
+ #endif
++#if !defined(FA3FP11_FWD_PVIL) || (FA3FP11_FWD_PVIL) != 1
++#error "delta_matching: FA3FP11_FWD_PVIL must be 1 (the release flag set; r8 PVIL-D256)"
++#endif
+ #if defined(FA3FP11_HD128_P0V5_ST) && (FA3FP11_HD128_P0V5_ST) != 3
+ #error "delta_matching: FA3FP11_HD128_P0V5_ST is fixed at 3 in this release"
+ #endif
+diff --git a/csrc/mainloop_fwd_sm90_fp8f.hpp b/csrc/mainloop_fwd_sm90_fp8f.hpp
+index 2203667..93ee9e4 100644
+--- a/csrc/mainloop_fwd_sm90_fp8f.hpp
++++ b/csrc/mainloop_fwd_sm90_fp8f.hpp
+@@ -507,6 +507,11 @@ struct CollectiveMainloopFwdSm90Fp8F {
+ // PV chain (tOrO 64 + tSrS 64 + tOrD 64 + tOrP 16 = 208 <= 240; the d256 plan needs PV-first because the same overlap
+ // is 272 there).  FA3FP11_HD128_PVFIRST=0 selects the mainloop's !kSchedPVFirst path (FA3's IntraWGOverlap order) for
+ // the hd128 instantiation ONLY; the d256 pin FA3FP8F_TP_PVFIRST is untouched.  Issue order only: O bitwise expected.
++#ifndef FA3FP11_FWD_PVIL
++#define FA3FP11_FWD_PVIL 0
++#endif
++    // ## r7 PVIL: interleaved half-width PV temp chains in the PV-first step (see FQ8_PV_PAIR_APG)
++    static constexpr bool kPVIL = FA3FP11_FWD_PVIL != 0 && kHeadDimV >= 256;   // r8: D256 only (Hao); hd128 keeps the shipped chain
+     static constexpr bool kSchedPVFirst = ((kHeadDimV >= 256 ? FA3FP8F_TP_PVFIRST : FA3FP11_HD128_PVFIRST) != 0) && IntraWGOverlap && !HasQv;
+ 
+     // ## HasQv guard (NO numeric effect on the shipped
+@@ -1632,6 +1637,49 @@ struct CollectiveMainloopFwdSm90Fp8F {
+             auto Ob_ = pv_O_slab(NB_C);                                                                        \
+             softmax.promote_o(Ob_, Db, softmax.basis_last(fq8_v[3]));                                          \
+         }                                                                                                      \
++    }
++// ## r7 PVIL (kda-sm90 round 7, scheduling only, bitwise): FWDIL2's interleaved pair generalised to kAtomsPerGroup
++// k-atoms per group (2 at hd128 F3, 1 at d256).  Two half-width temps Da / Db (one head-dim slab each) run as two rho
++// chains: while one temp's group-g gemm is in flight the other temp's group-(g-1) result is rescaled by rho_g, so the
++// rescale FMULs leave the tensor-core critical path.  Each temp sees exactly the shipped op sequence on its own
++// elements (zero-init g0, rho1, g1, rho2, g2, rho3, g3, promote with basis_last); rho_g / w3 are per-row scalars
++// shared by the slabs; a wgmma output element does not depend on the atom's N width.
++#define FQ8_PV_PAIR_APG(NA_C, NB_C, VSTAGE, DEFERB, Da, Db)                                                 \
++    {                                                                                                       \
++        constexpr int A_ = kAtomsPerGroup;                                                                  \
++        auto Ba_ = pv_B_slab(NA_C, VSTAGE);                                                                 \
++        auto Bb_ = pv_B_slab(NB_C, VSTAGE);                                                                 \
++        auto Oa_ = pv_O_slab(NA_C);                                                                         \
++        fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/-1, 0 * A_, 1 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
++        fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/-1, 0 * A_, 1 * A_>(tiled_mma_pv, tOrP, Bb_, Db);  \
++        auto rho1_ = fq8_rho(softmax, 1);                                                                   \
++        warpgroup_wait<1>(); warpgroup_fence_operand(Da);                                                   \
++        softmax.rescale_o(Da, rho1_);                                                                       \
++        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 1 * A_, 2 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
++        warpgroup_wait<1>(); warpgroup_fence_operand(Db);                                                   \
++        softmax.rescale_o(Db, rho1_);                                                                       \
++        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 1 * A_, 2 * A_>(tiled_mma_pv, tOrP, Bb_, Db);  \
++        auto rho2_ = fq8_rho(softmax, 2);                                                                   \
++        warpgroup_wait<1>(); warpgroup_fence_operand(Da);                                                   \
++        softmax.rescale_o(Da, rho2_);                                                                       \
++        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 2 * A_, 3 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
++        warpgroup_wait<1>(); warpgroup_fence_operand(Db);                                                   \
++        softmax.rescale_o(Db, rho2_);                                                                       \
++        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 2 * A_, 3 * A_>(tiled_mma_pv, tOrP, Bb_, Db);  \
++        auto rho3_ = fq8_rho(softmax, 3);                                                                   \
++        warpgroup_wait<1>(); warpgroup_fence_operand(Da);                                                   \
++        softmax.rescale_o(Da, rho3_);                                                                       \
++        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 3 * A_, 4 * A_>(tiled_mma_pv, tOrP, Ba_, Da);  \
++        warpgroup_wait<1>(); warpgroup_fence_operand(Db);                                                   \
++        softmax.rescale_o(Db, rho3_);                                                                       \
++        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/-1, 3 * A_, 4 * A_>(tiled_mma_pv, tOrP, Bb_, Db);  \
++        warpgroup_wait<1>(); warpgroup_fence_operand(Da);                                                   \
++        softmax.promote_o(Oa_, Da, softmax.basis_last(fq8_v[3]));                                           \
++        if constexpr (!(DEFERB)) {                                                                          \
++            warpgroup_wait<0>(); warpgroup_fence_operand(Db);                                               \
++            auto Ob_ = pv_O_slab(NB_C);                                                                     \
++            softmax.promote_o(Ob_, Db, softmax.basis_last(fq8_v[3]));                                       \
++        }                                                                                                   \
+     }
+             auto fq8_pv_tile = [&](auto tOrV_stage, auto& D_) {
+                 // slabs 0 .. kPVNSplit-2 promoted in place; the LAST slab deferred
+@@ -1684,7 +1732,20 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                     warp_scheduler_barrier_sync();
+                     KF(2);
+                     auto tOrD = make_tOrD();
+-                    fq8_pv_tile(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD);
++                    if constexpr (kPVIL) {
++                        static_assert(kGroups == 4 && kGroupsPerPromote == 4 && (kPVNSplit == 2 || kPVNSplit == 4),
++                                      "PVIL: four groups per tile, one promote per tile, two or four slabs");
++                        auto tOrV_st = tOrV(_, _, _, smem_pipe_read_v.index());
++                        auto tOrDx = make_tOrD();
++                        if constexpr (kPVNSplit == 2) {
++                            FQ8_PV_PAIR_APG(cute::Int<0>{}, cute::Int<1>{}, tOrV_st, true, tOrDx, tOrD)
++                        } else {
++                            FQ8_PV_PAIR_APG(cute::Int<0>{}, cute::Int<1>{}, tOrV_st, false, tOrDx, tOrD)
++                            FQ8_PV_PAIR_APG(cute::Int<2>{}, cute::Int<3>{}, tOrV_st, true, tOrDx, tOrD)
++                        }
++                    } else {
++                        fq8_pv_tile(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD);
++                    }
+                     KF(3);
+                     warpgroup_wait<0>();
+                     KF(4);
+diff --git a/delta_matching/_buildcfg.py b/delta_matching/_buildcfg.py
+index 431cc0f..0193bf9 100644
+--- a/delta_matching/_buildcfg.py
++++ b/delta_matching/_buildcfg.py
+@@ -53,6 +53,7 @@ FLAGS = {
+     "FA3FP11_HD128_DOTST": 1, "FA3FP11_HD128_BN256": 1, "FA3FP11_HD128_QST": 2, "FA3FP11_HD128_DOST": 1,
+     "FA3FP11_HD128_P2ST": 2, "FA3FP11_HD128_P0ST": 3, "FA3FP11_HD128_P1R": 1, "FA3FP11_HD128_P0V5": 1,
+     "FA3FP11_P1R_SAGEDP": 1 if BF16_DP else 0,
++    "FA3FP11_FWD_PVIL": 1,
+ }
+ EXTRA_DEFINES = ["-DFA3FP11_M16_P0V2_ATOMN=64", "-DFA3FP11_HD128_P0V6=1", "-DFA3FP11_P1R_MASKDIAG=1", "-DFA3FP11_P1R_RFSKIP=1"]
+ 
+@@ -65,7 +66,7 @@ def defines():
+          "-DFLASHATTENTION_DISABLE_HDIM128", "-DFLASHATTENTION_DISABLE_HDIM192", "-DFLASHATTENTION_DISABLE_HDIMDIFF64",
+          "-DFLASHATTENTION_DISABLE_HDIMDIFF192",
+          # the forward's certified pins
+-         "-DFA3FP8F_PHAT_FLOOR_B=12", "-DFA3FP8F_TP_GPP=4", "-DFA3FP8F_TP_NSPLIT=2", "-DFA3FP8F_TP_PVFIRST=1"]
++         "-DFA3FP8F_PHAT_FLOOR_B=12", "-DFA3FP8F_TP_GPP=4", "-DFA3FP8F_TP_NSPLIT=4", "-DFA3FP8F_TP_PVFIRST=1"]
+     if DBG:
+         d.append("-DFA3FP11_DBG")
+     if PROF:

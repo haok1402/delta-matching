@@ -43,7 +43,7 @@ repetitions, forward kernel ms, change vs knob 0:
 | 1 no S descale (FMUL + k-scale loads) | -4.6% | -3.4% | -9.0% | -2.9% | -3.4% | -3.2% |
 | 2 no rho rescale between the PV sub-gemms | -8.1% | -8.1% | -7.7% | -19.9% | -19.8% | -20.2% |
 | 3 knob 2 + no inner PV waits | -4.6% | -3.6% | -1.9% | -21.1% | -22.3% | -24.0% |
-| 4 k-scale prefetch at step start (bitwise) | -1.1% | -0.8% | +0.2% | -3.1% | -3.2% | -1.3% |
+| 4 k-scale prefetch at step start (expected bitwise; no equivalence run) | -1.1% | -0.8% | +0.2% | -3.1% | -3.2% | -1.3% |
 
 Reading:
 
@@ -52,7 +52,9 @@ Reading:
   the PV critical path, not the wait instructions themselves.
 - The S descale costs 3-9% (largest at D128 full, where there is no mask work to share the step).
 - The exposed k-scale load latency is worth ~3% at D256 causal and ~1% elsewhere.
-- Knobs 1-3 change numerics (bounds, not candidates); knob 4 is bitwise.
+- Knobs 1-3 change numerics: they time specific code-removal builds, not achievable speedups of a numerically valid
+  implementation, and they do not show that any one design is the only way to recover them. Knob 4 is expected bitwise
+  by construction (same operands) but was not run through the equivalence suite.
 
 ## Hypothesis selected (round 7): PVIL
 
@@ -65,4 +67,5 @@ promote with basis_last); `warpgroup_wait<1>` retires exactly the older of the t
 temp is rescaled; the last temp's g3 stays in flight to the caller's `wait<0>` + `fq8_promote_last`, as shipped.
 Expected bitwise (a wgmma output element does not depend on the atom N width; the M16 probe recorded identical
 digits at NSPLIT 4). Certified flag set changes: FA3FP8F_TP_NSPLIT 2 -> 4, FA3FP11_HD128_NSPLIT 1 -> 2,
-FA3FP11_FWD_PVIL 0 -> 1. Bound from knob 2: at most ~20% (D256) / ~8% (D128).
+FA3FP11_FWD_PVIL 0 -> 1. Knob 2's removal timing (~20% D256 / ~8% D128) sizes the opportunity; it is not a bound
+for this design.

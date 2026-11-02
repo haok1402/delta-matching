@@ -1,0 +1,120 @@
+diff --git a/csrc/dm_flagset.h b/csrc/dm_flagset.h
+index 9111bad..2245cfc 100644
+--- a/csrc/dm_flagset.h
++++ b/csrc/dm_flagset.h
+@@ -110,8 +110,8 @@
+ #if !defined(FA3FP8F_TP_GPP) || (FA3FP8F_TP_GPP) != 4
+ #error "delta_matching: FA3FP8F_TP_GPP must be 4 (the release flag set)"
+ #endif
+-#if !defined(FA3FP8F_TP_NSPLIT) || (FA3FP8F_TP_NSPLIT) != 2
+-#error "delta_matching: FA3FP8F_TP_NSPLIT must be 2 (the release flag set)"
++#if !defined(FA3FP8F_TP_NSPLIT) || (FA3FP8F_TP_NSPLIT) != 4
++#error "delta_matching: FA3FP8F_TP_NSPLIT must be 4 (the release flag set; r8 GRPFOLD)"
+ #endif
+ #if !defined(FA3FP8F_TP_PVFIRST) || (FA3FP8F_TP_PVFIRST) != 1
+ #error "delta_matching: FA3FP8F_TP_PVFIRST must be 1 (the release flag set)"
+@@ -170,8 +170,11 @@
+ #if defined(FA3FP11_HALFPSI) && (FA3FP11_HALFPSI) != 0
+ #error "delta_matching: FA3FP11_HALFPSI is fixed at 0 in this release"
+ #endif
+-#if defined(FA3FP11_HD128_NSPLIT) && (FA3FP11_HD128_NSPLIT) != 1
+-#error "delta_matching: FA3FP11_HD128_NSPLIT is fixed at 1 in this release"
++#if !defined(FA3FP11_HD128_NSPLIT) || (FA3FP11_HD128_NSPLIT) != 2
++#error "delta_matching: FA3FP11_HD128_NSPLIT must be 2 (the release flag set; r8 GRPFOLD)"
++#endif
++#if !defined(FA3FP11_FWD_GRPFOLD) || (FA3FP11_FWD_GRPFOLD) != 1
++#error "delta_matching: FA3FP11_FWD_GRPFOLD must be 1 (the release flag set; r8 GRPFOLD)"
+ #endif
+ #if defined(FA3FP11_HD128_P0V5_ST) && (FA3FP11_HD128_P0V5_ST) != 3
+ #error "delta_matching: FA3FP11_HD128_P0V5_ST is fixed at 3 in this release"
+diff --git a/csrc/mainloop_fwd_sm90_fp8f.hpp b/csrc/mainloop_fwd_sm90_fp8f.hpp
+index 2203667..b5765ab 100644
+--- a/csrc/mainloop_fwd_sm90_fp8f.hpp
++++ b/csrc/mainloop_fwd_sm90_fp8f.hpp
+@@ -507,6 +507,11 @@ struct CollectiveMainloopFwdSm90Fp8F {
+ // PV chain (tOrO 64 + tSrS 64 + tOrD 64 + tOrP 16 = 208 <= 240; the d256 plan needs PV-first because the same overlap
+ // is 272 there).  FA3FP11_HD128_PVFIRST=0 selects the mainloop's !kSchedPVFirst path (FA3's IntraWGOverlap order) for
+ // the hd128 instantiation ONLY; the d256 pin FA3FP8F_TP_PVFIRST is untouched.  Issue order only: O bitwise expected.
++#ifndef FA3FP11_FWD_GRPFOLD
++#define FA3FP11_FWD_GRPFOLD 0
++#endif
++    // ## r8 GRPFOLD: independent group PV accumulators folded into O (see GRPFOLD_TILE)
++    static constexpr bool kGrpFold = FA3FP11_FWD_GRPFOLD != 0;
+     static constexpr bool kSchedPVFirst = ((kHeadDimV >= 256 ? FA3FP8F_TP_PVFIRST : FA3FP11_HD128_PVFIRST) != 0) && IntraWGOverlap && !HasQv;
+ 
+     // ## HasQv guard (NO numeric effect on the shipped
+@@ -1632,6 +1637,33 @@ struct CollectiveMainloopFwdSm90Fp8F {
+             auto Ob_ = pv_O_slab(NB_C);                                                                        \
+             softmax.promote_o(Ob_, Db, softmax.basis_last(fq8_v[3]));                                          \
+         }                                                                                                      \
++    }
++// ## r8 GRPFOLD (kda-sm90 round 8, accumulation-order class, NOT bitwise): independent group PV accumulators.
++// Products k = 0 .. 4*kPVNSplit-1 (slab k/4, group k%4) each go into a ZERO-INIT half-width temp T[k%2] (32 fp32
++// regs), are retired by warpgroup_wait<1> one issue later, and folded into tOrO's slab with fmaf(T, w_g, O),
++// w_g = v8sc_g * 2^(ms_g - m*l2) (softmax.basis<g>), in ascending group order per slab; no Horner rho chain.
++// Ledger per step k: issue(k) -> wait<1> (retires k-1) -> fold(k-1).  T[k%2] was folded at step k-1 before
++// issue(k) reuses it.  The last product (slab kPVNSplit-1, group 3, temp T[1] = the caller's tOrD) stays in flight
++// to the caller's wait<0> + fq8_promote_last (basis_last = basis<3>), exactly as shipped.
++#define GF_ISSUE(K, T)                                                                                                \
++    fq8_gemm_krange</*zero_init=*/true, /*wg_wait=*/-1, ((K) % 4) * kAtomsPerGroup, ((K) % 4 + 1) * kAtomsPerGroup>(  \
++        tiled_mma_pv, tOrP, pv_B_slab(cute::Int<(K) / 4>{}, gf_vst), T);
++#define GF_FOLD(K, T)                                                                                \
++    { warpgroup_wait<1>(); warpgroup_fence_operand(T); auto gfO_ = pv_O_slab(cute::Int<(K) / 4>{});  \
++      softmax.promote_o(gfO_, T, fq8_gw[(K) % 4]); }
++#define GF_STEP(K, TK, TP) if constexpr ((K) < 4 * kPVNSplit) { GF_ISSUE(K, TK) GF_FOLD((K) - 1, TP) }
++#define GRPFOLD_TILE(VSTAGE, DLAST)                                                                                             \
++    {                                                                                                                           \
++        static_assert(kGroups == 4 && (kPVNSplit == 2 || kPVNSplit == 4), "GRPFOLD: four groups, two or four slabs");           \
++        auto gf_vst = VSTAGE;                                                                                                   \
++        auto gf_t0 = make_tOrD();                                                                                               \
++        typename Softmax::TensorT const fq8_gw[4] = {softmax.template basis<0>(fq8_v[0]), softmax.template basis<1>(fq8_v[1]),  \
++                                                    softmax.template basis<2>(fq8_v[2]), softmax.template basis<3>(fq8_v[3])};  \
++        GF_ISSUE(0, gf_t0)                                                                                                      \
++        GF_STEP(1, DLAST, gf_t0) GF_STEP(2, gf_t0, DLAST) GF_STEP(3, DLAST, gf_t0) GF_STEP(4, gf_t0, DLAST)                     \
++        GF_STEP(5, DLAST, gf_t0) GF_STEP(6, gf_t0, DLAST) GF_STEP(7, DLAST, gf_t0) GF_STEP(8, gf_t0, DLAST)                     \
++        GF_STEP(9, DLAST, gf_t0) GF_STEP(10, gf_t0, DLAST) GF_STEP(11, DLAST, gf_t0) GF_STEP(12, gf_t0, DLAST)                  \
++        GF_STEP(13, DLAST, gf_t0) GF_STEP(14, gf_t0, DLAST) GF_STEP(15, DLAST, gf_t0)                                           \
+     }
+             auto fq8_pv_tile = [&](auto tOrV_stage, auto& D_) {
+                 // slabs 0 .. kPVNSplit-2 promoted in place; the LAST slab deferred
+@@ -1684,7 +1716,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                     warp_scheduler_barrier_sync();
+                     KF(2);
+                     auto tOrD = make_tOrD();
+-                    fq8_pv_tile(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD);
++                    if constexpr (kGrpFold) { GRPFOLD_TILE(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD) }
++                    else { fq8_pv_tile(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD); }
+                     KF(3);
+                     warpgroup_wait<0>();
+                     KF(4);
+@@ -1805,7 +1838,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
+             // touches only row stats, never ms_ or row_max, so w_3 is still
+             // valid after it).
+             auto tOrD = make_tOrD();
+-            fq8_pv_tile(tOrV(_, _, _, smem_pipe_read.index()), tOrD);
++            if constexpr (kGrpFold) { GRPFOLD_TILE(tOrV(_, _, _, smem_pipe_read.index()), tOrD) }
++            else { fq8_pv_tile(tOrV(_, _, _, smem_pipe_read.index()), tOrD); }
+             // ## V3-TILEPROMOTE: tOrO is in TRUE exp(-m) units, so finalize is
+             // upstream's SCALAR form (final_scale = 1) and scores_scale is just
+             // 1/l.  There is no constant 2^8 to unshift, so the LSE it writes is
+diff --git a/delta_matching/_buildcfg.py b/delta_matching/_buildcfg.py
+index 431cc0f..b7bcba9 100644
+--- a/delta_matching/_buildcfg.py
++++ b/delta_matching/_buildcfg.py
+@@ -53,6 +53,7 @@ FLAGS = {
+     "FA3FP11_HD128_DOTST": 1, "FA3FP11_HD128_BN256": 1, "FA3FP11_HD128_QST": 2, "FA3FP11_HD128_DOST": 1,
+     "FA3FP11_HD128_P2ST": 2, "FA3FP11_HD128_P0ST": 3, "FA3FP11_HD128_P1R": 1, "FA3FP11_HD128_P0V5": 1,
+     "FA3FP11_P1R_SAGEDP": 1 if BF16_DP else 0,
++    "FA3FP11_HD128_NSPLIT": 2, "FA3FP11_FWD_GRPFOLD": 1,
+ }
+ EXTRA_DEFINES = ["-DFA3FP11_M16_P0V2_ATOMN=64", "-DFA3FP11_HD128_P0V6=1", "-DFA3FP11_P1R_MASKDIAG=1", "-DFA3FP11_P1R_RFSKIP=1"]
+ 
+@@ -65,7 +66,7 @@ def defines():
+          "-DFLASHATTENTION_DISABLE_HDIM128", "-DFLASHATTENTION_DISABLE_HDIM192", "-DFLASHATTENTION_DISABLE_HDIMDIFF64",
+          "-DFLASHATTENTION_DISABLE_HDIMDIFF192",
+          # the forward's certified pins
+-         "-DFA3FP8F_PHAT_FLOOR_B=12", "-DFA3FP8F_TP_GPP=4", "-DFA3FP8F_TP_NSPLIT=2", "-DFA3FP8F_TP_PVFIRST=1"]
++         "-DFA3FP8F_PHAT_FLOOR_B=12", "-DFA3FP8F_TP_GPP=4", "-DFA3FP8F_TP_NSPLIT=4", "-DFA3FP8F_TP_PVFIRST=1"]
+     if DBG:
+         d.append("-DFA3FP11_DBG")
+     if PROF:

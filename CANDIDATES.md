@@ -144,3 +144,13 @@ Same references as the integrator's gates (`.local/rounds/r17/ngate_nfwd3n_2`, `
 EXPB FAIL (fresh captures, job 21177918: 8 well-conditioned rows above accepted + round-off in gqa4 / gqa3_promote /
 bhnd / heldout; 22 without the envelope); PW16 FAIL (d128_bhnd matched dV +1.67e-5); PW32 FAIL (also gqa3_promote dV
 +3.3e-5). 9be3622 has no csrc change vs 3106faf: C2 stands as measured.
+
+### Addendum: C2 stacks on r17_fwd (kda-sm90 c1ceece, forward C3g accepted), paper grid, two jobs each
+
+| stack | pass 1 geomean job 1 / job 2 | bitwise vs r17_fwd |
+|---|---:|---|
+| SHFL8 | -2.20% / -1.74% | (C2) |
+| SHFL8 + DOST=2 | -1.95% / -2.20% | 4 routes |
+| SHFL8 + QST=3, DOST=3 | -2.15% / -2.45% | default route |
+
+None reaches the 3% bar; C2 stays held for stacking with another bitwise piece.

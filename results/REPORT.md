@@ -1,7 +1,7 @@
 # kda-sm90: delta-matching fp8 attention on H100 — interim report
 
-Status: interim (round 18; updated after every accepted round). Branch `kda-sm90`; accepted build `r18_c4` (kda-sm90
-65d4424 + tooling). Every number below is traced to a committed file; per-round detail and every screened variant are in
+Status: interim (round 19; updated after every accepted round). Branch `kda-sm90`; accepted build `r19_fwd` (kda-sm90
+020b155 + tooling). Every number below is traced to a committed file; per-round detail and every screened variant are in
 `results/rounds.md`, `results/screens/` and the helpers' `CANDIDATES.md` branches; rules in
 `docs/kda-sm90/rule-change-r10.md`.
 
@@ -125,3 +125,18 @@ Source: `results/r17/accepted_pk/sol4c.md` (`benchmarks/sol4.py`).
   exchange costing ~+100% on pass 1 and cannot run at 64K; handing pass 0's products to pass 1 costs more bytes than
   the backward); cheaper dK fold (neutral or fails residual-v4); forward shared-basis P codes (fails residual-v4 by
   100-400x). Every helper (forward, pass 0, pass 1) reports DONE.
+
+## Update: round 19 (accepted build r19_fwd, job 21196592; same-job calibration 1424.2 TFLOP/s)
+
+| kernel | sol4-v2 % (fixed ref. 1481.2) | sol4c % (fixed ref.) | sol4c % (same job) | target 90% |
+|---|---:|---:|---:|---|
+| pass 1 | 42.9% | 69.2% | 71.9% | not met |
+| forward | 57.6% | 82.4% | 85.7% | not met |
+| pass 0 | 72.7% | 97.6% | 101.5% | met |
+| pass 2 | 94.3% | 94.3% | 94.3% | met |
+
+- Forward / FA3 fp8 forward: 1.108x (was 1.162x).
+- Original -> now (four shapes, same job): e2e forward -15.8%, e2e fwd+bwd -13.3%.
+- Paper protocol 16/4: 621.5 / 500.3 / 529.7 TFLOP/s fwd / bwd / fwd+bwd (`results/paper_c2/r19_fwd_table.md`).
+- Forward SASS diff vs FA3 fp8 (results/screens/fwd_sassdiff.md): 9.2 vs 5.9 instructions per score per thread; the
+  ring turn's remaining 178 instructions are 128 rho / promote (contract-fixed), 8 QGMMA and ~42 descriptor / sync.

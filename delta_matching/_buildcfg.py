@@ -54,7 +54,7 @@ FLAGS = {
     "FA3FP11_HD128_P2ST": 3, "FA3FP11_HD128_P0ST": 3, "FA3FP11_HD128_P1R": 1, "FA3FP11_HD128_P0V5": 1,
     "FA3FP11_P1R_SAGEDP": 1 if BF16_DP else 0,
     "FA3FP11_HD128_FWDLAZY": 1,    # kda-fwd: forward lazy O rescale (named numerics change; O only)
-    "FA3FP11_HD128_FWDDFOLD": 1,   # kda-fwd: forward S-descale fold (named numerics change; O and LSE)
+    "FA3FP11_HD128_FWDDFOLD": 0,   # kda-fwd: forward S-descale fold (named numerics change; O and LSE)
 }
 EXTRA_DEFINES = ["-DFA3FP11_M16_P0V2_ATOMN=64", "-DFA3FP11_HD128_P0V6=1", "-DFA3FP11_P1R_MASKDIAG=1", "-DFA3FP11_P1R_RFSKIP=1"]
 

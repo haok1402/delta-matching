@@ -111,5 +111,11 @@ see swp). The remaining gap is tensor / vector overlap across warpgroups.
 | variant | change | geomean pass 0 (ref C4 stack) | numerics screen (DBG builds, default route, D128 matched cases + B1 H4 N8192; `p0/tools/rowres.py`) | status |
 |---|---|---:|---|---|
 | lazy | dP descale once per 8-key half partial (fmaf(P, dP, a), partial x dp) instead of per element: -1 FMUL / element | -17.80% (ref -13.96%), -18.30% (ref -14.40%) | gaussian cases: per-row residual changes within about +-2 x 2^-24, no exemption growth; stress cases (scale3 / scale10 / outliers): near-one-hot rows with residual ~1 in both builds move by up to 0.18 absolute; fp32 error larger on 8 (case, output) pairs (dQ / dK of gqa4, gqa3_promote, packed, bhnd; +7e-9 .. +1.3e-7 relative) | fails the strict rule as screened (fp32 error not larger on any case) |
-| defer | per-lane fp64 row partials across n-blocks, one fp64 quad reduce at the end (no per-tile shuffles / fp64 folds) | -16.61% (ref -14.40%) | pending (job n2) | screening |
-| lazy_defer | lazy + defer | -21.25% (ref -14.40%) | pending (job n2) | screening |
+| defer | per-lane fp64 row partials across n-blocks, one fp64 quad reduce at the end (no per-tile shuffles / fp64 folds) | -16.61% (ref -14.40%) | gaussian: within about +-1.6 x 2^-24; stress near-one-hot rows move up to 0.026 absolute; fp32 error larger on 5 pairs (<= +1.5e-6 relative on dQ of bhnd, others ~1e-8 .. 1e-7) | fails the strict rule as screened |
+| lazy_defer | lazy + defer | -21.25% (ref -14.40%) | as lazy; fp32 error larger on 7 pairs (<= +1.6e-6 relative) | fails the strict rule as screened |
+
+Reading: even DEFER, which only makes the fold more exact and keeps pass 1's per-element rounding, raises the fp32 error on
+some cases by noise-level amounts and moves the ill-conditioned (near-one-hot, residual ~1 in both builds) stress rows. As
+screened, the strict rule (no larger fp32 error on any case; per-row non-regression on those rows) rejects any change to
+delta's rounding. These candidates wait for the rule's tolerance / degenerate-row definition (data sent to kda-sm90).
+

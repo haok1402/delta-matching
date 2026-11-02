@@ -691,3 +691,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   and C3 restructured the kernel: the nomaskloop / skipdead / register-split pieces need a port onto r17_c3. Profile:
   pass 0 is issue-bound with 192 fixed instructions per 64-key block for bitwise outputs -> bitwise ceiling ~70-75% of
   its floor; 90% needs a numerics change (fold the +8, lazy dP descale), cf. the pass-0 helper's DEFER / LAZY.
+- Accepted build r17_p1 (job 21175599, calibration in results/r17/accepted_p1): % of calibrated limit pass1 45.1%,
+  forward 52.4%, pass0 69.8%, pass2 94.7%; original -> now e2e fwd+bwd -7.01%; paper C.2 16/4 fwd+bwd 503.7 TFLOP/s.
+  Note: the calibrated fp8 GEMM peak varies ~6% between jobs / nodes (tensor floors 75.3 -> 80.0 ms for the same work),
+  which moves every percentage with it; per-round comparisons should use the same-job calibration as here.
+- residual-v4 implemented (rule-change-r10.md); numerics gates of forward C1, pass-0 DEFER and LAZY submitted
+  (jobs 21176380-82) against r17_p1 with its DBG pair.

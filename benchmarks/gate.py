@@ -345,8 +345,8 @@ def main():
                     rep_ = json.load(open(os.path.join(run_dir, f"num_{r}_report.json")))
                 except (OSError, ValueError):
                     rep_ = {}
-                if rep_.get("ac23_eligible") is not True or "residual-v3" not in str(rep_.get("residual_versions", {}).get("rows")):
-                    raise GateFailure(f"numerics route {r}: not AC-2.3 eligible under residual-v3")
+                if rep_.get("ac23_eligible") is not True or "residual-v4" not in str(rep_.get("residual_versions", {}).get("rows")):
+                    raise GateFailure(f"numerics route {r}: not AC-2.3 eligible under residual-v4")
             gate.save(numerics={r: json.load(open(os.path.join(run_dir, f"num_{r}_report.json")))["result"] for r in routes})
         if a.mode == "full":
             base = a.base_dumps.split(","); prev = a.prev_dumps.split(",")

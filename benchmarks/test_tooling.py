@@ -728,7 +728,7 @@ def test_numerics_check_passes_a_self_certificate(tmp_path):
     r = _numcheck(tmp_path, extra=("--report", str(tmp_path / "rep.json")))
     assert r.returncode == 0 and "PASS" in r.stdout, r.stdout[-800:]
     rep = json.load(open(tmp_path / "rep.json"))
-    assert rep["ac23_eligible"] is True and "residual-v3" in rep["residual_versions"]["rows"]
+    assert rep["ac23_eligible"] is True and "residual-v4" in rep["residual_versions"]["rows"]
     k = rep["cases"]["d128_gqa4/causal/matched"]
     assert k["exempt"] > 0 and k["exempt"] == k["prev_exempt"] and k["violations"] == 0
 
@@ -789,6 +789,38 @@ def _both(fn):
 def test_numerics_residual_v2_rejects(tmp_path, why, rows_mutate):
     r = _numcheck(tmp_path, rows_mutate=rows_mutate)
     assert r.returncode == 1 and why in r.stdout, (why, r.stdout[-800:])
+
+
+def _err(f, key, o, v, tags=("cand", "cand-repeat", "cand-dbg", "cand-dbg-repeat")):
+    for t in tags:
+        _c(f, t, key)["errors"][o] = v
+
+
+def test_numerics_v4_error_tolerance_and_mean(tmp_path):
+    k2 = "d128_min/causal/matched"
+    up_down = lambda f, m: (_err(f, "d128_gqa4/causal/matched", "dK", 1e-3 + 5e-6), _err(f, k2, "dK", 1e-3 - 6e-6))
+    assert _numcheck(tmp_path, up_down).returncode == 0                     # +5e-6 in tolerance, mean not rising
+    d = tmp_path / "mean"; d.mkdir()
+    r = _numcheck(d, lambda f, m: _err(f, "d128_gqa4/causal/matched", "dK", 1e-3 + 5e-6))
+    assert r.returncode == 1 and "mean dK error" in r.stdout, r.stdout[-600:]
+    d = tmp_path / "big"; d.mkdir()
+    r = _numcheck(d, lambda f, m: (_err(f, "d128_gqa4/causal/matched", "dK", 1e-3 + 2e-5), _err(f, k2, "dK", 1e-3 - 5e-5)))
+    assert r.returncode == 1 and "+ 1e-05" in r.stdout, r.stdout[-600:]
+
+
+def test_numerics_v4_ill_conditioned_rows_exempt_but_fixed_by_the_accepted_build(tmp_path):
+    def ill(s):                               # row 7 has residual 0.5 in the accepted build: ill-conditioned
+        for t in s:
+            s[t][_G]["num"][0, 7] = 0.5
+        for t in ("cand-dbg", "cand-dbg-repeat"):
+            s[t][_G]["num"][0, 7] = 0.9       # moves freely (reported)
+    r = _numcheck(tmp_path, rows_mutate=ill, extra=("--report", str(tmp_path / "r.json")))
+    assert r.returncode == 0, r.stdout[-600:]
+    c = json.load(open(tmp_path / "r.json"))["cases"]["d128_gqa4/causal/matched"]
+    assert c["ill_conditioned"] == 1 and abs(c["ill_worst_move"] - 0.4) < 1e-12
+    d = tmp_path / "new"; d.mkdir()          # a well-conditioned accepted row cannot become ill-conditioned
+    r = _numcheck(d, rows_mutate=_both(lambda s: s[_G]["num"].__setitem__((0, 7), 0.5)))
+    assert r.returncode == 1 and "above their accepted residual" in r.stdout, r.stdout[-600:]
 
 
 def test_numerics_residual_v3_absolute_bound_is_reported_not_enforced(tmp_path):
@@ -1072,4 +1104,4 @@ def test_numerics_gate_accepts_only_residual_v2_eligible_reports(tmp_path):
     r = run_gate(tmp_path, "numerics", "", args=["--base-root", str(tmp_path / "base"), "--cand-dbg-root",
                                                  str(tmp_path / "cdbg"), "--prev-dbg-root", str(tmp_path / "pdbg"),
                                                  "--defects", str(tmp_path / "m.json")])
-    assert r.returncode == 1 and "not AC-2.3 eligible under residual-v3" in r.stdout, r.stdout[-600:]
+    assert r.returncode == 1 and "not AC-2.3 eligible under residual-v4" in r.stdout, r.stdout[-600:]

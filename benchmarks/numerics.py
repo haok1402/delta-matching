@@ -42,7 +42,9 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # requires num_r == 0; the exempt set may not grow or move vs the accepted build.  The absolute bound num_r <= k_r 2^-23
 # den_r (residual-v2) is REPORTED only: the original kernel exceeds it on 10204 of 334592 rows.  Bounds are derived here
 # from the case geometry, never taken from a capture.
-RESIDUAL_VERSION = "residual-v3"   # v2 (absolute bound) dropped by Hao after the accepted build's self-certificate
+RESIDUAL_VERSION = "residual-v4"   # Hao, round 17: v3 + ill-conditioned rows + fp32-error tolerance
+ILL_CONDITIONED = 1e-3             # rows whose ACCEPTED residual exceeds this are exempt from per-row non-regression
+ERR_ABS_TOL = 1e-5                 # per case / output: rel-L2 error may rise by at most this (absolute, in rel-error units)
 RESIDUAL_FLOOR = 1e-30
 
 
@@ -418,8 +420,13 @@ def residual_rows_check(k, desc, ncg, npg, C, R, P, probs):
             probs.append(f"{k} group {i}: recorded visible-key counts differ from the case geometry")
         exc, rc, bound, viol, zc = residual_v2(c["num"], c["den"], keys)
         exp, rp, _, _, zp = residual_v2(p["num"], p["den"], keys)
-        reg = (~exc) & (rc > rp + bound)
+        ill = (~exp) & (rp > ILL_CONDITIONED)              # fixed by the accepted build
+        reg = (~exc) & (~ill) & (rc > rp + bound)
         grow = exc & ~exp
+        out["ill_conditioned"] = out.get("ill_conditioned", 0) + int(ill.sum())
+        if bool(ill.any()):
+            mv = float((rc - rp)[ill].abs().max())
+            out["ill_worst_move"] = max(out.get("ill_worst_move", 0.0), mv)
         out["rows"] += int(rc.numel()); out["exempt"] += int(exc.sum()); out["prev_exempt"] += int(exp.sum())
         out["violations"] += int(viol.sum()); out["regressions"] += int(reg.sum())
         vp = (~exp) & (rp > bound)
@@ -483,6 +490,7 @@ def check(a):
             if x["resolved_route"] != cand["resolved_route"]:
                 probs.append("captures resolved different backward routes")
                 break
+        err_sums = {}
         for k, desc in EQ.selected_cases(a.route):
             if any(k not in x.get("cases", {}) for x in caps.values()):
                 continue   # already reported as a missing case by _load
@@ -495,8 +503,11 @@ def check(a):
                 for o in OUTPUTS:
                     r = ref["cases"][k]["errors"][o]
                     if _fin(r) and _fin(ce[o]):
-                        if ce[o] > r * (1 + a.rel_tol):
-                            probs.append(f"{k} {o}: error {ce[o]:.6e} > {rn} {r:.6e}")
+                        if ce[o] > r + ERR_ABS_TOL + r * a.rel_tol:
+                            probs.append(f"{k} {o}: error {ce[o]:.6e} > {rn} {r:.6e} + {ERR_ABS_TOL:g}")
+                        if rn == "prev":
+                            err_sums.setdefault(o, [0.0, 0.0, 0])
+                            err_sums[o][0] += ce[o]; err_sums[o][1] += r; err_sums[o][2] += 1
                         row[f"{o}_vs_{rn}"] = ce[o] / r if r > 0 else (0.0 if ce[o] == 0 else float("inf"))
             out = lambda x: {o: x["cases"][k]["outputs"][o]["bytes"] for o in OUTPUTS}
             if out(cand) != out(rep):
@@ -515,15 +526,21 @@ def check(a):
                 row.update(residual_rows_check(k, desc, len(cg), len(pg), cd.get("_rows"), cd2.get("_rows"),
                                                pd.get("_rows"), probs))
             report["cases"][k] = row
+    if all(caps.values()):
+        report["error_means"] = {}
+        for o, (c_, p_, n_) in err_sums.items():
+            report["error_means"][o] = {"cand": c_ / n_, "prev": p_ / n_}
+            if c_ > p_:   # residual-v4: the mean error over cases (per output tensor) may not rise
+                probs.append(f"mean {o} error over {n_} cases rises: {c_ / n_:.6e} > {p_ / n_:.6e}")
     report["ws_declaration"] = a.ws
     report["problems"] = probs
     report["result"] = ("FAIL" if probs else ("PASS (qualified by known defects: %d cases)" % len(report["known_defects"])
                                                if report["known_defects"] else "PASS"))
     # The residual acceptance contract is not settled (the plan's ratio is ill-conditioned on short rows; no replacement
     # is authorized): a PASS here validates capture / identity / schema plumbing and is NOT an AC-2.3 certificate.
-    report["residual_versions"]["rows"] = RESIDUAL_VERSION + " (the AC-2.3 predicate: per-row non-regression, no exemption growth)"
+    report["residual_versions"]["rows"] = RESIDUAL_VERSION + " (the AC-2.3 predicate: per-row non-regression on rows with accepted residual <= 1e-3, no degenerate-set growth, per-case error rise <= 1e-5, per-output mean error not rising)"
     report["ac23_eligible"] = not probs and all(caps.values())
-    report["ac23_note"] = ("residual-v3 per-row contract (Hao, round 17) enforced with determinism, identities, error "
+    report["ac23_note"] = ("residual-v4 contract (Hao, round 17) enforced with determinism, identities, error "
                            "non-increase and workspace checks" if report["ac23_eligible"] else "not eligible: problems")
     if a.report:
         with open(a.report, "w") as f:

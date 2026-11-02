@@ -142,3 +142,21 @@ den_r == 0 still requires num_r == 0. Rows above the absolute bound are reported
 Implemented as "residual-v3" in benchmarks/numerics.py; `gate.py --mode numerics` accepts only when all four routes'
 reports are `ac23_eligible` under residual-v3. The accepted build is re-certified under it before any numerics
 candidate is accepted.
+
+## Round 17: residual-v4 (Hao's tolerance decision) and autonomy
+
+residual-v4 (benchmarks/numerics.py, gate --mode numerics), replacing v3:
+- Error vs fp32: per case and output tensor, the candidate's relative-L2 error may exceed the accepted build's by at
+  most 1e-5 (absolute, in relative-error units: the literal reading of "the relative error may rise by at most 1e-5";
+  the per-case check against the frozen baseline uses the same tolerance), and the mean over all cases of each output
+  tensor may not rise vs the accepted build.
+- Row residual: strict per-row non-regression (accepted value + k_r 2^-23) on well-conditioned rows; rows whose
+  residual in the ACCEPTED build is above 1e-3 are ill-conditioned and exempt from it, with their count and worst
+  movement reported per case; the ill-conditioned set is fixed by the accepted build (a candidate row that was
+  well-conditioned and rises above 1e-3 is a regression); the degenerate exemption set may not grow.
+- Unchanged: deterministic outputs and row records, zero-den => zero-num, named numerics change in the commit, all
+  four routes, the identity / workspace checks.
+
+Autonomy (Hao): rule questions no longer wait for him: take the most defensible option that protects the zero-sum
+identity and the fp32 error, record it here with its evidence, and continue. The goal stands (every main kernel >= 90%
+of its calibrated sol4 limit on the four acceptance shapes; first milestone FA3 fp8 forward parity).

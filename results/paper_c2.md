@@ -83,3 +83,9 @@ repeated KV heads), not this H100. Our matched fwd+bwd (491.7) is above the pape
 | H32 original baseline | 567.0 +- 4.2 | 455.9 +- 1.0 | 482.9 +- 0.4 |
 | H32 FA3 BF16 | 725.7 +- 0.7 | 524.6 +- 1.9 | 569.7 +- 1.5 |
 | H32 cuDNN BF16 | 627.7 +- 0.6 | 467.4 +- 2.9 | 504.2 +- 2.4 |
+
+## After round 17's accepted S17-p1-39 (pass 1; `results/paper_c2/r17_p1_table.md`, job 21175599)
+
+16/4: accepted 516.9 / 498.6 / 503.7 TFLOP/s fwd / bwd / fwd+bwd (original 517.2 / 448.0 / 465.6; FA3 BF16 696.9 / 511.1 /
+553.2; cuDNN BF16 590.7 / 487.7 / 513.2). 32/4: accepted 569.7 / 501.1 / 518.9 (original 580.6 / 456.5 / 486.1; FA3 BF16
+723.0 / 525.4 / 569.9; cuDNN BF16 621.1 / 475.1 / 509.3; we now exceed cuDNN BF16 at 32/4).

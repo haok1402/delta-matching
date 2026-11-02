@@ -698,6 +698,18 @@ struct CollectiveMainloopBwdSm90Fp8R {
         int const fq8_srcA = 8 * (fq8_ip & 3) + (lane & 3);
         int const fq8_srcB = fq8_srcA + 4;
         uint32_t const fq8_sel = fq8_ip < 4 ? 0x5140u : 0x7362u;
+        // ## kda-pass1 SHFL8: every target lane needs WHOLE rdS words 2j + h (h = lane >= 16) from lanes srcA / srcB, so the
+        // transpose takes 8 shuffles: phase 0 low lanes read srcA, high lanes srcB, phase 1 swapped; a provider picks word
+        // 2j or 2j + 1 by (lane bit 2) ^ phase (one per-lane PRMT, before the dK issue), a receiver interleaves with a
+        // per-lane selector.  Byte-exact for all 32 lanes (benchmarks/kda_xpose_sim.py); bitwise.
+        int const fq8_h = lane >= 16;
+        int const fq8_b2 = (lane >> 2) & 1;
+        uint32_t const fq8_psel0 = fq8_b2 ? 0x7654u : 0x3210u;
+        uint32_t const fq8_psel1 = fq8_b2 ? 0x3210u : 0x7654u;
+        int const fq8_src0 = fq8_h ? fq8_srcB : fq8_srcA;
+        int const fq8_src1 = fq8_h ? fq8_srcA : fq8_srcB;
+        uint32_t const fq8_osel0 = fq8_h ? 0x1504u : 0x5140u;
+        uint32_t const fq8_osel1 = fq8_h ? 0x3726u : 0x7362u;
         // stmatrix.x4.trans row addresses: instruction s covers rows 32 s + lane of this warp's 16-key chunk.
         uint32_t const fq8_st_addr0 = cute::cast_smem_ptr_to_uint(&sdS(lane, 16 * warp_in_wg));
         uint32_t const fq8_st_addr1 = cute::cast_smem_ptr_to_uint(&sdS(32 + lane, 16 * warp_in_wg));
@@ -1004,8 +1016,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 Tensor rdS32 = recast<uint32_t>(rdS);
                 #pragma unroll
                 for (int i = 0; i < 4; ++i) {
-                    fq8_pk[2 * i] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), 0x5410);       // g = 2i
-                    fq8_pk[2 * i + 1] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), 0x7632);   // g = 2i + 1
+                    fq8_pk[i] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), fq8_psel0);        // SHFL8 phase 0, j = i
+                    fq8_pk[4 + i] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), fq8_psel1);    // SHFL8 phase 1, j = i
                 }
             }
             KP(12);
@@ -1032,10 +1044,18 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // this lane stores comes from lanes srcA / srcB (slot h = ip / 4); stmatrix.trans writes 16 keys x 8 rows.
             {
                 #pragma unroll
-                for (int w = 0; w < 8; ++w) {   // one word at a time: two shuffles, then overwrite it with its output
-                    uint32_t const a = __shfl_sync(0xffffffff, fq8_pk[w], fq8_srcA);
-                    uint32_t const b = __shfl_sync(0xffffffff, fq8_pk[w], fq8_srcB);
-                    fq8_pk[w] = __byte_perm(a, b, fq8_sel);
+                {   // SHFL8
+                    uint32_t r0[4], r1[4];
+                    #pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        r0[j] = __shfl_sync(0xffffffff, fq8_pk[j], fq8_src0);
+                        r1[j] = __shfl_sync(0xffffffff, fq8_pk[4 + j], fq8_src1);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        fq8_pk[2 * j] = __byte_perm(r0[j], r1[j], fq8_osel0);
+                        fq8_pk[2 * j + 1] = __byte_perm(r0[j], r1[j], fq8_osel1);
+                    }
                 }
                 // The previous tile's TMA box store of this WG must have drained before the tile is overwritten.
                 uint32_t const fq8_a0 = (m_block & 1) ? fq8_st_addr0b : fq8_st_addr0;

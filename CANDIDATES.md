@@ -76,6 +76,8 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 | S42 | b3arv | ping-pong | C3b with the turn ending after the PV chain issue (QK outside the turn) | = C3 | -3.00% geo vs C3b -12.47% (21176953): QK must stay in the turn |
 | S43 | b3tt2 / b3tt3 | ping-pong | C3b with the step split into 2 / 3 ring turns (all waits outside turns) | = C3 | -0.31% / -0.60% geo vs C3b -12.89% (21177145): extra ring turns cost far more than the bubbles |
 
+| S44 | b3qkr / qkr256 | ping-pong | only the QK issue inside the ring turn, PV chain free-running (3 WGs / 2 WGs) | = C3 / = S26 | -3.20% / +3.10% geo (job 21177775; C3b -12.79%, S26 -6.89%): the turn must cover PV chain + QK |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below
@@ -179,3 +181,9 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - Rule reading proposed (recorded per Hao's autonomy rule; the gate owner decides): the fp32 round-off allowance
   of a row includes the propagated round-off of its forward input LSE, measured by the +-1 ulp LSE controls of the
   accepted build. Without it every forward change that moves LSE at round-off fails, whatever its accuracy.
+
+### C3n (kda-sm90-fwd-c3n b1613d8: C3f without FWDDFOLD) : READY (timing); numerics: 0 rows beyond the LSE-ulp envelope
+
+- A/B vs r17_p1: fwd geo-mean -5.82% (job 21177596), -5.88% (21177597); no shape slower beyond spread.
+- C3f (3565487) vs r17_p1: -12.81% (21177598); the fold carries ~7 points on top of C3n.
+- Strict v4 rows: 23 up / 14 down (C3f 70 / 180); beyond the +-1 ulp LSE envelope: 0 (C3f 1, excess 2.5e-7).

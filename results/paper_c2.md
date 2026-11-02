@@ -57,3 +57,16 @@ therefore does not reproduce here: our matched kernel is 0.88x FA3 BF16 in fwd+b
 with the paper (596.4 / 478.3 / 506.8 here vs 601.6 / 472.9 / 503.6), so the machine class matches; the likely reason is
 the paper's FA3 BF16 run itself (an FA3 build or path far from Hopper-optimized at this GQA shape, e.g. a fallback or
 repeated KV heads), not this H100. Our matched fwd+bwd (491.7) is above the paper's 470.2.
+
+## After round 17's accepted C2 (pass 0 P0RTR + P0SPF; `results/paper_c2/r17_accepted_table.md`, job 21172815)
+
+| heads / arm | fwd TFLOP/s | bwd TFLOP/s | fwd+bwd TFLOP/s |
+|---|---:|---:|---:|
+| H16 accepted (r17_c2) | 518.8 +- 7.4 | 467.7 +- 4.8 | 481.1 +- 2.8 |
+| H16 original baseline | 509.9 +- 3.7 | 444.8 +- 2.5 | 461.6 +- 1.1 |
+| H16 FA3 BF16 | 693.9 +- 0.2 | 505.6 +- 6.5 | 548.0 +- 5.4 |
+| H16 cuDNN BF16 | 590.7 +- 3.3 | 471.4 +- 5.9 | 500.2 +- 4.8 |
+| H32 accepted (r17_c2) | 576.4 +- 4.6 | 475.1 +- 2.4 | 500.1 +- 1.2 |
+| H32 original baseline | 562.4 +- 6.7 | 457.0 +- 2.6 | 482.8 +- 1.5 |
+| H32 FA3 BF16 | 719.9 +- 0.4 | 523.2 +- 0.9 | 567.5 +- 0.8 |
+| H32 cuDNN BF16 | 619.8 +- 3.8 | 465.1 +- 2.0 | 500.8 +- 1.2 |

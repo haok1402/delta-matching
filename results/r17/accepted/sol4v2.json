@@ -1,0 +1,665 @@
+{
+ "version": "sol4-v2",
+ "grid": "paper",
+ "calibration_sha256": "17c81d268809aad1b719b6cbc4598d06949bfbc9a4fe7f93a2170e48c46848e6",
+ "counts_library_sha256": "e4e37208c530355bd327511e1c69898ea8ce939338d8f2eb0f71750b57e89e33",
+ "bound": "issue / MUFU: loop-only lower bounds (cheapest path per step loop iteration); peeled steps, prologue, epilogue, producer warps not counted; memory kernels: bytes only, issue not modeled",
+ "configs": [
+  {
+   "key": [
+    128,
+    2,
+    16,
+    4,
+    8192
+   ],
+   "part": "acceptance",
+   "route": {
+    "producers": "strided",
+    "heads_per_call": 16,
+    "recorded": true
+   },
+   "floors": {
+    "fwd": {
+     "floors_ms": {
+      "bytes": 0.03913033655453546,
+      "tensor": 0.38542183935642244,
+      "mufu": 0.332357031181379,
+      "issue": 0.35800874835309615
+     },
+     "sol_ms": 0.38542183935642244,
+     "controlling": "tensor",
+     "measured_ms": 0.7784978,
+     "pct_of_floor": 49.50840443690688,
+     "issue_modeled": true
+    },
+    "prod_fwd": {
+     "floors_ms": {
+      "bytes": 0.05852238568763824,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.05852238568763824,
+     "controlling": "bytes",
+     "measured_ms": 0.08949470000000125,
+     "pct_of_floor": 65.39201280929198,
+     "issue_modeled": false
+    },
+    "prod_bwd": {
+     "floors_ms": {
+      "bytes": 0.03324158066629935,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.03324158066629935,
+     "controlling": "bytes",
+     "measured_ms": 0.04635199999999909,
+     "pct_of_floor": 71.71552611818261,
+     "issue_modeled": false
+    },
+    "pass0": {
+     "floors_ms": {
+      "bytes": 0.0283996546029357,
+      "tensor": 0.37958211451768875,
+      "mufu": 0.29472491875274487,
+      "issue": 0.30393507246376816
+     },
+     "sol_ms": 0.37958211451768875,
+     "controlling": "tensor",
+     "measured_ms": 0.6226835000000008,
+     "pct_of_floor": 60.95907704599339,
+     "issue_modeled": true
+    },
+    "pass1": {
+     "floors_ms": {
+      "bytes": 0.4551410499561826,
+      "tensor": 0.7591642290353775,
+      "mufu": 0.3131452261747914,
+      "issue": 0.7552326043039087
+     },
+     "sol_ms": 0.7591642290353775,
+     "controlling": "tensor",
+     "measured_ms": 1.831590399999999,
+     "pct_of_floor": 41.44836252883712,
+     "issue_modeled": true
+    },
+    "pass2": {
+     "floors_ms": {
+      "bytes": 0.38519280075365714,
+      "tensor": 0.18979105725884438,
+      "mufu": 0.0,
+      "issue": 0.03853154150197628
+     },
+     "sol_ms": 0.38519280075365714,
+     "controlling": "bytes",
+     "measured_ms": 0.4325687999999996,
+     "pct_of_floor": 89.04775396507041,
+     "issue_modeled": true
+    },
+    "twin": {
+     "floors_ms": {
+      "bytes": 0.044318500906229026,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.044318500906229026,
+     "controlling": "bytes",
+     "measured_ms": 0.04630670000000018,
+     "pct_of_floor": 95.70645480293102,
+     "issue_modeled": false
+    },
+    "glue": {
+     "floors_ms": {
+      "bytes": 0.055398126132786274,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.055398126132786274,
+     "controlling": "bytes",
+     "measured_ms": 0.14307520000000173,
+     "pct_of_floor": 38.719586715786946,
+     "issue_modeled": false
+    }
+   },
+   "fa3": {
+    "bf16_bwd_kernel_ms": 2.5081428999999984,
+    "bf16_fwd_kernel_ms": 0.7773937999999997,
+    "bf16_fwd_ms": 0.7443840205669403,
+    "bf16_fwdbwd_ms": 3.137376070022583,
+    "fp8_fwd_kernel_ms": 0.6614387000000002
+   },
+   "fa3_spread_pct": {
+    "bf16_bwd_kernel_ms": 6.038910302917695,
+    "bf16_fwd_kernel_ms": 6.052582359159543,
+    "bf16_fwd_ms": 0.5545536936355582,
+    "bf16_fwdbwd_ms": 1.2519996604633339,
+    "fp8_fwd_kernel_ms": 8.95162318140744
+   }
+  },
+  {
+   "key": [
+    128,
+    1,
+    16,
+    4,
+    65536
+   ],
+   "part": "acceptance",
+   "route": {
+    "producers": "strided",
+    "heads_per_call": 1,
+    "recorded": true
+   },
+   "floors": {
+    "fwd": {
+     "floors_ms": {
+      "bytes": 0.15652134621814184,
+      "tensor": 12.006474268436433,
+      "mufu": 10.935618445322794,
+      "issue": 11.779642687747037
+     },
+     "sol_ms": 12.006474268436433,
+     "controlling": "tensor",
+     "measured_ms": 24.645323100000002,
+     "pct_of_floor": 48.71704955832545,
+     "issue_modeled": true
+    },
+    "prod_fwd": {
+     "floors_ms": {
+      "bytes": 0.23408007529735644,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.23408007529735644,
+     "controlling": "bytes",
+     "measured_ms": 0.3789966000000238,
+     "pct_of_floor": 61.763106924268385,
+     "issue_modeled": false
+    },
+    "prod_bwd": {
+     "floors_ms": {
+      "bytes": 0.1329663226651974,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.1329663226651974,
+     "controlling": "bytes",
+     "measured_ms": 0.16583579999999568,
+     "pct_of_floor": 80.17950446477833,
+     "issue_modeled": false
+    },
+    "pass0": {
+     "floors_ms": {
+      "bytes": 0.1135986184117428,
+      "tensor": 11.983115369081498,
+      "mufu": 9.431197400087836,
+      "issue": 9.725922318840581
+     },
+     "sol_ms": 11.983115369081498,
+     "controlling": "tensor",
+     "measured_ms": 19.217002699999952,
+     "pct_of_floor": 62.35683866080493,
+     "issue_modeled": true
+    },
+    "pass1": {
+     "floors_ms": {
+      "bytes": 11.75275573885665,
+      "tensor": 23.966230738162995,
+      "mufu": 10.020647237593325,
+      "issue": 24.16744333772508
+     },
+     "sol_ms": 24.16744333772508,
+     "controlling": "issue",
+     "measured_ms": 60.31627549999989,
+     "pct_of_floor": 40.06786416665453,
+     "issue_modeled": true
+    },
+    "pass2": {
+     "floors_ms": {
+      "bytes": 11.47296274204655,
+      "tensor": 5.991557684540749,
+      "mufu": 0.0,
+      "issue": 1.250134457619675
+     },
+     "sol_ms": 11.47296274204655,
+     "controlling": "bytes",
+     "measured_ms": 12.142390600000024,
+     "pct_of_floor": 94.4868528776082,
+     "issue_modeled": true
+    },
+    "twin": {
+     "floors_ms": {
+      "bytes": 0.1772740036249161,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.1772740036249161,
+     "controlling": "bytes",
+     "measured_ms": 0.18549409999997327,
+     "pct_of_floor": 95.56854025273131,
+     "issue_modeled": false
+    },
+    "glue": {
+     "floors_ms": {
+      "bytes": 0.7534145154058934,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.7534145154058934,
+     "controlling": "bytes",
+     "measured_ms": 1.0694479999999964,
+     "pct_of_floor": 70.44891527272911,
+     "issue_modeled": false
+    }
+   },
+   "fa3": {
+    "bf16_bwd_kernel_ms": 74.81771590000002,
+    "bf16_fwd_kernel_ms": 24.81555419999999,
+    "bf16_fwd_ms": 25.790143966674805,
+    "bf16_fwdbwd_ms": 99.60856246948242,
+    "fp8_fwd_kernel_ms": 18.485215699999998
+   },
+   "fa3_spread_pct": {
+    "bf16_bwd_kernel_ms": 0.3092194104257156,
+    "bf16_fwd_kernel_ms": 0.3486426267280261,
+    "bf16_fwd_ms": 2.1496564388039965,
+    "bf16_fwdbwd_ms": 0.7580752707579914,
+    "fp8_fwd_kernel_ms": 0.971858283482169
+   }
+  },
+  {
+   "key": [
+    128,
+    2,
+    32,
+    4,
+    8192
+   ],
+   "part": "acceptance",
+   "route": {
+    "producers": "strided",
+    "heads_per_call": 32,
+    "recorded": true
+   },
+   "floors": {
+    "fwd": {
+     "floors_ms": {
+      "bytes": 0.07271815550916473,
+      "tensor": 0.7708436787128449,
+      "mufu": 0.664714062362758,
+      "issue": 0.7160174967061923
+     },
+     "sol_ms": 0.7708436787128449,
+     "controlling": "tensor",
+     "measured_ms": 1.5937297000000008,
+     "pct_of_floor": 48.36727826009922,
+     "issue_modeled": true
+    },
+    "prod_fwd": {
+     "floors_ms": {
+      "bytes": 0.09176396635393758,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.09176396635393758,
+     "controlling": "bytes",
+     "measured_ms": 0.1310583999999962,
+     "pct_of_floor": 70.01761531801108,
+     "issue_modeled": false
+    },
+    "prod_bwd": {
+     "floors_ms": {
+      "bytes": 0.0664831613325987,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.0664831613325987,
+     "controlling": "bytes",
+     "measured_ms": 0.08622350000000056,
+     "pct_of_floor": 77.10561660405605,
+     "issue_modeled": false
+    },
+    "pass0": {
+     "floors_ms": {
+      "bytes": 0.0512567916059652,
+      "tensor": 0.7591642290353775,
+      "mufu": 0.5894498375054897,
+      "issue": 0.6078701449275363
+     },
+     "sol_ms": 0.7591642290353775,
+     "controlling": "tensor",
+     "measured_ms": 1.2513106999999994,
+     "pct_of_floor": 60.669522688120374,
+     "issue_modeled": true
+    },
+    "pass1": {
+     "floors_ms": {
+      "bytes": 0.904739582312459,
+      "tensor": 1.518328458070755,
+      "mufu": 0.6262904523495828,
+      "issue": 1.5104652086078174
+     },
+     "sol_ms": 1.518328458070755,
+     "controlling": "tensor",
+     "measured_ms": 3.7926461000000016,
+     "pct_of_floor": 40.03348633216145,
+     "issue_modeled": true
+    },
+    "pass2": {
+     "floors_ms": {
+      "bytes": 0.7676156952006751,
+      "tensor": 0.37958211451768875,
+      "mufu": 0.0,
+      "issue": 0.07706308300395256
+     },
+     "sol_ms": 0.7676156952006751,
+     "controlling": "bytes",
+     "measured_ms": 0.8498808999999987,
+     "pct_of_floor": 90.32038432687172,
+     "issue_modeled": true
+    },
+    "twin": {
+     "floors_ms": {
+      "bytes": 0.08863700181245805,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.08863700181245805,
+     "controlling": "bytes",
+     "measured_ms": 0.09202550000000052,
+     "pct_of_floor": 96.31787038642284,
+     "issue_modeled": false
+    },
+    "glue": {
+     "floors_ms": {
+      "bytes": 0.09971662703901531,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.09971662703901531,
+     "controlling": "bytes",
+     "measured_ms": 0.18112879999999745,
+     "pct_of_floor": 55.05288338409834,
+     "issue_modeled": false
+    }
+   },
+   "fa3": {
+    "bf16_bwd_kernel_ms": 5.020242,
+    "bf16_fwd_kernel_ms": 1.5690928000000006,
+    "bf16_fwd_ms": 1.4757599830627441,
+    "bf16_fwdbwd_ms": 6.724944114685059,
+    "fp8_fwd_kernel_ms": 1.2731022
+   },
+   "fa3_spread_pct": {
+    "bf16_bwd_kernel_ms": 1.3243465155663177,
+    "bf16_fwd_kernel_ms": 1.1351527455864467,
+    "bf16_fwd_ms": 0.40765545044691365,
+    "bf16_fwdbwd_ms": 1.6647285763615853,
+    "fp8_fwd_kernel_ms": 1.3264999463515057
+   }
+  },
+  {
+   "key": [
+    128,
+    1,
+    32,
+    4,
+    65536
+   ],
+   "part": "acceptance",
+   "route": {
+    "producers": "strided",
+    "heads_per_call": 1,
+    "recorded": true
+   },
+   "floors": {
+    "fwd": {
+     "floors_ms": {
+      "bytes": 0.2908726220366589,
+      "tensor": 24.012948536872866,
+      "mufu": 21.871236890645587,
+      "issue": 23.559285375494074
+     },
+     "sol_ms": 24.012948536872866,
+     "controlling": "tensor",
+     "measured_ms": 48.82458780000006,
+     "pct_of_floor": 49.18208144477737,
+     "issue_modeled": true
+    },
+    "prod_fwd": {
+     "floors_ms": {
+      "bytes": 0.3670463979625538,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.3670463979625538,
+     "controlling": "bytes",
+     "measured_ms": 0.5463943000000449,
+     "pct_of_floor": 67.17610303813997,
+     "issue_modeled": false
+    },
+    "prod_bwd": {
+     "floors_ms": {
+      "bytes": 0.2659326453303948,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.2659326453303948,
+     "controlling": "bytes",
+     "measured_ms": 0.3272978000000527,
+     "pct_of_floor": 81.25097245699543,
+     "issue_modeled": false
+    },
+    "pass0": {
+     "floors_ms": {
+      "bytes": 0.2050271664238608,
+      "tensor": 23.966230738162995,
+      "mufu": 18.86239480017567,
+      "issue": 19.451844637681162
+     },
+     "sol_ms": 23.966230738162995,
+     "controlling": "tensor",
+     "measured_ms": 38.7741822000002,
+     "pct_of_floor": 61.80976458650589,
+     "issue_modeled": true
+    },
+    "pass1": {
+     "floors_ms": {
+      "bytes": 23.483341407313677,
+      "tensor": 47.93246147632599,
+      "mufu": 20.04129447518665,
+      "issue": 48.33488667545016
+     },
+     "sol_ms": 48.33488667545016,
+     "controlling": "issue",
+     "measured_ms": 121.71726370000019,
+     "pct_of_floor": 39.710789748430805,
+     "issue_modeled": true
+    },
+    "pass2": {
+     "floors_ms": {
+      "bytes": 22.934845858866538,
+      "tensor": 11.983115369081498,
+      "mufu": 0.0,
+      "issue": 2.50026891523935
+     },
+     "sol_ms": 22.934845858866538,
+     "controlling": "bytes",
+     "measured_ms": 24.296300399999858,
+     "pct_of_floor": 94.39645329239785,
+     "issue_modeled": true
+    },
+    "twin": {
+     "floors_ms": {
+      "bytes": 0.3545480072498322,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 0.3545480072498322,
+     "controlling": "bytes",
+     "measured_ms": 0.37095629999995666,
+     "pct_of_floor": 95.57675856964113,
+     "issue_modeled": false
+    },
+    "glue": {
+     "floors_ms": {
+      "bytes": 1.4625105299055579,
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null
+     },
+     "sol_ms": 1.4625105299055579,
+     "controlling": "bytes",
+     "measured_ms": 1.7752593000000447,
+     "pct_of_floor": 82.38292456237357,
+     "issue_modeled": false
+    }
+   },
+   "fa3": {
+    "bf16_bwd_kernel_ms": 148.77191539999995,
+    "bf16_fwd_kernel_ms": 50.37143079999997,
+    "bf16_fwd_ms": 51.553680419921875,
+    "bf16_fwdbwd_ms": 198.2564926147461,
+    "fp8_fwd_kernel_ms": 37.5369146
+   },
+   "fa3_spread_pct": {
+    "bf16_bwd_kernel_ms": 0.08527194105074486,
+    "bf16_fwd_kernel_ms": 0.43812037199464016,
+    "bf16_fwd_ms": 0.016726493819077717,
+    "bf16_fwdbwd_ms": 0.633813562175605,
+    "fp8_fwd_kernel_ms": 0.4757223706394104
+   }
+  }
+ ],
+ "totals": {
+  "acceptance": {
+   "configs": 4,
+   "kernels": {
+    "fwd": {
+     "measured_ms": 75.84213840000007,
+     "sol_ms": 37.175688323378566,
+     "waste_ms": 38.6664500766215,
+     "pct_of_floor": 49.01719427702547,
+     "floors_ms": {
+      "tensor": 37.175688323378566,
+      "mufu": 33.803926429512515,
+      "issue": 36.4129543083004,
+      "bytes": 0.559242460318501
+     },
+     "controlling": "tensor"
+    },
+    "prod_fwd": {
+     "measured_ms": 1.145944000000066,
+     "sol_ms": 0.751412825301486,
+     "waste_ms": 0.39453117469858,
+     "pct_of_floor": 65.57151355576212,
+     "floors_ms": {
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null,
+      "bytes": 0.751412825301486
+     },
+     "controlling": "bytes"
+    },
+    "prod_bwd": {
+     "measured_ms": 0.6257091000000481,
+     "sol_ms": 0.49862370999449024,
+     "waste_ms": 0.12708539000555785,
+     "pct_of_floor": 79.6893812147613,
+     "floors_ms": {
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null,
+      "bytes": 0.49862370999449024
+     },
+     "controlling": "bytes"
+    },
+    "pass0": {
+     "measured_ms": 59.86517910000015,
+     "sol_ms": 37.08809245079756,
+     "waste_ms": 22.777086649202587,
+     "pct_of_floor": 61.952696055322534,
+     "floors_ms": {
+      "tensor": 37.08809245079756,
+      "mufu": 29.177766956521744,
+      "issue": 30.089572173913048,
+      "bytes": 0.3982822310445045
+     },
+     "controlling": "tensor"
+    },
+    "pass1": {
+     "measured_ms": 187.6577757000001,
+     "sol_ms": 74.77982270028137,
+     "waste_ms": 112.87795299971872,
+     "pct_of_floor": 39.84904031891994,
+     "floors_ms": {
+      "tensor": 74.17618490159512,
+      "mufu": 31.00137739130435,
+      "issue": 74.76802782608696,
+      "bytes": 36.59597777843897
+     },
+     "controlling": "issue"
+    },
+    "pass2": {
+     "measured_ms": 37.72114069999988,
+     "sol_ms": 35.56061709686742,
+     "waste_ms": 2.160523603132461,
+     "pct_of_floor": 94.2723799889422,
+     "floors_ms": {
+      "tensor": 18.54404622539878,
+      "mufu": 0.0,
+      "issue": 3.8659979973649534,
+      "bytes": 35.56061709686742
+     },
+     "controlling": "bytes"
+    },
+    "twin": {
+     "measured_ms": 0.6947825999999306,
+     "sol_ms": 0.6647775135934354,
+     "waste_ms": 0.03000508640649524,
+     "pct_of_floor": 95.68137048819325,
+     "floors_ms": {
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null,
+      "bytes": 0.6647775135934354
+     },
+     "controlling": "bytes"
+    },
+    "glue": {
+     "measured_ms": 3.1689113000000404,
+     "sol_ms": 2.371039798483253,
+     "waste_ms": 0.7978715015167874,
+     "pct_of_floor": 74.82190487576042,
+     "floors_ms": {
+      "tensor": 0.0,
+      "mufu": 0.0,
+      "issue": null,
+      "bytes": 2.371039798483253
+     },
+     "controlling": "bytes"
+    }
+   },
+   "fa3_fp8_fwd_kernel_ms": 57.9566712,
+   "fwd_over_fa3_fp8": 1.3086006637317027
+  }
+ },
+ "runs": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/results/r17/accepted/accepted_median.json",
+ "runs_sha256": "493fd0148ea38982575c5e316e6f7154d37134c8098fdebfeb364426adddd13f",
+ "counts_sha256": "eb7ed5d9c7774c4f49ea951b24952accc93d8f75597126de4bac1f85590149bb"
+}

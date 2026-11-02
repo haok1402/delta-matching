@@ -201,7 +201,12 @@ the held piece is `kda-sm90-pass1-c2pk` (SHFL8, -1.10% / -1.07%, bitwise, four r
 - Equivalence vs r17_pk: BITWISE EQUAL on default / kv / head / streams2 (72 cases each); pytest 49 / 3.
 - Paper set vs r17_pk, 3 reps, two jobs (21191218 / 21191219): pass 1 geomean **-2.93% / -2.93%**, pass 0 **-3.39% /
   -3.21%**, e2e fwd+bwd -1.80% / -1.90%.
-- Status: READY (pass 1 just under 3% alone; >= 1% bitwise for stacking; pass 0 gain included).
+- Status: **ACCEPTED** as kda-sm90 65d4424 (gate 21191514: pass 0 -3.53%, pass 1 -3.31%, e2e -2.21%; confirmation
+  21191853: pass 0 -3.86%, pass 1 -3.08%, e2e -2.31%; bitwise on four routes); new root `r18_c4`.
 - Pass 1 reusing pass 0's S / dP or computing the matched delta itself: already prototyped and priced by kda-fuse (F1a
   PDL two-phase +0.11%; F1b delta in pass 1: row-sum work +17% of pass 1, infeasible at 64K; F2a-c handoff costs more
   HBM time than pass 1), not duplicated here.
+
+
+Status after C4 (2026-11-02): kda-pass1 is DONE again. No further grounded per-element cut in pass 1 on r18_c4
+(ledger above; the dK fold and pass-0/1 reuse are covered by kda-p1split / kda-p1redesign / kda-fuse).

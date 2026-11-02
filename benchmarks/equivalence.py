@@ -29,7 +29,7 @@ KV group on 2 streams).  `dump --perturb <tensor>` flips one bit of a captured t
 import argparse, os, sys
 from contextlib import contextmanager
 
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4   # v4: matched deltas canonicalized to all.delta_fp8.* (any head grouping of pass 0)
 ROUTES = {"default": {"DM_BWD_HEAD_GROUPS": "off", "DM_BWD_STREAMS": "1", "DM_BWD_WS_LIMIT_GB": "8"},
           "kv": {"DM_BWD_HEAD_GROUPS": "kv", "DM_BWD_STREAMS": "1", "DM_BWD_WS_LIMIT_GB": "8"},
           "head": {"DM_BWD_HEAD_GROUPS": "head", "DM_BWD_STREAMS": "1", "DM_BWD_WS_LIMIT_GB": "8"},
@@ -98,11 +98,13 @@ def expected_schema(desc, route):
     if desc["mode"] == "stale":
         s["doq.delta"] = ((BH, N), f32)
     hp = heads_per_call(route, H, Hk)
+    if desc["mode"] == "matched":
+        # v4: pass 0's head grouping is the library's choice (per backward group, or once on all heads); the dump
+        # concatenates whatever delta_fp8 calls ran (canonical_deltas: contiguous, covering all H heads exactly).
+        s["all.delta_fp8.lse"] = ((B, H, N), f32)
+        s["all.delta_fp8.out"] = ((B, H, N), f32)
     for h0 in range(0, H, hp):
         g = f"g{h0:02d}-{h0 + hp:02d}"
-        if desc["mode"] == "matched":
-            s[f"{g}.delta_fp8.lse"] = ((B, hp, N), f32)
-            s[f"{g}.delta_fp8.out"] = ((B, hp, N), f32)
         s[f"{g}.bwd.lse"] = ((B, hp, N), f32)
         s[f"{g}.bwd.delta"] = ((B, hp, N), f32)
         for t in ("dq", "dk", "dv"):
@@ -287,6 +289,26 @@ def capture():
         A.quant_qkv_m17, A.doq_m17, A._ops_gt, C._ops = saved
 
 
+def canonical_deltas(t, H):
+    """Replace the per-call g<a>-<b>.delta_fp8.{lse,out} captures by all.delta_fp8.{lse,out}: the calls concatenated
+    along the head dim in head order.  Raises if the calls do not tile [0, H) exactly (a missing / overlapping call)."""
+    import re, torch
+    calls = sorted((int(m.group(1)), int(m.group(2)), k) for k in t for m in [re.match(r"^g(\d+)-(\d+)\.delta_fp8\.out$", k)] if m)
+    if not calls:
+        return t
+    pos = 0
+    for a, b, _ in calls:
+        if a != pos or b <= a:
+            raise ValueError(f"delta_fp8 calls do not tile the heads: {[(a_, b_) for a_, b_, _ in calls]} of {H}")
+        pos = b
+    if pos != H:
+        raise ValueError(f"delta_fp8 calls cover {pos} of {H} heads")
+    for kind in ("lse", "out"):
+        parts = [t.pop(f"g{a:02d}-{b:02d}.delta_fp8.{kind}") for a, b, _ in calls]
+        t[f"all.delta_fp8.{kind}"] = torch.cat(parts, dim=1).contiguous()
+    return t
+
+
 def run_case(dm, desc):
     import torch
     causal, mode = desc["attn"] == "causal", desc["mode"]
@@ -317,7 +339,8 @@ def run_case(dm, desc):
     if desc["N"] <= REF_MAX_N and desc["kind"] == "gauss":   # informational: not part of the byte comparison
         ro, rdq, rdk, rdv = reference(q, k, v, do, causal)
         errs = {"O": rel(o, ro), "dQ": rel(dq, rdq), "dK": rel(dk, rdk), "dV": rel(dv, rdv)}
-    return {n_: t.contiguous().cpu() for n_, t in rec["t"].items()}, errs, strides
+    out = canonical_deltas(dict(rec["t"]), desc["H"])
+    return {n_: t.contiguous().cpu() for n_, t in out.items()}, errs, strides
 
 
 def sha256(path):

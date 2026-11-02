@@ -137,3 +137,10 @@ dataflow with fewer live accumulators per warp or more warps per SMSP: the struc
 kda-fuse), not further schedule tweaks of this kernel. Numerics: under residual-v4, any lever that changes P^ or the dS
 line fails the per-row test by construction (rounding residues move); only accumulation-regrouping levers (PW) can pass,
 and PW16 misses the 1e-5 per-case error tolerance by 0.67e-5 on one shape while lowering the mean.
+
+### Addendum: the integrator's residual-v4 checker (9be3622: LSE +-1 ulp envelope, 1e-5 per matched case)
+
+Same references as the integrator's gates (`.local/rounds/r17/ngate_nfwd3n_2`, `results/r17/cert/defects_default.json`):
+EXPB FAIL (fresh captures, job 21177918: 8 well-conditioned rows above accepted + round-off in gqa4 / gqa3_promote /
+bhnd / heldout; 22 without the envelope); PW16 FAIL (d128_bhnd matched dV +1.67e-5); PW32 FAIL (also gqa3_promote dV
++3.3e-5). 9be3622 has no csrc change vs 3106faf: C2 stands as measured.

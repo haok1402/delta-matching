@@ -264,3 +264,11 @@ Also screened on this stack (sT2, 3 reps, vs r17_fwd; stack ref -3.05%): Q/dO EV
 -3.69%, both -3.63%, ring depth 4 -3.90%. All bitwise; all within the 8k H32 shape's repetition range (up to 0.044 ms),
 so not taken. PERS (persistent W4, snake LPT tiles, next-tile K/V prefetch): -9.46% / -9.57% vs C5's -13.64% / -13.89%
 (spills in the tile-loop state; per-tile Q/dO hand-off): REJECTED after two variants (104 and 112 consumer regs).
+
+## Accepted: pass-0 stack (kda-sm90 2fe6079)
+
+f254c01 (C5 NML + 104/24) and 6061e7b (C4 P0ALL) were cherry-picked; equivalence v4 tooling 3766b4f was adopted as
+853f7e6. Gate 21179675: bitwise on all four routes, pass 0 -3.19%. Confirmation 21179800: -3.43%. New accepted root:
+.local/frozen/r17_p0s. Byte references for bitwise gates: the r17_fwd v4 dumps.
+
+Accepted from this helper so far: C1 RTR, C2 SPF, C3 LPT + W4 (+ fallback), C4 P0ALL, C5 NML + 104/24.

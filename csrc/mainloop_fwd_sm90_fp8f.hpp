@@ -1740,6 +1740,9 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // keeps only the two PV sub-gemms, the rescale, the promote and the QK issue.
                     static constexpr bool kPreTurn = kFwdLazy && kGroups == 2 && kPVNSplit == 1;
                     if constexpr (kPreTurn) { fq8_lazy_rebase(); }
+                    // ## kda-fwd KTOK (bitwise): the K stage's try-wait token is taken before the turn; the blocking wait
+                    // inside the turn then only completes it.
+                    auto const ktok_ = pipeline_k.consumer_try_wait(smem_pipe_read);
                     auto const pre_r1_ = [&] { if constexpr (kPreTurn) { return fq8_rho(softmax, 1); } else { return typename Softmax::TensorT{}; } }();
                     auto const pre_w_ = [&] { if constexpr (kPreTurn) { return softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1]); } else { return typename Softmax::TensorT{}; } }();
                     warp_scheduler_barrier_sync();
@@ -1767,7 +1770,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     KF(5);
                     // ---- tOrD is dead here; QK reuses its registers ----
                     Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
-                    consumer_wait(pipeline_k, smem_pipe_read);
+                    pipeline_k.consumer_wait(smem_pipe_read, ktok_);
                     KF(6);
                     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
                     warp_scheduler_barrier_arrive();

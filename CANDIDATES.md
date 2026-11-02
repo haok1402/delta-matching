@@ -169,3 +169,32 @@ Levers, each tried in at least two designed variants:
 
 To reach 90% of the floor, the next steps lie outside bitwise pass-0 scheduling: the numerics tolerance for DEFER / LAZY,
 or the joint exp-line change with pass 1.
+
+## Round after residual-v4 (branch kda-sm90-pass0-num, on the accepted head 3106faf, no C4)
+
+Commits (ungated, named numerics changes): e3275a3 P0DEFER, c49c0d6 P0LAZY (on DEFER), 4dc4268 P0FOLD (exp argument
+as one fmaf(s, dsc, 8 - lse), on LAZY). Screen variants: e881f20 P0NORM on FOLD, a23f011 P0NORM on DEFER
+(delta = sum P dP / sum P). Note: `p0/tools/{defer,lazy}.patch` are macro-gated what-if patches; applied without
+-DKDA_P0DEFER / -DKDA_P0LAZY they compile the unchanged kernel. kda-sm90's jobs 21176380 / 21176381 measured exactly
+that (~0%, trivial PASS).
+
+Stamped builds of the commits vs frozen r17_p1 (ab.py paper / pass0, one job each):
+
+| commit | pass 0 geomean | decision (this job) |
+|---|---:|---|
+| e3275a3 DEFER | -3.04% | REJECT (one shape slower beyond spread) |
+| c49c0d6 LAZY + DEFER | -7.50% | ACCEPT |
+
+Screen (job sO1, 2 reps, vs r14_h3): c49c0d6 -19.27%, + FOLD -23.73%.
+
+residual-v4 evaluation (`p0/tools/v4.py` on numerics.py captures of the stamped builds, all four routes, vs cert_v3 r17_c3):
+
+| commit | well-conditioned row regressions | ill-conditioned rows (accepted > 1e-3) | mean dQ error | strict v4 |
+|---|---|---|---|---|
+| DEFER | 28 / route (all d128_scale3, worst 0.026 absolute) | 8124, worst move 0.11 | +1.35e-9 | FAIL |
+| LAZY + DEFER | 57 / route (gqa4 3, gqa3 2, mqa 2, heldout 1, the rest scale3) | 8124, worst move 0.18 | +3.4e-9 | FAIL |
+
+Reading: the regressing rows have a small accepted residual by chance. A row's residual is dominated by
+sum_j P_j != 1 (delta = sum P dP satisfies sum_j P_j (dP_j - delta) = 0 only when sum_j P_j = 1), so any rounding change
+of delta moves them. Most defensible next step, protecting the zero-sum identity: P0NORM, delta = sum P dP / sum P,
+which makes the identity exact up to the rounding of the sums. Its numerics and timing are in flight.

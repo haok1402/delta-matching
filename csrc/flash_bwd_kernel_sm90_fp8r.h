@@ -183,6 +183,18 @@ public:
                 mainloop.load_tail_gt(pipeline_q, pipeline_do, pipeline_qt, pipeline_dot,
                                       smem_pipe_write, smem_pipe_write_do, smem_pipe_write_qt, smem_pipe_write_dot);
             }
+#if KDA_FQ & 2
+            else if (warp_idx_in_warpgroup == 1) {   // ## kda-bwdport FQ: the dQ writer warp
+                for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+                     work_tile_info.is_valid(params.scheduler);
+                     work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+                    auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+                    auto [n_block, bidh, bidb, _ /*split_idx*/] = block_coord_;
+                    cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
+                    mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+                }
+            }
+#endif
         } else {  // Consumer
             cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
             TiledMmadKV tiled_mma_dKV;

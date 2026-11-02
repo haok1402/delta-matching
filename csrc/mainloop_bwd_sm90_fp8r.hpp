@@ -63,6 +63,7 @@
 #include "mask.h"
 #include "softmax.h"
 #include "utils.h"
+#include "copy_sm90_bulk_reduce.hpp"
 
 static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written for the in-kernel lse*log2e (FA3FP11_M17_LSEK=1) build line");
 // ## M20 micro-levers (bitwise-class schedule changes; the release build sets RFSKIP, DSDEFER stays off):
@@ -118,6 +119,19 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #endif
 
 #include "kda_prof.h"
+// ## kda-bwdport FQ (FA3-style in-kernel dQ; default 0 = the accepted pass 1).  Bit mask, staged so each addition is priced:
+//   1: the Kt tile (128 d x 128 keys, the pass-2 twin) is loaded once per CTA with K / V, and at the start of step m each
+//      warpgroup issues dQ(m-2)[:, 64 wg .. 64 wg + 63] = dS'(m-2) (both warpgroups' smem half tiles, already parity-buffered
+//      and certified complete by the psi barrier of step m-1) x Kt as an SS wgmma, retired before the dP issue; the dS'
+//      gmem store goes (pass 2 would no longer read it).  Timing only at 1 (the result is discarded).
+//   2: + the psi(m-2) scale and the fp32 partial written to a per-warpgroup 16-KB smem buffer, handed to the dQ writer warp
+//      (producer warp 1) through dQEmpty / dQFull named barriers (FA3's protocol); the writer only acknowledges.
+//   4: + the writer's bulk reduce-add of each 16-KB partial into the fp32 dQaccum [BH, nbm, 2, 4096] (fragment order).
+//   8: + deterministic order: per (bh, m-block) semaphore, adders in DESCENDING n-block order (FA3's deterministic causal
+//      order), with the scheduler dispatching n-blocks shortest-first (SPT) so every awaited adder is resident earlier.
+#ifndef KDA_FQ
+#define KDA_FQ 0
+#endif
 
 namespace flash {
 
@@ -225,6 +239,19 @@ struct CollectiveMainloopBwdSm90Fp8R {
     static_assert(cute::cosize_v<SmemLayoutDS> == kDsHalfElems, "P1-R: the dS' half tile must be dense");
     // dV persistent accumulator overlay: kBlockN x kHeadDim fp32, slot(i, thread) = i * NumMmaThreads + thread (conflict-free).
     static constexpr int kDvOverlayFloats = kBlockN * kHeadDim;
+    // ## kda-bwdport FQ: Kt (N = d, K = keys, keys contiguous) and the dQ SS gemm (per WG: 64 rows x 64 d, K = 64 keys per call).
+    static constexpr bool kFQ = (KDA_FQ & 1) != 0;
+    using SmemLayoutAtomKt = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
+                                      Int<kHeadDim>, Int<kBlockN>>());
+    using SmemLayoutKt = decltype(tile_to_shape(SmemLayoutAtomKt{}, make_shape(Int<kHeadDim>{}, Int<kBlockN>{})));
+    using SmemLayoutDS2 = decltype(tile_to_shape(SmemLayoutAtomDS{}, make_shape(Int<kBlockM>{}, Int<kDsHalfN>{}, _2{})));   // [rows, keys, parity]
+    using TileShapeAtomdQ = Shape<Int<kBlockM>, Int<kHeadDim / NumMmaWarpGroups>, Int<kDsHalfN>>;
+    using TiledMmadQ = decltype(cute::make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShapeAtomdQ, GMMA::Major::K, GMMA::Major::K>(),
+        Layout<Shape<_1, Int<NumMmaWarpGroups>, _1>>{}));
+    static constexpr int kDqWGFloats = kBlockM * kHeadDim / NumMmaWarpGroups;   // 4096 per warpgroup partial
+    static constexpr uint32_t kFqEmptyId = 0;   // user named-barrier ids 0, 1 (FA3's KVEmpty / PdS: unused by this kernel)
+    static constexpr uint32_t kFqFullId = 2;    // ids 2, 3
 
     using GmemTiledCopyQdO = cute::SM90_TMA_LOAD;
     using GmemTiledCopyKV = cute::SM90_TMA_LOAD;
@@ -253,6 +280,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
         take<0, 2>(SmemLayoutdO{}), TileShape_MNK{}, ClusterShape{}));
     // The twins are [d, seq, head, batch] (seq contiguous, pi-ordered inside every 16-position window).
     using TileShape_TwinM = Shape<Int<kHeadDim>, _1, Int<kBlockM>>;
+    using TileShape_TwinN = Shape<Int<kHeadDim>, _1, Int<kBlockN>>;
+    using TMA_Kt = decltype(make_tma_copy_A_sm90(
+        cute::SM90_TMA_LOAD{},
+        make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQKV{}),
+        SmemLayoutKt{}, TileShape_TwinN{}, ClusterShape{}));
     using TMA_Qt = decltype(make_tma_copy_A_sm90(
         cute::SM90_TMA_LOAD{},
         make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQKV{}),
@@ -286,6 +318,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
     static constexpr uint32_t TmaTransactionBytesLSE = static_cast<uint32_t>(size(select<0>(SmemLayoutLSE{})) * cutlass::sizeof_bits_v<ElementAccum> / 8);
     static constexpr uint32_t TmaTransactionBytesQt = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutQt{})) * cutlass::sizeof_bits_v<Element> / 8);
     static constexpr uint32_t TmaTransactionBytesdOt = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutdOt{})) * cutlass::sizeof_bits_v<Element> / 8);
+    static constexpr uint32_t TmaTransactionBytesKt = kFQ ? static_cast<uint32_t>(size(SmemLayoutKt{}) * cutlass::sizeof_bits_v<Element> / 8) : 0u;
 
     static constexpr size_t SmemAlignmentQKVdO = 128;
 
@@ -303,6 +336,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_lse;
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_dpsum;
         cute::array_aligned<ElementAccum, 16, 16> smem_psired;   // 8 warps x 2 tile parities
+#if KDA_FQ
+        cute::array_aligned<Element, cute::cosize_v<SmemLayoutKt>, 1024> smem_kt;
+        cute::array_aligned<ElementAccum, NumMmaWarpGroups * kDqWGFloats, 1024> smem_dq;   // [wg][float4 slot][thread] partials
+#endif
 #ifdef FA3FP11_DBG
         cute::array_aligned<ElementAccum, NumMmaWarpGroups * 4 * 2 * kBlockM, 16> smem_dbg_rows;   // [wg][warp][sum|abs][row]
 #endif
@@ -403,6 +440,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
         float* const ptr_dbg_rows;
         float* const ptr_dbg_rowsabs;
         unsigned int* const ptr_dbg_cks;
+#if KDA_FQ
+        TMA_Kt tma_load_Kt;
+        ElementAccum* const ptr_dQaccum;
+        int* const dq_semaphore;
+#endif
     };
 
     static Params
@@ -435,7 +477,13 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 args.softmax_scale, args.window_size_left, args.window_size_right, attention_chunk_divmod,
                 args.num_batch, args.cu_seqlens_q, args.cu_seqlens_k, args.seqused_q, args.seqused_k,
                 tma_store_dS8, args.ptr_psi, args.nbm, args.nbn,
-                args.ptr_dbg_rows, args.ptr_dbg_rowsabs, args.ptr_dbg_cks};
+                args.ptr_dbg_rows, args.ptr_dbg_rowsabs, args.ptr_dbg_cks
+#if KDA_FQ
+                , make_tma_copy_A_sm90(cute::SM90_TMA_LOAD{}, make_tensor(make_gmem_ptr(args.ptr_Kt), args.shape_Kt, args.stride_Kt),
+                                       SmemLayoutKt{}, TileShape_TwinN{}, ClusterShape{}),
+                args.ptr_dQaccum, args.dq_semaphore
+#endif
+                };
     }
 
     CUTLASS_DEVICE
@@ -447,6 +495,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::prefetch_tma_descriptor(params.tma_load_Qt.get_tma_descriptor());
         cute::prefetch_tma_descriptor(params.tma_load_dOt.get_tma_descriptor());
         cute::prefetch_tma_descriptor(params.tma_store_dS8.get_tma_descriptor());
+#if KDA_FQ
+        cute::prefetch_tma_descriptor(params.tma_load_Kt.get_tma_descriptor());
+#endif
     }
 
     KT_MEMBERS   // the producer's tile counter (timeline-only build)
@@ -532,8 +583,19 @@ struct CollectiveMainloopBwdSm90Fp8R {
                  tQtgQt(_, m_block), tQtsQt(_, smem_pipe_write_qt.index()));
         }
         if (lane_predicate) {
-            shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
+            shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV + TmaTransactionBytesKt);
             copy(params.tma_load_K.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0), tKgK, tKsK);
+#if KDA_FQ
+            {
+                Tensor sKt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_kt.data()), SmemLayoutKt{});
+                auto shape_Kt = make_shape(get<1>(params.shape_K), get<0>(params.shape_K), get<2>(params.shape_K), get<3>(params.shape_K));
+                Tensor mKt = params.tma_load_Kt.get_tma_tensor(shape_Kt)(_, _, bidh_kv, bidb);
+                Tensor gKt = local_tile(mKt, make_shape(Int<kHeadDim>{}, Int<kBlockN>{}), make_coord(_0{}, n_block));
+                auto block_tma_Kt = params.tma_load_Kt.get_slice(_0{});
+                copy(params.tma_load_Kt.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0),
+                     block_tma_Kt.partition_S(gKt), block_tma_Kt.partition_D(sKt));
+            }
+#endif
             copy(params.tma_load_V.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0), tVgV, tVsV);
             KTP_H(8);
             #pragma unroll 1
@@ -602,6 +664,67 @@ struct CollectiveMainloopBwdSm90Fp8R {
 
     CUTLASS_DEVICE void mma_init() {}
 
+    // ## kda-bwdport FQ: the dQ writer warp (producer warp 1): per m-block, both warpgroups' 16-KB partials, in tile order.
+    template <typename SharedStorage>
+    CUTLASS_DEVICE void
+    store_dq(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord) {
+#if KDA_FQ & 2
+        auto [n_block, bidh, bidb] = block_coord;
+        SeqlenInfo_t seqlen_info{bidb, get<0>(params.shape_Q), size<0>(params.shape_K),
+                                 params.cu_seqlens_q, params.cu_seqlens_k, params.seqused_q, params.seqused_k};
+        auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(
+            seqlen_info, n_block, bidb, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/);
+        if (m_block_max <= m_block_min) { return; }
+        int const bh = bidb * get<2>(params.shape_Q) + bidh;
+        [[maybe_unused]] float* const sdq = shared_storage.tensors.mainloop.smem_dq.data();
+        [[maybe_unused]] int const lane = threadIdx.x % cutlass::NumThreadsPerWarp;
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (int m = m_block_min; m < m_block_max; ++m) {
+            [[maybe_unused]] float* const gdq = params.ptr_dQaccum + (int64_t(bh) * params.nbm + m) * (NumMmaWarpGroups * kDqWGFloats);
+#if KDA_FQ & 8
+            int* const sem = params.dq_semaphore + int64_t(bh) * params.nbm + m;
+            {   // descending n-block order: the diagonal block adds first
+                constexpr int kbm = kBlockM, kbn = kBlockN;
+                int const n_max = cute::min(params.nbn, ((m + 1) * kbm + seqlen_info.seqlen_k - seqlen_info.seqlen_q + kbn - 1) / kbn);
+                int const want = Is_causal ? n_max - 1 - n_block : n_block;   // non-causal: the dispatch order (n ascending)
+                if (lane == 0) {
+                    int v;
+                    do { asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(sem) : "memory"); } while (v != want);
+                    asm volatile("fence.proxy.async.global;" ::: "memory");
+                }
+                __syncwarp();
+            }
+#endif
+            #pragma unroll
+            for (int w = 0; w < NumMmaWarpGroups; ++w) {
+                cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, kFqFullId + w);
+#if KDA_FQ & 4
+                if (lane == 0) {
+                    SM90_BULK_REDUCE_ADD::copy(sdq + w * kDqWGFloats, gdq + w * kDqWGFloats, kDqWGFloats * int(sizeof(float)));
+                    cute::tma_store_arrive();
+                }
+#endif
+            }
+            #pragma unroll
+            for (int w = 0; w < NumMmaWarpGroups; ++w) {
+#if KDA_FQ & 4
+                if (lane == 0) { if (w == 0) { cute::tma_store_wait<1>(); } else { cute::tma_store_wait<0>(); } }
+                __syncwarp();
+#endif
+                cutlass::arch::NamedBarrier::arrive(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, kFqEmptyId + w);
+            }
+#if KDA_FQ & 8
+            if (lane == 0) {
+                asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");   // the adds are performed, not only read
+                asm volatile("fence.proxy.async.global;" ::: "memory");
+                asm volatile("red.release.gpu.global.add.s32 [%0], 1;" :: "l"(sem) : "memory");
+            }
+            __syncwarp();
+#endif
+        }
+#endif
+    }
+
     template <typename SharedStorage, typename FrgTensordKV>
     CUTLASS_DEVICE bool
     mma(Params const& params,
@@ -651,6 +774,43 @@ struct CollectiveMainloopBwdSm90Fp8R {
         auto wg_mma_dP = tiled_mma_dP.get_slice(warp_group_thread_layout(warp_group_idx));
         auto thread_mma_SdP = tiled_mma_SdP.get_thread_slice(thread_idx);
         auto wg_mma_dKV = tiled_mma_dKV.get_slice(warp_group_thread_layout(warp_group_idx));
+#if KDA_FQ
+        // ## kda-bwdport FQ: dQ(m) = dS'(m) Kt over the CTA's 128 keys; this WG owns d columns [64 wg, 64 wg + 64).
+        TiledMmadQ tiled_mma_dQ;
+        auto wg_mma_dQ = tiled_mma_dQ.get_slice(warp_group_thread_layout(warp_group_idx));
+        Tensor fq_sdSA = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data()), SmemLayoutDS2{});                    // keys 0-63 (WG 0's halves)
+        Tensor fq_sdSB = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + 2 * kDsHalfElems), SmemLayoutDS2{});  // keys 64-127
+        Tensor fq_sKt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_kt.data()), SmemLayoutKt{});
+        Tensor fq_tdQrdSA = wg_mma_dQ.partition_fragment_A(fq_sdSA);
+        Tensor fq_tdQrdSB = wg_mma_dQ.partition_fragment_A(fq_sdSB);
+        Tensor fq_tdQrKt0 = wg_mma_dQ.partition_fragment_B(local_tile(fq_sKt, Shape<Int<kHeadDim>, Int<kDsHalfN>>{}, make_coord(_0{}, _0{})));
+        Tensor fq_tdQrKt1 = wg_mma_dQ.partition_fragment_B(local_tile(fq_sKt, Shape<Int<kHeadDim>, Int<kDsHalfN>>{}, make_coord(_0{}, _1{})));
+        float fq_psi1 = 0.f, fq_psi2 = 0.f;   // psi of tiles m - 1 and m - 2 (0 for a zero tile)
+        [[maybe_unused]] float4* const fq_sdq = reinterpret_cast<float4*>(shared_storage.tensors.mainloop.smem_dq.data() + warp_group_idx * kDqWGFloats) + wg_thread;
+        auto fq_issue = [&](auto& acc, int m_src) {
+            int const par = m_src & 1;
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dQ, fq_tdQrdSA(_, _, _, par), fq_tdQrKt0, acc);
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dQ, fq_tdQrdSB(_, _, _, par), fq_tdQrKt1, acc);
+        };
+        // After the dQ groups retired: the psi scale and the hand-off to the writer warp.
+        auto fq_finish = [&](auto& acc, float psi) {
+#if KDA_FQ & 2
+            static_assert(decltype(size(acc))::value == 32, "FQ: 32 dQ values per thread");
+            cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, kFqEmptyId + warp_group_idx);
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                fq_sdq[j * cutlass::NumThreadsPerWarpGroup] = make_float4(acc(4 * j) * psi, acc(4 * j + 1) * psi, acc(4 * j + 2) * psi, acc(4 * j + 3) * psi);
+            }
+            cutlass::arch::fence_view_async_shared();
+            cutlass::arch::NamedBarrier::arrive(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, kFqFullId + warp_group_idx);
+#endif
+        };
+#if KDA_FQ & 2
+        if (warp_in_wg == 0) {   // the writer's share of the first dQEmpty phase (FA3's mma_init)
+            cutlass::arch::NamedBarrier::arrive(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, kFqEmptyId + warp_group_idx);
+        }
+#endif
+#endif
 
         Tensor tSrK = wg_mma_SdP.partition_fragment_A(sK);          // this WG's 64 keys (MMA, MMA_M, MMA_K)
         Tensor tSrQ = wg_mma_SdP.partition_fragment_B(sQ);          // (MMA, MMA_N, MMA_K, PIPE)
@@ -763,6 +923,12 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // (kBlockN, kBlockM) = the swapAB fragment: rows = keys, columns = query rows.
             Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<1, 0>(TileShape_MNK{}));
             KT_VAL(30, smem_pipe_read.index()); KT_VAL(31, smem_pipe_read.phase()); KT(0);
+#if KDA_FQ
+            // ## FQ: dQ(m - 2) first (its dS' halves were certified by the psi barrier of step m - 1; tile m reuses the
+            // parity buffer only after this step's psi barrier, which both WGs reach after retiring this gemm).
+            Tensor fq_acc = partition_fragment_C(tiled_mma_dQ, Shape<Int<kBlockM>, Int<kHeadDim>>{});
+            fq_issue(fq_acc, m_block);   // parity of m - 2 == parity of m; discarded below while m - 2 < the first tile
+#endif
             consumer_wait(pipeline_q, smem_pipe_read);
             KP(3);
             if constexpr (kSt >= 0) {
@@ -770,6 +936,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
             } else {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, smem_pipe_read.index()), tSrS);
             }
+#if KDA_FQ
+            warpgroup_wait<1>();   // the two dQ groups retired (S outstanding)
+            if (m_block >= fq8_m_first + 2) { fq_finish(fq_acc, fq_psi2); }
+#endif
             float const fq8_q8sc = fq8_q8sc_next;
             float const fq8_do8sc = fq8_do8sc_next;
             if (m_block + 1 < m_block_max) {
@@ -1012,9 +1182,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
             float* const fq8_psi_slots = fq8_psired + (m_block & 1) * 8;
             if (lane == 0) { fq8_psi_slots[thread_idx / cutlass::NumThreadsPerWarp] = fq8_amax; }
             KP(9);
-            if (wg_thread == 0) { cute::tma_store_wait<0>(); }   // S17 DSDEFER-CTA: store(m - 2) drained (buffer m & 1)
+            if (!kFQ && wg_thread == 0) { cute::tma_store_wait<0>(); }   // S17 DSDEFER-CTA: store(m - 2) drained (buffer m & 1)
             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
-            if (wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
+            if (!kFQ && wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
             KP(10);
             #pragma unroll
             for (int w = 0; w < NumMmaThreads / cutlass::NumThreadsPerWarp; ++w) { fq8_amax = fmaxf(fq8_amax, fq8_psi_slots[w]); }
@@ -1025,6 +1195,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
             if (thread_idx == 0) {
                 params.ptr_psi[(int64_t(fq8_bh) * params.nbm + m_block) * params.nbn + n_block] = fq8_tile_zero ? 0.0f : fq8_psi;
             }
+#if KDA_FQ
+            fq_psi2 = fq_psi1;
+            fq_psi1 = fq8_tile_zero ? 0.0f : fq8_psi;
+#endif
             // dS' codes = e4m3(dS / psi) as the RS A operand of dK.
             #pragma unroll
             for (int i = 0; i < size(tdPrdP); ++i) { if constexpr (!(KDA_PK_PROBE & 2)) { tdPrdP(i) *= fq8_psi_inv; } }
@@ -1136,9 +1310,24 @@ struct CollectiveMainloopBwdSm90Fp8R {
 
         // S17 DSDEFER-CTA: the last tile's halves, after a CTA-wide rendezvous (every stmatrix + fence of it done).
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
+#if KDA_FQ
+        // ## FQ: the last two tiles' dQ (tile m_max - 2 only if it is this CTA's).
+        {
+            Tensor fq_acc = partition_fragment_C(tiled_mma_dQ, Shape<Int<kBlockM>, Int<kHeadDim>>{});
+            if (m_block_max - 2 >= fq8_m_first) {
+                fq_issue(fq_acc, m_block_max - 2);
+                warpgroup_wait<0>();
+                fq_finish(fq_acc, fq_psi2);
+            }
+            fq_issue(fq_acc, m_block_max - 1);
+            warpgroup_wait<0>();
+            fq_finish(fq_acc, fq_psi1);
+        }
+#else
         if (wg_thread == 0) { fq8_issue_ds_cta(m_block_max - 1); }
         // Drain the last dS' box store (non-issuing threads return immediately).
         cute::tma_store_wait<0>();
+#endif
         // Exit: the k8s unfold of dK (this WG's keys are one scale group) and the dV read-back from the overlay.
         float const fq8_ik = params.softmax_scale / fq8_k8s_wg;
         #pragma unroll

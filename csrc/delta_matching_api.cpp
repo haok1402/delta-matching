@@ -328,7 +328,16 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     at::Tensor dv = torch::empty({batch_size, seqlen_k, num_heads, head_size}, opts.dtype(at::kBFloat16));
     // Dummy dq_accum: the split backward has no cross-CTA dQ reduction; the
     // pointer is never dereferenced (plumbing only).
-    at::Tensor dq_accum = torch::empty({4}, opts.dtype(at::kFloat));
+#ifndef KDA_FQ
+#define KDA_FQ 0
+#endif
+    // ## kda-bwdport FQ: the fp32 dQ partial sums [BH, nbm, 2, 4096] (fragment order) and the per-(bh, m-block) order semaphores.
+    at::Tensor dq_accum = (KDA_FQ & 4) && head_size == 128
+        ? torch::zeros({int64_t(batch_size) * num_heads * (seqlen_q / 64) * 64 * head_size}, opts.dtype(at::kFloat))
+        : torch::empty({4}, opts.dtype(at::kFloat));
+    at::Tensor fq_sem = (KDA_FQ & 8) && head_size == 128
+        ? torch::zeros({int64_t(batch_size) * num_heads * (seqlen_q / 64)}, opts.dtype(at::kInt))
+        : torch::empty({1}, opts.dtype(at::kInt));
     // ## FP11-M17 LSEK: the kernels form lse*log2e in-register (bitwise the host prep).
     at::Tensor lse_log2 = lse;
     // The SingleTile schedulers never read the semaphore: no memset launch.
@@ -371,6 +380,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> bwd_fp8_core(
     params.dk_row_stride = dk.stride(1); params.dk_head_stride = dk.stride(2); params.dk_batch_stride = dk.stride(0);
     params.dv_row_stride = dv.stride(1); params.dv_head_stride = dv.stride(2); params.dv_batch_stride = dv.stride(0);
     params.dq_accum_ptr = dq_accum.data_ptr();
+    params.dq_semaphore = fq_sem.data_ptr<int>();
     params.softmax_lse_ptr = lse.data_ptr();
     params.softmax_lse_log2_ptr = lse_log2.data_ptr();
     params.dsoftmax_sum = delta.data_ptr();

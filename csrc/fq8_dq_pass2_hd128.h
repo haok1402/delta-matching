@@ -86,6 +86,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cuda_bf16.h>
 
 #include <cute/tensor.hpp>
 #include <cutlass/cutlass.h>
@@ -441,4 +442,32 @@ void run_fq8_dq_pass2_fp11_d128(Flash_bwd_fp8_params &params, cudaStream_t strea
     dim3 grid(nbm, bh, 1);
     kernel<<<grid, 128, kSmem, stream>>>(p2);
     { cudaError_t e_ = cudaGetLastError(); if (e_ != cudaSuccess) { fprintf(stderr, "[delta_matching pass 2 hd128] launch: %s\n", cudaGetErrorString(e_)); exit(1); } }
+}
+
+// ## kda-bwdport FQ (KDA_FQ & 16): pass 1 accumulated dQ in fp32 [BH, nbm, 2 (d half), 8 (n8 block), 128 (thread), 4] (the wgmma
+// C fragment order of the in-kernel dQ gemm); this kernel only applies final_scale = sm/256 and writes bf16 dQ.
+namespace fq8p2h128 {
+static __global__ void __launch_bounds__(256) fq_dq_post_kernel(float const* __restrict__ acc, cutlass::bfloat16_t* __restrict__ dq,
+        int64_t row_stride, int64_t head_stride, int64_t batch_stride, float fin, int nbm, int h) {
+    int const mb = blockIdx.x, bh = blockIdx.y, t = threadIdx.x;
+    int const w = t >> 7, wt = t & 127, wi = wt >> 5, l = wt & 31;
+    float4 const* src = reinterpret_cast<float4 const*>(acc + ((int64_t(bh) * nbm + mb) * 2 + w) * 4096) + wt;
+    cutlass::bfloat16_t* base = dq + int64_t(bh / h) * batch_stride + int64_t(bh % h) * head_stride
+                                + int64_t(mb * 64 + 16 * wi + (l >> 2)) * row_stride + 64 * w + 2 * (l & 3);
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        float4 const v = src[j * 128];
+        __nv_bfloat162 const a = __floats2bfloat162_rn(v.x * fin, v.y * fin);
+        __nv_bfloat162 const b = __floats2bfloat162_rn(v.z * fin, v.w * fin);
+        *reinterpret_cast<__nv_bfloat162*>(base + 8 * j) = a;
+        *reinterpret_cast<__nv_bfloat162*>(base + 8 * row_stride + 8 * j) = b;
+    }
+}
+}  // namespace fq8p2h128
+inline void run_fq_dq_post_d128(Flash_bwd_fp8_params &params, cudaStream_t stream) {
+    int const nbm = params.seqlen_q / 64;
+    dim3 grid(nbm, params.b * params.h, 1);
+    fq8p2h128::fq_dq_post_kernel<<<grid, 256, 0, stream>>>(static_cast<float const*>(params.dq_accum_ptr),
+        static_cast<cutlass::bfloat16_t*>(params.dq_ptr), params.dq_row_stride, params.dq_head_stride, params.dq_batch_stride,
+        params.scale_softmax / 256.0f, nbm, params.h);
 }

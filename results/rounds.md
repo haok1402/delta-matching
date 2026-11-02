@@ -955,3 +955,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   except the repaired d128_zeros defect (job 21205898); v5 rows 0 worse; pytest passes. vs the original: forward
   -2.29%, e2e fwd+bwd -8.38% (paper set, 3 reps). Cost of restoring the numerics vs r19_fwd: forward ~+13.6%, pass 0
   ~+7%, pass 1 ~+3%, fwd+bwd ~+6%. Accepted root r21_clean.
+
+## Round 22 (started): bitwise forward work on r21_clean
+
+- kda-fwd port check (eabba10 = e256bw source): WGID, the scale reads after the turn's arrive (SMSC4) and PRETURN4 are
+  already active on the 128 x 256 tile; the lazy-rebase -inf guard drop does not apply without lazy. Screens on
+  r21_clean, all rejected: ST3 (3 K/V stages exceed shared memory), PREW4 (+1.13%, 8 reps), A1SKIP (skip O *= alpha
+  when alpha == 1: spills, +52%), A1DEF (deferred skip: bitwise, -0.10%). Next: kda-fwd takes a SASS opcode-mix diff of
+  the softmax / convert path vs FA3 fp8; my S22 worker takes older round 7-16 levers and 2-WG schedule specifics.

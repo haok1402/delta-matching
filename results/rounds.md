@@ -778,3 +778,6 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Pass-1 helper on r17_pk: SHFL8 alone (kda-sm90-pass1-c2pk, release flags unchanged) -1.10% / -1.07%, bitwise on all
   four routes (job 21182433) -> the held pass-1 stacking piece; QST3 / DOST3 no longer help after EXPBX64 (+0.25% /
   +0.23%) and are dropped; SHFL8 + QST3/DOST3 -1.18% / -0.50%.
+- sol4c adopted (Hao, kda-solcheck evidence; rule-change-r10.md): r17_pk by sol4c (results/r17/accepted_pk/sol4c.md):
+  pass1 66.3%, forward 78.5%, pass0 94.0%, pass2 94.1% (pass 0 and pass 2 meet the 90% target; forward and pass 1 do
+  not). Forward helper DONE (54 variants, S1-S54; held C4 + SMSC bitwise -2.4%). Pass-0 work stops.

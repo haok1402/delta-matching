@@ -53,7 +53,12 @@ KERNELS_D128_CAUSAL = {
     "pass2": {"symbol": r"fq8_dq_pass2_kernel_hd128ILb1E", "unit": (64, 128), "wgs": 1,
               "step_elems_per_wg": 64 * 128, "gemm_flop_per_elem": 1 * 2 * 128, "work_tile_axis": 0, "peel": 1},
 }
-SPLIT_WS_LIMIT = 8 * 2 ** 30      # delta_matching.split default DM_BWD_WS_LIMIT_GB = 8
+SPLIT_WS_LIMIT = 8 * 2 ** 30
+# sol4c (Hao, round 17; kda-solcheck, origin/kda-sm90-solcheck b5be598, results/solcheck/README.md): the fraction of
+# sol4-v2 an IDEAL kernel with exactly the accepted step-loop instruction mix reaches on this H100 (best of five
+# schedules; tensor and ALU work couple at ~C_alu + 0.55 C_tensor, loaded clock 1.66-1.80 GHz, IPC <= ~3.5).
+# sol4c floor = sol4-v2 floor / fraction; pass 2 and the memory kernels keep their sol4-v2 (bytes) floor.
+IDEAL_FRACTION = {"fwd": 0.699, "pass1": 0.620, "pass0": 0.745}      # delta_matching.split default DM_BWD_WS_LIMIT_GB = 8
 
 
 class ModelError(Exception):
@@ -427,8 +432,10 @@ def floors(rec, calib, cnt):
         vals = {n: v for n, v in fl.items() if v is not None}
         ctl = max(vals, key=vals.get)
         ms = rec["ms"][c]
+        solc = vals[ctl] / IDEAL_FRACTION.get(c, 1.0)
         out[c] = {"floors_ms": fl, "sol_ms": vals[ctl], "controlling": ctl, "measured_ms": ms,
-                  "pct_of_floor": 100 * vals[ctl] / ms if ms > 0 else None, "issue_modeled": fl["issue"] is not None}
+                  "pct_of_floor": 100 * vals[ctl] / ms if ms > 0 else None, "issue_modeled": fl["issue"] is not None,
+                  "sol4c_ms": solc, "pct_of_sol4c": 100 * solc / ms if ms > 0 else None}
     return out, route
 
 
@@ -466,10 +473,12 @@ def model_records(recs, calib, cnt, grid="paper"):
         t = {}
         for c in CATS:
             m = sum(x["floors"][c]["measured_ms"] for x in sel); s = sum(x["floors"][c]["sol_ms"] for x in sel)
+            sc = sum(x["floors"][c]["sol4c_ms"] for x in sel)
             fl = {n: (None if any(x["floors"][c]["floors_ms"][n] is None for x in sel)
                       else sum(x["floors"][c]["floors_ms"][n] for x in sel)) for n in ("tensor", "mufu", "issue", "bytes")}
             known = {n: v for n, v in fl.items() if v is not None}
             t[c] = {"measured_ms": m, "sol_ms": s, "waste_ms": m - s, "pct_of_floor": 100 * s / m if m else None,
+                    "sol4c_ms": sc, "pct_of_sol4c": 100 * sc / m if m else None,
                     "floors_ms": fl, "controlling": max(known, key=known.get)}
         fa = [x.get("fa3", {}).get("fp8_fwd_kernel_ms") for x in sel]
         tot[part] = {"configs": len(sel), "kernels": t,
@@ -487,12 +496,13 @@ def table(res):
         T = res["totals"][part]; t = T["kernels"]
         lines += [f"### {part} ({T['configs']} configurations, model {res['version']}, calibration "
                   f"{res['calibration_sha256'][:12]}; issue / MUFU are loop-only lower bounds)", "",
-                  "| kernel | measured ms | tensor | MUFU | issue | bytes | floor (max) | controlling | % of floor | waste ms |",
-                  "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
+                  "| kernel | measured ms | tensor | MUFU | issue | bytes | floor (max) | controlling | % of floor | sol4c ms | % of sol4c | waste ms |",
+                  "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|"]
         for c in sorted(CATS, key=lambda c: -t[c]["waste_ms"]):
             v = t[c]; fl = v["floors_ms"]
             lines.append(f"| {c} | {v['measured_ms']:.3f} | {f3(fl['tensor'])} | {f3(fl['mufu'])} | {f3(fl['issue'])} | "
-                         f"{f3(fl['bytes'])} | {v['sol_ms']:.3f} | {v['controlling']} | {v['pct_of_floor']:.1f}% | {v['waste_ms']:.3f} |")
+                         f"{f3(fl['bytes'])} | {v['sol_ms']:.3f} | {v['controlling']} | {v['pct_of_floor']:.1f}% | {v['sol4c_ms']:.3f} | "
+                         f"{v['pct_of_sol4c']:.1f}% | {v['waste_ms']:.3f} |")
         if T.get("fa3_fp8_fwd_kernel_ms"):
             lines += ["", f"FA3 fp8 forward kernel (per-configuration medians, summed): {T['fa3_fp8_fwd_kernel_ms']:.3f} ms; "
                           f"our forward / FA3 fp8 = {T['fwd_over_fa3_fp8']:.4f}"]

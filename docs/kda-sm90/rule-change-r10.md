@@ -200,3 +200,24 @@ of its calibrated sol4 limit on the four acceptance shapes; first milestone FA3 
   round now reports the % against its same-job calibration AND against a fixed reference = the highest fp8 peak
   observed so far (1481.15 TFLOPS, job 21181967; the most demanding floor). Goal attainment is judged on the fixed
   reference.
+
+## Round 17: corrected floor sol4c (Hao, after kda-solcheck)
+
+Evidence (kda-solcheck, origin/kda-sm90-solcheck b5be598, results/solcheck/README.md on that branch): persistent
+synthetic kernels that issue exactly the accepted step loops' instruction mixes (same wgmma shapes / counts / SS-RS
+sources, same MUFU / FFMA / FMUL / FADD / FMNMX / F2FP / SHFL / LDS counts, filler to the exact instruction count, same
+warpgroups and register footprint, no ptxas serialization, random fp8 operands, same-job calibration) reach at most
+69.9% (forward), 62.0% (pass 1) and 74.5% (pass 0) of sol4-v2 in the best of five schedules (real dependence order,
+no dependence, interleaved, warp-specialized, ping-pong). On this H100 tensor and ALU work couple at about
+C_alu + 0.55 C_tensor, the loaded SM clock is 1.66-1.80 GHz and IPC tops out near 3.5. So 90% of sol4-v2 is not
+reachable with the current mixes.
+
+Rule: the working target is sol4c = sol4-v2 floor / ideal fraction (forward 0.699, pass 1 0.620, pass 0 0.745; pass 2
+and the memory kernels keep their sol4-v2 floor), at >= 90% per kernel on the four acceptance shapes, judged on the
+fixed-reference calibration; every report shows both the sol4-v2 % and the sol4c % (benchmarks/sol4.py, IDEAL_FRACTION).
+FA3 fp8 forward parity stays the first milestone. Status on r17_pk (job 21181967, 1481.2 TFLOPS reference):
+pass 0 94.0% and pass 2 94.1% meet it; forward 78.5% and pass 1 66.3% do not (solcheck's own same-job calibration,
+1437 TFLOPS, reads forward ~82%, pass 1 ~68%). Direction (Hao): pass-1 scheduling levers are spent (kda-p1split: freeing
+registers for a pipelined S / dP was 3.5-4% slower); pass-1 work removes instructions from the per-element path
+(sensitivity ~0.05 sol4 points per instruction per warp-step); forward work targets the gap to FA3 fp8; helpers with
+exhausted levers report DONE; pass-0 work stops (it meets the target).

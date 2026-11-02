@@ -809,3 +809,15 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   (target pass 0 per the two-kernel rule) bitwise on all four routes, pass 0 -3.53%, pass 1 -3.31%, e2e fwd+bwd
   -2.21%, bench -5.7%; confirmation 21191853 (library 13235f129191) pass 0 -3.86%, pass 1 -3.08%, e2e -2.31%:
   ACCEPTED (accepted root r18_c4).
+- Structural worker (S18-st-01..08, results/screens/structural_log.md): no candidate. Family B (pass 1 computes the
+  matched delta, pass 0 gone): ceiling with pass 0 removed -17.6 / -18.7% backward, but in-pass-1 row sums +13% on pass 1
+  and the minimum cross-CTA exchange +100% on pass 1 (+42% backward); infeasible at N65536 (512 key-block CTAs per row
+  on 132 SMs). Family A (pass 0 hands its products to pass 1): a bitwise handoff needs 8 B / element (17.2 GB at 8K
+  16/4 = 5.7 ms vs a 2.9 ms backward); even a free handoff saves only 5.5-6.4% of the backward; diagonal-only ~0.25%.
+  New: a proof that the exp clamp cannot fire when |LSE| < 4096 (the forward's LSE >= the row max): a bitwise
+  justification for C4's clamp drop.
+- Numerics worker (S18-nm-01..12, results/screens/numerics_p1_log.md): the clamp lever is C4's; exact guarded clamp
+  forms are slower (+4..+16%); the dK fold: deferred fold spills (+29%), DKACC (dK in the wgmma accumulator, no fold)
+  neutral on r18_c4 (-0.4 / +0.1%) and fails residual-v4 (dQ / dK errors +2e-5..1.2e-3); no cheaper exact fold on sm90.
+  With every helper DONE, pass 1 (66% of sol4c) and the forward (78.5%) have no remaining lever within the numerics
+  contract that the campaign could find.

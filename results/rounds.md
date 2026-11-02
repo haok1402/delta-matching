@@ -775,3 +775,6 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   41.1%, forward 54.9%, pass0 70.0%, pass2 94.1%; forward / FA3 fp8 1.155; original -> now e2e fwd -13.1%, fwd+bwd
   -11.2%; paper C.2 16/4 fwd+bwd 510.5 (cuDNN BF16 509.6), 32/4 533.3 TFLOP/s. (On the previous job's 1409 TFLOPS
   calibration the same build would read ~5% higher; see the calibration-stability decision.)
+- Pass-1 helper on r17_pk: SHFL8 alone (kda-sm90-pass1-c2pk, release flags unchanged) -1.10% / -1.07%, bitwise on all
+  four routes (job 21182433) -> the held pass-1 stacking piece; QST3 / DOST3 no longer help after EXPBX64 (+0.25% /
+  +0.23%) and are dropped; SHFL8 + QST3/DOST3 -1.18% / -0.50%.

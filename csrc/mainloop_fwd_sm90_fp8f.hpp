@@ -1867,7 +1867,14 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // the Triton reference forward do.  It is not a P-hat basis quantity, so the
                     // denominator invariant (row_sum *= scores_scale,
                     // softmax_fq8f.h:195) is untouched.
-                    if constexpr (!kFwdLazy) { softmax.rescale_o(tOrO, scores_scale); }
+                    if constexpr (!kFwdLazy) {
+                        // ## kda-fwd A1SKIP (bitwise): x * 1.0f == x exactly (NaN / inf included), so the rescale is skipped
+                        // when every row of the warp keeps its running max (alpha == 1); warp-uniform branch.
+                        bool a1_ = true;
+                        #pragma unroll
+                        for (int mi = 0; mi < size(scores_scale); ++mi) { a1_ &= scores_scale(mi) == 1.f; }
+                        if (!__all_sync(0xffffffff, a1_)) { softmax.rescale_o(tOrO, scores_scale); }
+                    }
                     KF(11);
                     if constexpr (kFwdDfold && !Check_inf) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
                     else { softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS); }

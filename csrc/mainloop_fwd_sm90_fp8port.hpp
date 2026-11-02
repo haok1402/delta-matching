@@ -221,6 +221,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
     static constexpr int kVarBasis = kVar / 10 % 10;
     static constexpr int kVarPV = kVar % 10;
     static constexpr int kVarLazy = kVar / 100000 % 10;
+    static constexpr int kVarSP = kVar / 1000000 % 10;   // k-scale loads: 0 at use, 1 at step start, 2 none (ablation)
     static_assert(!kVarLazy || (kVarSched == 1 && kVarPV != 0), "FWDPORT: lazy alpha is implemented for the PV-first weighted steps");
     static constexpr int kQuantKeys = 64;
     static constexpr int kQuantRowsQ = 128;
@@ -1364,12 +1365,22 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 for (int g = 0; g < kGroups; ++g) { fq8_v[g] = params.ptr_v8s[fq8_bh_k + min(kGroups * n_blk + g, params.nblk_k - 1)]; }
             }
         };
+        float fq8_k[kGS];
+        #pragma unroll
+        for (int g = 0; g < kGS; ++g) { fq8_k[g] = fq8_q8sc; }
+        auto fq8_load_k = [&](int n_blk) {
+            if constexpr (kVarDesc != 0 && kVarSP != 2) {
+                #pragma unroll
+                for (int g = 0; g < kGroups; ++g) { fq8_k[g] = params.ptr_k8s[fq8_bh_k + min(kGroups * n_blk + g, params.nblk_k - 1)]; }
+            }
+        };
         auto fq8_descale = [&](auto& tSrS_, int n_blk) {
+            if constexpr (kVarSP == 0) { fq8_load_k(n_blk); }
             if constexpr (kVarDesc == 1) {
                 auto sc_ = make_tensor(tSrS_.data(), flash::convert_layout_acc_rowcol(tSrS_.layout()));
                 float g_[kGS];
                 #pragma unroll
-                for (int g = 0; g < kGroups; ++g) { g_[g] = fq8_q8sc * params.ptr_k8s[fq8_bh_k + min(kGroups * n_blk + g, params.nblk_k - 1)]; }
+                for (int g = 0; g < kGroups; ++g) { g_[g] = kVarSP == 2 ? fq8_k[g] : fq8_q8sc * fq8_k[g]; }
                 #pragma unroll
                 for (int mi = 0; mi < size<0>(sc_); ++mi) {
                     #pragma unroll
@@ -1377,7 +1388,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 }
             } else if constexpr (kVarDesc == 2) {
                 #pragma unroll
-                for (int g = 0; g < kGroups; ++g) { softmax.gsc_[g] = fq8_q8sc * params.ptr_k8s[fq8_bh_k + min(kGroups * n_blk + g, params.nblk_k - 1)]; }
+                for (int g = 0; g < kGroups; ++g) { softmax.gsc_[g] = kVarSP == 2 ? fq8_k[g] : fq8_q8sc * fq8_k[g]; }
             }
         };
         auto fq8_rho = [&](int g) {
@@ -1392,6 +1403,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         auto make_tOrD = [&] { return partition_fragment_C(tiled_mma_pv, Shape<Int<kBlockM>, Int<kHeadDimV>>{}); };
         auto w_last = [&] { return softmax.basis_last(fq8_v[kGS - 1]); };
 
+        if constexpr (kVarSP == 1) { fq8_load_k(n_block); }
         Tensor tSrS0 = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
         consumer_wait(pipeline_k, smem_pipe_read);
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS0);
@@ -1451,6 +1463,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
             PipelineState smem_pipe_read_v(smem_pipe_read.index(), smem_pipe_read.phase(), smem_pipe_read.count());
             ++smem_pipe_read;
             auto Vst = tOrV(_, _, _, smem_pipe_read_v.index());
+            if constexpr (kVarSP == 1) { fq8_load_k(n_block); }
             if constexpr (kVarSched == 0) {
                 // ======== FA3's IntraWGOverlap order: QK(n) and PV(n-1) issued together, softmax(n) under PV(n-1) ========
                 Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));

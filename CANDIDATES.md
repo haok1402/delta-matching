@@ -66,7 +66,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 
 ## Candidates
 
-### C1 FWDLD + RHOPRE (commit e0db18e on kda-sm90-fwd; build `kda-work/frozen/c1c`) : READY (timing; numerics certification by kda-sm90)
+### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below
 
 - What it changes (D128 PV-first forward only; d256 untouched; new certified flag `FA3FP11_HD128_FWDLD=1`):
   1. S descale folded into the code argument (group maxima on raw codes and descaled once per row / group: gm, ms,
@@ -92,3 +92,26 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 
 - Still needed for acceptance (kda-sm90): `gate.py --mode numerics` (four routes, DBG pairs) under Hao's residual
   contract; pytest on the build.
+
+- Re-measured on the current accepted build r17_c3 (rebased commit c3df077, build c1e): fwd geo-mean **-6.86%**
+  (job 21174360) and **-6.57%** (21174361); no shape slower beyond spread; ACCEPT (this job) in both.
+- residual-v3 screen, default route (kda-sm90's r17_c3 base / acc / dbg captures and defects manifest; job 21174390,
+  `kda-work/runs/nv3_default`): (1) 1 matched row above its accepted residual by more than round-off
+  (d128_mqa/causal/matched, group 0) of 334592; (2) exemptions 8378 = accepted (no growth); (3) deterministic; error vs
+  fp32 over 288 case / output pairs: 43 up (median 1e-6 rel, max 3.9e-5), 53 down (min -6.2e-5), 192 equal ->
+  strict "not larger" FAILS on noise (90 problems). Needs Hao's ruling on fp32-noise tolerance and the one row.
+
+### C2 LAZY + RHOPRE (commit 76513de on kda-sm90-fwd-c2: C1 with FA3FP11_HD128_FWDDFOLD=0) : REJECTED (below 3%; kept as the numerics-safe fallback)
+
+- O-only numerics change in matched mode: LSE and the matched backward are bitwise (stale mode's delta reads O).
+- A/B vs r17_c3: fwd geo-mean -2.55% (21174362), -2.35% (21174363): below the 3% target; not bitwise, so not stackable.
+- residual-v3, default route (job 21174390): (1) 0 regressed rows of 334592; (2) exemptions 8378 unchanged;
+  (3) deterministic; fp32 error 22 up (median 1e-6, max 5.7e-6) / 22 down / 244 equal -> fails only the strict "not
+  larger" clause (44 noise problems).
+- Resources (both C1 and C2): REG 168, STACK / LOCAL unchanged, no spill / C7510 / serialization diagnostics.
+
+## Screens after the C1 hand-off
+
+| # | tag | lever | what it changes | outputs | screen result |
+|---|---|---|---|---|---|
+| S33 | qkh | QK latency | S26 + QK issued as two 128-key halves at the same point; group max of half 0 under half 1 | = S26 | -3.09% geo vs A (S26 -6.65%, job 21174063): splitting the QK wgmma costs more than the overlap gains |

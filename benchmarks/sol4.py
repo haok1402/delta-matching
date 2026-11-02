@@ -47,7 +47,7 @@ KERNELS_D128_CAUSAL = {
             "step_elems_per_wg": 64 * 256, "gemm_flop_per_elem": 2 * 2 * 128, "work_tile_axis": 0, "peel": 1},
     "pass1": {"symbol": r"INS1_20FlashAttnBwdSm90Fp8R.*SingleTileBwdLPTScheduler", "unit": (64, 128), "wgs": 2,
               "step_elems_per_wg": 64 * 64, "gemm_flop_per_elem": 4 * 2 * 128, "work_tile_axis": 1, "peel": 1},
-    "pass0": {"symbol": r"DeltaV6ILb1E", "unit": (128, 64), "wgs": 2,
+    "pass0": {"symbol": r"DeltaV6ILb1ELi4E", "unit": (256, 64), "wgs": 4,   # round 17 C3: P0W4 (4 WGs / 256-row CTA)
               "step_elems_per_wg": 64 * 64, "gemm_flop_per_elem": 2 * 2 * 128, "work_tile_axis": 0, "peel": 1},
     "pass2": {"symbol": r"fq8_dq_pass2_kernel_hd128ILb1E", "unit": (64, 128), "wgs": 1,
               "step_elems_per_wg": 64 * 128, "gemm_flop_per_elem": 1 * 2 * 128, "work_tile_axis": 0, "peel": 1},

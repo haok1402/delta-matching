@@ -628,3 +628,42 @@ report: `results/paper_c2.md` (Appendix C.2 protocol). Next lever named by Hao: 
   backward and fwd+bwd match or exceed it, our forward is 23% below the paper's (FA3 BF16 here is 1.17x the paper's
   matched fwd+bwd, so this H100's FA3 reference also differs from the paper's ratio 1.80x). 32/4: accepted 564.4 / 467.7
   / 491.7 (baseline 563.6 / 451.9 / 478.9; FA3 BF16 723.7 / 521.2 / 566.5; cuDNN BF16 616.2 / 470.1 / 504.2).
+
+## Round 17: residual contract implemented (v2 -> v3), breadth search, pass-0 C2 + C3 ACCEPTED (helper candidates)
+
+Hao during round 17: the residual decision (residual-v2), then residual-v3 after the self-certificate; the goal / stop
+rule (every main kernel >= 90% of its calibrated sol4 floor on the four training shapes; first milestone forward >=
+FA3 fp8 forward); breadth search with parallel cheap screens; helper agents (kda-pass1 / kda-fwd / kda-pass0) post
+candidates on their branches and this loop gates / integrates them; a progress A/B vs the original after every
+accepted round; paper C.2 reconciliation. All recorded in docs/kda-sm90/rule-change-r10.md.
+
+- Numerics: residual-v2 (per-row bound k 2^-23, degenerate exemption, per-row non-regression; hashed per-row sidecars;
+  identity hardening) implemented; the accepted build's self-certificate failed only the absolute bound (10204 /
+  334592 rows on all four routes; |delta|-conditioned variant 9667) -> Hao dropped it: residual-v3 = per-row
+  non-regression at round-off + no exemption growth + deterministic + error not larger + named change. Accepted build
+  r17_c3 re-certified under v3 on all four routes (PASS, 4 inherited NaN defect cases, 8378 exempt rows, jobs
+  21174137-41, results/r17/cert_v3). OPEN (for Hao): the "fp32 error not larger" clause has zero tolerance and rejects
+  any output change at noise level: the forward helper's O-only candidate (lazy O rescale + rho precompute) has 0
+  residual regressions and an unchanged exemption set, but 22 of 288 case/output errors go up and 22 go down by
+  ~1e-6 relative (max 5.7e-6); the pass-0 helper sees the same (+7e-9 .. +1.3e-7) and near-one-hot rows (residual ~1
+  already) moving by up to 0.18 under any delta-rounding change.
+- Breadth (results/screens.md): forward worker, 18 variants (13 bitwise candidates, 5 probes): no bitwise winner (best
+  RHOPRE -0.9%, noise; KSPF v2 -0.6%); probes: rho rescales ~9%, S descale ~5% of the forward, O *= alpha ~1%,
+  removing all steady PV work only -17..19%; every barrier alternative +1..12% -> the forward's remaining levers are
+  numerics changes (the forward helper's FWDLAZY / FWDDFOLD candidates). Pass-1, pass-0 and per-warpgroup-psi workers
+  were still screening at the end of the round (their logs land in .local/screens/*_log.md).
+- C2 (pass 0 P0RTR transposed quad reduce + P0SPF 8-byte scale loads, kda-pass0 helper): gate job 21172404 bitwise on
+  all four routes, pass 0 -5.21% geomean (0.948 / 0.950 / 0.947 / 0.946), confirmation 21172600 -5.27%: ACCEPTED
+  (5ff8956, 45aa160).
+- C3 (pass 0 P0LPT global longest-first dispatch + P0W4 four consumer warpgroups per 256-row CTA + template WG count
+  with 2-WG fallback): gate job 21173322 (--allow-new-functions) bitwise on all four routes, pass 0 -7.67% vs C2
+  (0.885 / 0.955 / 0.899 / 0.956), confirmation 21173891 -7.64%: ACCEPTED (499abb9, 97884e6, 963771f).
+- Accepted build r17_c3, % of calibrated limit (sol4-v2, job 21174139, calibration 641cda28f8c0;
+  results/r17/accepted_c3/sol4v2.md): pass1 40.1%, forward 49.7%, pass0 65.9%, pass2 94.7% (glue 74.9%); forward /
+  FA3 fp8 forward 1.319. (After C2, job 21172815: pass1 39.8, fwd 49.0, pass0 62.0, pass2 94.3.)
+- Progress vs the original 3d4cd5b on the four shapes (results/progress): e2e fwd -2.37%, fwd+bwd -5.10%.
+- Paper C.2 (B2 N8192): 16/4 fwd+bwd 491.9 TFLOP/s (paper 470.2; original 465.4; FA3 BF16 545.7; cuDNN BF16 511.9);
+  forward gap reconciled (kernel 704 TFLOP/s; the per-call window adds ~0.3 ms host work); the paper's FA3 BF16 ratio
+  does not reproduce on this H100 (results/paper_c2.md).
+- Waiting at the gate: C4 (P0ALL, split.py: pass 0 once on all heads; needs the equivalence schema for one all-heads
+  delta call on split routes), forward C1 / C2 (numerics, need Hao's error-tolerance decision).

@@ -36,7 +36,7 @@
    ]
   ],
   "iters": 10,
-  "sustained_clock_mhz": 1965.0,
+  "sustained_clock_mhz": 1950.0,
   "torch": "2.12.0+cu130",
   "cuda": "13.0",
   "device": "NVIDIA H100 80GB HBM3",
@@ -51,9 +51,9 @@
   "env": {
    "DM_SO": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/base/delta_matching/_C.so"
   },
-  "job": "21172815",
-  "host": "pool0-01696",
-  "device_uuid": "9f91b312-da7e-948e-dc48-71591c1f89a2",
+  "job": "21174139",
+  "host": "pool0-00648",
+  "device_uuid": "399fd047-d48e-3898-71e8-15210325eed1",
   "ab_root": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/base",
   "reps": 3
  },
@@ -66,32 +66,32 @@
    "N": 8192,
    "attn": "causal",
    "mode": "matched",
-   "e2e_fwd_ms": 1.0893759727478027,
-   "e2e_fwdbwd_ms": 4.392047882080078,
+   "e2e_fwd_ms": 1.083519995212555,
+   "e2e_fwdbwd_ms": 4.395472049713135,
    "clock_mhz": 1965.0,
    "kernels": {
-    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 0.20046039999999926,
-    "_quant_kernel": 0.06808950000000034,
-    "_twin_pi_kernel": 0.0466045999999995,
-    "_kmean_partial_kernel": 0.010316699999999717,
-    "_kmean_fold_kernel": 0.007855899999999041,
-    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.0010176999999998546,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 0.7832262999999997,
-    "_doq_m17_kernel": 0.046281200000000806,
-    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 0.6596237,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 1.9411333,
-    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 0.4923793999999996,
-    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.09061099999999944
+    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 0.20028439999999975,
+    "_quant_kernel": 0.06798369999999923,
+    "_twin_pi_kernel": 0.046620800000001024,
+    "_kmean_partial_kernel": 0.010396500000000627,
+    "_kmean_fold_kernel": 0.007782399999999756,
+    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.0010014999999990097,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 0.7770983999999993,
+    "_doq_m17_kernel": 0.04635840000000007,
+    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 0.6551340999999988,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 1.9265256999999996,
+    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 0.4911314000000003,
+    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.09077079999999958
    },
    "ms": {
-    "fwd": 0.7832262999999997,
-    "prod_fwd": 0.08628480000000119,
-    "prod_bwd": 0.04653740000000034,
-    "pass0": 0.6596237,
-    "pass1": 1.9415753999999996,
-    "pass2": 0.4924057999999999,
-    "twin": 0.04649920000000052,
-    "glue": 0.292022499999999
+    "fwd": 0.7773617000000006,
+    "prod_fwd": 0.08634569999999905,
+    "prod_bwd": 0.04639039999999996,
+    "pass0": 0.6551340999999988,
+    "pass1": 1.9268696999999997,
+    "pass2": 0.49123089999999997,
+    "twin": 0.04649249999999984,
+    "glue": 0.29205669999999834
    },
    "route": {
     "heads_per_call": 16,
@@ -105,11 +105,11 @@
     "fwd": {
      "flops": 549822922752.0,
      "bytes": 118505472,
-     "sol_ms": 0.258759565116817,
+     "sol_ms": 0.26075002331002334,
      "sol_nominal_ms": 0.27782866233046993,
      "bound": "compute",
-     "tflops": 701.9975232598806,
-     "pct_sol": 33.03765018064602
+     "tflops": 707.2935581364499,
+     "pct_sol": 33.54294703611242
     },
     "prod_fwd": {
      "flops": 0,
@@ -118,7 +118,7 @@
      "sol_nominal_ms": 0.05290564776119403,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 61.31514213533937
+     "pct_sol": 61.27189629731951
     },
     "prod_bwd": {
      "flops": 0,
@@ -127,25 +127,25 @@
      "sol_nominal_ms": 0.030051190447761195,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 64.57427885477267
+     "pct_sol": 64.77889918552377
     },
     "pass0": {
      "flops": 549822922752.0,
      "bytes": 86007808,
-     "sol_ms": 0.258759565116817,
+     "sol_ms": 0.26075002331002334,
      "sol_nominal_ms": 0.27782866233046993,
      "bound": "compute",
-     "tflops": 833.5402787255824,
-     "pct_sol": 39.22836082402998
+     "tflops": 839.2524870129656,
+     "pct_sol": 39.8010152898504
     },
     "pass1": {
      "flops": 1099645845504.0,
      "bytes": 1378385920,
-     "sol_ms": 0.517519130233634,
+     "sol_ms": 0.5215000466200467,
      "sol_nominal_ms": 0.5556573246609399,
      "bound": "compute",
-     "tflops": 566.3678297036521,
-     "pct_sol": 26.654598643639293
+     "tflops": 570.6902991437356,
+     "pct_sol": 27.064624381194367
     },
     "pass2": {
      "flops": 274911461376.0,
@@ -153,8 +153,8 @@
      "sol_ms": 0.34822357970149254,
      "sol_nominal_ms": 0.34822357970149254,
      "bound": "memory",
-     "tflops": 558.3026466706933,
-     "pct_sol": 70.71882169168045
+     "tflops": 559.6379653152926,
+     "pct_sol": 70.88796321678717
     },
     "twin": {
      "flops": 0,
@@ -163,7 +163,7 @@
      "sol_nominal_ms": 0.040064993432835816,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 86.16275856968586
+     "pct_sol": 86.1751754214894
     },
     "glue": {
      "flops": 0,
@@ -172,7 +172,7 @@
      "sol_nominal_ms": 0.11017873194029851,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 37.72953520372536
+     "pct_sol": 37.725117054427834
     }
    },
    "reps": 3
@@ -185,33 +185,33 @@
    "N": 65536,
    "attn": "causal",
    "mode": "matched",
-   "e2e_fwd_ms": 24.70636749267578,
-   "e2e_fwdbwd_ms": 122.41787338256836,
+   "e2e_fwd_ms": 24.775936126708984,
+   "e2e_fwdbwd_ms": 122.73169326782227,
    "clock_mhz": 1875.0,
    "kernels": {
-    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 0.7306324999999272,
-    "_quant_kernel": 0.2504055999999777,
-    "_twin_pi_kernel": 0.1852702000000252,
-    "_kmean_partial_kernel": 0.03319030000001167,
-    "_kmean_fold_kernel": 0.09021439999998597,
-    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.0010975000000096316,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 24.086308700000018,
-    "_doq_m17_kernel": 0.16447999999999155,
-    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 20.04071260000004,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 63.00059110000001,
-    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 13.45446220000009,
-    "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 3, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)": 0.5476982000000326,
-    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.33185559999998804
+    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 0.7311439000000252,
+    "_quant_kernel": 0.25184569999998313,
+    "_twin_pi_kernel": 0.18529269999998005,
+    "_kmean_partial_kernel": 0.033506999999993195,
+    "_kmean_fold_kernel": 0.09158699999998585,
+    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.0010720999999989998,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 24.238639199999994,
+    "_doq_m17_kernel": 0.1651741000000067,
+    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 20.150470300000052,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 63.30032329999993,
+    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 13.443741900000115,
+    "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 3, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)": 0.54801489999997,
+    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.33211430000001413
    },
    "ms": {
-    "fwd": 24.12880959999999,
-    "prod_fwd": 0.37381029999997534,
-    "prod_bwd": 0.16488919999999563,
-    "pass0": 20.04071260000004,
-    "pass1": 63.00059110000001,
-    "pass2": 13.45446220000009,
-    "twin": 0.1852702000000252,
-    "glue": 1.6112837999999572
+    "fwd": 24.272108399999993,
+    "prod_fwd": 0.3777591999999964,
+    "prod_bwd": 0.16545249999997652,
+    "pass0": 20.150470300000052,
+    "pass1": 63.30032329999993,
+    "pass2": 13.442131099999997,
+    "twin": 0.18590060000001257,
+    "glue": 1.6134498000000805
    },
    "route": {
     "heads_per_call": 1,
@@ -225,11 +225,11 @@
     "fwd": {
      "flops": 17592454479872.0,
      "bytes": 474021888,
-     "sol_ms": 8.279421759580538,
+     "sol_ms": 8.343109619269619,
      "sol_nominal_ms": 8.88956770079434,
      "bound": "compute",
-     "tflops": 729.105777347259,
-     "pct_sol": 34.31342820816383
+     "tflops": 724.8012488223727,
+     "pct_sol": 34.37323812903547
     },
     "prod_fwd": {
      "flops": 0,
@@ -238,7 +238,7 @@
      "sol_nominal_ms": 0.21161403223880598,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 56.610005727188344
+     "pct_sol": 56.01823390106925
     },
     "prod_bwd": {
      "flops": 0,
@@ -247,25 +247,25 @@
      "sol_nominal_ms": 0.12020476179104478,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 72.90032445487513
+     "pct_sol": 72.65212782584841
     },
     "pass0": {
      "flops": 17592454479872.0,
      "bytes": 344031232,
-     "sol_ms": 8.279421759580538,
+     "sol_ms": 8.343109619269619,
      "sol_nominal_ms": 8.88956770079434,
      "bound": "compute",
-     "tflops": 877.8357751546201,
-     "pct_sol": 41.31301079374054
+     "tflops": 873.0542869697664,
+     "pct_sol": 41.40404414913134
     },
     "pass1": {
      "flops": 35184908959744.0,
      "bytes": 35592994816,
-     "sol_ms": 16.558843519161076,
+     "sol_ms": 16.686219238539238,
      "sol_nominal_ms": 17.77913540158868,
      "bound": "compute",
-     "tflops": 558.4853783974099,
-     "pct_sol": 26.283631994622784
+     "tflops": 555.8409045241643,
+     "pct_sol": 26.360401288091456
     },
     "pass2": {
      "flops": 8796227239936.0,
@@ -273,8 +273,8 @@
      "sol_ms": 10.37183495641791,
      "sol_nominal_ms": 10.37183495641791,
      "bound": "memory",
-     "tflops": 653.7776916817932,
-     "pct_sol": 77.08843952467933
+     "tflops": 654.3774327521625,
+     "pct_sol": 77.15915638122226
     },
     "twin": {
      "flops": 0,
@@ -283,7 +283,7 @@
      "sol_nominal_ms": 0.16025997373134326,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 86.50067508499558
+     "pct_sol": 86.20734614699062
     },
     "glue": {
      "flops": 0,
@@ -292,7 +292,7 @@
      "sol_nominal_ms": 0.44071492776119403,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 27.35178791974485
+     "pct_sol": 27.315069099836393
     }
    },
    "reps": 3
@@ -305,32 +305,32 @@
    "N": 8192,
    "attn": "causal",
    "mode": "matched",
-   "e2e_fwd_ms": 1.9757920503616333,
-   "e2e_fwdbwd_ms": 8.487391948699951,
-   "clock_mhz": 1950.0,
+   "e2e_fwd_ms": 1.9777120351791382,
+   "e2e_fwdbwd_ms": 8.534272193908691,
+   "clock_mhz": 1965.0,
    "kernels": {
-    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 0.29700430000000055,
-    "_quant_kernel": 0.1075297000000005,
-    "_twin_pi_kernel": 0.09244500000000302,
-    "_kmean_partial_kernel": 0.01026890000000062,
-    "_kmean_fold_kernel": 0.007926300000000901,
-    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.001033500000002323,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 1.5587090000000001,
-    "_doq_m17_kernel": 0.08541100000000154,
-    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 1.2921716999999995,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 3.9139098999999993,
-    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 0.9618808000000014,
-    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.1263647000000006
+    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 0.29707789999999823,
+    "_quant_kernel": 0.10764140000000218,
+    "_twin_pi_kernel": 0.09227479999999925,
+    "_kmean_partial_kernel": 0.010403299999999375,
+    "_kmean_fold_kernel": 0.007817699999999695,
+    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.001004600000000187,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 1.5591097000000005,
+    "_doq_m17_kernel": 0.08544619999999978,
+    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 1.292972900000001,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 3.919776199999999,
+    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 0.9618120999999988,
+    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.1273694999999976
    },
    "ms": {
-    "fwd": 1.5635978999999993,
-    "prod_fwd": 0.12589150000000016,
-    "prod_bwd": 0.08542400000000047,
-    "pass0": 1.2967570000000004,
-    "pass1": 3.932158300000001,
-    "pass2": 0.9632754999999985,
-    "twin": 0.09244500000000302,
-    "glue": 0.4249910000000017
+    "fwd": 1.5689216,
+    "prod_fwd": 0.12609529999999983,
+    "prod_bwd": 0.0855006999999994,
+    "pass0": 1.3006181999999982,
+    "pass1": 3.9355857000000007,
+    "pass2": 0.9633451999999988,
+    "twin": 0.09227479999999925,
+    "glue": 0.42615920000000496
    },
    "route": {
     "heads_per_call": 32,
@@ -344,11 +344,11 @@
     "fwd": {
      "flops": 1099645845504.0,
      "bytes": 220225536,
-     "sol_ms": 0.517519130233634,
+     "sol_ms": 0.5215000466200467,
      "sol_nominal_ms": 0.5556573246609399,
      "bound": "compute",
-     "tflops": 703.279177788612,
-     "pct_sol": 33.09796784925551
+     "tflops": 700.8927950918644,
+     "pct_sol": 33.23939492069245
     },
     "prod_fwd": {
      "flops": 0,
@@ -357,7 +357,7 @@
      "sol_nominal_ms": 0.08295683820895522,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 65.89550383382128
+     "pct_sol": 65.78900102458644
     },
     "prod_bwd": {
      "flops": 0,
@@ -366,25 +366,25 @@
      "sol_nominal_ms": 0.06010238089552239,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 70.35772253174993
+     "pct_sol": 70.29460682254391
     },
     "pass0": {
      "flops": 1099645845504.0,
      "bytes": 155230208,
-     "sol_ms": 0.517519130233634,
+     "sol_ms": 0.5215000466200467,
      "sol_nominal_ms": 0.5556573246609399,
      "bound": "compute",
-     "tflops": 847.9968455955893,
-     "pct_sol": 39.9087207729462
+     "tflops": 845.4793616635546,
+     "pct_sol": 40.09632085880756
     },
     "pass1": {
      "flops": 2199291691008.0,
      "bytes": 2739986432,
-     "sol_ms": 1.035038260467268,
+     "sol_ms": 1.0430000932400934,
      "sol_nominal_ms": 1.1113146493218797,
      "bound": "compute",
-     "tflops": 559.309041807396,
-     "pct_sol": 26.322395526834914
+     "tflops": 558.8219539998836,
+     "pct_sol": 26.50177566302503
     },
     "pass2": {
      "flops": 549822922752.0,
@@ -392,8 +392,8 @@
      "sol_ms": 0.6939430973134328,
      "sol_nominal_ms": 0.6939430973134328,
      "bound": "memory",
-     "tflops": 570.7847056755838,
-     "pct_sol": 72.03994052723587
+     "tflops": 570.7434082320653,
+     "pct_sol": 72.03472828986263
     },
     "twin": {
      "flops": 0,
@@ -402,7 +402,7 @@
      "sol_nominal_ms": 0.08012998686567163,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 86.6785514258954
+     "pct_sol": 86.83842919808255
     },
     "glue": {
      "flops": 0,
@@ -411,7 +411,7 @@
      "sol_nominal_ms": 0.19030871880597017,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 44.77947034312948
+     "pct_sol": 44.65671955597062
     }
    },
    "reps": 3
@@ -424,33 +424,33 @@
    "N": 65536,
    "attn": "causal",
    "mode": "matched",
-   "e2e_fwd_ms": 49.28223991394043,
-   "e2e_fwdbwd_ms": 245.22882843017578,
-   "clock_mhz": 1860.0,
+   "e2e_fwd_ms": 49.34321594238281,
+   "e2e_fwdbwd_ms": 247.63232421875,
+   "clock_mhz": 1845.0,
    "kernels": {
-    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 1.0891825000000415,
-    "_quant_kernel": 0.41091500000002856,
-    "_twin_pi_kernel": 0.37130860000004573,
-    "_kmean_partial_kernel": 0.033539100000040435,
-    "_kmean_fold_kernel": 0.09555499999997583,
-    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.0010848999999779154,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 48.038208899999965,
-    "_doq_m17_kernel": 0.32503329999992125,
-    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 40.256098099999804,
-    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 126.62168949999982,
-    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 26.916811400000057,
-    "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 3, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)": 1.099636799999932,
-    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.47649220000004266
+    "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})": 1.0948133000001028,
+    "_quant_kernel": 0.41193520000004114,
+    "_twin_pi_kernel": 0.37247929999999935,
+    "_kmean_partial_kernel": 0.033481499999999775,
+    "_kmean_fold_kernel": 0.09585900000000978,
+    "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": 0.0011071999999886883,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > > >(flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::CollectiveMainloopFwdSm90Fp8F<2, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<128>, cute::C<256>, cute::C<128> >, 128, cutlass::float_e4m3_t, float, cutlass::arch::Sm90, true, false, false, false, false, false, false, true, true, false, false, false>, flash::CollectiveEpilogueFwd<cute::tuple<cute::C<128>, cute::C<128>, cute::C<256> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, false, true>, flash::DynamicPersistentTileScheduler<256, 128, false, false, true> > >::Params)": 48.480969299999956,
+    "_doq_m17_kernel": 0.3266489000000067,
+    "void cutlass::device_kernel<flash::DeltaV6<true> >(flash::DeltaV6<true>::Params)": 40.77705939999991,
+    "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > > >(flash::enable_sm90<flash::FlashAttnBwdSm90Fp8R<flash::CollectiveMainloopBwdSm90Fp8R<2, 1, 1, true>, flash::CollectiveEpilogueBwd<cute::tuple<cute::C<64>, cute::C<128>, cute::C<128> >, cutlass::bfloat16_t, cutlass::arch::Sm90, 256, false, false, 1>, flash::SingleTileBwdLPTScheduler<false, 128, false> > >::Params)": 128.0726838000003,
+    "void fq8p2h128::fq8_dq_pass2_kernel_hd128<true>(fq8p2h128::P2Params)": 26.998451400000157,
+    "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 3, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)": 1.098855400000076,
+    "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8> >(at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, c10::BFloat16, 4, 8>)": 0.47922119999996793
    },
    "ms": {
-    "fwd": 48.12185499999998,
-    "prod_fwd": 0.5400091000000449,
-    "prod_bwd": 0.3256799000000639,
-    "pass0": 40.28252979999953,
-    "pass1": 126.62168949999982,
-    "pass2": 26.917637699999915,
-    "twin": 0.37130860000004573,
-    "glue": 2.668189999999903
+    "fwd": 48.480969299999956,
+    "prod_fwd": 0.5426549999999966,
+    "prod_bwd": 0.3264890999999909,
+    "pass0": 40.77705939999991,
+    "pass1": 128.0726838000003,
+    "pass2": 26.989891700000026,
+    "twin": 0.372428199999993,
+    "glue": 2.6739971000001357
    },
    "route": {
     "heads_per_call": 1,
@@ -464,11 +464,11 @@
     "fwd": {
      "flops": 35184908959744.0,
      "bytes": 880902144,
-     "sol_ms": 16.558843519161076,
+     "sol_ms": 16.686219238539238,
      "sol_nominal_ms": 17.77913540158868,
      "bound": "compute",
-     "tflops": 731.1627733333225,
-     "pct_sol": 34.410235264540574
+     "tflops": 725.7468129818112,
+     "pct_sol": 34.41808090775787
     },
     "prod_fwd": {
      "flops": 0,
@@ -477,7 +477,7 @@
      "sol_nominal_ms": 0.33181879402985076,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 61.446889326461935
+     "pct_sol": 61.14728400730719
     },
     "prod_bwd": {
      "flops": 0,
@@ -486,25 +486,25 @@
      "sol_nominal_ms": 0.24040952358208956,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 73.81773440179832
+     "pct_sol": 73.63477787837213
     },
     "pass0": {
      "flops": 35184908959744.0,
      "bytes": 620920832,
-     "sol_ms": 16.558843519161076,
+     "sol_ms": 16.686219238539238,
      "sol_nominal_ms": 17.77913540158868,
      "bound": "compute",
-     "tflops": 873.4533092741462,
-     "pct_sol": 41.10676166907787
+     "tflops": 862.8603797689266,
+     "pct_sol": 40.9206045851832
     },
     "pass1": {
      "flops": 70369817919488.0,
      "bytes": 71118848000,
-     "sol_ms": 33.11768703832215,
+     "sol_ms": 33.372438477078475,
      "sol_nominal_ms": 35.55827080317736,
      "bound": "compute",
-     "tflops": 555.7485308983189,
-     "pct_sol": 26.154829531256727
+     "tflops": 549.4522003566215,
+     "pct_sol": 26.057421057243744
     },
     "pass2": {
      "flops": 17592454479872.0,
@@ -512,8 +512,8 @@
      "sol_ms": 20.733653664477615,
      "sol_nominal_ms": 20.733653664477615,
      "bound": "memory",
-     "tflops": 653.5660623692863,
-     "pct_sol": 77.02627509722996
+     "tflops": 651.8164161389349,
+     "pct_sol": 76.82006988000472
     },
     "twin": {
      "flops": 0,
@@ -522,7 +522,7 @@
      "sol_nominal_ms": 0.3205199474626865,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 86.32171392277127
+     "pct_sol": 86.06221211570245
     },
     "glue": {
      "flops": 0,
@@ -531,7 +531,7 @@
      "sol_nominal_ms": 0.7612348752238807,
      "bound": "memory",
      "tflops": 0.0,
-     "pct_sol": 28.530010052653985
+     "pct_sol": 28.468051637896018
     }
    },
    "reps": 3

@@ -70,3 +70,16 @@ repeated KV heads), not this H100. Our matched fwd+bwd (491.7) is above the pape
 | H32 original baseline | 562.4 +- 6.7 | 457.0 +- 2.6 | 482.8 +- 1.5 |
 | H32 FA3 BF16 | 719.9 +- 0.4 | 523.2 +- 0.9 | 567.5 +- 0.8 |
 | H32 cuDNN BF16 | 619.8 +- 3.8 | 465.1 +- 2.0 | 500.8 +- 1.2 |
+
+## After round 17's accepted C3 (pass 0 P0LPT + P0W4 on C2; `results/paper_c2/r17_c3_table.md`, job 21174139)
+
+| heads / arm | fwd TFLOP/s | bwd TFLOP/s | fwd+bwd TFLOP/s |
+|---|---:|---:|---:|
+| H16 accepted (r17_c3) | 517.6 +- 6.7 | 482.4 +- 5.9 | 491.9 +- 5.3 |
+| H16 original baseline | 523.0 +- 5.3 | 445.9 +- 6.6 | 465.4 +- 5.7 |
+| H16 FA3 BF16 | 697.0 +- 0.6 | 502.3 +- 8.9 | 545.7 +- 7.5 |
+| H16 cuDNN BF16 | 591.1 +- 5.5 | 486.2 +- 9.5 | 511.9 +- 6.2 |
+| H32 accepted (r17_c3) | 555.1 +- 2.6 | 488.7 +- 1.2 | 506.0 +- 1.3 |
+| H32 original baseline | 567.0 +- 4.2 | 455.9 +- 1.0 | 482.9 +- 0.4 |
+| H32 FA3 BF16 | 725.7 +- 0.7 | 524.6 +- 1.9 | 569.7 +- 1.5 |
+| H32 cuDNN BF16 | 627.7 +- 0.6 | 467.4 +- 2.9 | 504.2 +- 2.4 |

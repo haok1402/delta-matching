@@ -1408,7 +1408,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
         };
         auto fq8_gsc = [&](int n_blk, float (&g_)[kGroups]) {
             #pragma unroll
-            for (int g = 0; g < kGroups; ++g) { g_[g] = fq8_q8sc * params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g]; }
+            // floored at FLT_MIN: bitwise for every nonzero scale; an all-zero Q or K block (scale 0) would otherwise give
+            // -inf * 0 = NaN for the masked scores (the inherited zero-input defect); with the floor, masked scores stay -inf
+            // and the zero codes give the uniform softmax (O = 0 for zero V).
+            for (int g = 0; g < kGroups; ++g) { g_[g] = fmaxf(fq8_q8sc * params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g], 1.17549435e-38f); }
         };
         auto fq8_load_v = [&](int n_blk) {
             if constexpr (kGroups == 4) {

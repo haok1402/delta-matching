@@ -743,3 +743,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Forward helper C4 (PRETURN: lazy rebase / rho_1 / promote weight computed before the ring sync; bitwise, O sha equal
   on the four shapes): forward -1.10% / -1.12% vs r17_fwd in two jobs -> held for stacking (needs a >= 3% forward
   stack); C4b (+ K try-wait token) -0.58% / -0.75%, rejected.
+- Pass-0 stack (kda-pass0 helper: C5 = P0NML mask-free leading-stage loop for W4 + consumer register split 104 / 24,
+  ported from my pass-0 screen; C4 = P0ALL, split.py runs pass 0 once on all heads at D128 matched): equivalence
+  manifest v4 adopted (853f7e6: canonical all-heads matched deltas); gate 21179675 (byte references = the r17_fwd v4
+  dumps, see rule-change) bitwise on all four routes, pass 0 -3.19% geomean (0.993 / 0.945 / 0.985 / 0.951, the gain
+  is mostly the 64K split route), bench +0.2%; confirmation 21179800 (library 11a7eebdcabe) -3.43%: ACCEPTED (accepted
+  root r17_p0s).
+- Forward stack C4 (PRETURN) + kda-fwdport SMSC (k/v-scale smem staging): -2.46% / -2.42% vs r17_fwd, below 3%, not
+  yet gated.

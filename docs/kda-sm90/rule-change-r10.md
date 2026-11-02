@@ -190,3 +190,8 @@ of its calibrated sol4 limit on the four acceptance shapes; first milestone FA3 
   shapes); (2) a floor correction is admissible when it counts work the method needs: the per-group P^ basis / Horner
   rho chain / promote instructions are now to be added to the forward's sol4 issue / MUFU floors from the emitted
   step loop (they are in the ledger already; the tensor floor stays the calibrated GEMM peak).
+- Decided (round 17): after an accepted, certified NAMED NUMERICS change (forward C3g), byte equality with the frozen
+  original baseline is no longer attainable; for bitwise candidates both the "baseline" and the "previous" byte
+  references of the full gate are the latest numerics-certified accepted build (r17_fwd dumps, equivalence manifest
+  v4, .local/equiv4/r17fwd_*.pt). The original baseline stays the reference of the numerics gate (errors vs fp32) and
+  of the progress A/B.

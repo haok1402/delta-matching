@@ -71,6 +71,11 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 | S38 | b3ldns | structure | S36 without the ping-pong barrier | round-off | -1.1% geo (21175696): the barrier still matters with three WGs |
 | S39 | bn128l / bm192l / bm192d | bisect | lazy / dfold alone at BN128 | | used to locate the S36 NaN |
 
+| S40 | probeb3 | diagnostic | phase probe on the C3 configuration | n/a | per WG step ~4600-4800 cy; gemm turn ~2750 (60%), softmax ~1650 (job 21176432) |
+| S41 | b3il | rho | C3b + the two 32-register head-dim slabs interleaved (IL2: each slab's rescale under the other's sub-gemm) | = C3 | -12.60% geo vs C3b -12.88% (job 21176682): no gain |
+| S42 | b3arv | ping-pong | C3b with the turn ending after the PV chain issue (QK outside the turn) | = C3 | -3.00% geo vs C3b -12.47% (21176953): QK must stay in the turn |
+| S43 | b3tt2 / b3tt3 | ping-pong | C3b with the step split into 2 / 3 ring turns (all waits outside turns) | = C3 | -0.31% / -0.60% geo vs C3b -12.89% (21177145): extra ring turns cost far more than the bubbles |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below
@@ -158,3 +163,19 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   delta rowsum(dO * O) amplifying O's round-off into fp8 dS' code flips (sign-random: balanced counts, the same
   pattern at smaller amplitude in the O-only C2) and are reported, not gated. kda-sm90 owns the gate and may
   apply the stricter reading; under it C3 fails on 10 stale-mode cases and C1 on 4.
+
+#### C3 at the residual-v4 gate (kda-sm90 job 21176828: FAIL) and the follow-up (kda-fwd)
+
+- Gate failures on the default route: (1) zero-input NaN pattern moved (522752 vs 522240 NaN), (2) 70 well-
+  conditioned rows above accepted + k 2^-23, (3) per-output mean error +~3e-7 absolute.
+- Fix for (1), commit 3565487 (C3f): the folded scale q8sc * k8sc floored at FLT_MIN (bitwise for nonzero scales);
+  d128_zeros O now has 0 NaN and is finite (O = 0 = the fp32 reference for V = 0). The defect is removed; no 192-row
+  tiling can reproduce the frozen NaN pattern.
+- Evidence on (2), `runs/ctl`, jobs 21177451 / 21177475: the ACCEPTED r17_p1 DBG build with only its LSE moved by
+  +1 ulp (no kernel change) "regresses" 1930 well-conditioned rows under the same rule (d128_scale10 up to +0.29,
+  outliers +0.24, scale3 413 rows, d256 stress cases too); -1 ulp likewise. C3f: 70 up / 180 down; C3n (C3 without
+  FWDDFOLD, b1613d8): 23 up / 14 down. Against a per-row envelope k 2^-23 + max over the +-1 ulp LSE controls of
+  the accepted build: C3n 0 rows beyond, C3f 1 row (mqa, excess 2.5e-7).
+- Rule reading proposed (recorded per Hao's autonomy rule; the gate owner decides): the fp32 round-off allowance
+  of a row includes the propagated round-off of its forward input LSE, measured by the +-1 ulp LSE controls of the
+  accepted build. Without it every forward change that moves LSE at round-off fails, whatever its accuracy.

@@ -28,7 +28,7 @@
 #ifndef KDA_NOCLAMP
 #define KDA_NOCLAMP 0
 #endif
-#define KDA_F1(x) (KDA_NOCLAMP ? (x) : fminf((x), 12.0f))
+#define KDA_F1(x) (KDA_NOCLAMP == 1 ? (x) : fminf((x), 12.0f))
 #ifndef KDA_PK_EXPB
 #define KDA_PK_EXPB 6
 #endif
@@ -413,8 +413,18 @@ struct DeltaV6 {
                         #pragma unroll
                         for (int i = 0; i < size(scores); ++i) { scores(i) = __fadd_rn(scores(i), kFq8MoE); }
                     }
+#if KDA_NOCLAMP == 2
+                    if (isfinite(B0 + B1 + dsc_g0 + dsc_g1)) {
+                        #pragma unroll
+                        for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(scores(i)); }
+                    } else {
+                        #pragma unroll
+                        for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(fminf(scores(i), 12.0f)); }
+                    }
+#else
                     #pragma unroll
                     for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(KDA_F1(scores(i))); }
+#endif
                     return;
                 }
 #endif

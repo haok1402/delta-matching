@@ -39,7 +39,8 @@
 #ifndef KDA_NOCLAMP
 #define KDA_NOCLAMP 0
 #endif
-#define KDA_F1(x) (KDA_NOCLAMP ? (x) : fminf((x), 12.0f))
+#define KDA_F1(x) (KDA_NOCLAMP == 1 ? (x) : fminf((x), 12.0f))
+#define KDA_F1C(x) (kClampC ? fminf((x), 12.0f) : (x))
 
 #include <climits>
 #include <cutlass/cutlass.h>
@@ -822,6 +823,8 @@ struct CollectiveMainloopBwdSm90Fp8R {
             auto tSrS_probe = [&](int mi, int ni) { return scores(mi, ni); };
             static_assert(decltype(size<1>(scores))::value == 2, "probe: two keys per row per thread");
 #else
+            auto kda_exp_all = [&](auto clamp_c) {
+            constexpr bool kClampC = decltype(clamp_c)::value;
             #pragma unroll
             for (int mi = 0; mi < size<0>(scores); ++mi) {
 #if KDA_PK_EXPB == 6
@@ -846,25 +849,36 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
 #if KDA_PK_EXPB == 6
                     if constexpr (kExpbx) {
-                        scores(mi, ni) = exp2f(KDA_F1(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
+                        scores(mi, ni) = exp2f(KDA_F1C(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
                     } else {   // masked loop (rare): per-WG runtime choice
                         float const y = __fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled);
-                        scores(mi, ni) = exp2f(KDA_F1(fq8_x64_orig ? __fadd_rn(y, kFq8MoE) : y));
+                        scores(mi, ni) = exp2f(KDA_F1C(fq8_x64_orig ? __fadd_rn(y, kFq8MoE) : y));
                     }
 #elif KDA_PK_EXPB >= 3
                     if constexpr (kExpbx) {
-                        scores(mi, ni) = exp2f(KDA_F1(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
+                        scores(mi, ni) = exp2f(KDA_F1C(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
                     } else {
-                        scores(mi, ni) = exp2f(KDA_F1(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE));
+                        scores(mi, ni) = exp2f(KDA_F1C(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE));
                     }
 #elif KDA_PK_EXPB
-                    scores(mi, ni) = exp2f(KDA_F1(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
+                    scores(mi, ni) = exp2f(KDA_F1C(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled)));
 #else
                     // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
-                    scores(mi, ni) = exp2f(KDA_F1(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE));
+                    scores(mi, ni) = exp2f(KDA_F1C(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE));
 #endif
                 }
             }
+            };
+#if KDA_NOCLAMP == 2
+            // ## kda-pass1 NOCLAMP=2: the F1 clamp only where it can bind on non-finite inputs (a non-finite LSE / descale,
+            // e.g. the all-zero-input defect): one finiteness test per step instead of 32 FMNMX.
+            float kda_chk = fq8_s_descale_log2;
+            #pragma unroll
+            for (int mi = 0; mi < size<0>(scores); ++mi) { kda_chk += tLSEsLSE(mi, stage_q); }
+            if (isfinite(kda_chk)) { kda_exp_all(cute::false_type{}); } else { kda_exp_all(cute::true_type{}); }
+#else
+            kda_exp_all(cute::bool_constant<!KDA_NOCLAMP>{});
+#endif
 #endif
 #if KDA_PK_PROBE & 4
             // TIMING PROBE (packed exp line, pass 1 only: breaks the matched identity): per row, the two keys' fp32 arguments

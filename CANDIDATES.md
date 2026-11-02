@@ -357,3 +357,25 @@ nothing, so the light probe's "turn-bound" reading was distorted by its own spil
   PREW2 (next step's rho_1 / promote weight in the previous softmax) and WGID (barrier ids once). Gate 21195830:
   bitwise on all four routes, forward -3.51%; confirmation 21196466 (library 9ffc39ca080e): -3.92%. New accepted root
   `.local/frozen/r19_fwd`.
+
+## Round 19 (on r19_fwd, 1.108 x FA3): softmax-side sensitivity and FLOORPREV
+
+- Timing-only ablations on the r19 source (wrong numerics; 3 reps, 4 shapes, vs r19_fwd; jobs s39 / s40; control
+  rebuild r19c +0.05% / -0.14%):
+
+| ablation | removed | geo vs r19_fwd |
+|---|---|---:|
+| abQ | quad all-reduce of the group maxima (8 SHFL + 8 FMNMX) | **-1.93%** |
+| abF | exp2 of the row-sum fold (4 MUFU) | -0.67% |
+| abL | lazy-rebase check | -0.09% |
+| abS | basis scalar arithmetic (floor, -log2 448) | -0.17% |
+
+  So the softmax is NOT slack: the ~65-cycle quad-shuffle latency of the group-max reduction is exposed on each WG's
+  chain (QK wait -> thread max -> quad shuffles -> basis -> exp2). It cannot be hidden bitwise: every group's basis floor
+  needs the whole tile's max, i.e. every group's reduction.
+- FLOORPREV (kda-sm90-fwd-flp ada5860, named numerics change): floor from the PREVIOUS running max, fused max + softmax
+  so group 0's exp2 overlaps group 1's shuffles. +1.03% geo (slower, job s41) and residual-v4 FAIL (job nv6, vs my
+  r19 DBG + LSE +-1 ulp controls): scale10 / outliers O error 0.27 -> 0.37 and stale dQ / dK x3. Cause: when the max
+  jumps inside a tile the two group bases are no longer within B binades, and the next step's rho
+  (v0 / v1) 2^(ms0 - ms1) hits its [1e-30, 1e30] guard. The current-max floor is what bounds |ms0 - ms1| <= B. Rejected.
+- My r19 DBG build and LSE +-1 ulp control packages: `kda-work/frozen/r19_dbg`, `r19_dbg_lse{p,m}`.

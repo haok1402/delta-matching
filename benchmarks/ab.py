@@ -170,10 +170,50 @@ def analyze(raw_a, raw_b, subset=None, gate_pct=1.0):
         shapes.append({"key": list(k_), "A": va, "B": vb, "median_A": ma, "median_B": mb, "change_pct": ch,
                        "spread_A_pct": spread(va), "spread_B_pct": spread(vb),
                        "over_gate": ch > gate_pct, "beyond_spread": ch > gate_pct and min(vb) > max(va) * (1 + gate_pct / 100)})
+    for s_ in shapes:
+        # rule (Hao, round 10): a shape is SLOWER BEYOND ITS RUN-TO-RUN SPREAD when its median fwd+bwd slowdown exceeds
+        # the larger of its two repetition ranges (max - min, ms).  (All-B-above-all-A would flag ~1 in 20 unchanged
+        # shapes at 3 x 3 repetitions.)
+        rng = max(max(s_["A"]) - min(s_["A"]), max(s_["B"]) - min(s_["B"]))
+        s_["slower_beyond_spread"] = s_["median_B"] - s_["median_A"] > rng
     res["shapes"] = shapes
     res["over_gate"] = [s for s in shapes if s["over_gate"]]
     res["worst_shape_change_pct"] = max(s["change_pct"] for s in shapes)
     return res, med_a, med_b
+
+
+TUNE_DIM = 128           # rule (Hao, round 10): the evolved head dim; the other is held to correctness / no slowdown
+TARGET_PCT = 3.0
+
+
+def decision(raw_a, raw_b, res, target, tune_dim=TUNE_DIM, threshold=TARGET_PCT):
+    """Acceptance predicates of one merged-grid A/B for target kernel category `target`: (1) the target's summed median
+    over every tune_dim shape improves by >= threshold %; (2) no tune_dim shape is slower beyond its spread; (3) no
+    other-head-dim shape is slower beyond its spread and the other head dims' target sum is not slower beyond the
+    spread of its per-repetition sums."""
+    def per_rep(runs, sel):
+        return [sum(r["ms"][target] for r in recs if sel(r)) for recs in runs]
+    med_a, med_b = median_records(raw_a), median_records(raw_b)
+    tune = lambda r: r["D"] == tune_dim
+    other = lambda r: r["D"] != tune_dim
+    sa = sum(r["ms"][target] for r in med_a if tune(r)); sb = sum(r["ms"][target] for r in med_b if tune(r))
+    if sa <= 0:
+        raise SystemExit(f"target {target!r} has no time on the D{tune_dim} shapes")
+    oa = sum(r["ms"][target] for r in med_a if other(r)); ob = sum(r["ms"][target] for r in med_b if other(r))
+    ra, rb = per_rep(raw_a, other), per_rep(raw_b, other)
+    other_rng = max(max(ra) - min(ra), max(rb) - min(rb)) if ra else 0.0
+    slow_tune = [s for s in res["shapes"] if s["key"][0] == tune_dim and s["slower_beyond_spread"]]
+    slow_other = [s for s in res["shapes"] if s["key"][0] != tune_dim and s["slower_beyond_spread"]]
+    d = {"target": target, "tune_dim": tune_dim, "threshold_pct": threshold,
+         "target_tune_A": sa, "target_tune_B": sb, "target_tune_change_pct": 100 * (sb / sa - 1),
+         "target_other_A": oa, "target_other_B": ob, "target_other_change_pct": 100 * (ob / oa - 1) if oa > 0 else 0.0,
+         "target_other_slower_beyond_spread": ob - oa > other_rng,
+         "tune_shapes_slower_beyond_spread": [s["key"] for s in slow_tune],
+         "other_shapes_slower_beyond_spread": [s["key"] for s in slow_other]}
+    d["checks"] = {"target_gain": d["target_tune_change_pct"] <= -threshold, "tune_shapes": not slow_tune,
+                   "other_shapes": not slow_other, "other_target": not d["target_other_slower_beyond_spread"]}
+    d["accept"] = all(d["checks"].values())
+    return d
 
 
 def fmt_kernels(tab, title):
@@ -221,6 +261,8 @@ def run(a):
             meta.setdefault(x, []).append(d["meta"])
     subset = SUBSETS.get(a.subset) if a.subset else None
     res, med_a, med_b = analyze(raw["A"], raw["B"], subset, a.gate)
+    if a.target:
+        res["decision"] = decision(raw["A"], raw["B"], res, a.target)
     for x, recs in (("A", med_a), ("B", med_b)):
         clk = statistics.median(m["sustained_clock_mhz"] for m in meta[x])
         for r in recs:
@@ -235,6 +277,16 @@ def run(a):
     lines += fmt_kernels(res["all"], "Per-kernel sums, all configurations")
     if subset is not None:
         lines += [""] + fmt_kernels(res["subset"], f"Per-kernel sums, affected subset {a.subset}")
+    if "decision" in res:
+        d = res["decision"]
+        lines += ["", f"### Acceptance predicates (target {d['target']}, D{d['tune_dim']} tuned)", "",
+                  f"- target over all D{d['tune_dim']} shapes: {d['target_tune_A']:.3f} -> {d['target_tune_B']:.3f} ms "
+                  f"({d['target_tune_change_pct']:+.2f}%; needs <= -{d['threshold_pct']:.1f}%)",
+                  f"- D{d['tune_dim']} shapes slower beyond spread: {d['tune_shapes_slower_beyond_spread'] or 'none'}",
+                  f"- other head dims: target {d['target_other_A']:.3f} -> {d['target_other_B']:.3f} ms "
+                  f"({d['target_other_change_pct']:+.2f}%, slower beyond spread: {d['target_other_slower_beyond_spread']}); "
+                  f"shapes slower beyond spread: {d['other_shapes_slower_beyond_spread'] or 'none'}",
+                  f"- checks {d['checks']} -> **{'ACCEPT (this job)' if d['accept'] else 'REJECT'}**"]
     lines += ["", f"### Shapes over the {a.gate:.1f}% fwd+bwd gate", ""]
     if res["over_gate"]:
         for s_ in res["over_gate"]:
@@ -248,7 +300,8 @@ def run(a):
     for s_ in res["shapes"]:
         D, B, H, Hk, N, attn, mode = s_["key"]
         lines.append(f"| D{D} B{B} H{H}/{Hk} N{N} | {attn} | {mode} | {s_['median_A']:.3f} | {s_['median_B']:.3f} | "
-                     f"{s_['change_pct']:+.2f}% | {s_['spread_A_pct']:.2f}% | {s_['spread_B_pct']:.2f}% |")
+                     f"{s_['change_pct']:+.2f}% | {s_['spread_A_pct']:.2f}% | {s_['spread_B_pct']:.2f}% |"
+                     f"{' slower beyond spread' if s_['slower_beyond_spread'] else ''}")
     lines += ["", f"Worst single-shape fwd+bwd change (B vs A): {res['worst_shape_change_pct']:+.2f}%"]
     with open(os.path.join(a.out_dir, "ab.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -265,7 +318,8 @@ def main():
     f.add_argument("--rev", required=True); f.add_argument("--so", required=True); f.add_argument("--out", required=True)
     r = sp.add_parser("run")
     r.add_argument("--a", required=True); r.add_argument("--b", required=True)
-    r.add_argument("--grid", choices=("main", "holdout", "one"), default="main")
+    r.add_argument("--grid", choices=("all", "main", "holdout", "one"), default="all")
+    r.add_argument("--target", choices=K.CATS, default=None, help="evaluate the acceptance predicates for this kernel")
     r.add_argument("--reps", type=int, default=3); r.add_argument("--iters", type=int, default=10)
     r.add_argument("--sustain", type=float, default=2.0)
     r.add_argument("--modes", default=None)

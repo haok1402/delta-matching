@@ -332,7 +332,12 @@ if "equivalence.py" in line:
 if "ab.py" in line:
     d = args[args.index("--out-dir") + 1]; os.makedirs(d, exist_ok=True)
     if "ab" not in fail.split(","):
-        open(os.path.join(d, "ab.json"), "w").write("{}")
+        acc = os.environ.get("STUB_DECISION", "accept") == "accept"
+        if "--target" not in args or args[args.index("--grid") + 1] != "all":
+            sys.exit(9)
+        open(os.path.join(d, "ab.json"), "w").write(
+            '{"decision": {"accept": %s, "checks": {"target_gain": %s}, "tune_dim": 128, "target_tune_change_pct": -4.0}}'
+            % (("true", "true") if acc else ("false", "false")))
     done("ab")
 if "bench.py" in line:
     done("bench")
@@ -351,7 +356,7 @@ def run_gate(tmp_path, mode, fail, extra=None, kernel="X"):
     env = dict(os.environ, GATE_PYTHON=str(stub), GATE_CUOBJDUMP=str(cub), STUB_FAIL_ON=fail,
                STUB_ENVLOG=str(tmp_path / "pytest_env.txt"), **(extra or {}))
     return subprocess.run([sys.executable, os.path.join(HERE, "gate.py"), "--tag", "t", "--worktree", str(wt),
-                           "--prev-root", str(tmp_path), "--prev-lib", str(prev), "--subset", "D128", "--kernel", kernel,
+                           "--prev-root", str(tmp_path), "--prev-lib", str(prev), "--target", "pass2", "--kernel", kernel,
                            "--mode", mode, "--base-dumps", dumps, "--prev-dumps", dumps,
                            "--run-dir", str(tmp_path / f"run_{mode}_{fail or 'none'}")], env=env, capture_output=True, text=True)
 
@@ -359,8 +364,8 @@ def run_gate(tmp_path, mode, fail, extra=None, kernel="X"):
 @pytest.mark.parametrize("mode,fail,step", [
     ("full", "tooling", "tooling_tests"), ("full", "jit", "build"), ("full", "cuobjdump", "resources_prev"),
     ("full", "pytest", "pytest"), ("full", "dump", "dump_default"), ("full", "compare", "compare_base_default"),
-    ("full", "ab", "ab_main"), ("full", "bench", "bench_A_rep0_D128"),
-    ("confirm", "ab", "ab_main"), ("confirm", "bench", "bench_A_rep0_D128"), ("timing", "jit", "build")])
+    ("full", "ab", "ab_all"), ("full", "bench", "bench_A_rep0_D128"),
+    ("confirm", "ab", "ab_all"), ("confirm", "bench", "bench_A_rep0_D128"), ("timing", "jit", "build")])
 def test_gate_stops_on_any_failing_step(tmp_path, mode, fail, step):
     r = run_gate(tmp_path, mode, fail)
     assert r.returncode == 1 and f"step {step} failed" in r.stdout, (mode, fail, r.stdout[-800:], r.stderr[-400:])
@@ -463,3 +468,47 @@ def test_resource_growth_is_recorded_but_not_fatal_in_timing_mode(tmp_path):
     r = run_gate(tmp_path, "timing", "", extra={"STUB_RES": "stackgrow"})
     rec = json.load(open(tmp_path / "run_timing_none" / "gate.json"))
     assert r.returncode == 0 and rec["resource_regressions"] == ["_Z9KernelX_causal: STACK 8 -> 16"], r.stdout[-600:]
+
+
+def test_gate_rejects_when_the_acceptance_predicates_fail(tmp_path):
+    r = run_gate(tmp_path, "full", "", extra={"STUB_DECISION": "reject"})
+    assert r.returncode == 1 and "acceptance predicates not met" in r.stdout, r.stdout[-600:]
+
+
+def _recs(times, d_pass2):
+    """One repetition: two D128 shapes and one D256 shape; e2e times per shape, pass2 per head dim."""
+    out = []
+    for (D, N), e2e in zip(((128, 2048), (128, 4096), (256, 2048)), times):
+        ms = {c: 1.0 for c in K.CATS}; ms["pass2"] = d_pass2[D]
+        out.append({"D": D, "B": 1, "H": 16, "Hk": 16, "N": N, "attn": "causal", "mode": "matched",
+                    "e2e_fwd_ms": e2e / 2, "e2e_fwdbwd_ms": e2e, "ms": ms, "kernels": {}})
+    return out
+
+
+def _decide(a_runs, b_runs, target="pass2"):
+    res, _, _ = ab.analyze(a_runs, b_runs)
+    return ab.decision(a_runs, b_runs, res, target)
+
+
+def test_decision_accepts_a_d128_gain_with_noise_only():
+    A = [_recs((10.0 + 0.02 * i, 20.0 + 0.02 * i, 30.0 + 0.02 * i), {128: 1.00, 256: 1.0}) for i in range(3)]
+    B = [_recs((10.03, 20.01, 30.0 + 0.01 * i), {128: 0.95, 256: 1.0}) for i in range(3)]   # +0.01 ms vs a 0.04 ms range
+    d = _decide(A, B)
+    assert d["accept"] and abs(d["target_tune_change_pct"] + 5.0) < 1e-6, d
+
+
+def test_decision_rejects_small_gain_slow_d128_shape_and_slow_d256():
+    A = [_recs((10.0 + 0.01 * i, 20.0, 30.0 + 0.01 * i), {128: 1.0, 256: 1.0}) for i in range(3)]
+    small = _decide(A, [_recs((10.0, 20.0, 30.0), {128: 0.98, 256: 1.0}) for _ in range(3)])
+    assert not small["accept"] and not small["checks"]["target_gain"]
+    slow = _decide(A, [_recs((10.5, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)])
+    assert not slow["accept"] and slow["tune_shapes_slower_beyond_spread"] == [[128, 1, 16, 16, 2048, "causal", "matched"]]
+    other = _decide(A, [_recs((10.0, 20.0, 31.0), {128: 0.9, 256: 1.2}) for _ in range(3)])
+    assert not other["accept"] and not other["checks"]["other_shapes"] and not other["checks"]["other_target"]
+
+
+def test_slower_within_spread_is_not_flagged():
+    A = [_recs((10.0 + 0.2 * i, 20.0, 30.0), {128: 1.0, 256: 1.0}) for i in range(3)]
+    B = [_recs((10.3, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)]
+    res, _, _ = ab.analyze(A, B)
+    assert not res["shapes"][0]["slower_beyond_spread"]   # +0.1 ms median vs a 0.4 ms A range

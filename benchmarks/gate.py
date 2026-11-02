@@ -1,15 +1,18 @@
 """Acceptance-gate runner for one kernel candidate: every step is a checked subprocess with its full output in the run
 directory; the first failing step stops the gate with a non-zero exit naming the step.
 
-    python benchmarks/gate.py --tag h1b --worktree .local/wt/h1b --prev-root .local/frozen/r3_do2 \\
-        --prev-lib .local/jit/do2/_C.so --subset D128 --kernel FlashAttnBwdSm90Fp8R --mode full \\
+    python benchmarks/gate.py --tag psipf --worktree .local/wt/psipf --prev-root .local/frozen/r9_p2st3 \\
+        --prev-lib .local/jit/p2st3/_C.so --target pass2 --kernel fq8p2 --mode full \\
         --base-dumps .local/equiv/base3_default.pt,.local/equiv/base4_kv.pt,.local/equiv/base4_head.pt,.local/equiv/base4_streams2.pt \\
-        --prev-dumps .local/equiv/do2_4_default.pt,... --run-dir .local/rounds/h1b_run1
+        --prev-dumps .local/equiv/p2st3_default.pt,... --run-dir .local/rounds/r10/gate_psipf_2
 
-Modes: full (tooling tests, build, resources / SASS, candidate pytest, four 72-case equivalence suites vs the baseline
-and the previous accepted revision, A/B main + held-out vs the previous accepted revision, bench.py both D), confirm
-(A/B + bench only, against an already built candidate root), timing (build, resources, A/B, bench: for feasibility
-builds whose numerics are intentionally incomplete; never an acceptance).  The run directory must not exist (fresh).
+Modes: full (tooling tests, build, ELF-complete resources / SASS with per-symbol stack / local growth fatal, candidate
+pytest with in-process identity, four 72-case equivalence suites vs the baseline and the previous accepted revision,
+ONE merged-grid A/B (every shape, no held-out split) vs the previous accepted revision, bench.py both D), confirm
+(A/B + bench only, against an already built candidate root), timing (build, resources, A/B, bench: feasibility builds;
+never an acceptance).  Acceptance rule (Hao, round 10): the --target kernel >= 3% faster summed over all D128 shapes,
+no D128 shape slower beyond its run-to-run spread, D256 correct and not slower (ab.py decision()); a full job and a
+fresh confirm job must both pass.  The run directory must not exist (fresh).
 GATE_PYTHON / GATE_CUOBJDUMP override the executables (CPU failure-injection tests).
 """
 import argparse, hashlib, json, os, re, shutil, subprocess, sys
@@ -164,7 +167,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", required=True); ap.add_argument("--worktree", required=True)
     ap.add_argument("--prev-root", required=True); ap.add_argument("--prev-lib", required=True)
-    ap.add_argument("--subset", required=True); ap.add_argument("--kernel", required=True)
+    ap.add_argument("--subset", default=None, help="supplementary per-kernel report on D128 / D256 (not a predicate)")
+    ap.add_argument("--target", required=True, help="kernel category the candidate targets (acceptance predicates)")
+    ap.add_argument("--kernel", required=True)
     ap.add_argument("--mode", choices=("full", "confirm", "timing"), required=True)
     ap.add_argument("--base-dumps", default=""); ap.add_argument("--prev-dumps", default="")
     ap.add_argument("--run-dir", required=True)
@@ -228,13 +233,22 @@ def main():
                 gate.run(f"compare_base_{r}", [gate.py, os.path.join(HERE, "equivalence.py"), "compare", base[i], out])
                 gate.run(f"compare_prev_{r}", [gate.py, os.path.join(HERE, "equivalence.py"), "compare", prev[i], out])
         ab_env = dict(env, DM_SO=os.path.join(REPO, "delta_matching", "_C.so"))   # conflicting on purpose: ignored
-        for grid in ("main", "holdout"):
-            d = os.path.join(run_dir, f"ab_{grid}")
-            gate.run(f"ab_{grid}", [gate.py, os.path.join(HERE, "ab.py"), "run", "--a", os.path.abspath(a.prev_root),
-                                    "--b", wt, "--grid", grid, "--reps", str(a.reps), "--subset", a.subset,
-                                    "--out-dir", d], env=ab_env)
-            if not os.path.isfile(os.path.join(d, "ab.json")):
-                raise GateFailure(f"A/B {grid} wrote no ab.json")
+        # rule (Hao, round 10): ONE merged grid (no held-out split); acceptance = target >= 3% over all D128 shapes, no
+        # D128 shape slower beyond its spread, D256 not slower (ab.py decision()); the first job and the confirmation
+        # job must each pass.
+        d = os.path.join(run_dir, "ab_all")
+        gate.run("ab_all", [gate.py, os.path.join(HERE, "ab.py"), "run", "--a", os.path.abspath(a.prev_root), "--b", wt,
+                            "--grid", "all", "--reps", str(a.reps), "--target", a.target, "--out-dir", d]
+                 + (["--subset", a.subset] if a.subset else []), env=ab_env)
+        if not os.path.isfile(os.path.join(d, "ab.json")):
+            raise GateFailure("A/B wrote no ab.json")
+        with open(os.path.join(d, "ab.json")) as f:
+            dec = json.load(f).get("decision")
+        if not dec or "accept" not in dec:
+            raise GateFailure("A/B report has no acceptance decision")
+        gate.save(decision=dec)
+        print(f"[gate] decision: {dec.get('checks')} target D{dec.get('tune_dim')} "
+              f"{dec.get('target_tune_change_pct', float('nan')):+.2f}% -> {'ACCEPT' if dec['accept'] else 'REJECT'}", flush=True)
         for rep in range(3):
             order = ("A", "B") if rep != 1 else ("B", "A")
             for x in order:
@@ -242,7 +256,9 @@ def main():
                 for D in (128, 256):
                     gate.run(f"bench_{x}_rep{rep}_D{D}", [gate.py, os.path.join(HERE, "bench.py"), "--D", str(D), "--N", "8192"],
                              env=dict(env, PYTHONPATH=root))
-        gate.save(result="PASSED (all steps exited 0; the acceptance decision reads ab_*/ab.json and the logs)")
+        if not dec["accept"]:
+            raise GateFailure(f"acceptance predicates not met: {dec['checks']}")
+        gate.save(result="PASSED (all steps exited 0 and the merged-grid acceptance predicates hold for this job)")
         print("[gate] all steps passed", flush=True)
         return 0
     except GateFailure as e:

@@ -12,13 +12,16 @@ repetitions (job 21165303). Ablation timings are observations of code-removal bu
 
 ## Emitted order and resources
 
-Resources (accepted DO2): hd128 REG 114, d256 REG 167, STACK 0, LOCAL 0 (both instantiations each). Dynamic smem
-(header arithmetic): hd128 83968 B at depth 2, 108544 B at depth 3, d256 109568 B: two CTAs per SM in all three
-(116736 B half-SM budget), i.e. TWO math warpgroups per SM in total.
+Resources (accepted DO2): hd128 REG 114, d256 REG 167, STACK 0, LOCAL 0 (both instantiations each). Launch dynamic
+smem (sizeof(SharedStorage): array payloads + barriers, rounded to 1024 B; review-verified from the host code) hd128
+84992 B at depth 2, 109568 B at depth 3, d256 109568 B, each plus 1024 B static (cuobjdump SHARED): two CTAs per SM in
+all three, i.e. TWO math warpgroups per SM in total. (The first version of this file quoted the 83968 / 108544 B array
+payloads as CTA totals; the two-CTA conclusion is unchanged.)
 
 Per tile, both headers emit one serial chain per CTA (`results/r9/wi/pass2_hd128_do2_order.txt`, hd128 instantiation of DO2):
-`SYNCS.PHASECHK.TRANS64.TRYWAIT` (TMA full barrier) -> `LDG.E` of psi_row[nb] -> predicate / ratio (`FMUL` x 64
-rescale on the rescale path) -> 4 x `QGMMA.64x128x32` -> `WARPGROUP.DEPBAR.LE gsb0, 0x0` -> `BAR.SYNC` (the
+`SYNCS.PHASECHK.TRANS64.TRYWAIT` (TMA full barrier) -> `LDG.E` of psi_row[nb] -> predicate / ratio (rescale of
+the accumulator: 64 `FMUL` at hd128, 128 at d256) -> the tile's wgmma (hd128: 4 x `QGMMA.64x128x32`; d256: 2 x
+`QGMMA.64x256x32`) -> `WARPGROUP.DEPBAR.LE gsb0, 0x0` -> `BAR.SYNC` (the
 unconditional release) -> `SYNCS.ARRIVE.TRANS64` + 2 x `UTMALDG` (re-arm slot nb % depth for tile nb + depth). The psi
 load is issued only after the barrier wait, so its latency sits between the TMA arrival and the gemm on every tile;
 with depth 2 only one further tile is in flight while a tile is consumed.
@@ -34,15 +37,19 @@ with depth 2 only one further tile is in flight while a tile is consumed.
 | 3 hd128 TMA depth 3 (flag; d256 unchanged) | 0.887 (-8.8%) | 0.885 (-7.8%) | 1.647 (-9.0%) | 0.890 (-8.5%) | 0.890 (+0.4%) | 0.885 (-0.1%) | 1.612 (+0.0%) | 0.888 (-0.0%) | 8.584 (-4.49%) |
 | 4 PSIPF: psi loaded one tile early (bitwise on the default route) | 0.945 (-2.8%) | 0.925 (-3.6%) | 1.793 (-0.9%) | 0.944 (-3.0%) | 0.851 (-4.0%) | 0.843 (-4.9%) | 1.559 (-3.3%) | 0.849 (-4.4%) | 8.709 (-3.09%) |
 
-Pass 1 is unchanged in every build (+-0.3% on its sum). Reading: the exposed psi-load latency is worth ~4-6% (knob 1;
-knob 4 recovers most of it bitwise), the in-window rescale ~1.5% at hd128 / ~6% at d256 (knob 2), and one more TMA
-stage at hd128 ~8-9% of the hd128 pass 2 (knob 3) at unchanged occupancy (two CTAs per SM at both depths).
+Pass 1 is unchanged in every build (+-0.3% on its sum). These are observations of whole code-removal builds:
+knob 1 removes the psi load AND the data-dependent scale / skip / state work, knob 2 can also change scheduling and
+register use, so neither isolates an exclusive latency or bounds what a valid change can recover. Knob 3 (one more
+TMA stage at hd128, -8..-9% of the hd128 pass 2 at unchanged occupancy) and knob 4 (PSIPF, -3.1% on depth 2) are
+real candidates and are measured as separate hypotheses; knob 4's default-route equality is a saved log
+(`p2wi4_compare.txt`), not an all-route certification of a later implementation.
 
 ## Hypotheses, in gate order (one per round, each its own commit)
 
 1. P2ST3 (round 9): hd128 pass-2 TMA depth 2 -> 3 (`FA3FP11_HD128_P2ST` 3; certified flag-set change). Footprint:
    the hd128 pass 2 (D128 subset `pass2`); d256 code unchanged. Mechanism: one more tile in flight hides the TMA
-   latency of the serial per-tile chain. Budget: smem 83968 -> 108544 B per CTA (two CTAs per SM still fit),
+   latency of the serial per-tile chain. Budget: dynamic smem 84992 -> 109568 B per CTA (+1024 B static; two CTAs
+   per SM still fit),
    registers unchanged. Ledger: unchanged except the ring depth: wait(nb) on slot nb % 3 with parity (nb / 3) & 1,
    gemm with wg_wait 0, the unconditional `__syncthreads()`, then issue(nb + 3) into the slot just consumed; the
    prologue issues min(3, nb_end) tiles; kPromoteTiles (4) >= depth (3) still holds (static_assert). Arithmetic,

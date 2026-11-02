@@ -36,6 +36,8 @@ MAIN = [(D, 32768 // N, H, Hk, N) for D, H in ((128, 16), (256, 8)) for N in (20
 # held-out shapes: never tuned on (odd sequence lengths, other head counts / GQA ratios, batch 3)
 HOLDOUT = [(128, 3, 12, 4, 6144), (128, 1, 24, 8, 12288), (256, 3, 6, 2, 6144), (256, 1, 12, 4, 12288),
            (128, 2, 32, 32, 3072), (256, 2, 16, 1, 5120)]
+# Rule change (Hao, round 10): no held-out split; every shape is measured and tuned as ONE grid ("all").
+ALL = MAIN + HOLDOUT
 MODES = (("causal", "matched"), ("causal", "stale"), ("full", "stale"))
 
 CATS = ("fwd", "prod_fwd", "prod_bwd", "pass0", "pass1", "pass2", "twin", "glue")
@@ -52,7 +54,7 @@ def sha256(path):
 
 def expected_configs(grid, modes="all", one=None):
     """The (D, B, H, Hk, N, attn, mode) keys a kernels.py run must produce."""
-    shapes = MAIN if grid == "main" else HOLDOUT if grid == "holdout" else [one]
+    shapes = {"main": MAIN, "holdout": HOLDOUT, "all": ALL}.get(grid, [one])
     md = MODES if modes in (None, "all") else tuple(tuple(m.split("-")) for m in modes.split(","))
     return [(D, B, H, Hk, N, attn, mode) for (D, B, H, Hk, N) in shapes for attn, mode in md]
 
@@ -306,7 +308,7 @@ def fa3_arms(q, k, v, do, causal, iters):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid", choices=("main", "holdout", "one"), default="one")
+    ap.add_argument("--grid", choices=("all", "main", "holdout", "one"), default="one")
     ap.add_argument("--D", type=int, default=128); ap.add_argument("--N", type=int, default=8192)
     ap.add_argument("--B", type=int, default=2); ap.add_argument("--H", type=int, default=16)
     ap.add_argument("--Hk", type=int, default=4)
@@ -319,7 +321,7 @@ def main():
     a = ap.parse_args()
     global dm
     import delta_matching as dm
-    shapes = MAIN if a.grid == "main" else HOLDOUT if a.grid == "holdout" else [(a.D, a.B, a.H, a.Hk, a.N)]
+    shapes = {"main": MAIN, "holdout": HOLDOUT, "all": ALL}.get(a.grid, [(a.D, a.B, a.H, a.Hk, a.N)])
     modes = MODES if a.modes == "all" else tuple(tuple(m.split("-")) for m in a.modes.split(","))
     recs = []
     with ClockSampler() as clock:

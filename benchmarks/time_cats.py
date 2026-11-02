@@ -44,6 +44,7 @@ def main():
             raise SystemExit(f"missing category timings {ms} for {(D, B, H, Hk, N, attn, mode)}")
         recs.append({"cfg": [D, B, H, Hk, N, attn, mode], "ms": ms})
         print(f"{recs[-1]['cfg']}: " + " ".join(f"{c} {v:.3f} ms" for c, v in ms.items()), flush=True)
+    meta = dict(meta, configs=[list(c) for c in CONFIGS], cats=cats, iters=a.iters)   # this script's own set
     with open(a.out, "w") as f:
         json.dump({"meta": meta, "records": recs}, f, indent=1)
 

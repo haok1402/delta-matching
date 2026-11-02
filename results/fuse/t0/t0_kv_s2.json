@@ -1,0 +1,93 @@
+{
+ "package": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching",
+ "env": {
+  "DM_BWD_STREAMS": "2",
+  "DM_BWD_WS_LIMIT_GB": "16",
+  "DM_SO": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching/_C.so"
+ },
+ "shapes": [
+  {
+   "H": 16,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 89.05632019042969,
+   "wall_ms": [
+    89.05632019042969,
+    89.72112274169922,
+    88.90016174316406,
+    90.4676513671875,
+    88.73248291015625
+   ],
+   "trace_wall_us": 86976.8916015625,
+   "trace_busy_us": 86450.14213671876,
+   "trace_idle_us": 599.2305273437523,
+   "cat_us": {
+    "glue": 1724.542,
+    "pass0": 17768.633,
+    "pass1": 55159.236000000004,
+    "pass2": 12012.292,
+    "prod_bwd": 163.807,
+    "twin": 95.135
+   },
+   "gaps_us": {
+    "glue->glue": 7.263671875,
+    "glue->pass0": 160.5439453125,
+    "pass0->pass1": 2.52783203125,
+    "pass1->pass2": 2.751953125,
+    "pass2->glue": 1.72802734375,
+    "prod_bwd->twin": 29.8876953125,
+    "twin->glue": 393.05517578125
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "glue": 13,
+    "pass0": 4,
+    "pass1": 4,
+    "pass2": 4
+   },
+   "n_kernels": 27
+  },
+  {
+   "H": 32,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 178.13133239746094,
+   "wall_ms": [
+    177.68768310546875,
+    180.4899139404297,
+    190.1822052001953,
+    178.13133239746094,
+    176.6730194091797
+   ],
+   "trace_wall_us": 176703.99072265625,
+   "trace_busy_us": 176204.98359375002,
+   "trace_idle_us": 444.5102070312132,
+   "cat_us": {
+    "glue": 1587.934,
+    "pass0": 37616.407,
+    "pass1": 115260.659,
+    "pass2": 25528.551,
+    "prod_bwd": 327.488,
+    "twin": 192.672
+   },
+   "gaps_us": {
+    "glue->glue": 5.7275390625,
+    "pass2->glue": 1.56787109375,
+    "prod_bwd->twin": 1.43994140625,
+    "twin->pass0": 435.71142578125
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "pass0": 32,
+    "pass1": 32,
+    "pass2": 32,
+    "glue": 5
+   },
+   "n_kernels": 103
+  }
+ ]
+}

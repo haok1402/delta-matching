@@ -81,6 +81,10 @@
 #define FA3FP11_P0NWG 4
 #endif
 
+#ifndef KDA_PDL
+#define KDA_PDL 0   // ## KDA-FUSE PDL (schedule only): programmatic dependent launch of pass 1 behind pass 0 and of pass 2 behind pass 1
+#endif
+
 namespace flash {
 
 using namespace cute;
@@ -214,6 +218,9 @@ struct DeltaV6 {
         }
         MainloopPipeline pipeline_kv(shared_storage.pipelines.pipeline_kv, pipeline_params, ClusterShape{});
         __syncthreads();
+#if KDA_PDL && defined(__CUDA_ARCH__)
+        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
 
         // CTA = (m-pair p, bh); longest first for the causal tail.  ## P0LPT: grid (bh, p): blocks dispatch in linear
         // order (x fastest), so every head's longest row block goes first, then the next-longest of every head, ...: a

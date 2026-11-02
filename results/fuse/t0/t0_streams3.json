@@ -1,0 +1,91 @@
+{
+ "package": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching",
+ "env": {
+  "DM_BWD_STREAMS": "3",
+  "DM_SO": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching/_C.so"
+ },
+ "shapes": [
+  {
+   "H": 16,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 88.25052642822266,
+   "wall_ms": [
+    88.31244659423828,
+    88.25052642822266,
+    87.897216796875,
+    88.69683074951172,
+    87.90019226074219
+   ],
+   "trace_wall_us": 85870.4140625,
+   "trace_busy_us": 85827.59881640626,
+   "trace_idle_us": 42.815246093741735,
+   "cat_us": {
+    "glue": 885.149,
+    "pass0": 18231.961,
+    "pass1": 55822.613,
+    "pass2": 12673.859,
+    "prod_bwd": 164.416,
+    "twin": 95.968
+   },
+   "gaps_us": {
+    "glue->glue": 6.2734375,
+    "pass0->pass1": 1.50390625,
+    "pass1->pass2": 1.76025390625,
+    "pass2->glue": 3.904296875,
+    "prod_bwd->twin": 1.69482421875,
+    "twin->pass0": 26.88037109375
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "pass0": 16,
+    "pass1": 16,
+    "pass2": 16,
+    "glue": 5
+   },
+   "n_kernels": 55
+  },
+  {
+   "H": 32,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 179.43817138671875,
+   "wall_ms": [
+    181.72515869140625,
+    184.92147827148438,
+    179.43817138671875,
+    176.9517364501953,
+    177.50601196289062
+   ],
+   "trace_wall_us": 175819.8740234375,
+   "trace_busy_us": 175514.78709375003,
+   "trace_idle_us": 296.1624648437428,
+   "cat_us": {
+    "glue": 1587.836,
+    "pass0": 37348.842000000004,
+    "pass1": 115162.257,
+    "pass2": 25451.364000000005,
+    "prod_bwd": 328.159,
+    "twin": 192.831
+   },
+   "gaps_us": {
+    "glue->glue": 6.91259765625,
+    "pass2->glue": 2.84716796875,
+    "prod_bwd->twin": 1.56884765625,
+    "twin->pass0": 284.3837890625
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "pass0": 32,
+    "pass1": 32,
+    "pass2": 32,
+    "glue": 5
+   },
+   "n_kernels": 103
+  }
+ ]
+}

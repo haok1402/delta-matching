@@ -100,6 +100,17 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 
 #include "kda_prof.h"
 
+// ## KDA-FUSE what-if (timing only; outputs unchanged, an extra scratch store): pass 1 also forms the per-(query row,
+// warpgroup) partial row sums sum_j P_ij * dP_ij * dp_descale of its tile (fmaf chain over the thread's keys, 3 xor
+// shuffles over the 8 key lanes, the 4 warps through smem, parity double-buffered) and stores them to a scratch sink:
+// the cost pass 1 would add if it produced the matched delta itself (pass 0's work minus its S / dP recompute).
+#ifndef KDA_P1_WI_ROWSUM
+#define KDA_P1_WI_ROWSUM 0
+#endif
+#if KDA_P1_WI_ROWSUM
+static __device__ float kda_wi_rowsum_sink[1 << 20];
+#endif
+
 namespace flash {
 
 using namespace cute;
@@ -284,7 +295,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_lse;
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_dpsum;
         cute::array_aligned<ElementAccum, 16, 16> smem_psired;   // 8 warps x 2 tile parities
-#ifdef FA3FP11_DBG
+#if defined(FA3FP11_DBG) || KDA_P1_WI_ROWSUM
         cute::array_aligned<ElementAccum, NumMmaWarpGroups * 4 * 2 * kBlockM, 16> smem_dbg_rows;   // [wg][warp][sum|abs][row]
 #endif
     };
@@ -856,6 +867,31 @@ struct CollectiveMainloopBwdSm90Fp8R {
                     params.ptr_dbg_rowsabs[gi] = sb;
                 }
                 cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, wg_barrier_id);
+            }
+#endif
+#if KDA_P1_WI_ROWSUM
+            {
+                float* rs_smem = shared_storage.tensors.mainloop.smem_dbg_rows.data() + warp_group_idx * (4 * 2 * kBlockM)
+                                 + (m_block & 1) * (4 * kBlockM);
+                Tensor tScS = thread_mma_SdP.partition_C(cute::make_identity_tensor(select<1, 0>(TileShape_MNK{})));
+                Tensor tScS_rc = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tScS.layout()));
+                #pragma unroll
+                for (int mi = 0; mi < size<0>(dS); ++mi) {
+                    float ra = 0.f;
+                    #pragma unroll
+                    for (int ni = 0; ni < size<1>(dS); ++ni) { ra = fmaf(scores(mi, ni), dS(mi, ni) * fq8_dp_descale, ra); }
+                    #pragma unroll
+                    for (int off = 4; off < 32; off *= 2) { ra += __shfl_xor_sync(0xffffffff, ra, off); }
+                    if ((lane >> 2) == 0) { rs_smem[warp_in_wg * kBlockM + get<1>(tScS_rc(mi, _0{}))] = ra; }
+                }
+                cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, wg_barrier_id);
+                if (wg_thread < kBlockM) {
+                    float sa = 0.f;
+                    #pragma unroll
+                    for (int w = 0; w < 4; ++w) { sa += rs_smem[w * kBlockM + wg_thread]; }
+                    int64_t const gi = ((int64_t(fq8_bh) * params.nbn + n_block) * 2 + warp_group_idx) * 64 + m_block * kBlockM + wg_thread;
+                    kda_wi_rowsum_sink[gi & ((1 << 20) - 1)] = sa;
+                }
             }
 #endif
             #pragma unroll

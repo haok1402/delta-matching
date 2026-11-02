@@ -201,13 +201,34 @@ struct P2Params {
     int h_k;
 };
 
+#ifndef KDA_PDL
+#define KDA_PDL 0   // ## KDA-FUSE PDL (schedule only): programmatic dependent launch of pass 1 behind pass 0 and of pass 2 behind pass 1
+#endif
+// ## KDA-FUSE P2LPT (schedule only): grid (bh, m-block) instead of (m-block, bh): the blocks dispatch longest-first
+// ACROSS heads (all heads' longest rows first), so the causal tail is the globally shortest rows instead of the last
+// head's rows.  Per CTA the work and its order are unchanged: bitwise.
+#ifndef KDA_P2_LPT
+#define KDA_P2_LPT 0
+#endif
+// ## KDA-FUSE what-if (timing only, numerics WRONG): every CTA reads the dS' tiles of the last row block of head 0
+// (64 x 8 KB, L2 resident) instead of its own: the pass-2 time when its dS' stream comes from L2, i.e. the ceiling of a
+// pass 1 + pass 2 fusion that consumes dS' before it leaves L2.
+#ifndef KDA_P2_WI_L2
+#define KDA_P2_WI_L2 0
+#endif
+
 template <bool Is_causal>
 __global__ void __launch_bounds__(128, 1)
 fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
     extern __shared__ char smem_raw[];
     auto& shared = *reinterpret_cast<SharedStorage*>(smem_raw);
+#if KDA_P2_LPT
+    int const mb = params.nbm - 1 - blockIdx.y;   // longest-first across all heads
+    int const bh = blockIdx.x;
+#else
     int const mb = params.nbm - 1 - blockIdx.x;   // longest-first
     int const bh = blockIdx.y;
+#endif
     // ## Delta-Matching-128 FIX (M19): the d256 form `mb + 1` assumes kBM == kBK (64-key tiles).  At hd128 the
     // dS' tiles are 128 keys wide (kBK = 2 kBM): the last tile a causal row block reads is the one holding its last
     // row's diagonal key, nb_end = ((mb + 1) kBM - 1) / kBK + 1 (= mb/2 + 1); pass 1 writes exactly these tiles
@@ -221,12 +242,19 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
     }
     cutlass::arch::fence_barrier_init();
     __syncthreads();
+#if KDA_PDL && defined(__CUDA_ARCH__)
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
 
     Tensor sA = make_tensor(make_smem_ptr(shared.smem_a.data()), SmemLayoutA{});
     Tensor sB = make_tensor(make_smem_ptr(shared.smem_b.data()), SmemLayoutB{});
     Tensor mA = params.tma_a.get_tma_tensor(params.shape_a);
     Tensor mB = params.tma_b.get_tma_tensor(params.shape_b);
+#if KDA_P2_WI_L2
+    Tensor gA = mA(_, _, _, params.nbm - 1, 0);
+#else
     Tensor gA = mA(_, _, _, mb, bh);                                    // (64, 64, nbn)
+#endif
     // ## FP11-M16 (native GQA): B operand indexed by KV head.
     int const bh_kv = (bh / params.h) * params.h_k + (bh % params.h) / (params.h / params.h_k);
     Tensor gB = flat_divide(mB(_, _, bh_kv), Shape<Int<kBD>, Int<kBK>>{})(_, _, _0{}, _);  // (256, 64, nbn)
@@ -438,7 +466,21 @@ void run_fq8_dq_pass2_fp11_d128(Flash_bwd_fp8_params &params, cudaStream_t strea
         fprintf(stderr, "[delta_matching pass 2 hd128] smem_size=%d grid=(%d,%d) block=128 kPromoteTiles=%d kDqPitch=%d\n",
                 kSmem, nbm, bh, kPromoteTiles, kDqPitch);
     }
+#if KDA_P2_LPT
+    dim3 grid(bh, nbm, 1);
+#else
     dim3 grid(nbm, bh, 1);
+#endif
+#if KDA_PDL
+    {
+        cudaLaunchConfig_t cfg = {}; cudaLaunchAttribute at[1];
+        cfg.gridDim = grid; cfg.blockDim = dim3(128, 1, 1); cfg.dynamicSmemBytes = kSmem; cfg.stream = stream;
+        at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; at[0].val.programmaticStreamSerializationAllowed = 1;
+        cfg.attrs = at; cfg.numAttrs = 1;
+        CHECK_CUDA(cudaLaunchKernelEx(&cfg, kernel, p2));
+    }
+#else
     kernel<<<grid, 128, kSmem, stream>>>(p2);
+#endif
     { cudaError_t e_ = cudaGetLastError(); if (e_ != cudaSuccess) { fprintf(stderr, "[delta_matching pass 2 hd128] launch: %s\n", cudaGetErrorString(e_)); exit(1); } }
 }

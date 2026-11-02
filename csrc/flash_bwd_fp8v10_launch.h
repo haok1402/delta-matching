@@ -155,7 +155,7 @@ void run_flash_bwd_fp11r_hd128(Flash_bwd_fp8_params &params, cudaStream_t stream
         fprintf(stderr, "[delta_matching hd128] smem_size=%d grid=(%d,%d,%d) block=(%d,%d,%d)\n",
                 smem_size, grid_dims.x, grid_dims.y, grid_dims.z, block_dims.x, block_dims.y, block_dims.z);
     }
-    CHECK_CUTLASS(cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/));
+    CHECK_CUTLASS(cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, bool(KDA_PDL) /*launch_with_pdl*/));
     if (std::getenv("DM_DEBUG")) {
         cudaError_t e_ = cudaGetLastError();
         fprintf(stderr, "[delta_matching hd128] post-launch cudaGetLastError: %s\n", cudaGetErrorString(e_));

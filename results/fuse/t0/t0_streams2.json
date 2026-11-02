@@ -1,0 +1,89 @@
+{
+ "package": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching",
+ "env": {
+  "DM_BWD_STREAMS": "2",
+  "DM_SO": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching/_C.so"
+ },
+ "shapes": [
+  {
+   "H": 16,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 88.1055679321289,
+   "wall_ms": [
+    88.75430297851562,
+    88.27311706542969,
+    88.1055679321289,
+    88.07997131347656,
+    88.08195495605469
+   ],
+   "trace_wall_us": 85659.423828125,
+   "trace_busy_us": 85604.67177734377,
+   "trace_idle_us": 54.75205078122963,
+   "cat_us": {
+    "glue": 882.6850000000002,
+    "pass0": 18240.374,
+    "pass1": 55685.316,
+    "pass2": 12740.194,
+    "prod_bwd": 164.544,
+    "twin": 95.104
+   },
+   "gaps_us": {
+    "glue->glue": 6.3681640625,
+    "pass2->glue": 1.6640625,
+    "prod_bwd->twin": 1.69580078125,
+    "twin->pass0": 44.736328125
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "pass0": 16,
+    "pass1": 16,
+    "pass2": 16,
+    "glue": 5
+   },
+   "n_kernels": 55
+  },
+  {
+   "H": 32,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 178.56080627441406,
+   "wall_ms": [
+    185.23782348632812,
+    181.75900268554688,
+    178.56080627441406,
+    176.6280059814453,
+    176.5223388671875
+   ],
+   "trace_wall_us": 175306.56396484375,
+   "trace_busy_us": 175294.6269375,
+   "trace_idle_us": 11.583300781232538,
+   "cat_us": {
+    "glue": 1582.652,
+    "pass0": 37391.10900000001,
+    "pass1": 114743.024,
+    "pass2": 25442.304,
+    "prod_bwd": 326.591,
+    "twin": 192.288
+   },
+   "gaps_us": {
+    "glue->glue": 6.33642578125,
+    "pass2->glue": 1.98388671875,
+    "prod_bwd->twin": 1.63232421875,
+    "twin->pass0": 1.7587890625
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "pass0": 32,
+    "pass1": 32,
+    "pass2": 32,
+    "glue": 5
+   },
+   "n_kernels": 103
+  }
+ ]
+}

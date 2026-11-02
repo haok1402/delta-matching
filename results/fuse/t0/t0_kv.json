@@ -1,0 +1,95 @@
+{
+ "package": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching",
+ "env": {
+  "DM_BWD_WS_LIMIT_GB": "16",
+  "DM_SO": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_p1/delta_matching/_C.so"
+ },
+ "shapes": [
+  {
+   "H": 16,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 88.48303985595703,
+   "wall_ms": [
+    88.48303985595703,
+    88.82211303710938,
+    87.89791870117188,
+    89.74041748046875,
+    88.2674560546875
+   ],
+   "trace_wall_us": 87228.9150390625,
+   "trace_busy_us": 87190.77,
+   "trace_idle_us": 38.145039062495925,
+   "cat_us": {
+    "glue": 1575.9640000000002,
+    "pass0": 17671.607,
+    "pass1": 55720.989,
+    "pass2": 11968.387999999999,
+    "prod_bwd": 164.704,
+    "twin": 95.296
+   },
+   "gaps_us": {
+    "glue->glue": 11.77587890625,
+    "glue->pass0": 5.376953125,
+    "pass0->pass1": 5.69580078125,
+    "pass1->pass2": 6.62548828125,
+    "pass2->glue": 6.591796875,
+    "prod_bwd->twin": 1.248046875,
+    "twin->glue": 1.248046875
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "glue": 13,
+    "pass0": 4,
+    "pass1": 4,
+    "pass2": 4
+   },
+   "n_kernels": 27
+  },
+  {
+   "H": 32,
+   "B": 1,
+   "Hk": 4,
+   "N": 65536,
+   "wall_ms_med": 179.52700805664062,
+   "wall_ms": [
+    184.15679931640625,
+    184.80812072753906,
+    179.52700805664062,
+    178.01939392089844,
+    178.81581115722656
+   ],
+   "trace_wall_us": 179650.39013671875,
+   "trace_busy_us": 179485.10799999992,
+   "trace_idle_us": 165.28213671882986,
+   "cat_us": {
+    "glue": 1583.934,
+    "pass0": 37554.420999999995,
+    "pass1": 115599.86299999998,
+    "pass2": 24228.714999999993,
+    "prod_bwd": 327.103,
+    "twin": 192.287
+   },
+   "gaps_us": {
+    "glue->glue": 5.7587890625,
+    "pass0->pass1": 51.7109375,
+    "pass1->pass2": 53.1845703125,
+    "pass2->glue": 1.98291015625,
+    "pass2->pass0": 50.14453125,
+    "prod_bwd->twin": 1.2158203125,
+    "twin->pass0": 1.15185546875
+   },
+   "launches": {
+    "prod_bwd": 1,
+    "twin": 1,
+    "pass0": 32,
+    "pass1": 32,
+    "pass2": 32,
+    "glue": 5
+   },
+   "n_kernels": 103
+  }
+ ]
+}

@@ -20,6 +20,10 @@
 
 #include "utils.h"
 
+#ifndef KDA_PDL
+#define KDA_PDL 0   // ## KDA-FUSE PDL (schedule only): programmatic dependent launch of pass 1 behind pass 0 and of pass 2 behind pass 1
+#endif
+
 namespace flash {
 
 using namespace cute;
@@ -159,6 +163,10 @@ public:
         CollectiveMainloop mainloop;
         CollectiveEpilogue epilogue;
         __syncthreads();   // the pipeline init must be visible to every warp
+#if KDA_PDL && defined(__CUDA_ARCH__)
+        asm volatile("griddepcontrol.wait;" ::: "memory");
+        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
         TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
         if (warp_group_idx == 0) {  // Producer

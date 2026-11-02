@@ -74,6 +74,9 @@ def defines():
         d.append("-DKDA_TRACE=1")
     d += [f"-D{k}={v}" for k, v in FLAGS.items()]
     d += EXTRA_DEFINES
+    # KDA_DEFS: screening builds only (kda-fuse helper): extra -D switches of the what-if / candidate variants, appended
+    # after the certified set; unset in every shipped build.
+    d += os.environ.get("KDA_DEFS", "").split()
     return d
 
 

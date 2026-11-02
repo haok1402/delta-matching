@@ -137,6 +137,12 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_P1_SHFL8
 #define KDA_P1_SHFL8 0
 #endif
+//   KDA_P1_STLATE (bitwise): the deferred dS' box store of tile m-1 (S17 DSDEFER-SPLIT) is issued by the elected thread
+//     after the dK gemm issue (1) or after the tile's own transpose / stmatrix (2) instead of right after the psi barrier,
+//     so warp 0's address / UTMASTG work is not on the barrier -> psi -> dK path.  Still after the same barrier.
+#ifndef KDA_P1_STLATE
+#define KDA_P1_STLATE 0
+#endif
 #define KDA_DSBUF (KDA_P1_FENCE2 ? 4 : 2)
 
 #include "kda_prof.h"
@@ -1011,7 +1017,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
 #else
             if (wg_thread == 0) { cute::tma_store_wait<0>(); }   // S17 DSDEFER-CTA: store(m - 2) drained (buffer m & 1)
             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
+#if !KDA_P1_STLATE
             if (wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
+#endif
 #endif
             KP(10);
             #pragma unroll
@@ -1069,6 +1077,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK);
             }
             KP(15);
+#if KDA_P1_STLATE == 1
+            if (wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
+#endif
             // ## M25 (H1b): dS' natural (rows x keys) for pass 2, the ONE transpose, from the pre-packed words while the dV
             // and dK gemms are outstanding (sdS is not an operand of either: they read the dOt / Qt stages).  The key pair
             // this lane stores comes from lanes srcA / srcB (slot h = ip / 4); stmatrix.trans writes 16 keys x 8 rows.
@@ -1115,6 +1126,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 cutlass::arch::fence_view_async_shared();
 #endif
             }
+#if KDA_P1_STLATE == 2
+            if (wg_thread == 0 && m_block > fq8_m_first) { fq8_issue_ds_cta(m_block - 1); }
+#endif
             KP(13);
             warpgroup_wait<1>();
             pipeline_dot.consumer_release(smem_pipe_read_dot);

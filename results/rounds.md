@@ -751,3 +751,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   root r17_p0s).
 - Forward stack C4 (PRETURN) + kda-fwdport SMSC (k/v-scale smem staging): -2.46% / -2.42% vs r17_fwd, below 3%, not
   yet gated.
+- Pass-0 helper status after the stack: every bitwise pass-0 lever measured with >= 2 variants and exhausted
+  (CANDIDATES.md on origin/kda-sm90-pass0); the W4 kernel's remaining loss is tensor / vector overlap across
+  warpgroups (one S / dP pair per warpgroup fits the register budget; cross-iteration pipelining is serialized by
+  ptxas C7517; more accumulators spill); the output-changing cuts (FOLD -13%, LAZY, DEFER, NORM) fail residual-v4.
+  Next structural lever (proposed): share pass 0's S / dP work with pass 1 (pass 0 recomputes the same products pass 1
+  needs, e.g. on the diagonal tiles), i.e. a cross-kernel redesign rather than further pass-0 tuning.

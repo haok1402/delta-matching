@@ -234,6 +234,8 @@ def main():
     ap.add_argument("--build-log", default=None, help="the prebuilt library's build log (spill / serialization scan)")
     ap.add_argument("--tooling-tests", action="store_true", help="also run the CPU tooling tests (default: run them "
                     "outside GPU jobs)")
+    ap.add_argument("--allow-new-functions", action="store_true",
+                    help="a candidate may add target kernels (e.g. a new CTA variant); a missing one stays fatal")
     a = ap.parse_args()
     if os.path.exists(a.run_dir):
         raise SystemExit(f"run directory {a.run_dir} exists: every gate run gets a fresh directory")
@@ -284,7 +286,10 @@ def main():
             gate.save(candidate_library=lib, candidate_sha256=sha256(lib))
             r_prev = resources(gate, os.path.abspath(a.prev_lib), a.kernel, "prev")
             r_cand = resources(gate, lib, a.kernel, "cand")
-            if r_prev["functions"] != r_cand["functions"]:
+            if a.allow_new_functions and r_cand["functions"] > r_prev["functions"]:
+                print(f"[gate] WARNING: target {a.kernel!r} has {r_cand['functions']} functions (previous "
+                      f"{r_prev['functions']}): new kernels allowed by --allow-new-functions", flush=True)
+            elif r_prev["functions"] != r_cand["functions"]:
                 raise GateFailure(f"target {a.kernel!r}: {r_prev['functions']} functions in the previous build, "
                                   f"{r_cand['functions']} in the candidate")
             regress = resource_regressions(r_prev, r_cand)
@@ -334,14 +339,14 @@ def main():
                 gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws, "--defects", defects,
                                            "--report", os.path.join(run_dir, f"num_{r}_report.json")]
                          + [x for tag, f in files.items() for x in (f"--{tag}", f)])
-            # residual-v2 (Hao's per-row contract, round 16): every route's check must report AC-2.3 eligibility
+            # residual-v3 (Hao's per-row contract, round 17): every route's check must report AC-2.3 eligibility
             for r in routes:
                 try:
                     rep_ = json.load(open(os.path.join(run_dir, f"num_{r}_report.json")))
                 except (OSError, ValueError):
                     rep_ = {}
-                if rep_.get("ac23_eligible") is not True or "residual-v2" not in str(rep_.get("residual_versions", {}).get("rows")):
-                    raise GateFailure(f"numerics route {r}: not AC-2.3 eligible under residual-v2")
+                if rep_.get("ac23_eligible") is not True or "residual-v3" not in str(rep_.get("residual_versions", {}).get("rows")):
+                    raise GateFailure(f"numerics route {r}: not AC-2.3 eligible under residual-v3")
             gate.save(numerics={r: json.load(open(os.path.join(run_dir, f"num_{r}_report.json")))["result"] for r in routes})
         if a.mode == "full":
             base = a.base_dumps.split(","); prev = a.prev_dumps.split(",")

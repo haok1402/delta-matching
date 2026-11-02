@@ -37,10 +37,12 @@ RESIDUAL_ULP_PER_KEY = 2.0 ** -23
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # residual-v2 (Hao's decision, round 16; docs/kda-sm90/rule-change-r10.md): per matched row r with k_r visible keys,
 # num_r = |sum_j t_rj|, den_r = sum_j |t_rj| (fp64 over the kernel's fp32 partials).  Exempt (degenerate) rows: k_r <= 1
-# or den_r < RESIDUAL_FLOOR (all-zero dS; the kernels' own 1e-30 psi floor).  Every other row: num_r <= k_r 2^-23 den_r,
-# and num_r / den_r <= its own accepted value + k_r 2^-23.  den_r == 0 requires num_r == 0.  The exempt set may not grow
-# or move vs the accepted build.  Bounds are derived here from the case geometry, never taken from a capture.
-RESIDUAL_VERSION = "residual-v2"
+# or den_r < RESIDUAL_FLOOR (all-zero dS; the kernels' own 1e-30 psi floor).  residual-v3 (Hao, round 17): every other
+# row: num_r / den_r <= its own accepted value + k_r 2^-23 (per-row non-regression at fp32 round-off); den_r == 0
+# requires num_r == 0; the exempt set may not grow or move vs the accepted build.  The absolute bound num_r <= k_r 2^-23
+# den_r (residual-v2) is REPORTED only: the original kernel exceeds it on 10204 of 334592 rows.  Bounds are derived here
+# from the case geometry, never taken from a capture.
+RESIDUAL_VERSION = "residual-v3"   # v2 (absolute bound) dropped by Hao after the accepted build's self-certificate
 RESIDUAL_FLOOR = 1e-30
 
 
@@ -387,12 +389,12 @@ def _load(path, route, label, dbg, probs, manifest):
                         probs.append(f"{label} {k}: residual record missing / out of range ({rp}, {rc})")
                     elif g["zero_den_nonzero_num"]:
                         probs.append(f"{label} {k}: {g['zero_den_nonzero_num']} zero-denominator rows with a nonzero sum")
-                    # the centered ratio is a reported diagnostic only (residual-v2 is the predicate, check())
+                    # the centered ratio is a reported diagnostic only (the residual-v3 per-row predicate is in check())
     return d
 
 
 def residual_rows_check(k, desc, ncg, npg, C, R, P, probs):
-    """residual-v2 on every row of every matched group of case k: candidate DBG (C), its repeat (R), previous DBG (P)."""
+    """residual-v3 on every row of every matched group of case k: candidate DBG (C), its repeat (R), previous DBG (P)."""
     import torch
     out = {"rows": 0, "exempt": 0, "prev_exempt": 0, "violations": 0, "regressions": 0}
     if ncg != npg or C is None or R is None or P is None:
@@ -427,10 +429,7 @@ def residual_rows_check(k, desc, ncg, npg, C, R, P, probs):
             out["violations_v2c"] = out.get("violations_v2c", 0) + int(vc.sum())
         if bool(zc.any()):
             probs.append(f"{k} group {i}: {int(zc.sum())} zero-denominator rows with a nonzero sum")
-        if bool(viol.any()):
-            j = int(torch.where(viol.flatten(), rc.flatten() / bound.flatten(), torch.zeros(1, dtype=torch.float64)).argmax())
-            probs.append(f"{k} group {i}: {int(viol.sum())} rows above the round-off bound (worst ratio "
-                         f"{float(rc.flatten()[j]):.3e} vs {float(bound.flatten()[j]):.3e}, keys {int(keys.flatten()[j])})")
+        # residual-v3: rows above the absolute round-off bound are reported (out["violations"]), not a predicate
         if bool(grow.any()):
             probs.append(f"{k} group {i}: the exemption set grows / moves ({int(grow.sum())} rows not exempt before)")
         if bool(reg.any()):
@@ -522,9 +521,9 @@ def check(a):
                                                if report["known_defects"] else "PASS"))
     # The residual acceptance contract is not settled (the plan's ratio is ill-conditioned on short rows; no replacement
     # is authorized): a PASS here validates capture / identity / schema plumbing and is NOT an AC-2.3 certificate.
-    report["residual_versions"]["rows"] = RESIDUAL_VERSION + " (the AC-2.3 predicate)"
+    report["residual_versions"]["rows"] = RESIDUAL_VERSION + " (the AC-2.3 predicate: per-row non-regression, no exemption growth)"
     report["ac23_eligible"] = not probs and all(caps.values())
-    report["ac23_note"] = ("residual-v2 per-row contract (Hao, round 16) enforced with determinism, identities, error "
+    report["ac23_note"] = ("residual-v3 per-row contract (Hao, round 17) enforced with determinism, identities, error "
                            "non-increase and workspace checks" if report["ac23_eligible"] else "not eligible: problems")
     if a.report:
         with open(a.report, "w") as f:

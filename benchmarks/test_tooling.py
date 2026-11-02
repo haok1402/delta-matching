@@ -261,6 +261,8 @@ if sys.argv[0].endswith("cuobjdump"):
     shape = os.environ.get("STUB_RES", "ok")
     lib = open(args[-1], "rb").read()
     funcs = [f for f in FUNCS if not (shape == "nomatch" and "KernelX" in f)]
+    if shape == "newfunc" and lib == b"lib":
+        funcs = funcs + ["_Z9KernelX_w4"]   # the candidate adds a target kernel (e.g. a 4-warpgroup CTA variant)
     ninstr = 5000 if shape == "long" else 200
     if "--dump-resource-usage" in args:
         print("Fatbin elf code:\n================\narch = sm_90")
@@ -398,6 +400,14 @@ def test_gate_refuses_a_reused_run_directory(tmp_path):
 def test_gate_rejects_missing_or_malformed_resource_evidence(tmp_path, shape, why):
     r = run_gate(tmp_path, "full", "", extra={"STUB_RES": shape})
     assert r.returncode == 1 and why in r.stdout and "step pytest" not in r.stdout, r.stdout[-800:]
+
+
+def test_gate_new_target_functions_need_the_explicit_flag(tmp_path):
+    r = run_gate(tmp_path, "full", "", extra={"STUB_RES": "newfunc"})
+    assert r.returncode == 1 and "functions in the previous build" in r.stdout, r.stdout[-800:]
+    d = tmp_path / "flag"; d.mkdir()
+    r = run_gate(d, "full", "", extra={"STUB_RES": "newfunc"}, args=["--allow-new-functions"])
+    assert r.returncode == 0 and "new kernels allowed" in r.stdout, r.stdout[-800:]
 
 
 def test_gate_rejects_a_misspelled_kernel_selector(tmp_path):
@@ -718,7 +728,7 @@ def test_numerics_check_passes_a_self_certificate(tmp_path):
     r = _numcheck(tmp_path, extra=("--report", str(tmp_path / "rep.json")))
     assert r.returncode == 0 and "PASS" in r.stdout, r.stdout[-800:]
     rep = json.load(open(tmp_path / "rep.json"))
-    assert rep["ac23_eligible"] is True and "residual-v2" in rep["residual_versions"]["rows"]
+    assert rep["ac23_eligible"] is True and "residual-v3" in rep["residual_versions"]["rows"]
     k = rep["cases"]["d128_gqa4/causal/matched"]
     assert k["exempt"] > 0 and k["exempt"] == k["prev_exempt"] and k["violations"] == 0
 
@@ -768,8 +778,8 @@ def _both(fn):
 
 
 @pytest.mark.parametrize("why,rows_mutate", [
-    # one row worsens past round-off while the group's plan maximum stays 1 (row 0, exempt): per row, not group maxima
-    ("above the round-off bound", _both(lambda s: s[_G]["num"].__setitem__((0, 7), 8 * 2.0 ** -22))),
+    # one row worsens past its accepted value + round-off while the group's plan maximum stays 1 (row 0, exempt)
+    ("above their accepted residual", _both(lambda s: s[_G]["num"].__setitem__((0, 7), 8 * 2.0 ** -22))),
     ("exemption set grows", _both(lambda s: (s[_G]["num"].__setitem__((0, 9), 0.0), s[_G]["den"].__setitem__((0, 9), 0.0)))),
     ("zero-denominator rows with a nonzero sum", _both(lambda s: s[_G]["den"].__setitem__((0, 9), 0.0))),
     ("nondeterministic", lambda s: s["cand-dbg-repeat"][_G]["num"].__setitem__((0, 5), 0.0)),
@@ -779,6 +789,15 @@ def _both(fn):
 def test_numerics_residual_v2_rejects(tmp_path, why, rows_mutate):
     r = _numcheck(tmp_path, rows_mutate=rows_mutate)
     assert r.returncode == 1 and why in r.stdout, (why, r.stdout[-800:])
+
+
+def test_numerics_residual_v3_absolute_bound_is_reported_not_enforced(tmp_path):
+    def both_high(s):                         # accepted AND candidate above the absolute bound, equal: passes (v3)
+        for t in s:
+            s[t][_G]["num"][0, 7] = 8 * 2.0 ** -22
+    r = _numcheck(tmp_path, rows_mutate=both_high, extra=("--report", str(tmp_path / "r.json")))
+    assert r.returncode == 0, r.stdout[-600:]
+    assert json.load(open(tmp_path / "r.json"))["cases"]["d128_gqa4/causal/matched"]["violations"] == 1
 
 
 def test_numerics_residual_v2_regression_vs_the_accepted_row(tmp_path):
@@ -1053,4 +1072,4 @@ def test_numerics_gate_accepts_only_residual_v2_eligible_reports(tmp_path):
     r = run_gate(tmp_path, "numerics", "", args=["--base-root", str(tmp_path / "base"), "--cand-dbg-root",
                                                  str(tmp_path / "cdbg"), "--prev-dbg-root", str(tmp_path / "pdbg"),
                                                  "--defects", str(tmp_path / "m.json")])
-    assert r.returncode == 1 and "not AC-2.3 eligible under residual-v2" in r.stdout, r.stdout[-600:]
+    assert r.returncode == 1 and "not AC-2.3 eligible under residual-v3" in r.stdout, r.stdout[-600:]

@@ -126,3 +126,19 @@ Breadth (Hao, round 17): compute is not rationed: many candidates and many varia
 worktrees and screened with short 1-GPU sbatch --wait jobs (`.local/jobs/screen.sh`: build, default-route bitwise
 check, 2-rep A/B on B2 N8192 16/4 and 32/4); screen winners go to the full gate + confirmation; every screened variant
 is logged with its number (results/screens.md).
+
+## Round 17: residual-v3 (Hao's decision after the accepted build's self-certificate)
+
+The self-certificate of the accepted build (jobs 21171647-50, results/r17/cert) showed the ORIGINAL kernel exceeds the
+absolute round-off bound k_r 2^-23 on 10204 of 334592 matched rows on every route (the scale3 / scale10 / outliers
+cases and a few 2-3-key rows of the Gaussian cases; a |delta|-conditioned variant still left 9667), so Hao dropped the
+absolute bound. An output-changing candidate passes the residual check when:
+1. no non-exempt row's residual exceeds its value in the accepted build by more than fp32 round-off:
+   ratio_r(candidate) <= ratio_r(accepted) + k_r 2^-23 (per-row non-regression);
+2. the degenerate exemption set (k_r <= 1 or sum |t| < 1e-30) does not grow (or move) vs the accepted build;
+3. the other AC-2.3 conditions hold: deterministic (identical outputs and row records over two runs), error vs fp32 not
+   larger on any case / output, named numerics change in the commit; plus the existing identity / workspace checks.
+den_r == 0 still requires num_r == 0. Rows above the absolute bound are reported (`violations`), not enforced.
+Implemented as "residual-v3" in benchmarks/numerics.py; `gate.py --mode numerics` accepts only when all four routes'
+reports are `ac23_eligible` under residual-v3. The accepted build is re-certified under it before any numerics
+candidate is accepted.

@@ -259,3 +259,17 @@ exhausted levers report DONE; pass-0 work stops (it meets the target).
    under v5; one that makes any row worse than the original beyond round-off is reverted or fixed before anything
    else is accepted.
 5. Bitwise candidates pass automatically; residual-v5 gates every non-bitwise candidate from now on.
+
+## Round 21: docs/kda-sm90/TASK.md adopted (Hao) as the current task for kda-sm90 and every helper
+
+Added as given; where it disagrees with plan.md or older notes, TASK.md wins. Fact fixes / notes on adoption:
+- Fixed: AGENTS.md is not in the repo; the cluster rules are ~/workspace/haok1402/agents/AGENTS.md (TASK.md now says so).
+- Supersedes earlier error-tolerance decisions: TASK.md's "error against fp32: per case at most 1e-5 relative above
+  the ORIGINAL, and the mean over cases does not rise" replaces residual-v4's reference (the accepted build), its
+  stale / full 1e-3 per-case allowance and its 1e-6 mean-noise allowance (round-17 decisions). Applied from now on in
+  the residual-v5 gate and in the re-audit of the accepted numerics changes.
+- New scope requirement: stale mode, full attention, head dim 256 and other lengths must not get slower. The current
+  gate does not time them (they were correctness-only since round 12); a no-regression timing check over those
+  configurations is being added to the gate.
+- Two-kernel changes: "the target kernel (or the summed time of every kernel a change touches)" replaces the round-18
+  rule (target the kernel that clears 3%).

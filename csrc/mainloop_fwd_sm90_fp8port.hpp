@@ -1396,6 +1396,12 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         };
         auto fq8_descale = [&](auto& tSrS_, int n_blk) {
             if constexpr (kVarSP == 0) { fq8_load_k(n_blk); }
+            if constexpr (kVarBasis == 2) {   // the tile's v-scales enter the code basis
+                #pragma unroll
+                for (int g = 0; g < kGroups; ++g) {
+                    softmax.vsc_[g] = kVarSP == 3 ? fq8_vn[g] : params.ptr_v8s[fq8_bh_k + min(kGroups * n_blk + g, params.nblk_k - 1)];
+                }
+            }
             if constexpr (kVarDesc == 1) {
                 auto sc_ = make_tensor(tSrS_.data(), flash::convert_layout_acc_rowcol(tSrS_.layout()));
                 float g_[kGS];

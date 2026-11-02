@@ -54,7 +54,7 @@ __device__ __forceinline__ void port_reduce_group_(Tensor<Engine0, Layout0> cons
 
 template <int kNRows, int kGroups, int kRowcol, int kBasis, int kDescale, int kPhatFloorB = 12, int kLazy = 0>
 struct SoftmaxPort {
-    static_assert(kBasis == 0 || kBasis == 1);
+    static_assert(kBasis >= 0 && kBasis <= 2);   // 2: per-row tile basis with v8sc_g / vmax folded into the codes
     static_assert(kDescale >= 0 && kDescale <= 2);
     static constexpr int kColsPerGroup = kGroups > 0 ? kRowcol / kGroups : kRowcol;
     static_assert((kBasis == 0 && kDescale == 0) || kColsPerGroup * kGroups == kRowcol, "groups must tile the rowcol width");
@@ -68,11 +68,12 @@ struct SoftmaxPort {
     TensorT ref_max;           // kLazy: the per-row reference max tOrO is kept in (lags row_max by <= 2^8)
     TensorT ms_[kGS];          // kBasis 1: the per-group log2 basis of the codes in tOrP
     float gsc_[kGS];           // kDescale 2: per-group descale q8sc * k8sc_g (natural units)
+    float vsc_[kGS];           // kBasis 2: the tile's v-scales (set by the mainloop before max_get_scale_grouped)
     float const softmax_scale_log2;
 
     CUTLASS_DEVICE SoftmaxPort(float const l2) : softmax_scale_log2(l2) {
         #pragma unroll
-        for (int g = 0; g < kGS; ++g) { gsc_[g] = 1.f; }
+        for (int g = 0; g < kGS; ++g) { gsc_[g] = 1.f; vsc_[g] = 1.f; }
     }
 
     template <bool Check_inf>
@@ -139,6 +140,16 @@ struct SoftmaxPort {
                 float const floor_l2 = max_l2<Check_inf>(mi) - kFloorB;
                 #pragma unroll
                 for (int g = 0; g < kGroups; ++g) { ms_[g](mi) = fmaxf(ms_[g](mi) * softmax_scale_log2, floor_l2) - kLog2_448; }
+            } else if constexpr (kBasis == 2) {
+                // one basis per row and tile (the tile max -> 448), each group's codes scaled by v8sc_g / vmax so that every
+                // group's product carries the same weight vmax 2^(msT - m l2): one PV chain, one promote, no rho.
+                float const floor_l2 = max_l2<Check_inf>(mi) - kFloorB;
+                float const msT = fmaxf(tile_max(mi) * softmax_scale_log2, floor_l2) - kLog2_448;
+                float vmax = vsc_[0];
+                #pragma unroll
+                for (int g = 1; g < kGroups; ++g) { vmax = fmaxf(vmax, vsc_[g]); }
+                #pragma unroll
+                for (int g = 0; g < kGroups; ++g) { ms_[g](mi) = msT - __log2f(vsc_[g] / vmax); }
             }
         }
         return scores_scale;
@@ -164,7 +175,7 @@ struct SoftmaxPort {
                 }
             }
             flash::reduce_sum</*zero_init=*/Is_first, /*warp_reduce=*/false>(scores, row_sum);
-        } else {
+        } else {   // kBasis 1 and 2
             #pragma unroll
             for (int mi = 0; mi < kNRows; ++mi) {
                 #pragma unroll
@@ -223,7 +234,7 @@ struct SoftmaxPort {
         TensorT c;
         #pragma unroll
         for (int mi = 0; mi < kNRows; ++mi) {
-            if constexpr (kBasis == 1) { c(mi) = v8sc_g * exp2f(ms_[G](mi) - (kLazy ? ref_l2(mi) : max_l2</*Check_inf=*/true>(mi))); }
+            if constexpr (kBasis >= 1) { c(mi) = v8sc_g * exp2f(ms_[G](mi) - (kLazy ? ref_l2(mi) : max_l2</*Check_inf=*/true>(mi))); }
             else { c(mi) = v8sc_g; }
         }
         return c;

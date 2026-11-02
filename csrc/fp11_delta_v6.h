@@ -377,6 +377,9 @@ struct DeltaV6 {
             // reduce (P0RTR) + per-tile fp64 fold: fewer fp32 roundings per row (no per-tile cross-lane fp32 sums), no
             // shuffles / fp64 adds inside the n-block loop.  The exp line (P, shared bit for bit with pass 1) and every
             // per-element product are unchanged.  Deterministic (fixed order, one writer per row).
+            // ## P0LAZY (named numerics change on top of P0DEFER): the dP descale (dp_g = dO scale x V scale of the
+            // n-block's 64-key group) is applied once to each 8-key half partial instead of to every element: one rounding
+            // per half instead of one per element, one FMUL per element less.
             double acc_q0 = 0.0, acc_q1 = 0.0;   // this lane's partial of row0 / row1
             double acc_r = 0.0;                  // the quad-reduced row value this lane stores (quad_hi: row1)
             bool const quad_hi = (wtid & 2) != 0;
@@ -388,10 +391,10 @@ struct DeltaV6 {
                 for (int mi = 0; mi < 2; ++mi) {
                     float a0 = 0.f, a1 = 0.f;
                     #pragma unroll
-                    for (int ni = 0; ni < 8; ++ni) { a0 = fmaf(scores(mi, ni), dPv(mi, ni) * dp_g0, a0); }
+                    for (int ni = 0; ni < 8; ++ni) { a0 = fmaf(scores(mi, ni), dPv(mi, ni), a0); }
                     #pragma unroll
-                    for (int ni = 8; ni < 16; ++ni) { a1 = fmaf(scores(mi, ni), dPv(mi, ni) * dp_g1, a1); }
-                    a[mi][0] = a0; a[mi][1] = a1;
+                    for (int ni = 8; ni < 16; ++ni) { a1 = fmaf(scores(mi, ni), dPv(mi, ni), a1); }
+                    a[mi][0] = a0 * dp_g0; a[mi][1] = a1 * dp_g1;   // ## P0LAZY: the dP descale once per 8-key half partial
                 }
                 acc_q0 += double((a[0][0] + a[0][1]) * kFq8MoInv);
                 acc_q1 += double((a[1][0] + a[1][1]) * kFq8MoInv);

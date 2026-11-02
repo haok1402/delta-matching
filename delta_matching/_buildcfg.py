@@ -74,6 +74,7 @@ def defines():
         d.append("-DKDA_TRACE=1")
     d += [f"-D{k}={v}" for k, v in FLAGS.items()]
     d += EXTRA_DEFINES
+    d += os.environ.get("KDA_EXTRA_DEFS", "").split()
     return d
 
 
@@ -82,6 +83,11 @@ def sources():
          "flash_delta_hdim256_e4m3_fp11_sm90.cu", "fp11_twin_kernel.cu",
          "flash_fwd_hdim128_e4m3_fp8f_sm90.cu", "flash_bwd_hdim128_e4m3_fp8v10_sm90.cu",
          "flash_delta_hdim128_e4m3_fp11v5_sm90.cu"]
+    if os.environ.get("DM_FWDPORT_BUILD", "1") == "1":   # kda-fwdport experiments: one TU per variant
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gen_fwdport", os.path.join(CSRC, "gen_fwdport.py"))
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        s += mod.main()
     return [os.path.join(CSRC, f) for f in s]
 
 

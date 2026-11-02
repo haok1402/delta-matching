@@ -24,6 +24,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
 
 #include "flash_bwd_fp8_params.h"   // Flash_fwd_fp8_params / Flash_bwd_fp8_params (pulls flash.h)
@@ -59,6 +60,20 @@ void run_flash_delta_fp11_d256(Flash_bwd_fp8_params &params, cudaStream_t stream
 // the same ops dispatch on head_size, the block-scale contract is [128, 64] = the Triton reference's).
 template <bool Is_causal>
 void run_flash_fwd_fp8f_d128(Flash_fwd_fp8_params &params, cudaStream_t stream);
+// ## FWDPORT (kda-fwdport experiments): FA3-port forward variants, selected by the env DM_FWDPORT=<kVar> (causal hd128 only)
+#include "fwdport_variants.h"
+template <int kVar> void run_flash_fwd_fp8port_d128(Flash_fwd_fp8_params &params, cudaStream_t stream);
+static int fwdport_variant() {
+    static int v = [] { char const* e = std::getenv("DM_FWDPORT"); return e && *e ? std::atoi(e) : -1; }();
+    return v;
+}
+static bool fwdport_launch(int v, Flash_fwd_fp8_params &params, cudaStream_t stream) {
+#define FWDPORT_CASE(V) if (v == V) { run_flash_fwd_fp8port_d128<V>(params, stream); return true; }
+    FWDPORT_LIST(FWDPORT_CASE)
+#undef FWDPORT_CASE
+    TORCH_CHECK(false, "DM_FWDPORT=", v, " is not a compiled variant");
+    return false;
+}
 template <bool Is_causal>
 void run_flash_bwd_fp11_d128(Flash_bwd_fp8_params &params, cudaStream_t stream);
 template <bool Is_causal>
@@ -201,7 +216,8 @@ std::tuple<at::Tensor, at::Tensor> fwd_fp8_core(
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     if (head_size == 128) {
-        if (is_causal) { run_flash_fwd_fp8f_d128<true>(params, stream); }   // ## Delta-Matching-128
+        if (is_causal && fwdport_variant() >= 0) { fwdport_launch(fwdport_variant(), params, stream); }
+        else if (is_causal) { run_flash_fwd_fp8f_d128<true>(params, stream); }   // ## Delta-Matching-128
         else { run_flash_fwd_fp8f_d128<false>(params, stream); }
     } else {
         if (is_causal) { run_flash_fwd_fp8f_d256<true>(params, stream); }

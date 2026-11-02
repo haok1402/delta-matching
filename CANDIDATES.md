@@ -1,6 +1,6 @@
 # kda-solcheck: are the sol4 floors reachable? (branch kda-sm90-solcheck)
 
-Helper kda-solcheck, branch `kda-sm90-solcheck` on origin/kda-sm90 19c238b. This helper ships no kernel change. Its
+Helper kda-solcheck, branch `kda-sm90-solcheck` on origin/kda-sm90 (rebased on 70b482e). This helper ships no kernel change. Its
 deliverable is a measurement: synthetic microkernels with the exact step-loop instruction mix of the accepted kernels
 (frozen r17_p0s), the floors' assumptions measured directly, and a corrected floor. The full report is
 `results/solcheck/README.md`; the tools are in `solcheck/`.
@@ -61,7 +61,7 @@ Why the ceiling sits there (measured):
 
 ### SC1: synthetic ideal-mix step kernels + floor-assumption microbenchmarks (measurement, no kernel change)
 
-- Commits on `kda-sm90-solcheck`: 69df559 (generator, microbenchmarks, run r3) and the commit adding this file.
+- Commits on `kda-sm90-solcheck`: f1b7dac (generator, microbenchmarks, run r3) and the commit adding this file.
 - What it changes: nothing in the library (`solcheck/`, `results/solcheck/`, `CANDIDATES.md` only); bitwise n/a.
 - Numbers: the tables above. Jobs:
   - 21183317 (r3);

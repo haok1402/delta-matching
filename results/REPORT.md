@@ -79,6 +79,7 @@ Source: `results/r17/accepted_pk/sol4c.md` (`benchmarks/sol4.py`).
 | 17 | C3g: BM192 three-warpgroup forward + lazy O rescale + descale fold on unmasked steps (kda-fwd) | forward | -12.89% / -12.68% | named numerics |
 | 17 | pass-0 stack: P0NML mask-free loop + register split + P0ALL one all-heads call (kda-pass0) | pass 0 | -3.19% / -3.43% | bitwise |
 | 17 | EXPBX64: exp-line bias fold off the masked diagonal, passes 0 + 1 (kda-p1packed) | pass 0 | -4.50% / -4.04% | named numerics |
+| 18 | C4: SHFL8 dS' transpose + exp clamp on the masked-tile line only (kda-pass1) | pass 0 + pass 1 | p0 -3.53 / -3.86%, p1 -3.31 / -3.08% | named numerics (bitwise on all cases) |
 
 ## What was tried and why it failed (summary; full ledgers in results/screens and the helpers' CANDIDATES.md)
 

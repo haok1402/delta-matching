@@ -803,3 +803,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   (limit 1e-5; e.g. gqa3_promote 4.604e-2 -> 5.025e-2) and 7 matched rows beyond the envelope; the smaller groups'
   codes lose precision on the shared basis (more e4m3 subnormals): a real accuracy loss, REJECTED. 2 WGs + BN256:
   +8.3%. Forward helper back to DONE; the per-group P basis is the forward's remaining cost under the contract.
+- kda-pass1 C4 (SHFL8 8-shuffle dS' transpose + the exp clamp min(t, 12) kept only on the certified masked-tile line
+  that pass 0 masks (EXPBX64's predicate), dropped on the folded line elsewhere: -32 FMNMX per thread per step in
+  pass 1 and per tile in pass 0; a named numerics change, bitwise on all 72 x 4 certification cases): gate 21191514
+  (target pass 0 per the two-kernel rule) bitwise on all four routes, pass 0 -3.53%, pass 1 -3.31%, e2e fwd+bwd
+  -2.21%, bench -5.7%; confirmation 21191853 (library 13235f129191) pass 0 -3.86%, pass 1 -3.08%, e2e -2.31%:
+  ACCEPTED (accepted root r18_c4).

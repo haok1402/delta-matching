@@ -1,0 +1,165 @@
+{
+ "steps": [
+  {
+   "step": "ab_all",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/ab.py",
+    "run",
+    "--a",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_pk",
+    "--b",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/p1c4",
+    "--grid",
+    "paper",
+    "--reps",
+    "3",
+    "--target",
+    "pass0",
+    "--out-dir",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/ab_all"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/01_ab_all.log"
+  },
+  {
+   "step": "bench_A_rep0_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/bench_A_rep0_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/02_bench_A_rep0_D128.log"
+  },
+  {
+   "step": "bench_B_rep0_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/bench_B_rep0_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/03_bench_B_rep0_D128.log"
+  },
+  {
+   "step": "bench_B_rep1_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/bench_B_rep1_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/04_bench_B_rep1_D128.log"
+  },
+  {
+   "step": "bench_A_rep1_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/bench_A_rep1_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/05_bench_A_rep1_D128.log"
+  },
+  {
+   "step": "bench_A_rep2_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/bench_A_rep2_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/06_bench_A_rep2_D128.log"
+  },
+  {
+   "step": "bench_B_rep2_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/bench_B_rep2_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_2/07_bench_B_rep2_D128.log"
+  }
+ ],
+ "decision": {
+  "target": "pass0",
+  "tune_dim": 128,
+  "threshold_pct": 3.0,
+  "weighting": "geometric mean per shape",
+  "target_tune_A": 52.75633019999999,
+  "target_tune_B": 50.71947929999999,
+  "target_tune_change_pct": -3.7758510338066653,
+  "target_tune_sum_change_pct": -3.860865401892566,
+  "target_shape_ratios": {
+   "(128, 2, 16, 4, 8192, 'causal', 'matched')": 0.9614300960063132,
+   "(128, 1, 16, 4, 65536, 'causal', 'matched')": 0.9639071064823265,
+   "(128, 2, 32, 4, 8192, 'causal', 'matched')": 0.9635608123163818,
+   "(128, 1, 32, 4, 65536, 'causal', 'matched')": 0.9600730766114428
+  },
+  "target_other_A": 0,
+  "target_other_B": 0,
+  "target_other_change_pct": 0.0,
+  "target_other_slower_beyond_spread": false,
+  "tune_shapes_slower_beyond_spread": [],
+  "other_shapes_slower_beyond_spread": [],
+  "tuned_configs": 4,
+  "checks": {
+   "target_gain": true,
+   "tune_shapes": true,
+   "complete_set": true
+  },
+  "accept": true
+ },
+ "bench_decision": {
+  "changes_pct": {
+   "D128 delta_matching (matched)": -0.137
+  },
+  "ok": true,
+  "limit_pct": 1.0
+ },
+ "result": "PASSED (all steps exited 0 and the merged-grid acceptance predicates hold for this job)"
+}

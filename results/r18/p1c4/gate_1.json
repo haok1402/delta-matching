@@ -1,0 +1,498 @@
+{
+ "steps": [
+  {
+   "step": "resources_prev",
+   "cmd": [
+    "cuobjdump",
+    "--dump-resource-usage",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_pk/delta_matching/_C.so"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/01_resources_prev.log"
+  },
+  {
+   "step": "sass_prev",
+   "cmd": [
+    "cuobjdump",
+    "-sass",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_pk/delta_matching/_C.so"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/02_sass_prev.log"
+  },
+  {
+   "step": "elf_prev",
+   "cmd": [
+    "cuobjdump",
+    "--dump-elf",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_pk/delta_matching/_C.so"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/03_elf_prev.log"
+  },
+  {
+   "step": "resources_cand",
+   "cmd": [
+    "cuobjdump",
+    "--dump-resource-usage",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/jit/p1c4/_C.so"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/04_resources_cand.log"
+  },
+  {
+   "step": "sass_cand",
+   "cmd": [
+    "cuobjdump",
+    "-sass",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/jit/p1c4/_C.so"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/05_sass_cand.log"
+  },
+  {
+   "step": "elf_cand",
+   "cmd": [
+    "cuobjdump",
+    "--dump-elf",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/jit/p1c4/_C.so"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/06_elf_cand.log"
+  },
+  {
+   "step": "pytest",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "-m",
+    "pytest",
+    "tests/",
+    "-q",
+    "-rs",
+    "-p",
+    "gate_identity",
+    "--junitxml=/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/pytest.xml"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/07_pytest.log"
+  },
+  {
+   "step": "dump_default",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "dump",
+    "--route",
+    "default",
+    "--expect-root",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/p1c4",
+    "--out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_default.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/08_dump_default.log"
+  },
+  {
+   "step": "compare_base_default",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_default.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_default.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/09_compare_base_default.log"
+  },
+  {
+   "step": "compare_prev_default",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_default.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_default.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/10_compare_prev_default.log"
+  },
+  {
+   "step": "dump_kv",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "dump",
+    "--route",
+    "kv",
+    "--expect-root",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/p1c4",
+    "--out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_kv.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/11_dump_kv.log"
+  },
+  {
+   "step": "compare_base_kv",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_kv.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_kv.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/12_compare_base_kv.log"
+  },
+  {
+   "step": "compare_prev_kv",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_kv.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_kv.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/13_compare_prev_kv.log"
+  },
+  {
+   "step": "dump_head",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "dump",
+    "--route",
+    "head",
+    "--expect-root",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/p1c4",
+    "--out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_head.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/14_dump_head.log"
+  },
+  {
+   "step": "compare_base_head",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_head.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_head.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/15_compare_base_head.log"
+  },
+  {
+   "step": "compare_prev_head",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_head.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_head.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/16_compare_prev_head.log"
+  },
+  {
+   "step": "dump_streams2",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "dump",
+    "--route",
+    "streams2",
+    "--expect-root",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/p1c4",
+    "--out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_streams2.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/17_dump_streams2.log"
+  },
+  {
+   "step": "compare_base_streams2",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_streams2.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_streams2.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/18_compare_base_streams2.log"
+  },
+  {
+   "step": "compare_prev_streams2",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/equivalence.py",
+    "compare",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/equiv4/r17pk_streams2.pt",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/cand_streams2.pt"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/19_compare_prev_streams2.log"
+  },
+  {
+   "step": "ab_all",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/ab.py",
+    "run",
+    "--a",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_pk",
+    "--b",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/p1c4",
+    "--grid",
+    "paper",
+    "--reps",
+    "3",
+    "--target",
+    "pass0",
+    "--out-dir",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/ab_all"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/20_ab_all.log"
+  },
+  {
+   "step": "bench_A_rep0_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/bench_A_rep0_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/21_bench_A_rep0_D128.log"
+  },
+  {
+   "step": "bench_B_rep0_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/bench_B_rep0_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/22_bench_B_rep0_D128.log"
+  },
+  {
+   "step": "bench_B_rep1_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/bench_B_rep1_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/23_bench_B_rep1_D128.log"
+  },
+  {
+   "step": "bench_A_rep1_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/bench_A_rep1_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/24_bench_A_rep1_D128.log"
+  },
+  {
+   "step": "bench_A_rep2_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/bench_A_rep2_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/25_bench_A_rep2_D128.log"
+  },
+  {
+   "step": "bench_B_rep2_D128",
+   "cmd": [
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/envs/dm/bin/python",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/benchmarks/bench.py",
+    "--D",
+    "128",
+    "--N",
+    "8192",
+    "--modes",
+    "matched",
+    "--json-out",
+    "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/bench_B_rep2_D128.json"
+   ],
+   "rc": 0,
+   "log": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/rounds/r18/gate_p1c4_1/26_bench_B_rep2_D128.log"
+  }
+ ],
+ "candidate_library": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/jit/p1c4/_C.so",
+ "candidate_sha256": "13235f129191b6c2c893d35f9bdb184e663df507eb87880397c5071d562da384",
+ "resources": {
+  "prev": {
+   "functions": 4,
+   "rows": {
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi2EEEEEvNT_6ParamsE": {
+     "REG": 168,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi4EEEEEvNT_6ParamsE": {
+     "REG": 96,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi2EEEEEvNT_6ParamsE": {
+     "REG": 168,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi4EEEEEvNT_6ParamsE": {
+     "REG": 96,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    }
+   },
+   "text_bytes": {
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi2EEEEEvNT_6ParamsE": 28800,
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi4EEEEEvNT_6ParamsE": 28416,
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi2EEEEEvNT_6ParamsE": 31232,
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi4EEEEEvNT_6ParamsE": 30848
+   },
+   "lines": 7460,
+   "counts": {
+    "QGMMA": 128,
+    "STL": 0,
+    "LDL": 0,
+    "WARPGROUP.DEPBAR": 34,
+    "WARPGROUP.ARRIVE": 32,
+    "BAR.SYNC": 4,
+    "BAR.ARV": 0,
+    "CALL": 0
+   }
+  },
+  "cand": {
+   "functions": 4,
+   "rows": {
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi2EEEEEvNT_6ParamsE": {
+     "REG": 168,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi4EEEEEvNT_6ParamsE": {
+     "REG": 96,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi2EEEEEvNT_6ParamsE": {
+     "REG": 168,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi4EEEEEvNT_6ParamsE": {
+     "REG": 96,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    }
+   },
+   "text_bytes": {
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi2EEEEEvNT_6ParamsE": 31232,
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb0ELi4EEEEEvNT_6ParamsE": 28416,
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi2EEEEEvNT_6ParamsE": 33408,
+    "_ZN7cutlass13device_kernelIN5flash7DeltaV6ILb1ELi4EEEEEvNT_6ParamsE": 30848
+   },
+   "lines": 7748,
+   "counts": {
+    "QGMMA": 128,
+    "STL": 0,
+    "LDL": 0,
+    "WARPGROUP.DEPBAR": 34,
+    "WARPGROUP.ARRIVE": 32,
+    "BAR.SYNC": 4,
+    "BAR.ARV": 0,
+    "CALL": 0
+   }
+  }
+ },
+ "resource_regressions": [],
+ "decision": {
+  "target": "pass0",
+  "tune_dim": 128,
+  "threshold_pct": 3.0,
+  "weighting": "geometric mean per shape",
+  "target_tune_A": 52.630530500000035,
+  "target_tune_B": 50.759655900000084,
+  "target_tune_change_pct": -3.5298654462284196,
+  "target_tune_sum_change_pct": -3.554732552049711,
+  "target_shape_ratios": {
+   "(128, 2, 16, 4, 8192, 'causal', 'matched')": 0.9603546378270318,
+   "(128, 1, 16, 4, 65536, 'causal', 'matched')": 0.9678838007654493,
+   "(128, 2, 32, 4, 8192, 'causal', 'matched')": 0.9678901070804276,
+   "(128, 1, 32, 4, 65536, 'causal', 'matched')": 0.9626992353608722
+  },
+  "target_other_A": 0,
+  "target_other_B": 0,
+  "target_other_change_pct": 0.0,
+  "target_other_slower_beyond_spread": false,
+  "tune_shapes_slower_beyond_spread": [],
+  "other_shapes_slower_beyond_spread": [],
+  "tuned_configs": 4,
+  "checks": {
+   "target_gain": true,
+   "tune_shapes": true,
+   "complete_set": true
+  },
+  "accept": true
+ },
+ "bench_decision": {
+  "changes_pct": {
+   "D128 delta_matching (matched)": -5.698
+  },
+  "ok": true,
+  "limit_pct": 1.0
+ },
+ "result": "PASSED (all steps exited 0 and the merged-grid acceptance predicates hold for this job)"
+}

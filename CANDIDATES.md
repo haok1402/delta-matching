@@ -64,6 +64,7 @@ accepted the same design independently (RESCALE-EARLY == TOPFILL=2, DSDEFER-SPLI
 | EXPSPLIT (on r17_c2) | exp rows 0..7 before the dP wait, dS 0..7 interleaved with exp 8..15 | -0.39 / -0.58% | neutral (first version deadlocked: `if constexpr (false)` before a `#pragma unroll` loop lost a pipeline release; fixed with #if) |
 | (QST, DOST, DOTST) flag sweep | (2,2,1) / (3,3,1) / (3,2,1) / (3,3,2) / (2,2,2) | -1.02/-1.39, -1.61/-1.36, -0.86/+0.23, +0.07/-0.14, +1.10/+0.75% | nothing beyond DOST=2 (2,2,1); screen noise ~1% (the same config v2o read -2.40/-1.47) |
 | SHFL8 | 8-shuffle dS' transpose | -1.67 / -1.86% | **C2** (conversions / packing lever, variant 2) |
+| STLATE=1 / =2 | the deferred dS' store issued after the dK issue / after the transpose (not right after the psi barrier) | +1.37 / +1.55%, +0.26 / +0.13% | reject (with SHFL8: -1.01 / -1.26, -1.36 / -1.21 vs SHFL8 -1.67 / -1.86) |
 
 ## Output-changing levers vs residual-v4 (default route; all deterministic; pytest 49 / 3)
 
@@ -103,3 +104,36 @@ with EARLY still spills), STSEL 1 / 2 (0 / +5.8%), PSIADDR (noise).
   register budget: dK 64 + dV 64 + dK temp 64 + S / dP 64 of 240.
 - So a ~2x pass 1 needs a different dataflow (fewer live accumulators per warp, more warps per SMSP, or less vector work
   per FLOP), i.e. the structural redesign lane (kda-p1redesign / kda-fuse), not schedule tweaks on P1-R.
+
+## Final summary (2026-11-02, helper kda-pass1)
+
+Deliverables:
+- **C1** (TOPFILL=2 + DSDEFER + DVZI + LSEPRE + PV4, bitwise, -4.36% / -4.42% geomean, two jobs): its two effective parts
+  were found and accepted independently as S17-p1-39 (round 17); the rest is neutral on top of it. Superseded.
+- **C2** (SHFL8, bitwise, -1.78% / -1.50% geomean, two jobs, 4 routes bitwise): READY for stacking; with DOST 1 -> 2
+  -2.45% / -2.33%. Branch `kda-sm90-pass1-c2`.
+
+Lever coverage (each with >= 2 designed variants, ~130 screened builds in `results/kda_pass1_screens.md`):
+
+| lever | variants | outcome |
+|---|---|---|
+| instruction cuts: scaling | LSEPRE, EXPB, dPsum/LSE moves (integrator 29 / 35 / 41) | LSEPRE neutral on r17_p1; EXPB -2.4% but fails residual-v4 |
+| exp2 setup | EXPB, EXPSPLIT | EXPSPLIT neutral; EXPB as above |
+| conversions / packing | PCONVEARLY, SHFL8 | **SHFL8 -1.6% (C2)**; PCONVEARLY neutral |
+| psi amax | REDUX 1 / 2 / 3 (and the integrator's AMAXTREE) | +0.2 .. +3.1%, none helps |
+| dK fold | FOLDSPLIT, DKSPLIT | spills / exposed half gemm |
+| dV promote | TOPFILL=1 / 3, PV4, POFF, PW16 / 32 | bitwise ones neutral or slower; PW fails residual-v4 by ~0.7e-5 on one shape |
+| per-warpgroup psi (decoupling) | HALFPSI + P2A, + P2B, + 2-stage dO | pass 1 -2..-3%, pass 2 +11..13%; rejected (integrator: pass1+pass2 +0.1..+0.8%) |
+| ping-pong over all four gemms | PP1 (offset), PP2 (S/dP turns), PP3 (both batches), +/- 2-stage dO, +/- EARLY | -1.1 .. +1.0%; no gain |
+| structural (in-kernel) | EARLY 1..5 (+ liveness kill), KRS / VRS, DKSPLIT (+EARLY / +KRS), POFF, UNROLL2, STSEL | all limited by the 240-register budget or slower |
+| pipeline depth | DOST / DOTST / QST sweeps | only DOST=2 (the integrator's finding) helps |
+| store / fence schedule | DSDEFER (== S17), FENCE2, STLATE 1 / 2, XPTOP | DSDEFER accepted (S17); others slower |
+
+Where pass 1 stands against the sol4-v2 floor (tensor-controlled, 78.6 ms on the paper set): 188.5 ms (41.7%) on r16;
+~179 ms (~43.8%) after S17-p1-39; with C2 ~176 ms (~44.5%), with DOST=2 as well ~45%. The measurements above
+(ablations: vector and tensor work fully serialized; vector phases at ~0.65 IPC per SMSP; smem bandwidth not binding;
+every overlap design blocked by dK 64 + dV 64 + dK-temp 64 + S/dP 64 registers of 240) say a 2x on P1-R needs a
+dataflow with fewer live accumulators per warp or more warps per SMSP: the structural lane (kda-p1redesign /
+kda-fuse), not further schedule tweaks of this kernel. Numerics: under residual-v4, any lever that changes P^ or the dS
+line fails the per-row test by construction (rounding residues move); only accumulation-regrouping levers (PW) can pass,
+and PW16 misses the 1e-5 per-case error tolerance by 0.67e-5 on one shape while lowering the mean.

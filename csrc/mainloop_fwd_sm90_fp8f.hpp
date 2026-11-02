@@ -1739,6 +1739,13 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // promote weight depend only on the consumed tile's state, so they run BEFORE the ring turn; the turn
                     // keeps only the two PV sub-gemms, the rescale, the promote and the QK issue.
                     static constexpr bool kPreTurn = kFwdLazy && kGroups == 2 && kPVNSplit == 1;
+                    // ## kda-fwd VPF (bitwise): this step's tile's v-scales are loaded here into temporaries (they are only
+                    // needed by the NEXT step's pre-turn rho / weight), so their latency is not exposed at the step start.
+                    float vpf_[kGroups];
+                    if constexpr (kPreTurn) {
+                        #pragma unroll
+                        for (int g = 0; g < kGroups; ++g) { vpf_[g] = params.ptr_v8s[fq8_bh_k + kGroups * n_block + g]; }
+                    }
                     if constexpr (kPreTurn) { fq8_lazy_rebase(); }
                     auto const pre_r1_ = [&] { if constexpr (kPreTurn) { return fq8_rho(softmax, 1); } else { return typename Softmax::TensorT{}; } }();
                     auto const pre_w_ = [&] { if constexpr (kPreTurn) { return softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1]); } else { return typename Softmax::TensorT{}; } }();
@@ -1800,7 +1807,12 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     if constexpr (Is_FP8 && V_colmajor) { flash::permute_Aregs_fp8(tOrP); }
                     if constexpr (!MmaPV_is_RS) { write_P_to_smem(tOrP); }
                     KF(13);
+                    if constexpr (kPreTurn) {
+                        #pragma unroll
+                        for (int g = 0; g < kGroups; ++g) { fq8_v[g] = vpf_[g]; }
+                    } else {
                     fq8_load_v(n_block);           // this tile's four v-scales
+                    }
                     if constexpr (!MmaPV_is_RS) { arrive_on_P_write_barrier(); }
                     KF(14); KF_STEP();
                 } else {

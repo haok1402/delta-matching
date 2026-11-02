@@ -294,3 +294,7 @@ Added as given; where it disagrees with plan.md or older notes, TASK.md wins. Fa
   FA3FP11_HD128_BM192 = 0, BN256 = 1, FWDLAZY = 0, FWDDFOLD = 0; KDA_PK_EXPB = 0 in pass 0 and pass 1) while every
   bitwise piece stays; the revert is accepted on bitwise equality with the original arithmetic (or the v5 audit) and
   needs no speed gain. Fixes re-enter only as new candidates passing residual-v5 + the error clause.
+- Decided (round 21), reading of TASK.md's "per case at most 1e-5 relative above the original": the relative-L2 error
+  (vs fp32) of each case / output may exceed the original's by at most 1e-5 in those relative-error units (the reading
+  used since residual-v4; the alternative x(1 + 1e-5) reading is reported alongside). C3g and EXPBX64 fail under
+  either reading, so the revert does not depend on this choice. The per-output mean over cases must not rise.

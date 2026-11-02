@@ -905,3 +905,20 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   holding split, softmax 96 / PV 128 / producer 24, still spills on the PV side; two softmax chains instead of three
   plus a per-tile handoff. Stopped at the skeleton (>= 2% bar missed by 40 points). The forward's layout space is
   exhausted under the 160-register / per-group-basis constraints; forward stays at 1.108x FA3 fp8.
+
+## Round 21: residual-v5 audit of the accepted numerics changes (staged tooling, .local/rounds/r21-v5)
+
+- Measured tensors: the DBG op's rows / rowsabs are the fp32 partials of t = P^ (dP - delta) per n-tile and warpgroup,
+  before the k8s fold and e4m3 quantization (identical code in 3d4cd5b and HEAD); a new DBG-only op bwd_fp8_t_dbg5 adds
+  rowsx (fp64 Σ P^dP, Σ P^, Σ |P^dP| from the same fp32 values), so delta_recomputed = 2^-8 Σ P^dP is compared with the
+  delta used. Production SASS unchanged (22/22 vs base, 24/24 vs r19_fwd); DBG gradients byte-identical to production.
+- v5 as first implemented (ratio |Σt| / Σ|t| vs the ORIGINAL + k 2^-23, no exemptions), rows worse than the original:
+  HEAD vs original 191 (72-case rows, all routes) / 0 (acceptance shapes, 11.8M rows, 3 seeds) / 104,715 (stress);
+  C3g 138 / 0 / 66,540; EXPBX64 63 / 0 / 50,090; C4 0 / 0 / 0 (bitwise rows: PASS); fallbacks C3n2 and nofold also
+  fail. All failing rows are cancelling rows of d128_outliers / scale10 / scale3 and the stress inputs (Σ|t| ~1e-4 ..
+  1e-2 of 2^8 |delta|). Delta used vs recomputed stays at fp32 round-off in every build (<= 3.5e-7 relative).
+- Control: the ORIGINAL with its saved LSE moved +-1 ulp fails this v5 against itself on 4,279 / 4,471 72-case rows
+  (20-30x HEAD), 165 / 155 acceptance rows (HEAD 0) and ~0.4M stress rows; HEAD improves 463 rows vs 191 worse.
+  The ratio form's bound (k 2^-23 times the cancelled Σ|t|) is far below the round-off of computing the row sum.
+  Next (in progress): v5-abs, round-off of the row sum from its actual terms, k 2^-23 (Σ|P^dP| + |delta| Σ P^), on
+  |Σt|, every row vs the original, calibrated by the +-1 ulp controls; revert C3g / EXPBX64 if they fail it.

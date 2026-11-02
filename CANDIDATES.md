@@ -193,7 +193,7 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 - C3f (3565487) vs r17_p1: -12.81% (21177598); the fold carries ~7 points on top of C3n.
 - Strict v4 rows: 23 up / 14 down (C3f 70 / 180); beyond the +-1 ulp LSE envelope: 0 (C3f 1, excess 2.5e-7).
 
-### C3g (kda-sm90-fwd-c3g b0db717 on 9be3622) : READY (timing and my residual-v4 + LSE-envelope reproduction)
+### C3g (kda-sm90-fwd-c3g b0db717 on 9be3622) : ACCEPTED by kda-sm90 as c1ceece (numerics gate 21178215 all four routes, fwd -12.89%; confirmation 21178561 -12.68%)
 
 - C3f + C3n2's zero-scale floor, with FWDDFOLD applied on UNMASKED steps only (the first tile and masked / diagonal
   steps keep the exact descale). Reason: the one row that kept C3f out (d128_mqa group 0, row 4098) has 3 visible keys;

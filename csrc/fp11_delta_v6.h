@@ -71,6 +71,16 @@
 #define FA3FP11_P0V7_LAZY 0
 #endif
 
+// ## P0W4: FA3FP11_P0NWG consumer warpgroups per CTA (2: the v6 CTA; 4: 256 rows = two Q / dO scale blocks per CTA,
+// four warps per scheduler instead of two).  With 4 the register budget is 112 per consumer thread (24 producer; 640 threads launch at 96, and 4 x 128 x (112 - 96) <= 128 x (96 - 24)), so
+// each warpgroup keeps ONE (S, dP) accumulator pair: per n-block issue S, dP; wait S; exp; wait dP; row sum; the
+// overlap comes from the other three warpgroups.  A warpgroup skips the n-blocks past its own diagonal (fully masked:
+// every term is a signed zero, which leaves the fp64 fold, never -0, unchanged), still waiting / releasing every stage.
+// Per element and per fold the arithmetic is v6's: bitwise.
+#ifndef FA3FP11_P0NWG
+#define FA3FP11_P0NWG 4
+#endif
+
 namespace flash {
 
 using namespace cute;
@@ -80,19 +90,20 @@ struct DeltaV6 {
     using Element = cutlass::float_e4m3_t;
     using ElementAccum = float;
     static constexpr int kBlockM = 64;       // per warpgroup
-    static constexpr int kRowsCTA = 128;     // two warpgroups = one Q/dO scale block
+    static constexpr int kNWG = FA3FP11_P0NWG;
+    static constexpr int kRowsCTA = 64 * kNWG;   // two warpgroups = one Q/dO scale block
     static constexpr int kBlockN = 64;       // per n-block (one K/V scale group)
     static constexpr int kNbPerStage = 2;    // 128 keys per stage
     static constexpr int kHeadDim = 128;
     static constexpr int kStages = FA3FP11_HD128_P0V5_ST;
     static constexpr int kAtomN = 64;
-    static constexpr int NumMmaWarpGroups = 2;
+    static constexpr int NumMmaWarpGroups = kNWG;
     static constexpr int NumMmaThreads = NumMmaWarpGroups * cutlass::NumThreadsPerWarpGroup;
     static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarpGroup;
     static constexpr int MaxThreadsPerBlock = NumMmaThreads + NumProducerThreads;
     static constexpr int MinBlocksPerMultiprocessor = 1;
-    static constexpr uint32_t LoadRegisterRequirement = 40;
-    static constexpr uint32_t MmaRegisterRequirement = 232;
+    static constexpr uint32_t LoadRegisterRequirement = kNWG == 2 ? 40 : 24;
+    static constexpr uint32_t MmaRegisterRequirement = kNWG == 2 ? 232 : 112;
 
     using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
     using ClusterShape = Shape<_1, _1, _1>;
@@ -324,8 +335,9 @@ struct DeltaV6 {
             int const fq8_bh_kv = bidb * get<2>(params.shape_K) + bidh_kv;
             float const* fq8_k8s_base = params.ptr_k8s + fq8_bh_kv * params.nblk_k;
             float const* fq8_v8s_base = params.ptr_v8s + fq8_bh_kv * params.nblk_k;
-            float const fq8_q8sc = params.ptr_q8s[bh * params.nblk_q + p];      // one Q/dO scale block per CTA (128 rows)
-            float const fq8_do8sc = params.ptr_do8s[bh * params.nblk_q + p];
+            int const qblk = (kRowsCTA / 128) * p + wg / 2;                      // the warpgroup's 128-row Q/dO scale block
+            float const fq8_q8sc = params.ptr_q8s[bh * params.nblk_q + qblk];
+            float const fq8_do8sc = params.ptr_do8s[bh * params.nblk_q + qblk];
             static constexpr float kFq8MoE = 8.0f;
             static constexpr float kFq8MoInv = 1.0f / 256.0f;
 
@@ -390,6 +402,41 @@ struct DeltaV6 {
                 acc_r += double(p0); acc_r += double(p1);
             };
 
+#if FA3FP11_P0NWG == 4
+            {
+                PipelineState smem_pipe_read;
+                Tensor tSrS = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
+                Tensor tdPrdP = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
+                float2 const* fq8_k8s_2 = reinterpret_cast<float2 const*>(fq8_k8s_base);
+                float2 const* fq8_v8s_2 = reinterpret_cast<float2 const*>(fq8_v8s_base);
+                int const nb_last = Is_causal ? (m_block * kBlockM + kBlockM - 1 + fq8_diag_off) / kBlockN : (1 << 30);   // later n-blocks: fully masked
+                CUTLASS_PRAGMA_NO_UNROLL
+                for (int s = 0; s < nstages; ++s) {
+                    float2 const k2 = fq8_k8s_2[s], v2 = fq8_v8s_2[s];
+                    auto tok = pipeline_kv.consumer_try_wait(smem_pipe_read);
+                    pipeline_kv.consumer_wait(smem_pipe_read, tok);
+                    int const slot0 = kNbPerStage * smem_pipe_read.index();
+                    #pragma unroll
+                    for (int j = 0; j < kNbPerStage; ++j) {
+                        int const nb = kNbPerStage * s + j;
+                        if (nb <= nb_last && nb < n_block_max) {
+                            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma, tSrQ(_, _, _, wg), tSrK(_, _, _, slot0 + j), tSrS);
+                            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma, tdPrdO(_, _, _, wg), tdPrV(_, _, _, slot0 + j), tdPrdP);
+                            float const dsc = fq8_q8sc * (j == 0 ? k2.x : k2.y) * float(M_LOG2E);
+                            float const dp = fq8_do8sc * (j == 0 ? v2.x : v2.y);
+                            warpgroup_wait<1>();
+                            warpgroup_fence_operand(tSrS);
+                            exp_step(tSrS, nb, dsc, dsc);
+                            warpgroup_wait<0>();
+                            warpgroup_fence_operand(tdPrdP);
+                            rowsum_step(tSrS, tdPrdP, dp, dp);
+                        }
+                    }
+                    pipeline_kv.consumer_release(smem_pipe_read);
+                    ++smem_pipe_read;
+                }
+            }
+#else
             // Warp-scheduler ping-pong: WG0 takes the first turn (WG1 pre-arrives on WG0's barrier).
             auto sched_sync = [&]() {
             };
@@ -474,6 +521,7 @@ struct DeltaV6 {
             CUTLASS_PRAGMA_NO_UNROLL
             for (int s = 0; s < nstages - 1; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}); }
             step(nstages - 1, cute::false_type{}, cute::Int<-1>{});
+#endif
             // One writer per row: quad lane 0 stores row0's fp64 fold rounded once to fp32, quad lane 2 row1's.
             if ((wtid & 1) == 0) {
                 int const r = m_block * kBlockM + (quad_hi ? row1 : row0);
@@ -493,7 +541,7 @@ void run_flash_delta_v6_fp11_hd128(Flash_bwd_fp8_params &params, cudaStream_t st
     int const seqlen_q = params.seqlen_q;
     int const seqlen_k = params.seqlen_k;
     if (seqlen_q % Kernel::kRowsCTA != 0 || seqlen_k % (Kernel::kNbPerStage * Kernel::kBlockN) != 0) {
-        fprintf(stderr, "[delta_matching pass 0] seqlen_q and seqlen_k must be 128-multiples (got %d, %d)\n", seqlen_q, seqlen_k); exit(1);
+        fprintf(stderr, "[delta_matching pass 0] seqlen_q must be a %d-multiple and seqlen_k a 128-multiple (got %d, %d)\n", Kernel::kRowsCTA, seqlen_q, seqlen_k); exit(1);
     }
     int const nbm = seqlen_q / Kernel::kBlockM;
     int const nbn = seqlen_k / Kernel::kBlockN;

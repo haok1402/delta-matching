@@ -706,3 +706,10 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   inherited all-zero causal NaN defect grew (O n_nan 522752 vs 522240), 70 well-conditioned stress-case rows regress
   beyond round-off (scale3 36, outliers 18, scale10 15, mqa 1), and the per-output means rise by ~3e-7 -> REJECTED as
   submitted; returned to the helper.
+- Pass-0 LAZY + DEFER (c49c0d6, the real commit; -7.50% pass 0 in the helper's A/B): FAILS residual-v4 (job 21177096):
+  well-conditioned rows regress beyond round-off in Gaussian cases too (gqa4 3 rows, worst 2.36e-5 -> 4.43e-5; mqa 2;
+  gqa3_promote 2; heldout 1) and in stress cases (scale3 25, outliers 20, scale10 4) -> REJECTED as submitted.
+  Reading: any change to the rounding of pass 0's delta moves well-conditioned rows by more than k 2^-23; per-row
+  non-regression keeps pass 0's numerics effectively frozen unless a change makes delta closer to pass 1's sum row
+  by row. Bitwise pass-0 levers (the pass-0 worker's nomaskloop / skipdead / register split, ported onto r17_p1) are
+  the next pass-0 candidates.

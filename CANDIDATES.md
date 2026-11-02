@@ -80,6 +80,9 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 
 | S45 | b3os / b2os | registers | O accumulator in shared memory (thread-private float4 chunks), FA3-order step (turn = g0 + QK, rescale / g1 / softmax / promote outside) | = b3ld / bn128ld class | b2os (2 WGs, BN128) +21.7% geo (job 21178384); b3os (3 WGs) does not launch: O 96 KB + 2 K/V/Vt stages + Q + epilogue exceed 227 KB. Rejected |
 
+| S46 | b3kw | ping-pong | C3b with the K pipeline wait moved ahead of the ring turn | = C3 | +30.1% geo (job 21178438 build: STACK up to 384 B, also on d256): rejected |
+| S47 | b3n64 / b3n64o / b2n64o | tile | 64-key tiles (one P-hat group: no rho), 3 WGs PV-first / 3 WGs FA3 order / 2 WGs FA3 order, 4 stages | order class | -3.44% / +62.2% (spills) / +16.8% geo vs C3b -12.64% (job 21178606): per-tile overhead dominates; 128-key tiles with 3 WGs are the sweet spot |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below

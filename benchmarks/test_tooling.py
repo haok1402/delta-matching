@@ -793,3 +793,89 @@ def test_row_residual_plan_is_ill_conditioned_and_the_diagnostic_is_not():
     assert r == 1.0 and worst["num"] == worst["den"] > 0             # the plan's ratio: always 1 on such a row
     delta = torch.full((1, 1), 1.0)
     assert NUM.row_residual(rows, rows.abs(), delta)[0] < 1e-8         # residue / (|t| + 2^8 |delta|)
+
+
+
+# ---- sol4 (four-floor model) ----
+import sol4 as S4  # noqa: E402
+
+
+def _calib(tflops=1000.0, gbs=3000.0, clk=2000.0, sms=100):
+    return {"sha256": "c" * 64, "sm_clock_mhz": clk, "sms": sms, "gemm_fp8": {"peak_tflops": tflops},
+            "copy": {"peak_gbs": gbs}}
+
+
+def _counts():
+    k = lambda instr, mufu, steps: {"chosen": {"instr": instr, "mufu_ex2": mufu, "qgmma": 1, "steps": steps}}
+    return {"kernels": {"fwd": k(1000, 128, 1), "pass1": k(1000, 32, 1), "pass0": k(700, 64, 2), "pass2": k(300, 0, 1)}}
+
+
+def _rec(N=4096, B=1, H=1, Hk=1):
+    return {"D": 128, "B": B, "H": H, "Hk": Hk, "N": N, "attn": "causal", "mode": "matched",
+            "ms": {c: 1.0 for c in S4.CATS}}
+
+
+def test_sol4_hand_computed_fwd_floors():
+    f = S4.floors(_rec(), _calib(), _counts(), "strided")["fwd"]["floors_ms"]
+    units = sum(min(16, -(-((mb + 1) * 128) // 256)) for mb in range(32))     # 128-row x 256-key causal units at N 4096
+    assert units == S4.visited_units(4096, 128, 256, True)
+    elems = units * 128 * 256
+    assert abs(f["tensor"] - elems * 512 / 1e15 * 1e3) < 1e-12               # 2 GEMMs x 2 x D 128 FLOP per element
+    warp_iters = units * 2 * 4                                                # 2 warpgroups x 4 warps, one step each
+    assert abs(f["issue"] - warp_iters * 1000 / (4 * 100 * 2e9) * 1e3) < 1e-12
+    assert abs(f["mufu"] - warp_iters * 128 * 32 / (16 * 100 * 2e9) * 1e3) < 1e-12
+
+
+def test_sol4_pass0_loop_covers_two_steps_and_glue_follows_the_producer_mode():
+    r = S4.floors(_rec(), _calib(), _counts(), "strided")
+    units = S4.visited_units(4096, 128, 64, True)
+    assert abs(r["pass0"]["floors_ms"]["issue"] - units * 2 * 4 / 2 * 700 / (4 * 100 * 2e9) * 1e3) < 1e-12
+    gq = S4.floors(_rec(H=4, Hk=1), _calib(), _counts(), "strided")["glue"]["floors_ms"]["bytes"]
+    gc = S4.floors(_rec(H=4, Hk=1), _calib(), _counts(), "copy")["glue"]["floors_ms"]["bytes"]
+    assert 0 < gq < gc                                                        # strided: only the GQA fold remains
+    assert S4.floors(_rec(), _calib(), _counts(), "strided")["glue"]["floors_ms"]["bytes"] == 0.0
+
+
+@pytest.mark.parametrize("why,calib,counts", [
+    ("calibration", {}, _counts()), ("calibration", dict(_calib(), sha256=None), _counts()),
+    ("non-positive", _calib(tflops=0.0), _counts()), ("counts for", _calib(), {"kernels": {}})])
+def test_sol4_rejects_missing_inputs(why, calib, counts):
+    with pytest.raises(S4.ModelError, match=why):
+        S4.floors(_rec(), calib, counts, "strided")
+
+
+def test_sol4_loop_choice_and_rejection():
+    cands = [{"start": 0, "end": 9, "instr": 900, "mufu_ex2": 146, "qgmma": 12},
+             {"start": 10, "end": 19, "instr": 800, "mufu_ex2": 146, "qgmma": 12},
+             {"start": 20, "end": 29, "instr": 100, "mufu_ex2": 0, "qgmma": 0}]
+    assert S4.choose_loop(cands, 128)["start"] == 10
+    with pytest.raises(S4.ModelError):
+        S4.choose_loop(cands[2:], 128)
+
+
+def test_gate_lib_stamp_handling(tmp_path):
+    # package-resident library with its own stamp: no SameFileError, stamp intact
+    wt = tmp_path / "wt"; (wt / "delta_matching").mkdir(parents=True)
+    lib = wt / "delta_matching" / "_C.so"; lib.write_bytes(b"lib")
+    (wt / "delta_matching" / "_build_info.py").write_text("BUILD_INFO = {}\n")
+    log = tmp_path / "build.log"; log.write_text("BUILD-OK\n")
+    r = run_gate(tmp_path, "timing", "jit", args=["--lib", str(lib), "--build-log", str(log)])
+    assert r.returncode == 0 and (wt / "delta_matching" / "_build_info.py").exists(), r.stdout[-600:]
+    # external library without a sidecar: an unrelated package stamp is removed
+    (tmp_path / "x").mkdir(); ext = tmp_path / "x" / "ext.so"; ext.write_bytes(b"lib")
+    (tmp_path / "y").mkdir()
+    wt2 = tmp_path / "y" / "wt"; (wt2 / "delta_matching").mkdir(parents=True)
+    (wt2 / "delta_matching" / "_build_info.py").write_text("BUILD_INFO = {'stale': 1}\n")
+    r = run_gate(tmp_path / "y", "timing", "jit", args=["--lib", str(ext), "--build-log", str(log)])
+    assert r.returncode == 0 and not (wt2 / "delta_matching" / "_build_info.py").exists(), r.stdout[-600:]
+
+
+def test_numerics_gate_never_accepts_until_the_residual_contract_is_settled(tmp_path):
+    (tmp_path / "delta_matching").mkdir(); (tmp_path / "delta_matching" / "_C.so").write_bytes(b"prev")   # --prev-root
+    for n in ("base", "cdbg", "pdbg"):
+        (tmp_path / n / "delta_matching").mkdir(parents=True)
+        (tmp_path / n / "delta_matching" / "_C.so").write_bytes(b"x")
+    r = run_gate(tmp_path, "numerics", "", args=["--base-root", str(tmp_path / "base"), "--cand-dbg-root",
+                                                 str(tmp_path / "cdbg"), "--prev-dbg-root", str(tmp_path / "pdbg"),
+                                                 "--defects", str(tmp_path / "m.json")])
+    assert r.returncode == 1 and "residual contract" in r.stdout, r.stdout[-600:]

@@ -415,6 +415,10 @@ def check(a):
     report["problems"] = probs
     report["result"] = ("FAIL" if probs else ("PASS (qualified by known defects: %d cases)" % len(report["known_defects"])
                                                if report["known_defects"] else "PASS"))
+    # The residual acceptance contract is not settled (the plan's ratio is ill-conditioned on short rows; no replacement
+    # is authorized): a PASS here validates capture / identity / schema plumbing and is NOT an AC-2.3 certificate.
+    report["ac23_eligible"] = False
+    report["ac23_note"] = "residual contract pending the user's authorization; not a numerical acceptance"
     if a.report:
         with open(a.report, "w") as f:
             json.dump(report, f, indent=1)

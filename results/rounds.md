@@ -530,3 +530,48 @@ Target configurations: 8 (D128 causal matched, N 4096 / 8192; old two-floor mode
 | prod_bwd | 0.754 | 1.3% | 0.541 | 0.213 | 71.7% |
 | twin | 0.828 | 1.4% | 0.721 | 0.107 | 87.1% |
 | glue | 1.657 | 2.9% | 2.043 | -0.386 | 123.3% |
+
+## Round 15: the four-floor speed-of-light model (sol4-v1) and the target re-rank
+
+Tooling only (Hao's audit direction 5); no kernel change. `benchmarks/calibrate.py` measures same-allocation peaks;
+`benchmarks/sol4.py` takes per kernel the max of four floors: tensor (tile-granular FLOPs / calibrated fp8 GEMM peak),
+MUFU (executed MUFU.EX2 lane-ops / 16 per clock per SM), issue (executed warp instructions / 4 per clock per SM) and
+bytes (modeled compulsory bytes / calibrated copy bandwidth). Executed counts come from the steady-state SASS loop of
+each D128 causal kernel (`results/r15/sol4_counts.json`: fwd 1288 instr / 146 MUFU / 12 QGMMA per step; pass 1 1026 /
+32 / 12; pass 0 720 / 64 / 16 over 2 steps; pass 2 325 / 0 / 8) times the declared tile / warpgroup / causal-visited
+multiplicities. Triton producers, twins and glue get the bytes floor only (issue not modeled). The glue ledger now
+follows the producer mode (strided after H3), which removes the copied-traffic fiction (glue was 123% of its old floor).
+
+Calibration (job 21170192, pool0-01834): fp8 GEMM 1386.1 TFLOPS, copy 3026.3 GB/s, SM clock 1980 MHz, sha256
+78a0f4225064. Accepted build r14_h3, d128m grid, 3 repetitions, medians (`results/r15/sol4_accepted.md`).
+
+Target (D128 causal matched, N 4096 / 8192, 8 configurations):
+
+| kernel | measured ms | floor ms | controlling | % of floor | waste ms |
+|---|---:|---:|---|---:|---:|
+| pass1 | 26.042 | 14.182 | issue | 54.5% | 11.860 |
+| fwd | 11.106 | 5.578 | tensor | 50.2% | 5.528 |
+| pass0 | 9.083 | 5.466 | tensor | 60.2% | 3.617 |
+| glue | 1.653 | 0.665 | bytes | 40.2% | 0.988 |
+| pass2 | 5.967 | 5.391 | bytes | 90.3% | 0.576 |
+| prod_fwd | 1.902 | 1.510 | bytes | 79.4% | 0.392 |
+| prod_bwd | 0.751 | 0.599 | bytes | 79.7% | 0.152 |
+| twin | 0.828 | 0.798 | bytes | 96.4% | 0.030 |
+
+The guard (16k / 32k) ranks the same (pass 1 55.1%, fwd 51.7%, pass 0 62.6%, pass 2 92.2%); glue there is 10.9% of its
+floor, but all of it sits in the GQA configurations (H != Hk) and is noisy at 16k / 32k (0.27-2.90 ms per call).
+
+Findings:
+- Pass 1 is issue-bound, not tensor-bound: 1026 warp instructions per 64x64 step against 12 QGMMA; its issue floor
+  (14.2 ms) exceeds its tensor floor (10.9 ms). Levers that cut instructions (MUFU-poly is the wrong axis: MUFU floor
+  3.5 ms) come first: the psi / dS' conversion and packing path, and PINGPONG to hide the rest.
+- The forward is 50% of its tensor floor and 1.276x FA3's fp8 forward kernel summed over the 8 targets (11.106 vs
+  8.706 ms; per config 1.17-1.37x). Its issue floor (4.5 ms) is close to the tensor floor: 1288 instructions per step
+  (146 MUFU) leave little issue slack for overlap.
+- Pass 0 is 60% of its tensor floor; pass 2 is at 90% of its bytes floor (closed for practical purposes).
+- New ranking by target waste: pass 1 (11.9 ms) > forward (5.5) > pass 0 (3.6) > glue (1.0, GQA expansions) > pass 2
+  (0.6) > producers (0.5).
+
+Also in this round's tooling commit: B16 (`--lib` stamp: no SameFileError for a package-resident library; a stale
+stamp is removed when the reused library has none); `gate.py --mode numerics` never accepts and `numerics.py check`
+marks its PASS `ac23_eligible: false` until Hao settles the residual contract. CPU tests: 127 passed (job 21170192).

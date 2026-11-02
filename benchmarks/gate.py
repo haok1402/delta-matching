@@ -259,9 +259,15 @@ def main():
                     if os.path.lexists(link):
                         os.remove(link)          # a different library (or a dangling link): never the input itself
                     os.symlink(lib, link)
-                stamp = os.path.join(os.path.dirname(lib), "_build_info.py")   # the library's build stamp, as the JIT
-                if os.path.isfile(stamp):                                       # build installs it beside the package
-                    shutil.copyfile(stamp, os.path.join(wt, "delta_matching", "_build_info.py"))
+                # the library's build stamp beside the package, as the JIT build installs it (B16): nothing to do when
+                # it already is that file; an unrelated package stamp is removed when the reused library has none
+                stamp = os.path.join(os.path.dirname(lib), "_build_info.py")
+                dest = os.path.join(wt, "delta_matching", "_build_info.py")
+                if os.path.isfile(stamp):
+                    if not (os.path.exists(dest) and os.path.samefile(stamp, dest)):
+                        shutil.copyfile(stamp, dest)
+                elif os.path.lexists(dest):
+                    os.remove(dest)
             else:
                 jit = os.path.join(run_dir, "jit")
                 build_log = gate.run("build", [gate.py, "-m", "delta_matching.jit"], cwd=wt,
@@ -328,6 +334,10 @@ def main():
                 gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws, "--defects", defects,
                                            "--report", os.path.join(run_dir, f"num_{r}_report.json")]
                          + [x for tag, f in files.items() for x in (f"--{tag}", f)])
+            # The residual acceptance contract (AC-2.3) is not settled: the plan's ratio is ill-conditioned on short
+            # rows and no replacement is authorized.  A numerics PASS validates the plumbing only and never accepts.
+            raise GateFailure("numerical acceptance is unavailable until the residual contract is authorized "
+                              "(numerics checks ran; see num_*_report.json)")
         if a.mode == "full":
             base = a.base_dumps.split(","); prev = a.prev_dumps.split(",")
             if len(base) != 4 or len(prev) != 4:

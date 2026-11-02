@@ -325,6 +325,7 @@ def main():
     ap.add_argument("--modes", default="all", help="all or a comma list of causal-matched,causal-stale,full-stale")
     ap.add_argument("--iters", type=int, default=10)
     ap.add_argument("--fa3", action="store_true")
+    ap.add_argument("--calib", default=None, help="a calibrate.py JSON from the same allocation (its sha256 is recorded)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--names", action="store_true", help="print every kernel name and its category")
     ap.add_argument("--sustain", type=float, default=4.0, help="seconds of sustained load for the clock measurement")
@@ -358,6 +359,9 @@ def main():
             "sustained_clock_mhz": clk, "torch": torch.__version__, "cuda": torch.version.cuda, "device": torch.cuda.get_device_name(0),
             "kernel_version": {k: v for k, v in dm.kernel_version().items() if k != "numerics"},
             "env": {k: v for k, v in os.environ.items() if k.startswith("DM_")}}
+    if a.calib:   # bind the same-allocation calibration (sol4 model) to these timings
+        with open(a.calib) as fh:
+            meta["calibration_sha256"] = json.load(fh)["sha256"]
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w") as fh:

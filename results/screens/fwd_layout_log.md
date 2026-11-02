@@ -68,3 +68,42 @@ No layout candidate. Every layout either:
 - is bounded below the 3.5% bar (V transpose: <= 2.5%; warp specialization: <= ~4.6% ideal, unbuilt).
 
 The 3-WG x 160-register BM192 x BN128 layout is a local optimum of the layout space under the numerics contract.
+
+## S21: softmax / PV warp specialization (FA4-style), integrator-directed prototype: STOPPED at the skeleton
+
+Layout (`.local/wt/S21-fwd-01a`, patch `.local/screens/S21-fwd-01a/variant.patch`, defines S21_SPEC / S21_SMREG /
+S21_PVREG / S21_LDREG, FA3FP11_HD128_NSPLIT=2, BM192=0): a 128-row CTA, 640 threads.
+- WG0 is the producer.
+- WG1-2 are PV warpgroups (O, a 32-register zero-init slab temp, the rho rescale, the promote, the lazy O rebase, the
+  final scale, the epilogue).
+- WG3-4 are softmax warpgroups (QK, mask, descale / fold, grouped softmax, P codes, rho_1 / promote weight / lazy-rebase
+  check exactly as PREW2 / REBNI, finalize).
+- Per slice, P (16 words / thread) and 11 per-row scalars go through smem: two buffers and full / empty mbarriers. K is
+  consumed by the softmax WGs and V by the PV WGs, and the dynamic scheduler barrier is widened to 640 threads.
+- It is the real data flow (not a stub), so the screen also measures bitwise.
+
+Register budget (the binding constraint):
+- 640 threads force a 96-register launch, so the CTA pool is 61440 = 128 x 480.
+- setmaxnreg.dec on the softmax WGs below 96 is rejected by ptxas (C7507 "setmaxnreg ignored to maintain minimum
+  register requirements" for SMREG 88 with PVREG 128 / 136, LDREG 24 / 32). When it is rejected, the whole kernel stays
+  at 96 and spills (STACK 168 / 176).
+- The only valid split is softmax 96 / PV 128 / producer 24 (472 of 480). Bisect builds are S21-fwd-01b / c / d
+  (job 21200715). There PV at 128 still spills STACK 32 / 40 (causal / non-causal), and 136 does not fit.
+
+| tag | regs (soft / PV / producer) | REG / STACK (fwd D128 symbols) | fwd H16 vs r19_fwd | fwd H32 | bitwise |
+|---|---|---|---:|---:|---|
+| S21-fwd-01 | 88 / 136 / 24 (setmaxnreg ignored) | 96 / 168-176 | +62.59% | +65.55% | - |
+| S21-fwd-01a | 96 / 128 / 24 | 96 / 32-40 | **+37.94%** | **+38.75%** | not bitwise vs the same-BM control S20-fwd-06 (see below) |
+| (S20-fwd-06, unsplit BM128 control) | 240 x 2 | 168 / 24-32 | +18.33% | +17.44% | - |
+
+Bitwise:
+- Any BM128 build differs from the r17pk byte reference, because the descale fold applies on unmasked steps only, so
+  O depends on the m-block height. S20-fwd-06 is the matching reference.
+- Against S20-fwd-06, 01a differs in LSE on ~12% of rows of every multi-tile case (causal rows >= 128, every row in
+  full mode; single-tile rows equal), and in a few O elements. That is round-off-sized, from a softmax-side
+  code-generation / order difference that was not traced (stopped first).
+
+Verdict: REJECTED at the skeleton. It is 38% slower than r19_fwd and 17% slower than the unsplit BM128 control, against
+a >= 2% faster bar. The split cuts the softmax chains from 3 (BM192) to 2. It also adds per-tile smem P handoffs and
+mbarrier round trips. And at 640 threads the register file cannot give the PV side its ~144 registers. Not completed;
+no 4-rep A/B and no residual-v4 run (job 21200942).

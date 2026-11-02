@@ -898,3 +898,10 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   splits exceed the 65536-register file. The 64 x 128, 2-WG, non-persistent longest-first geometry is the only workable
   point under the per-tile scale contract and the 240-register budget. No candidate; pass-1 progress rests on
   kda-bwdport's FA3-structure rebuild.
+- Forward FA4-style split prototype (S21-fwd-01a: 128-row CTA, producer + 2 PV warpgroups holding O and doing rho /
+  promote / rebase / epilogue + 2 softmax warpgroups, P and 11 per-row values through double-buffered shared memory):
+  +37.9% / +38.8% vs r19_fwd (the plain 128-row layout is +18%). 640 threads force a 96-register launch; ptxas will not
+  lower the softmax WGs below 96 (88 ignores the register settings and spills the whole kernel, +63%); the only
+  holding split, softmax 96 / PV 128 / producer 24, still spills on the PV side; two softmax chains instead of three
+  plus a per-tile handoff. Stopped at the skeleton (>= 2% bar missed by 40 points). The forward's layout space is
+  exhausted under the 160-register / per-group-basis constraints; forward stays at 1.108x FA3 fp8.

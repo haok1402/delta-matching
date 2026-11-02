@@ -140,3 +140,14 @@ Source: `results/r17/accepted_pk/sol4c.md` (`benchmarks/sol4.py`).
 - Paper protocol 16/4: 621.5 / 500.3 / 529.7 TFLOP/s fwd / bwd / fwd+bwd (`results/paper_c2/r19_fwd_table.md`).
 - Forward SASS diff vs FA3 fp8 (results/screens/fwd_sassdiff.md): 9.2 vs 5.9 instructions per score per thread; the
   ring turn's remaining 178 instructions are 128 rho / promote (contract-fixed), 8 QGMMA and ~42 descriptor / sync.
+
+## Round 20 (no acceptance): the layout spaces are exhausted
+
+- Forward: every layout in the space the numerics and the 65536-register file allow was screened (K/V depth, register
+  splits, 2 CTAs / SM, 128-row tiles, producer warp, key-tile widths, 4 warpgroups) plus an FA4-style softmax / PV
+  warpgroup split (+38%); the accepted 192 x 128, 3-warpgroup layout is the best point. The group-max shuffle chain
+  (~1.9%) and the per-group rho / promote (128 instructions per 128 keys) are the remaining gap to FA3 fp8 (1.108x).
+- Pass 1: pipeline depths, a persistent scheduler, L2 tile order and register splits screened; the 64 x 128,
+  2-warpgroup geometry is the only workable point under the per-tile scale contract and the 240-register budget.
+- Further progress needs a different kernel structure (kda-bwdport: pass 1 rebuilt from FA3's BF16 backward) or a
+  change to the numerics contract itself (per-group P basis, per-tile psi), which the current rules do not admit.

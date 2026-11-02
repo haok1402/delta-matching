@@ -221,6 +221,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
     static constexpr int kVarBasis = kVar / 10 % 10;
     static constexpr int kVarPV = kVar % 10;
     static constexpr int kVarLazy = kVar / 100000 % 10;
+    static_assert(!kVarLazy || (kVarSched == 1 && kVarPV != 0), "FWDPORT: lazy alpha is implemented for the PV-first weighted steps");
     static constexpr int kQuantKeys = 64;
     static constexpr int kQuantRowsQ = 128;
     static constexpr int kGroups = kBlockN % 64 == 0 ? kBlockN / 64 : 0;
@@ -1500,6 +1501,8 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 fq8_load_v(n_block);
             } else {
                 // ======== PV-first (the shipped order): PV(n-1) + promote, then QK(n) inside the scheduler section ========
+                // kLazy: the (rare, warp-uniform) rebase runs here, where tSrS is dead, before the promote that uses ref_max.
+                if constexpr (kVarLazy) { softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale); }
                 consumer_wait(pipeline_v, smem_pipe_read_v);
                 warp_scheduler_barrier_sync();
                 if constexpr (kVarPV == 0) {
@@ -1524,7 +1527,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 mask_fn(tSrS, n_block);
                 fq8_descale(tSrS, n_block);
                 cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
-                softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale);
+                if constexpr (!kVarLazy) { softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale); }
                 softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS);
                 flash::permute_Cregs_fp8(tSrS);
                 convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
@@ -1548,6 +1551,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
             fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
         }
         cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+        if constexpr (kVarLazy) { softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale); }
         consumer_wait(pipeline_v, smem_pipe_read);
         {
             auto Vst = tOrV(_, _, _, smem_pipe_read.index());

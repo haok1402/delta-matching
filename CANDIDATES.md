@@ -426,3 +426,33 @@ the backward numerics changes already accepted on the head (pass 0 / pass 1), so
 | acceptance shapes | 11,796,480 | 0 (0) | 0 (0) | 0.012 |
 
 - Both builds include the head's accepted backward changes (EXPBX64, C4), so this is the combination's result.
+
+### BN256 ports on the clean backward (c6a7372 + EXPBX64 reverted), the split asked by decision 8ec1517
+
+- Base: `kda-sm90-fwd-r21e0` 8271207, which is c6a7372 with `KDA_PK_EXPB 0` in pass 0 and pass 1. C4's unclamped line (KDA_F1U)
+  exists only under EXPB = 6, so with EXPB 0 every line keeps the original `min(., 12)` clamp in both passes (C4 = no-op).
+- Variants (pushed), each on the original 2 WG x 128 x 256 tile with RHOPRE + SMSC4 + PRETURN4:
+  - **e256bw** `kda-sm90-fwd-bn256bw-r21` 2be8a66: FWDLAZY 0, FWDDFOLD 0. PRETURN4 is generalized to run without lazy
+    (9716380: no rebase; the weight is basis_last, the expression fq8_promote_last uses).
+  - **e256nf** `kda-sm90-fwd-bn256nf-r21` 3a891f2: FWDLAZY only (named numerics).
+  - **e256** `kda-sm90-fwd-bn256-r21` 9716380: FWDLAZY + FWDDFOLD (named numerics).
+- Timing (job 21205198, 6 rotating reps, geomean of 4 shapes; raw `kda-results/kda-sm90-fwd/te256`):
+
+| build | vs original (frozen/base) | vs r19_fwd |
+|---|---:|---:|
+| original | 0 | +17.99% |
+| e256bw | **-3.69%** (sum -2.49%) | +13.63% |
+| e256nf | -3.78% (sum -3.44%) | +13.53% |
+| e256 | -7.69% (sum -7.40%) | +8.91% |
+
+- Errors vs the ORIGINAL (jobs 21205194-6, 66 finite cases x 4 routes, identical on every route; `fwd-tools/errcmp2.py`):
+  - e256bw: **bitwise** (O / dQ / dK / dV identical in every case on every route; O sha also SAME on the 4 timing shapes).
+  - e256nf: per case, worst absolute rise +5.0e-6 (dQ full/stale scale10) and worst relative rise +5.7e-6. No case is
+    above 1e-5 under either reading. matched dQ / dK and all dV are bitwise. Means: O +1.7e-10 (+2.2e-9 full/stale),
+    dQ +6.8e-8 (+2.3e-7 full/stale), dK -2.3e-8, dV 0. **O and dQ means rise**, so it fails the strict mean clause.
+  - e256: dQ full/stale scale10 is +1.2e-5 absolute (+1.0e-5 relative), above the bound; dQ mean +4.0e-7. **Fails.**
+- v5 rows (v5-abs, c = 1, job 21205197): all three PASS on cases x 4 routes, stress and acceptance. e256nf and e256bw
+  have 0 ratio-worse rows (max c 0); e256 has max c 0.40.
+- Decision: **e256bw READY as the bitwise floor** (-3.7% vs the original, bitwise). e256nf is REJECTED under the strict
+  mean clause (O / dQ means rise by 2e-10 / 7e-8); it is the integrator's call if the mean clause tolerates round-off.
+  e256 is REJECTED (dQ case above 1e-5, dQ mean rises).

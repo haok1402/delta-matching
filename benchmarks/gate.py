@@ -61,7 +61,21 @@ class Gate:
             json.dump(self.record, f, indent=1)
 
 
-DIAG_RE = re.compile(r"C7510|serializ|spill", re.IGNORECASE)
+DIAG_FATAL_RE = re.compile(r"C7510|(warning|error)\b.*serializ", re.IGNORECASE)
+SPILL_RE = re.compile(r"(\d+) bytes spill stores,\s*(\d+) bytes spill loads")
+
+
+def build_diagnostics(path):
+    """Fatal compiler diagnostics in a build log (B10): C7510 / serialization warnings or errors and NONZERO ptxas
+    spill counts; zero-count resource reports and incidental path / source text are not diagnostics."""
+    out = []
+    for line in open(path, errors="replace"):
+        m = SPILL_RE.search(line)
+        if m and (int(m.group(1)) or int(m.group(2))):
+            out.append(line.strip())
+        elif DIAG_FATAL_RE.search(line):
+            out.append(line.strip())
+    return out
 RES_RE = re.compile(r"REG:(\d+)\s+STACK:(\d+)\s+SHARED:(\d+)\s+LOCAL:(\d+)")
 ELF_TEXT_RE = re.compile(r"^\s*[0-9a-f]+\s+[0-9a-f]+\s+([0-9a-f]+)\s.*\sPROGBITS\s.*\s\.text\.(\S+)\s*$")
 SASS_OFF_RE = re.compile(r"/\*([0-9a-f]{4,6})\*/")
@@ -225,14 +239,16 @@ def main():
                 gate.run("tooling_tests", [gate.py, "-m", "pytest", os.path.join(HERE, "test_tooling.py"), "-q"])
             if a.lib:
                 # Hao (round 11): never rebuild in the gate when the library exists; link the worktree to it
-                lib = os.path.abspath(a.lib)
+                # resolve and validate BEFORE touching the package (B9): the package entry may itself be the input
+                lib = os.path.realpath(a.lib)
                 if not os.path.isfile(lib) or not a.build_log or not os.path.isfile(a.build_log):
                     raise GateFailure("--lib needs an existing library and its --build-log")
-                link = os.path.join(wt, "delta_matching", "_C.so")
-                if os.path.lexists(link):
-                    os.remove(link)
-                os.symlink(lib, link)
                 build_log = os.path.abspath(a.build_log)
+                link = os.path.join(wt, "delta_matching", "_C.so")
+                if not (os.path.exists(link) and os.path.realpath(link) == lib):
+                    if os.path.lexists(link):
+                        os.remove(link)          # a different library (or a dangling link): never the input itself
+                    os.symlink(lib, link)
             else:
                 jit = os.path.join(run_dir, "jit")
                 build_log = gate.run("build", [gate.py, "-m", "delta_matching.jit"], cwd=wt,
@@ -240,7 +256,7 @@ def main():
                 lib = os.path.join(jit, "_C.so")
             if not os.path.isfile(lib):
                 raise GateFailure(f"build produced no library at {lib}")
-            diag = [l.strip() for l in open(build_log, errors="replace") if DIAG_RE.search(l)]
+            diag = build_diagnostics(build_log)
             if diag:   # ptxas spill / wgmma serialization diagnostics stay hard failures
                 raise GateFailure(f"build diagnostics: {diag[0][:160]} ({len(diag)} lines)")
             linked = os.path.realpath(os.path.join(wt, "delta_matching", "_C.so"))

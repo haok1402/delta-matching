@@ -305,7 +305,7 @@ if args[:2] == ["-m", "delta_matching.jit"]:
         os.remove(link)
     os.symlink(os.path.join(jit, "_C.so"), link)
     done("jit")
-if args[:2] == ["-m", "pytest"] and "test_tooling" in line:
+if args[:2] == ["-m", "pytest"] and any(x.endswith("test_tooling.py") for x in args):
     done("tooling")
 if args[:2] == ["-m", "pytest"]:
     open(os.environ["STUB_ENVLOG"], "w").write(repr({k: os.environ.get(k) for k in
@@ -354,7 +354,7 @@ sys.exit(0)
 def run_gate(tmp_path, mode, fail, extra=None, kernel="X", args=()):
     stub = tmp_path / "python"; stub.write_text(STUB.replace("{py}", sys.executable)); stub.chmod(0o755)
     cub = tmp_path / "cuobjdump"; cub.write_text(STUB.replace("{py}", sys.executable)); cub.chmod(0o755)
-    wt = tmp_path / "wt"; (wt / "delta_matching").mkdir(parents=True)
+    wt = tmp_path / "wt"; (wt / "delta_matching").mkdir(parents=True, exist_ok=True)
     if mode == "confirm":
         (wt / "delta_matching" / "_C.so").write_bytes(b"lib")
     prev = tmp_path / "prev.so"; prev.write_bytes(b"prev")
@@ -551,6 +551,43 @@ def test_prebuilt_library_is_not_rebuilt_and_build_diagnostics_fail(tmp_path):
     assert r.returncode == 1 and "build diagnostics" in r.stdout, r.stdout[-600:]
 
 
+def _steps(tmp_path, name):
+    return [st["step"] for st in json.load(open(tmp_path / name / "gate.json"))["steps"]]
+
+
 def test_tooling_tests_do_not_run_by_default(tmp_path):
     r = run_gate(tmp_path, "full", "tooling")
-    assert r.returncode == 0 and "tooling_tests" not in r.stdout, r.stdout[-400:]
+    assert r.returncode == 0 and "tooling_tests" not in _steps(tmp_path, "run_full_tooling"), r.stdout[-400:]
+
+
+def test_tooling_tests_run_when_requested(tmp_path):
+    r = run_gate(tmp_path, "full", "", args=["--tooling-tests"])
+    assert r.returncode == 0 and _steps(tmp_path, "run_full_none")[0] == "tooling_tests", r.stdout[-400:]
+
+
+@pytest.mark.parametrize("kind", ["regular", "symlink"])
+def test_lib_pointing_at_the_package_entry_is_kept_intact(tmp_path, kind):
+    wt = tmp_path / "wt"; (wt / "delta_matching").mkdir(parents=True, exist_ok=True)
+    log = tmp_path / "build.log"; log.write_text("BUILD-OK\n")
+    if kind == "regular":
+        entry = wt / "delta_matching" / "_C.so"; entry.write_bytes(b"lib")
+        target = entry
+    else:
+        target = tmp_path / "jitdir_C.so"; target.write_bytes(b"lib")
+        (wt / "delta_matching" / "_C.so").symlink_to(target)
+    r = run_gate(tmp_path, "timing", "jit", args=["--lib", str(wt / "delta_matching" / "_C.so"), "--build-log", str(log)])
+    assert r.returncode == 0 and "build" not in _steps(tmp_path, "run_timing_jit"), r.stdout[-600:]
+    assert target.read_bytes() == b"lib" and os.path.realpath(wt / "delta_matching" / "_C.so") == os.path.realpath(target)
+
+
+@pytest.mark.parametrize("text,fatal", [
+    ("ptxas info    : 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\n", False),
+    ("nvcc -o /tmp/spill_test/serialize_kernels.o -c x.cu\n", False),
+    ("ptxas info    : 32 bytes stack frame, 16 bytes spill stores, 16 bytes spill loads\n", True),
+    ("ptxas warning : (C7510) Potential Performance Loss: wgmma.mma_async instructions are serialized\n", True),
+    ("ptxas warning : wgmma serialized due to function call\n", True)])
+def test_build_diagnostics_parse_counts_not_words(tmp_path, text, fatal):
+    log = tmp_path / "b.log"; log.write_text("BUILD-OK\n" + text)
+    sys.path.insert(0, HERE)
+    import gate as G
+    assert bool(G.build_diagnostics(str(log))) == fatal

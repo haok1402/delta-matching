@@ -316,3 +316,20 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   min 4.529e-2 -> 4.825e-2, mqa 4.655e-2 -> 4.916e-2, gqa4 4.629e-2 -> 4.846e-2, packed / bhnd / constk ~+1.7e-3,
   heldout +1.3e-3; 7 matched rows beyond the envelope. Cause: the smaller group's codes on the shared basis lose
   precision (more e4m3 subnormals), a real accuracy loss, 100-400 x the tolerance.
+
+## Round 18 (cont.): turn-bound diagnosis and ring-token levers : all REJECTED
+
+- Light phase probe on C3g + C4 + SMSC (diagnostic build, spills 144-160 B so absolute cycles are inflated; job
+  lprobe, both 8K and 64K shapes): per WG step ~4020 cycles = pre-turn 370 (9%) + waiting for the ring token 950 (24%)
+  + ring turn 1300 (33%: PV gemms, rescale, promote, QK issue) + post-turn 1350 (33%: QK wait + softmax). Three turns
+  ~= one step: the forward is RING-TURN-BOUND; the softmax phase has slack.
+- TOK2 (two tokens in the named-barrier ring, WG2 skipping its first sync): deadlocks (a WG can be lapped: two
+  arrivals land on one named barrier before its sync); job cancelled.
+- TOK2b / TOK1s (ring as smem counting semaphores, 2 / 1 tokens; counters in PipelineStorage after a first version
+  misaligned the dynamic smem): +28.9% / +48.6% geo vs r17_pk (job s35): the spin loop spills (STACK 136-152 B); the
+  second token is worth ~12% against its own 1-token control.
+- TOK2p / TOK1p (parity-alternating named barriers, 6 ids: no lapping, no spin; 2 / 1 tokens): +23.1% / +19.8% geo
+  (job s36, STACK 72 / 160 B): the extra per-thread ring state spills in the 160-register turn, and the second token no
+  longer helps. All bitwise (O identical).
+- Reading: at 3 WGs every added per-thread state or branch in the step spills; the turn's content (two PV sub-gemm
+  waits, the rescale and the promote, the QK issue) is fixed by the per-group basis and the register budget.

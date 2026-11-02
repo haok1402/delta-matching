@@ -1,0 +1,344 @@
+{
+ "tag": "acceptance run",
+ "roots": {
+  "A": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_c2",
+  "B": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/c3pass0"
+ },
+ "builds": {
+  "A": [
+   "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_c2/delta_matching",
+   "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r17_c2/delta_matching/_C.so",
+   "e4e37208c530355bd327511e1c69898ea8ce939338d8f2eb0f71750b57e89e33"
+  ],
+  "B": [
+   "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/wt/c3pass0/delta_matching",
+   "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/jit/c3pass0/_C.so",
+   "228257da8cf5f7f553f4dead71634258ba64e4711783772fb02a9b5dd5714c3c"
+  ]
+ },
+ "grid": "paper",
+ "reps": 3,
+ "subset": null,
+ "gate_pct": 1.0,
+ "all": {
+  "fwd": {
+   "A": 76.291056,
+   "B": 75.99076110000004,
+   "change_pct": -0.3936174379339463,
+   "spread_A_pct": 0.7340347042254938,
+   "spread_B_pct": 0.5607066896220337,
+   "reps_A": [
+    75.84941489999997,
+    76.40991959999998,
+    76.35942780000005
+   ],
+   "reps_B": [
+    75.78435319999996,
+    76.21031380000002,
+    75.96852470000005
+   ]
+  },
+  "prod_fwd": {
+   "A": 1.150732900000118,
+   "B": 1.14762620000005,
+   "change_pct": -0.26997576936124146,
+   "spread_A_pct": 0.6005665456688233,
+   "spread_B_pct": 0.25425459189209526,
+   "reps_A": [
+    1.1469796000001138,
+    1.1538960000000809,
+    1.1516459000000734
+   ],
+   "reps_B": [
+    1.147983200000025,
+    1.148636500000172,
+    1.145717700000022
+   ]
+  },
+  "prod_bwd": {
+   "A": 0.6263008999999666,
+   "B": 0.6261913999999862,
+   "change_pct": -0.01748360891393741,
+   "spread_A_pct": 0.2491848965368527,
+   "spread_B_pct": 0.2952670859759932,
+   "reps_A": [
+    0.6256078999999751,
+    0.627168699999991,
+    0.6263621999999802
+   ],
+   "reps_B": [
+    0.6261110999999854,
+    0.6271680999999525,
+    0.6253194000000103
+   ]
+  },
+  "pass0": {
+   "A": 60.062732999999966,
+   "B": 57.17559989999982,
+   "change_pct": -4.806862684720237,
+   "spread_A_pct": 0.6682755347658074,
+   "spread_B_pct": 0.32417289286264245,
+   "reps_A": [
+    59.702971699999694,
+    60.10422409999995,
+    60.042958199999966
+   ],
+   "reps_B": [
+    57.020781699999816,
+    57.20608619999982,
+    57.16224399999957
+   ]
+  },
+  "pass1": {
+   "A": 188.4483149000002,
+   "B": 187.55303249999972,
+   "change_pct": -0.4750811385474951,
+   "spread_A_pct": 0.6664757494232539,
+   "spread_B_pct": 0.34749494711730716,
+   "reps_A": [
+    187.2307734999998,
+    188.4869674000002,
+    188.48306200000016
+   ],
+   "reps_B": [
+    187.0573068999998,
+    187.70892300000008,
+    187.51815109999987
+   ]
+  },
+  "pass2": {
+   "A": 37.66690350000002,
+   "B": 37.60174540000015,
+   "change_pct": -0.1729850185319015,
+   "spread_A_pct": 0.3163338325240497,
+   "spread_B_pct": 0.1754255399001054,
+   "reps_A": [
+    37.56093580000033,
+    37.68009620000011,
+    37.66919240000002
+   ],
+   "reps_B": [
+    37.59418109999993,
+    37.66013429999993,
+    37.59612200000023
+   ]
+  },
+  "twin": {
+   "A": 0.7107495999999831,
+   "B": 0.7110590999999984,
+   "change_pct": 0.043545574983827606,
+   "spread_A_pct": 0.04358577254304703,
+   "spread_B_pct": 0.27630124138023743,
+   "reps_A": [
+    0.7107824000000347,
+    0.7109442000001234,
+    0.7106343999999833
+   ],
+   "reps_B": [
+    0.7107098000000004,
+    0.7118814999999733,
+    0.7099177999999623
+   ]
+  },
+  "glue": {
+   "A": 3.172433500000032,
+   "B": 3.164648800000216,
+   "change_pct": -0.24538575827722786,
+   "spread_A_pct": 0.13189648608898144,
+   "spread_B_pct": 0.19753482977686024,
+   "reps_A": [
+    3.17180550000009,
+    3.168181699999931,
+    3.172365200000008
+   ],
+   "reps_B": [
+    3.1632388999999472,
+    3.1655177000002435,
+    3.169491900000199
+   ]
+  },
+  "e2e_fwd": {
+   "A": 76.3320004940033,
+   "B": 75.97515058517456,
+   "change_pct": -0.46749712639427843,
+   "spread_A_pct": 1.0409678533840092,
+   "spread_B_pct": 0.7652962195747474,
+   "reps_A": [
+    75.58896058797836,
+    76.32435250282288,
+    76.38347256183624
+   ],
+   "reps_B": [
+    75.80049452185631,
+    76.38107123970985,
+    75.86300611495972
+   ]
+  },
+  "e2e_fwdbwd": {
+   "A": 366.3535215854645,
+   "B": 362.74200880527496,
+   "change_pct": -0.9857999356905345,
+   "spread_A_pct": 0.487143267055919,
+   "spread_B_pct": 0.5638235752079455,
+   "reps_A": [
+    365.2211148738861,
+    367.00769543647766,
+    366.74643445014954
+   ],
+   "reps_B": [
+    361.5896134376526,
+    363.63610768318176,
+    362.96712934970856
+   ]
+  }
+ },
+ "shapes": [
+  {
+   "key": [
+    128,
+    1,
+    16,
+    4,
+    65536,
+    "causal",
+    "matched"
+   ],
+   "A": [
+    117.2725601196289,
+    118.10441589355469,
+    118.4308967590332
+   ],
+   "B": [
+    116.4788818359375,
+    116.89784240722656,
+    117.12296295166016
+   ],
+   "median_A": 118.10441589355469,
+   "median_B": 116.89784240722656,
+   "change_pct": -1.021615895730421,
+   "spread_A_pct": 0.9807733526647168,
+   "spread_B_pct": 0.5509777618297936,
+   "over_gate": false,
+   "beyond_spread": false,
+   "slower_beyond_spread": false
+  },
+  {
+   "key": [
+    128,
+    1,
+    32,
+    4,
+    65536,
+    "causal",
+    "matched"
+   ],
+   "A": [
+    235.9737548828125,
+    236.81094360351562,
+    236.14801788330078
+   ],
+   "B": [
+    233.15028381347656,
+    235.04674530029297,
+    234.04466247558594
+   ],
+   "median_A": 236.14801788330078,
+   "median_B": 234.04466247558594,
+   "change_pct": -0.8906936533146226,
+   "spread_A_pct": 0.3545186312412097,
+   "spread_B_pct": 0.810298968904806,
+   "over_gate": false,
+   "beyond_spread": false,
+   "slower_beyond_spread": false
+  },
+  {
+   "key": [
+    128,
+    2,
+    16,
+    4,
+    8192,
+    "causal",
+    "matched"
+   ],
+   "A": [
+    4.040623903274536,
+    4.031872034072876,
+    4.046447992324829
+   ],
+   "B": [
+    3.979151964187622,
+    3.9591360092163086,
+    3.9737600088119507
+   ],
+   "median_A": 4.040623903274536,
+   "median_B": 3.9737600088119507,
+   "change_pct": -1.6547913407233605,
+   "spread_A_pct": 0.3607353369399393,
+   "spread_B_pct": 0.503703165941763,
+   "over_gate": false,
+   "beyond_spread": false,
+   "slower_beyond_spread": false
+  },
+  {
+   "key": [
+    128,
+    2,
+    32,
+    4,
+    8192,
+    "causal",
+    "matched"
+   ],
+   "A": [
+    7.934175968170166,
+    8.060463905334473,
+    8.121071815490723
+   ],
+   "B": [
+    7.981295824050903,
+    7.732383966445923,
+    7.825743913650513
+   ],
+   "median_A": 8.060463905334473,
+   "median_B": 7.825743913650513,
+   "change_pct": -2.911991101760536,
+   "spread_A_pct": 2.31867358399642,
+   "spread_B_pct": 3.1806798222824715,
+   "over_gate": false,
+   "beyond_spread": false,
+   "slower_beyond_spread": false
+  }
+ ],
+ "over_gate": [],
+ "worst_shape_change_pct": -0.8906936533146226,
+ "decision": {
+  "target": "pass0",
+  "tune_dim": 128,
+  "threshold_pct": 3.0,
+  "weighting": "geometric mean per shape",
+  "target_tune_A": 60.062732999999966,
+  "target_tune_B": 57.17559989999982,
+  "target_tune_change_pct": -7.6350156671485365,
+  "target_tune_sum_change_pct": -4.806862684720237,
+  "target_shape_ratios": {
+   "(128, 2, 16, 4, 8192, 'causal', 'matched')": 0.8880561655955401,
+   "(128, 1, 16, 4, 65536, 'causal', 'matched')": 0.9522822687057159,
+   "(128, 2, 32, 4, 8192, 'causal', 'matched')": 0.9017495622549955,
+   "(128, 1, 32, 4, 65536, 'causal', 'matched')": 0.9544152536105391
+  },
+  "target_other_A": 0,
+  "target_other_B": 0,
+  "target_other_change_pct": 0.0,
+  "target_other_slower_beyond_spread": false,
+  "tune_shapes_slower_beyond_spread": [],
+  "other_shapes_slower_beyond_spread": [],
+  "tuned_configs": 4,
+  "checks": {
+   "target_gain": true,
+   "tune_shapes": true,
+   "complete_set": true
+  },
+  "accept": true
+ }
+}

@@ -62,6 +62,10 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 //   FA3FP11_P1R_RFSKIP: the dV window rescale (64 FMUL per thread) is skipped when the clamped ratio is exactly 1.0f (every
 //     second m-block at hd128: one dO scale per 128 rows).  x * 1.0f is exact for normal x; the promote's FFMA flushes a
 //     denormal window value either way.
+// ## p1packed per-element arithmetic switches (default 0 = the certified line).
+#ifndef KDA_PK_EXPB
+#define KDA_PK_EXPB 0
+#endif
 #ifndef FA3FP11_P1R_DSDEFER
 #define FA3FP11_P1R_DSDEFER 0
 #endif
@@ -784,11 +788,23 @@ struct CollectiveMainloopBwdSm90Fp8R {
             mask_fn(tSrS, m_block);
             #pragma unroll
             for (int mi = 0; mi < size<0>(scores); ++mi) {
+#if KDA_PK_EXPB == 1
+                // ## KDA_PK_EXPB (named numerics arm; pass 0 does the same): b = fma(lse, log2e, -8) per row,
+                // P-hat = exp2(min(fma(s, dsc, -b), 12)): the per-element FADD of the 2^8 offset is gone.
+                float const lse_scaled = __fmaf_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E), -kFq8MoE);
+#elif KDA_PK_EXPB == 2
+                float const lse_scaled = __fadd_rn(__fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E)), -kFq8MoE);
+#else
                 float const lse_scaled = __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));   // LSEK: the host prep's exact multiply
+#endif
                 #pragma unroll
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
+#if KDA_PK_EXPB
+                    scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), fq8_s_descale_log2, -lse_scaled), kFq8MoE + 4.0f));
+#else
                     // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
                     scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+#endif
                 }
             }
             // The stage's LSE rows were read by the loop above and the S gemm has retired: raw Q's readers are done.

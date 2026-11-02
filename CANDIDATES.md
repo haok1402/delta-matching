@@ -210,3 +210,21 @@ the held piece is `kda-sm90-pass1-c2pk` (SHFL8, -1.10% / -1.07%, bitwise, four r
 
 Status after C4 (2026-11-02): kda-pass1 is DONE again. No further grounded per-element cut in pass 1 on r18_c4
 (ledger above; the dK fold and pass-0/1 reuse are covered by kda-p1split / kda-p1redesign / kda-fuse).
+
+## Round on r18_c4 (2026-11-02, Hao: contract-fixed instructions, the dK fold, pass-0 reuse)
+
+| variant | what | pass 1 screen vs r18_c4 (32/4, 16/4) | numerics | verdict |
+|---|---|---:|---|---|
+| GUARDLITE=1 | drop the F2b psi floor + its running g_max | +0.03 / +0.37% | bitwise (72 cases) | no gain |
+| GUARDLITE=2 | drop the dV window ratio clamp | -0.60 / -0.20% | bitwise | no gain (noise) |
+| GUARDLITE=3 | both | -0.40 / +0.45% | bitwise | no gain |
+
+- The remaining per-element instructions after C4 (exp FFMA + MUFU, dS FFMA + FMUL, amax FMNMX, scale FMUL, e4m3
+  conversions, dK fold) are not guards: changing any of them changes P^ (moves per-row residuals: fails residual-v4's
+  per-row test, as EXPB did), the dS' codes (per-case dK / dQ errors at quantization level, far above the 1e-5 per-case
+  tolerance) or the dK accumulation (in-wgmma dK, like PW on dV, measured +1.7e-5 .. +3.3e-5 per case on dV alone).
+- dK fold: measured elsewhere, not repeated: RIP in-place dK (kda-p1redesign) +3.78% slower; deleting the fold is a -8%
+  timing bound (kda-p1split) that no design reaching residual-v4 approaches.
+- Pass-0 reuse: kda-fuse priced every handoff (F2a-c) and built F1a / F1b; per-tile statistics from pass 0 can only bound
+  psi (a different dS' code set: fails residual-v4), so no variant was worth a build.
+Status: DONE on r18_c4.

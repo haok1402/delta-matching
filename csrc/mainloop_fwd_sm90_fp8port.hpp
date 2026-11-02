@@ -221,7 +221,8 @@ struct CollectiveMainloopFwdSm90Fp8Port {
     static constexpr int kVarBasis = kVar / 10 % 10;
     static constexpr int kVarPV = kVar % 10;
     static constexpr int kVarLazy = kVar / 100000 % 10;
-    static constexpr int kVarSP = kVar / 1000000 % 10;   // k-scale loads: 0 at use, 1 at step start, 2 none (ablation)
+    static constexpr int kVarSP = kVar / 1000000 % 10;   // k-scale loads: 0 at use, 1 at step start, 2 none (ablation), 3 smem-staged with K
+    static_assert(kVarSP != 3 || (kGroups == 4 && kVarSched == 1), "FWDPORT: smem-staged scales need BN 256, PV-first");
     static_assert(!kVarLazy || (kVarSched == 1 && kVarPV != 0), "FWDPORT: lazy alpha is implemented for the PV-first weighted steps");
     static constexpr int kQuantKeys = 64;
     static constexpr int kQuantRowsQ = 128;
@@ -413,7 +414,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
 
     // Set the bytes transferred in this TMA transaction (may involve multiple issues)
     static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(SmemLayoutQ{}) * cutlass::sizeof_bits_v<Element> / 8);
-    static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8);
+    static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8) + (kVarSP == 3 ? 32u : 0u);
     static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutVt{})) * cutlass::sizeof_bits_v<Element> / 8);
     static constexpr uint32_t TmaTransactionBytesQv = static_cast<uint32_t>(size(SmemLayoutQv{}) * cutlass::sizeof_bits_v<Element> / 8);
 
@@ -481,6 +482,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         SmemQv_t smem_qv;
         SmemScale_t smem_scale;
+        cute::array_aligned<float, 8 * kStages, 128> smem_kvsc;   // ## FWDPORT SP3: per K stage, 4 k-scales + 4 v-scales
     };
 
     using TensorStorage = std::conditional_t<!Transpose_V, TensorStorageNoTranspose, TensorStorageTransposeV>;
@@ -942,6 +944,12 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 auto [n_block_idx, bidb_kv_idx] = paged_kv_manager.get_indices_for_K_TMA();
                 copy(params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                     tKgK_TMA(_, n_block_idx, bidb_kv_idx), tKsK_TMA(_, smem_pipe_write.index()));
+                if constexpr (kVarSP == 3) {
+                    int const sc_off = (bidb * get<2>(params.shape_K) + params.qhead_per_khead_divmod.divide(bidh)) * params.nblk_k + 4 * n_block;
+                    float* sc_dst = shared_storage.tensors.mainloop.smem_kvsc.data() + 8 * smem_pipe_write.index();
+                    cute::SM90_BULK_COPY_G2S::copy(params.ptr_k8s + sc_off, pipeline_k.producer_get_barrier(smem_pipe_write), sc_dst, 16);
+                    cute::SM90_BULK_COPY_G2S::copy(params.ptr_v8s + sc_off, pipeline_k.producer_get_barrier(smem_pipe_write), sc_dst + 4, 16);
+                }
             } else {
                 constexpr bool Seqlenk_mask = decltype(need_seqlenk_masking_type)::value;
                 paged_kv_manager.template load_K<Seqlenk_mask>(n_block, sK_pi(_, _, smem_pipe_write.index()));
@@ -1357,10 +1365,14 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         float const fq8_q8sc = params.ptr_q8s[fq8_bh * params.nblk_q + m_block];
         int const fq8_bh_k = (bidb * get<2>(params.shape_K) + bidh_kv) * params.nblk_k;
         float fq8_v[kGS];
+        float fq8_vn[kGS];
         #pragma unroll
         for (int g = 0; g < kGS; ++g) { fq8_v[g] = 1.f; }
         auto fq8_load_v = [&](int n_blk) {
-            if constexpr (kVarPV != 0) {
+            if constexpr (kVarPV != 0 && kVarSP == 3) {
+                #pragma unroll
+                for (int g = 0; g < kGS; ++g) { fq8_v[g] = fq8_vn[g]; }
+            } else if constexpr (kVarPV != 0) {
                 #pragma unroll
                 for (int g = 0; g < kGroups; ++g) { fq8_v[g] = params.ptr_v8s[fq8_bh_k + min(kGroups * n_blk + g, params.nblk_k - 1)]; }
             }
@@ -1372,6 +1384,13 @@ struct CollectiveMainloopFwdSm90Fp8Port {
             if constexpr (kVarDesc != 0 && kVarSP != 2) {
                 #pragma unroll
                 for (int g = 0; g < kGroups; ++g) { fq8_k[g] = params.ptr_k8s[fq8_bh_k + min(kGroups * n_blk + g, params.nblk_k - 1)]; }
+            }
+        };
+        auto fq8_read_sc = [&](int stage) {
+            if constexpr (kVarSP == 3) {
+                float const* sc = shared_storage.tensors.mainloop.smem_kvsc.data() + 8 * stage;
+                #pragma unroll
+                for (int g = 0; g < kGS; ++g) { fq8_k[g] = sc[g]; fq8_vn[g] = sc[4 + g]; }
             }
         };
         auto fq8_descale = [&](auto& tSrS_, int n_blk) {
@@ -1406,6 +1425,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         if constexpr (kVarSP == 1) { fq8_load_k(n_block); }
         Tensor tSrS0 = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
         consumer_wait(pipeline_k, smem_pipe_read);
+        fq8_read_sc(smem_pipe_read.index());
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS0);
         warpgroup_wait<0>();
         pipeline_k.consumer_release(smem_pipe_read);
@@ -1468,6 +1488,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 // ======== FA3's IntraWGOverlap order: QK(n) and PV(n-1) issued together, softmax(n) under PV(n-1) ========
                 Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
                 if (!UseSchedulerBarrier || warp_group_idx == 0) { consumer_wait(pipeline_k, smem_pipe_read); }
+                fq8_read_sc(smem_pipe_read.index());
                 warp_scheduler_barrier_sync();
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
                 if (!UseSchedulerBarrier || warp_group_idx == 0) { consumer_wait(pipeline_v, smem_pipe_read_v); }
@@ -1533,6 +1554,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 pipeline_v.consumer_release(smem_pipe_read_v);
                 Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
                 consumer_wait(pipeline_k, smem_pipe_read);
+                fq8_read_sc(smem_pipe_read.index());
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
                 warp_scheduler_barrier_arrive();
                 warpgroup_wait<0>();

@@ -1,0 +1,21 @@
+{
+ "config": {
+  "B": 2,
+  "H": 16,
+  "Hk": 4,
+  "N": 8192,
+  "D": 128,
+  "iters": 20
+ },
+ "library": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/jit/r13prod/_C.so",
+ "rows": {
+  "delta_matching (matched)": {
+   "fwd_ms": 0.969109998550266,
+   "fwdbwd_ms": 4.244788025971502
+  },
+  "flash-attn 3 (bf16)": {
+   "fwd_ms": 0.7976394845172763,
+   "fwdbwd_ms": 3.478282946161926
+  }
+ }
+}

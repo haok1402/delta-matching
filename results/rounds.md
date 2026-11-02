@@ -497,3 +497,36 @@ configurations) and `ab.py` (`is_tuned`, `is_guarded`, `decision()`).
   scale multiplying the masked -inf scores in the forward descale).
 - Tooling repairs in the same commit: B11 (actual ptxas spill warnings and any positive spill count fail the gate), Q16
   (bench.py `--modes`, the gate times matched only), Q17 (gate documentation). CPU suite 103 passed (beside the job).
+
+## Round 14: H3, producer Q / K / V copy removal (glue): ACCEPTED
+
+- Change (`results/r14/h3.patch`, `delta_matching/producers.py` only; CUDA library unchanged): strided-input copies of
+  the frozen quantizer (`quant._quant_kernel` modes 0 / 1 / 2) and of `_kmean_partial_kernel` read the caller's
+  (B, H, N, D) tensors directly (bh -> b = bh // H, h = bh % H; offset b*sB + h*sH + n*sN + d*sD); output codes /
+  scales / twins stay contiguous; every arithmetic op identical. The first use of each (kind, shape, strides) signature
+  is checked bitwise against the contiguous route (fallback on a mismatch); `DM_STRIDED_PRODUCERS=0` restores the
+  copying route. Triton resources (`results/r14/h3_triton_resources.json`): quant MODE0 92 vs 88 registers, MODE1+T8
+  62 vs 61, k-mean partial 29 vs 31, no spills.
+- Gate (job 21169539, full, prebuilt library reuse, vs `.local/frozen/r13_prod`, target glue on the 8 target
+  configurations): pytest 49 / 3 in-process verified; **bitwise on all four routes vs the frozen baseline and the
+  previous accepted revision**; glue 5.154 -> 1.662 ms (**-67.75%**), no target / guard shape slower beyond spread;
+  bench D128 matched fwd+bwd -2.6%. (Job 21169464 stopped at pytest: the `--lib` path did not install the library's
+  build stamp into the worktree, so `kernel_version()` lacked `library`; fixed in gate.py, then rerun.)
+- Confirmation (job 21169682, same candidate package / library): glue 5.138 -> 1.657 ms (**-67.75%**), all
+  predicates; bench D128 -2.1%. Whole d128m grid: glue -47.1%, prod_fwd +2.0%, e2e fwd -10.0%, e2e fwd+bwd -2.0%.
+- Verdict: ACCEPTED. Glue counter stays 0.
+
+Target-grid ranking after H3 (accepted arm of the confirmation, `results/r14/h3_3/ab_all/B_median.json`):
+
+Target configurations: 8 (D128 causal matched, N 4096 / 8192; old two-floor model, the four-floor model is pending)
+
+| kernel | measured ms | share | modeled SOL ms | modeled waste ms | % of modeled SOL |
+|---|---:|---:|---:|---:|---:|
+| pass1 | 26.271 | 45.5% | 7.207 | 19.064 | 27.4% |
+| fwd | 11.196 | 19.4% | 3.603 | 7.592 | 32.2% |
+| pass0 | 9.165 | 15.9% | 3.603 | 5.561 | 39.3% |
+| pass2 | 6.004 | 10.4% | 4.870 | 1.134 | 81.1% |
+| prod_fwd | 1.908 | 3.3% | 1.364 | 0.544 | 71.5% |
+| prod_bwd | 0.754 | 1.3% | 0.541 | 0.213 | 71.7% |
+| twin | 0.828 | 1.4% | 0.721 | 0.107 | 87.1% |
+| glue | 1.657 | 2.9% | 2.043 | -0.386 | 123.3% |

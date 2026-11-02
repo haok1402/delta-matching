@@ -1,0 +1,2 @@
+route streams2, FULL SUITE, A 07fee0f25b8b vs B 756158cb1226
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs

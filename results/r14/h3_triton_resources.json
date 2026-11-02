@@ -1,0 +1,38 @@
+{
+ "_quant_strided_kernel MODE0": {
+  "n_regs": 92,
+  "n_spills": 0,
+  "shared": 32,
+  "num_warps": 8
+ },
+ "_quant_kernel MODE0 (frozen)": {
+  "n_regs": 88,
+  "n_spills": 0,
+  "shared": 32,
+  "num_warps": 8
+ },
+ "_kmean_partial_strided_kernel": {
+  "n_regs": 29,
+  "n_spills": 0,
+  "shared": 1024,
+  "num_warps": 4
+ },
+ "_kmean_partial_kernel (frozen)": {
+  "n_regs": 31,
+  "n_spills": 0,
+  "shared": 1024,
+  "num_warps": 4
+ },
+ "_quant_strided_kernel MODE1 T8": {
+  "n_regs": 62,
+  "n_spills": 0,
+  "shared": 8192,
+  "num_warps": 8
+ },
+ "_quant_kernel MODE1 T8 (frozen)": {
+  "n_regs": 61,
+  "n_spills": 0,
+  "shared": 8192,
+  "num_warps": 8
+ }
+}

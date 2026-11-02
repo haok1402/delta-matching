@@ -271,3 +271,10 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   accepted round reports both the sol4 % and the FA3-referenced % (r17_fwd: 59.0% of sol4, 86% of FA3). Method work
   (per-group basis / Horner / promote) stays counted in the sol4 issue / MUFU floors from the emitted loop. Next step
   unchanged: C4 + kda-fwdport's k / v-scale smem staging, >= 3% combined in two jobs vs r17_fwd.
+
+### Stack C4 + SMSC (kda-fwdport, origin/kda-sm90-fwdport-smsc 80b8151 on b7d70a0) : below 3% (held)
+
+- k / v scales staged into smem with the K TMA (kda-fwdport) on top of C4. Bitwise: O identical to r17_fwd on all four
+  shapes (screen s27). A/B vs r17_fwd: fwd geo-mean -2.46% (job 21179751), -2.42% (21179752); job 1 flags B2 32/4
+  N8192 e2e fwd+bwd slower beyond spread (its forward is faster). Causal D128 symbol STACK 16 -> 40 B (kda-fwdport
+  investigating). Needs ~0.6% more bitwise to clear the 3% stacking bar.

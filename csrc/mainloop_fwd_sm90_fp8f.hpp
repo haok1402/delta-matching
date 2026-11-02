@@ -1460,12 +1460,11 @@ struct CollectiveMainloopFwdSm90Fp8F {
             }
             scoremod_premask_fn(tSrS);
             mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block);
-            float fq8_g0_[kGroups];
-            if constexpr (false) { fq8_gsc(n_block, fq8_g0_); }   // ## C3g: the first (masked) tile keeps the exact descale else { fq8_descale(tSrS, n_block); }   // ## FQ8: codes -> true S (mask's -inf survives)
+            // ## C3g: the first (masked) tile keeps the exact descale (FWDDFOLD only on unmasked steps).
+            fq8_descale(tSrS, n_block);   // ## FQ8: codes -> true S (mask's -inf survives)
 
             Tensor scores_scale = [&] {
-                if constexpr (false) { return softmax.template max_get_scale_grouped_raw</*Is_first=*/true, /*Check_inf=*/true>(tSrS, fq8_g0_); }
-                else { return softmax.template max_get_scale_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS); }
+                return softmax.template max_get_scale_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
             }();
             // Don't need to store scales to send to WG1 (in the case of LargeHeadDimV) since it's 1.f
 
@@ -1473,11 +1472,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // e4m3-bound codes on them.  No V-fold: the per-32 V descale is
             // carried by the accumulator's basis instead (see rho above).
             if constexpr (kFwdLazy) { softmax.init_ref(); }
-            if constexpr (false) {
-                softmax.template online_softmax_grouped_raw</*Is_first=*/true, /*Check_inf=*/true>(tSrS, fq8_g0_);
-            } else {
-                softmax.template online_softmax_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
-            }
+            softmax.template online_softmax_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
             fq8_load_v(n_block);   // ## FQ8: this P-hat tile's four v-scales
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
             Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV>(tSrS.layout()));

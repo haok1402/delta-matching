@@ -280,6 +280,8 @@ SUBSETS = {"D128": lambda r: r["D"] == 128, "D256": lambda r: r["D"] == 256}
 def run(a):
     if a.reps < 3 and not a.smoke:
         raise SystemExit("an acceptance A/B needs --reps >= 3 (use --smoke for a labelled, non-acceptance run)")
+    from _paths import results_path
+    a.out_dir = results_path(a.out_dir, is_dir=True)
     os.makedirs(a.out_dir, exist_ok=True)
     roots = {"A": os.path.abspath(a.a), "B": os.path.abspath(a.b)}
     builds = {x: resolve_build(roots[x]) for x in roots}

@@ -7,3 +7,7 @@ dist/
 delta_matching/_jit/
 delta_matching/_build_info.py
 .pytest_cache/
+
+# results JSON lives outside the repo (~/workspace/haok1402/kda-results/, same relative paths); markdown summaries stay
+results/**/*.json
+!results/progress/*.json

@@ -312,6 +312,9 @@ def main():
     g = sp.add_parser("diag"); g.add_argument("--root", required=True); g.add_argument("--H", type=int, default=16)
     a = ap.parse_args()
     if a.cmd == "run":
+        sys.path.insert(0, HERE)
+        from _paths import results_path
+        a.out = results_path(a.out)
         run(a)
     elif a.cmd == "one":
         print(json.dumps(one(a.arm, a.root, a.H)))

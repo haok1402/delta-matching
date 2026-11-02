@@ -869,3 +869,39 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Accepted build r19_fwd (job 21196592, same-job calibration 1424.2 TFLOP/s): sol4c (fixed ref.) pass1 69.2%, forward
   82.4%, pass0 97.6%, pass2 94.3%; forward / FA3 fp8 1.108; original -> now e2e fwd -15.8%, fwd+bwd -13.3%; paper C.2
   16/4 fwd+bwd 529.7 TFLOP/s.
+
+## Round 20 (started): layout-space rounds (Hao: keep running own rounds)
+
+- Workers launched on r19_fwd: forward layout space (S20-fwd-*: key-tile width vs P-hat group size, 4 warpgroups at
+  120 registers, register splits, K / V depth, 2 CTAs / SM, producer warp instead of a producer warpgroup) and pass-1
+  layout space (S20-p1-*: tile shapes vs psi granularity, warpgroup count, register split, Q / dO / K depths, dS' store
+  layout, scheduler order, 2 CTAs / SM), bitwise or residual-v4. kda-p1fresh DONE and stopped; kda-bwdport starts pass 1
+  from FA3's BF16 backward structure (its candidates are gated when READY).
+- Forward helper ablations on r19_fwd (timing-only, 3 reps, control within +-0.15%): dropping the group-max quad
+  all-reduce (8 SHFL + 8 FMNMX) -1.93%, the fold exp2 -0.67%, the lazy check -0.09%, the basis scalars -0.17%: the
+  softmax is NOT slack (corrects the S19 SASS-diff note); the shuffle latency cannot be hidden bitwise (each group's
+  basis floor needs the whole tile max). FLOORPREV (floor from the previous max) is unsound (rho guards bind, O error
+  0.27 -> 0.37 on scale10 / outliers) and +1% slower: rejected.
+- Forward layout worker (S20-fwd-01..06, results/screens/fwd_layout_log.md, 2-rep screens vs r19_fwd): K/V depth 2
+  / 4 +0.4..+1.0% / +0.1..+0.6%; consumers at 152 registers +5.7% (the 160 budget is binding); 2 CTAs / SM with
+  64-row tiles +23%; 128-row tiles x 2 WGs at 240 registers +18%; a producer WARP cannot free registers for the
+  consumers (released registers return only to its own CTA; 160 / 168-register consumers hang); 64-key tiles trade the
+  rho chain for an equal number of promotes; 192 / 256-key tiles exceed 160 registers; 4 WGs at 120 infeasible;
+  pre-transposed V worth <= 2.5%. The 3-WG BM192 x BN128 layout is the best point of the space. Remaining structural
+  option: an FA4-style split (softmax WG + PV WG per 64-row slice, P through shared memory), estimated 0-4%: prototype
+  launched (round 20).
+- Pass-1 layout worker (S20-p1-01..08, results/screens/pass1_layout_log.md, 2-rep screens vs r19_fwd, all bitwise,
+  240 regs, no spills): dO / dOt depth 2 +0.5..+2.6% (the old ~-2% DOST gain is gone), Q3 + dO2 / dO2 + dOt2 neutral;
+  a first PERSISTENT pass 1 (one CTA per SM, longest-first, next tile's loads under the epilogue) +1.2..+2.1% (the
+  out-of-loop time is ~3400 of ~215000 cycles per CTA: <= 1.5-2% recoverable, below the extra per-tile sync);
+  L2 tile-order grouping 1 / 16 heads +0.3..+4.5%. 128-row steps, 2 CTAs / SM, 3 consumer WGs and other register
+  splits exceed the 65536-register file. The 64 x 128, 2-WG, non-persistent longest-first geometry is the only workable
+  point under the per-tile scale contract and the 240-register budget. No candidate; pass-1 progress rests on
+  kda-bwdport's FA3-structure rebuild.
+- Forward FA4-style split prototype (S21-fwd-01a: 128-row CTA, producer + 2 PV warpgroups holding O and doing rho /
+  promote / rebase / epilogue + 2 softmax warpgroups, P and 11 per-row values through double-buffered shared memory):
+  +37.9% / +38.8% vs r19_fwd (the plain 128-row layout is +18%). 640 threads force a 96-register launch; ptxas will not
+  lower the softmax WGs below 96 (88 ignores the register settings and spills the whole kernel, +63%); the only
+  holding split, softmax 96 / PV 128 / producer 24, still spills on the PV side; two softmax chains instead of three
+  plus a per-tile handoff. Stopped at the skeleton (>= 2% bar missed by 40 points). The forward's layout space is
+  exhausted under the 160-register / per-group-basis constraints; forward stays at 1.108x FA3 fp8.

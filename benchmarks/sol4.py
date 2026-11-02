@@ -519,6 +519,8 @@ def main():
         m.add_argument(f"--{n}", required=True)
     m.add_argument("--md", default=None); m.add_argument("--grid", choices=tuple(GRID_PARTS), default="paper")
     a = ap.parse_args()
+    from _paths import results_path
+    a.out = results_path(a.out)
     try:
         counts(a) if a.cmd == "counts" else model(a)
     except ModelError as e:

@@ -55,6 +55,8 @@ separate row pass; levers are inside it.
 |---|---|---|---|---|---|---|---|---|
 | C1 | RTR | 9635adb (`rtr.patch`) | transposed quad reduce: 4 SHFL + 4 FADD instead of 8 + 8, one fp64 fold per lane | yes (default route, 72 cases) | -3.74% (job 21171179, 3 reps) | ab.py paper / pass0: **-3.88%** (job 21171446; per shape -3.83 / -3.62 / -4.40 / -3.68) and **-3.66%** (job 21171447; -3.83 / -3.85 / -3.40 / -3.57); ACCEPT in both, no shape slower beyond spread | 168 / 0 / 0, no spills, no ptxas diagnostics | **READY** |
 | C2 | RTR + SPF | 41bfa7b (on C1; `spf.patch`) | stage scales: one float2 load per tensor per stage at s + 1, no clamps (531 vs 544 instr / stage) | yes (72 cases) | -5.46% (job 21171431; -5.79 / -4.99 / -5.79 / -5.27) | ab.py: **-5.27%** (job 21171806; -4.99 / -5.29 / -5.33 / -5.46) and **-4.97%** (job 21171794; -4.61 / -4.87 / -5.03 / -5.36), ACCEPT in both | 168 / 0 / 0, no spills | **READY** (supersedes C1) |
+| C3 | + LPT + W4 (on C2) | c9f9cda (LPT), 1b48691 (W4), aef8c7a (template warpgroup count, 128-row fallback when seqlen_q % 256 != 0) | grid (bh, p) for global longest-first dispatch; 4 consumer warpgroups per 256-row CTA (112 regs, one S/dP pair per warpgroup, past-diagonal n-blocks skipped) | yes: full equivalence vs frozen r14_h3 on default / kv / head / streams2 (72 cases each, job 21172311); aef8c7a leaves both W4 kernels SASS-identical to the timed build and its forced 2-warpgroup path is bitwise on 72 cases (job c5) | -14.03% stack incl. split (21171938) | ab.py: **-12.40%** (job 21172311; -15.63 / -9.80 / -14.91 / -9.05) and **-12.32%** (job 21172459; -16.02 / -9.59 / -14.08 / -9.40), ACCEPT in both | 96 launch / 112 consumer / 24 producer, STACK 0, LOCAL 0, no spills, no ptxas diagnostics | **READY** (stack on C2) |
+| C4 | + P0ALL (on C3) | de91150 (`delta_matching/split.py` only) | split route at D128 matched: pass 0 once on all heads (one launch), each group takes its slice | outputs: O / dQ / dK / dV (and the captured deltas) byte-equal to C3 on default / kv / head / streams2, 72 cases each (`p0/tools/eqout.py`, job 21172334). `benchmarks/equivalence.py dump` refuses the split routes by its schema (it expects one delta_fp8 capture per group), so its expected-schema derivation needs one all-heads delta call on matched D128 split routes | -14.03% (21171938) | ab.py (C2+C3+C4 vs r14_h3): **-14.35%** (job 21172334; -16.05 / -13.72 / -14.91 / -12.70) and **-14.47%** (job 21172595; -16.03 / -13.56 / -15.28 / -12.95), ACCEPT in both | Python only | **READY** (stack on C3; needs the equivalence schema update) |
 
 ## Screen log (every variant; 2-rep screens unless noted; geomean of per-shape pass-0 ratios vs frozen r14_h3)
 
@@ -82,3 +84,21 @@ separate row pass; levers are inside it.
 | mc2_all | mc2 + all-heads split pass 0 | yes | -4.00% | -5.03 / -4.24 / -2.97 / -3.76 | 21171530 | |
 | rtr_mc2_all | rtr + mc2_all | yes | -6.69% | -7.74 / -6.79 / -5.74 / -6.47 | 21171530 | |
 | rtr_st4_mc2_all | rtr + depth 4 + mc2_all | yes | -6.98% | -7.66 / -7.14 / -5.66 / -7.46 | 21171530 | |
+| c3mc2 / c3mc4 | C4 stack + multicast along grid x (C = 2 / 4) | yes | -14.62% / -6.12% (in-job ref -14.42%) | | 21172253 | no gain on top of W4 (C=2 within noise), C=4 slower: REJECTED |
+| w3 | C4 stack with 3 consumer warpgroups (192-row CTA, partial last CTA, 160 regs, v6 four-accumulator pipeline) | yes | -10.48% (ref -14.42%) | -11.44 / -11.47 / -8.60 / -10.41 | 21172253 | REJECTED: warp count beats intra-warpgroup pipelining |
+| w5 | C4 stack with 5 consumer warpgroups (320-row CTA, 88 regs) | yes | -1.73% (ref -14.30%) | | 21172523 | REJECTED |
+| stag_* | C4 stack + warpgroup start stagger (odd wg 400 / 1000 clk, wg x 300 / 700 clk), timing only | n/a | -14.31 / -13.81 / -14.13 / -14.43% (ref -15.33%, 2 shapes) | | 21172523 | REJECTED: phase alignment of the warpgroups is not the loss |
+
+## W4 what-ifs (C4 stack, B2 H16/4 N8192, job 21172377; timing only)
+
+| what-if | pass 0 ms | reading |
+|---|---:|---|
+| C4 stack | 0.555 | |
+| no vector work | 0.386 | tensor + loads = the calibrated tensor floor |
+| no wgmma | 0.399 | vector work alone ~ the same as tensor alone |
+| no dP gemm | 0.470 | tensor work now matters (-15%) |
+| no MUFU | 0.532 | |
+
+Each half alone sits at the floor; together 1.44x. A warpgroup has one S / dP pair (112 regs), so its own gemms and
+vector work only overlap during exp (dP in flight); cross-iteration pipelining makes ptxas inject a full wait (C7517,
+see swp). The remaining gap is tensor / vector overlap across warpgroups.

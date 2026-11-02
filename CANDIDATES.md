@@ -79,3 +79,41 @@ weighting costs 8-14%. Expressions tried per lever:
 - On the old base (r17_p1, 2 WGs) the same change is -3.9% (job 21179674): C3g's third warpgroup already hides most of the
   load latency.
 - Status: READY for stacking (bitwise, >= 1% in two jobs); C4 + SMSC alone is 2.4%, short of 3%.
+
+## The same ledger in the accepted layout (BM192, three consumer warpgroups, BN128, 3 stages; jobs 21179940, 21180532)
+
+| step | variant | vs FA3 |
+|---|---|---:|
+| FA3 math, 3 WGs, PV-first | 10013000 | **-7.0%** (-11% at 64K) |
+| FA3 math, 3 WGs, FA3 order | 10003000 | +19.0% (S + O + P over 160 regs: serialized) |
+| + DFOLD descale | 10013200 | -1.1% |
+| + per-group basis | 10013210 | +3.0% |
+| + zero-init temp + promote, unweighted (wrong numerics, cost probe) | 10013212 | +12.7% |
+| + exact Horner weights, port (spills at 160 regs, STACK 64) | 10013211 | +31.0% |
+| accepted forward C4 (C3g + PRETURN) | c4 | +14.8% |
+| C4 + SMSC | c4s | +13.4% |
+| V-scale folded into the codes (BASIS 2: one tile basis per row, codes scaled by v8sc_g/vmax, one PV chain, no rho) | 10013222 | +13.7% |
+
+BASIS 2 at 2 WGs (3010222) is -9.4% vs the exact Horner (3010211), but it fails residual-v4 badly (job 21180533): O error
+up on all 22 causal D128 cases by +2e-3 .. +5.5e-3 (5-12% relative), stale dQ / dK up to +1.4e-2. It loses the exact
+448-mapping of every group maximum but one, as expected. The P-quantization / V-scale fold is therefore measured,
+not only argued, to be out.
+
+## Final summary (kda-fwdport)
+
+- Ledger: on FA3's own math, our PV-first order and 256-key tile are free (+0.4%), and the 3-WG BM192 layout is 7% faster
+  than FA3 itself. The delta-matching additions cost, in that layout: S descale about 6% (mostly scale-load latency),
+  per-group basis about 4%, and the zero-init per-tile temp + promote (the fp8-accumulate precision contract) about 10%.
+  The exact rho weighting on top is about 2% in C4.
+- Delivered: SMSC (k/v scales staged into smem with the K TMA), bitwise on default and kv (72 cases each),
+  -1.41% / -1.19% vs C4 in two jobs; with C4, -2.46% / -2.42% vs r17_fwd (kda-fwd's A/B). READY for stacking.
+- Not reachable under residual-v4 with the levers tried: "within 5% of FA3" (C4 + SMSC is 1.134x FA3). Every form that
+  drops the exact per-group weights or the zero-init tile temp fails numerics:
+  - BASIS 2: +2e-3 .. 5e-3 on O.
+  - Direct accumulation into O: +1.4e-2 on O (historical measurement in the mainloop comments).
+  - Two-temp fold: within 1e-5 on O, but fails on stale dQ / dK.
+  Every exact form that keeps FA3's issue order spills at 240 / 160 registers.
+- What remains grounded: the temp + promote costs about 10% in the 3-WG layout. Taking the running O out of registers
+  (kda-fwd's O-in-smem plan) is the one structural lever left that could let FA3's QK(n) + PV(n-1) issue order hold the temp.
+  The remaining descale cost after SMSC (2010200 vs 3010200: 5 points on plain FA3 math) is the per-tile scale
+  arithmetic in the max / exp-constant chain.

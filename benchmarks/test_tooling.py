@@ -340,6 +340,12 @@ if "ab.py" in line:
             % (("true", "true") if acc else ("false", "false")))
     done("ab")
 if "bench.py" in line:
+    out = args[args.index("--json-out") + 1]
+    slow = os.environ.get("STUB_BENCH_SLOW") == "1" and "bench_B_" in os.path.basename(out)
+    t = 20.0 if slow else 10.0
+    if "bench" not in fail.split(","):
+        open(out, "w").write('{"rows": {"delta_matching (matched)": {"fwd_ms": 1.0, "fwdbwd_ms": %s}, '
+                             '"delta_matching (stale)": {"fwd_ms": 1.0, "fwdbwd_ms": %s}}}' % (t, t))
     done("bench")
 sys.exit(0)
 """
@@ -512,3 +518,16 @@ def test_slower_within_spread_is_not_flagged():
     B = [_recs((10.3, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)]
     res, _, _ = ab.analyze(A, B)
     assert not res["shapes"][0]["slower_beyond_spread"]   # +0.1 ms median vs a 0.4 ms A range
+
+
+def test_gate_rejects_a_bench_regression_even_when_every_child_succeeds(tmp_path):
+    r = run_gate(tmp_path, "full", "", extra={"STUB_BENCH_SLOW": "1"})
+    rec = json.load(open(tmp_path / "run_full_none" / "gate.json"))
+    assert r.returncode == 1 and "bench.py fwd+bwd regression" in r.stdout, r.stdout[-600:]
+    assert rec["bench_decision"]["changes_pct"]["D128 delta_matching (matched)"] == 100.0
+
+
+def test_gate_records_the_bench_decision_on_success(tmp_path):
+    r = run_gate(tmp_path, "confirm", "")
+    rec = json.load(open(tmp_path / "run_confirm_none" / "gate.json"))
+    assert r.returncode == 0 and rec["bench_decision"]["ok"] and len(rec["bench_decision"]["changes_pct"]) == 4

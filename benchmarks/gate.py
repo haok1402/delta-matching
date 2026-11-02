@@ -143,6 +143,37 @@ def resource_regressions(prev, cand):
     return out
 
 
+BENCH_PCT = 1.0
+BENCH_ROWS = ("delta_matching (matched)", "delta_matching (stale)")
+
+
+def bench_decision(files):
+    """bench.py medians per (D, row) for A and B over the repetitions: every row complete, finite and positive; the
+    fwd+bwd median of B within BENCH_PCT % of A's for matched and stale at both D."""
+    import math, statistics
+    vals = {}
+    for x, D, path in files:
+        if not os.path.isfile(path):
+            raise GateFailure(f"bench.py wrote no JSON ({path})")
+        with open(path) as f:
+            rows = json.load(f).get("rows", {})
+        for r in BENCH_ROWS:
+            v = rows.get(r, {}).get("fwdbwd_ms")
+            if not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+                raise GateFailure(f"bench.py {path}: missing or invalid {r!r} fwd+bwd timing")
+            vals.setdefault((D, r, x), []).append(v)
+    ch, ok = {}, True
+    for D in sorted({D for _, D, _ in files}):
+        for r in BENCH_ROWS:
+            a_, b_ = vals.get((D, r, "A")), vals.get((D, r, "B"))
+            if not a_ or not b_ or len(a_) != len(b_):
+                raise GateFailure(f"bench.py: incomplete repetitions for D{D} {r}")
+            c = 100 * (statistics.median(b_) / statistics.median(a_) - 1)
+            ch[f"D{D} {r}"] = round(c, 3)
+            ok = ok and c <= BENCH_PCT
+    return {"changes_pct": ch, "ok": ok, "limit_pct": BENCH_PCT}
+
+
 ALLOWED_SKIPS = ("needs two GPUs", "could not import 'flash_attn'")
 MIN_PASSED = 49
 
@@ -232,6 +263,7 @@ def main():
                     raise GateFailure(f"dump {r} wrote nothing")
                 gate.run(f"compare_base_{r}", [gate.py, os.path.join(HERE, "equivalence.py"), "compare", base[i], out])
                 gate.run(f"compare_prev_{r}", [gate.py, os.path.join(HERE, "equivalence.py"), "compare", prev[i], out])
+        bench_files = []
         ab_env = dict(env, DM_SO=os.path.join(REPO, "delta_matching", "_C.so"))   # conflicting on purpose: ignored
         # rule (Hao, round 10): ONE merged grid (no held-out split); acceptance = target >= 3% over all D128 shapes, no
         # D128 shape slower beyond its spread, D256 not slower (ab.py decision()); the first job and the confirmation
@@ -254,10 +286,18 @@ def main():
             for x in order:
                 root = os.path.abspath(a.prev_root) if x == "A" else wt
                 for D in (128, 256):
-                    gate.run(f"bench_{x}_rep{rep}_D{D}", [gate.py, os.path.join(HERE, "bench.py"), "--D", str(D), "--N", "8192"],
+                    bj = os.path.join(run_dir, f"bench_{x}_rep{rep}_D{D}.json")
+                    bench_files.append((x, D, bj))
+                    gate.run(f"bench_{x}_rep{rep}_D{D}", [gate.py, os.path.join(HERE, "bench.py"), "--D", str(D), "--N", "8192",
+                                                          "--json-out", bj],
                              env=dict(env, PYTHONPATH=root))
+        bdec = bench_decision(bench_files)
+        gate.save(bench_decision=bdec)
+        print(f"[gate] bench: {bdec['changes_pct']} -> {'ok' if bdec['ok'] else 'REGRESSION'}", flush=True)
         if not dec["accept"]:
             raise GateFailure(f"acceptance predicates not met: {dec['checks']}")
+        if not bdec["ok"]:
+            raise GateFailure(f"bench.py fwd+bwd regression above {BENCH_PCT}%: {bdec['changes_pct']}")
         gate.save(result="PASSED (all steps exited 0 and the merged-grid acceptance predicates hold for this job)")
         print("[gate] all steps passed", flush=True)
         return 0

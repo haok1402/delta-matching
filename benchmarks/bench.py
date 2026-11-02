@@ -24,6 +24,7 @@ def main():
     ap.add_argument("--D", type=int, default=128); ap.add_argument("--N", type=int, default=8192)
     ap.add_argument("--B", type=int, default=2); ap.add_argument("--H", type=int, default=16); ap.add_argument("--Hk", type=int, default=4)
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--json-out", default=None, help="also write the timings as JSON (gate.py's benchmark predicate)")
     a = ap.parse_args()
     g = torch.Generator(device="cuda").manual_seed(0)
     q = torch.randn(a.B, a.N, a.H, a.D, device="cuda", dtype=torch.bfloat16, generator=g, requires_grad=True)
@@ -46,6 +47,7 @@ def main():
     except Exception:
         pass
     print(f"B{a.B} H{a.H} Hk{a.Hk} N{a.N} D{a.D}, median ms over {a.iters}")
+    rows = {}
     for name, fn in arms.items():
         fwd = bench(lambda: fn(), a.iters)
 
@@ -53,6 +55,12 @@ def main():
             o = fn(); o.backward(do)
         fb = bench(step, a.iters)
         print(f"  {name:28s} forward {fwd:7.3f}   forward+backward {fb:7.3f}")
+        rows[name] = {"fwd_ms": fwd, "fwdbwd_ms": fb}
+    if a.json_out:
+        import json, os
+        with open(a.json_out, "w") as f:
+            json.dump({"config": {"B": a.B, "H": a.H, "Hk": a.Hk, "N": a.N, "D": a.D, "iters": a.iters},
+                       "library": os.path.realpath(dm.core.loaded_library()), "rows": rows}, f, indent=1)
 
 
 if __name__ == "__main__":

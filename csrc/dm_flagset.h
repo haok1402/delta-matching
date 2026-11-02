@@ -44,8 +44,8 @@
 #if !defined(FA3FP11_HD128_FWDLAZY) || (FA3FP11_HD128_FWDLAZY) != 1
 #error "delta_matching: FA3FP11_HD128_FWDLAZY must be 1 (the release flag set; kda-fwd)"
 #endif
-#if !defined(FA3FP11_HD128_FWDDFOLD) || (FA3FP11_HD128_FWDDFOLD) != 1
-#error "delta_matching: FA3FP11_HD128_FWDDFOLD must be 1 (the release flag set; kda-fwd)"
+#if !defined(FA3FP11_HD128_FWDDFOLD) || (FA3FP11_HD128_FWDDFOLD) != 0
+#error "delta_matching: FA3FP11_HD128_FWDDFOLD must be 0 (the release flag set; kda-fwd)"
 #endif
 #if !defined(FA3FP11_HD128_PVFIRST) || (FA3FP11_HD128_PVFIRST) != 1
 #error "delta_matching: FA3FP11_HD128_PVFIRST must be 1 (the release flag set)"

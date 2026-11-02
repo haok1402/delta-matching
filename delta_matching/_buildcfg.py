@@ -56,7 +56,7 @@ FLAGS = {
     "FA3FP11_HD128_BM192": 1,
     "FA3FP11_HD128_FWDST": 3,      # kda-fwd: hd128 forward K/V pipeline stages (bitwise knob)      # kda-fwd: forward 192 x 128 tiles, three consumer warpgroups (O order class)
     "FA3FP11_HD128_FWDLAZY": 1,    # kda-fwd: forward lazy O rescale (named numerics change; O only)
-    "FA3FP11_HD128_FWDDFOLD": 1,   # kda-fwd: forward S-descale fold (named numerics change; O and LSE)
+    "FA3FP11_HD128_FWDDFOLD": 0,   # kda-fwd: forward S-descale fold (named numerics change; O and LSE)
 }
 EXTRA_DEFINES = ["-DFA3FP11_M16_P0V2_ATOMN=64", "-DFA3FP11_HD128_P0V6=1", "-DFA3FP11_P1R_MASKDIAG=1", "-DFA3FP11_P1R_RFSKIP=1"]
 

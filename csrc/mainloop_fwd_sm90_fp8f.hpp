@@ -1735,9 +1735,24 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     KF_VAL(30, smem_pipe_read_v.index()); KF_VAL(31, smem_pipe_read_v.phase()); KF(0);
                     consumer_wait(pipeline_v, smem_pipe_read_v);
                     KF(1);
+                    // ## kda-fwd PRETURN (bitwise): with 128-key tiles and the lazy O rescale, the lazy rebase, rho_1 and the
+                    // promote weight depend only on the consumed tile's state, so they run BEFORE the ring turn; the turn
+                    // keeps only the two PV sub-gemms, the rescale, the promote and the QK issue.
+                    static constexpr bool kPreTurn = kFwdLazy && kGroups == 2 && kPVNSplit == 1;
+                    if constexpr (kPreTurn) { fq8_lazy_rebase(); }
+                    auto const pre_r1_ = [&] { if constexpr (kPreTurn) { return fq8_rho(softmax, 1); } else { return typename Softmax::TensorT{}; } }();
+                    auto const pre_w_ = [&] { if constexpr (kPreTurn) { return softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1]); } else { return typename Softmax::TensorT{}; } }();
                     warp_scheduler_barrier_sync();
                     KF(2);
                     auto tOrD = make_tOrD();
+                    if constexpr (kPreTurn) {
+                        auto B_ = pv_B_slab(cute::Int<0>{}, tOrV(_, _, _, smem_pipe_read_v.index()));
+                        fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, tOrD);
+                        softmax.rescale_o(tOrD, pre_r1_);
+                        fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 2, 4>(tiled_mma_pv, tOrP, B_, tOrD);
+                        auto O0_ = pv_O_slab(cute::Int<0>{});
+                        softmax.promote_o(O0_, tOrD, pre_w_);
+                    } else {
                     fq8_pv_tile(tOrV(_, _, _, smem_pipe_read_v.index()), tOrD);
                     KF(3);
                     warpgroup_wait<0>();
@@ -1747,6 +1762,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // destroys both, so every promote of this tile must precede it.
                     fq8_lazy_rebase();   // before the promote: its weight 2^(ms_3 - mref) must stay bounded
                     fq8_promote_last(tOrD);
+                    }
                     pipeline_v.consumer_release(smem_pipe_read_v);  // release V
                     KF(5);
                     // ---- tOrD is dead here; QK reuses its registers ----

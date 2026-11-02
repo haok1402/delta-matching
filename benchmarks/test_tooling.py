@@ -261,6 +261,7 @@ if sys.argv[0].endswith("cuobjdump"):
     shape = os.environ.get("STUB_RES", "ok")
     lib = open(args[-1], "rb").read()
     funcs = [f for f in FUNCS if not (shape == "nomatch" and "KernelX" in f)]
+    ninstr = 5000 if shape == "long" else 200
     if "--dump-resource-usage" in args:
         print("Fatbin elf code:\n================\narch = sm_90")
         for f in funcs:
@@ -268,14 +269,32 @@ if sys.argv[0].endswith("cuobjdump"):
                 continue
             print(f"\tFunction {f}:")
             bad = shape == "badrow" and f.endswith("causal")
-            print("\tREG:168 STACK:0" if bad else "\tREG:168 STACK:8 SHARED:0 LOCAL:0 CONSTANT[0]:904 TEXTURE:0 SURFACE:0 SAMPLER:0")
+            stack = 16 if shape == "stackgrow" and lib == b"lib" and f.endswith("causal") else 8
+            print("\tREG:168 STACK:0" if bad else f"\tREG:168 STACK:{stack} SHARED:0 LOCAL:0 CONSTANT[0]:904 TEXTURE:0 SURFACE:0 SAMPLER:0")
+    elif "--dump-elf" in args:
+        print("Fatbin elf code:\n================\narch = sm_90a\nSections:\nIndex Offset   Size ES Align Type Flags Link Info Name")
+        for k, f in enumerate(funcs):
+            if shape == "noelf" and f.endswith("full"):
+                continue
+            for _ in range(2 if shape == "dupelf" and f.endswith("causal") else 1):
+                print(f"   {k + 10:2x}   {4096 * (k + 1):x}  {16 * ninstr:x}  0 80   PROGBITS   6    3   {k + 3:x} .text.{f}")
     else:
         for f in funcs:
-            print(f"\n\tcode for sm_90\n\t\tFunction : {f}")
-            n = 10 if shape == "truncated" and f.endswith("full") else (5000 if shape == "long" else 200)
-            for i in range(n):
-                op = "QGMMA.64x256x32.F32.E4M3.E4M3" if i % 20 == 0 else "FFMA R1, R2, R3, R4"
-                print(f"        /*{16 * i:04x}*/                   {op} ;  /* 0x000000000000 */")
+            for _ in range(2 if shape == "dupfunc" and f.endswith("causal") else 1):
+                print(f"\n\tcode for sm_90\n\t\tFunction : {f}")
+                full = f.endswith("full")
+                idx = list(range(ninstr))
+                if full and shape == "truncated":
+                    idx = idx[:10]
+                if full and shape == "tail":
+                    idx = idx[:100]
+                if full and shape == "gap":
+                    idx = idx[:50] + idx[51:]
+                if full and shape == "dupoff":
+                    idx = idx[:51] + [50] + idx[51:]
+                for i in idx:
+                    op = "QGMMA.64x256x32.F32.E4M3.E4M3" if i % 20 == 0 else "FFMA R1, R2, R3, R4"
+                    print(f"        /*{16 * i:04x}*/                   {op} ;  /* 0x000000000000 */")
     done("cuobjdump_ok")
 if args[:2] == ["-m", "delta_matching.jit"]:
     jit = os.environ["DM_JIT_DIR"]; os.makedirs(jit, exist_ok=True)
@@ -359,7 +378,10 @@ def test_gate_refuses_a_reused_run_directory(tmp_path):
 
 
 @pytest.mark.parametrize("shape,why", [("nomatch", "no function matches"), ("badrow", "malformed"),
-                                       ("onlysass", "different functions"), ("truncated", "truncated SASS")])
+                                       ("onlysass", "different functions"), ("truncated", "incomplete SASS"),
+                                       ("tail", "incomplete SASS"), ("gap", "incomplete SASS"), ("dupoff", "incomplete SASS"),
+                                       ("dupfunc", "duplicate SASS function"), ("noelf", "ELF .text sections"),
+                                       ("dupelf", "duplicate ELF"), ("stackgrow", "stack / local growth")])
 def test_gate_rejects_missing_or_malformed_resource_evidence(tmp_path, shape, why):
     r = run_gate(tmp_path, "full", "", extra={"STUB_RES": shape})
     assert r.returncode == 1 and why in r.stdout and "step pytest" not in r.stdout, r.stdout[-800:]
@@ -435,3 +457,9 @@ def test_gate_counts_instructions_past_offset_0x10000(tmp_path):
     r = run_gate(tmp_path, "full", "", extra={"STUB_RES": "long"})
     rec = json.load(open(tmp_path / "run_full_none" / "gate.json"))
     assert r.returncode == 0 and rec["resources"]["cand"]["counts"]["QGMMA"] == 2 * 250, r.stdout[-600:]
+
+
+def test_resource_growth_is_recorded_but_not_fatal_in_timing_mode(tmp_path):
+    r = run_gate(tmp_path, "timing", "", extra={"STUB_RES": "stackgrow"})
+    rec = json.load(open(tmp_path / "run_timing_none" / "gate.json"))
+    assert r.returncode == 0 and rec["resource_regressions"] == ["_Z9KernelX_causal: STACK 8 -> 16"], r.stdout[-600:]

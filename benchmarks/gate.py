@@ -59,7 +59,21 @@ class Gate:
 
 
 RES_RE = re.compile(r"REG:(\d+)\s+STACK:(\d+)\s+SHARED:(\d+)\s+LOCAL:(\d+)")
-MIN_BODY = 50   # instruction lines a selected kernel function must have (a real pass-1 / forward kernel has thousands)
+ELF_TEXT_RE = re.compile(r"^\s*[0-9a-f]+\s+[0-9a-f]+\s+([0-9a-f]+)\s.*\sPROGBITS\s.*\s\.text\.(\S+)\s*$")
+SASS_OFF_RE = re.compile(r"/\*([0-9a-f]{4,6})\*/")
+
+
+def elf_text_sizes(path, kernel, tag):
+    """{symbol: .text section size in bytes} for every function matching `kernel` in a `cuobjdump --dump-elf` log;
+    a symbol with two .text sections (duplicate records) fails."""
+    sizes = {}
+    for line in open(path).read().splitlines():
+        m = ELF_TEXT_RE.match(line)
+        if m and re.search(kernel, m.group(2)):
+            if m.group(2) in sizes:
+                raise GateFailure(f"{tag}: duplicate ELF .text section for {m.group(2)[:80]}")
+            sizes[m.group(2)] = int(m.group(1), 16)
+    return sizes
 
 
 def resources(gate, lib, kernel, tag):
@@ -69,6 +83,8 @@ def resources(gate, lib, kernel, tag):
     log = gate.run(f"resources_{tag}", [gate.cuobjdump, "--dump-resource-usage", lib])
     shutil.copyfile(log, out)
     sass_log = gate.run(f"sass_{tag}", [gate.cuobjdump, "-sass", lib])
+    elf_log = gate.run(f"elf_{tag}", [gate.cuobjdump, "--dump-elf", lib])
+    sizes = elf_text_sizes(elf_log, kernel, tag)
     res_lines = open(out).read().splitlines()
     rows = {}
     for i, line in enumerate(res_lines):
@@ -76,6 +92,8 @@ def resources(gate, lib, kernel, tag):
         if m and re.search(kernel, m.group(1)):
             nxt = res_lines[i + 1] if i + 1 < len(res_lines) else ""
             r = RES_RE.search(nxt)
+            if m.group(1) in rows:
+                raise GateFailure(f"{tag}: duplicate resource row for {m.group(1)[:80]}")
             if not r:
                 raise GateFailure(f"{tag}: resource row missing or malformed for {m.group(1)[:80]}")
             rows[m.group(1)] = dict(zip(("REG", "STACK", "SHARED", "LOCAL"), map(int, r.groups())))
@@ -85,22 +103,41 @@ def resources(gate, lib, kernel, tag):
         if m:
             cur = m.group(1) if re.search(kernel, m.group(1)) else None
             if cur:
+                if cur in bodies:
+                    raise GateFailure(f"{tag}: duplicate SASS function record for {cur[:80]}")
                 bodies[cur] = []
             continue
-        if cur and re.search(r"/\*[0-9a-f]{4,6}\*/", line):
+        if cur and SASS_OFF_RE.search(line):
             bodies[cur].append(line)
     if not rows or not bodies:
         raise GateFailure(f"{tag}: no function matches {kernel!r} (resources {len(rows)}, sass {len(bodies)})")
     if set(rows) != set(bodies):
         raise GateFailure(f"{tag}: resource and SASS outputs select different functions for {kernel!r}")
-    short = [n for n, b in bodies.items() if len(b) < MIN_BODY]
-    if short:
-        raise GateFailure(f"{tag}: truncated SASS body for {short[0][:80]}")
+    if set(sizes) != set(bodies):
+        raise GateFailure(f"{tag}: ELF .text sections and SASS select different functions for {kernel!r}")
+    for n, b in bodies.items():
+        # complete coverage: unique, contiguous 16-byte instruction offsets from 0 to the exact .text section end
+        offs = [int(SASS_OFF_RE.search(l).group(1), 16) for l in b]
+        if sizes[n] <= 0 or sizes[n] % 16 or offs != list(range(0, sizes[n], 16)):
+            raise GateFailure(f"{tag}: incomplete SASS for {n[:80]}: {len(offs)} instructions, offsets "
+                              f"{'not contiguous/unique from 0' if offs[:1] != [0] or len(set(offs)) != len(offs) else 'end at ' + hex(offs[-1] if offs else 0)}"
+                              f", ELF .text size {hex(sizes[n])}")
     keep = [l for n in sorted(bodies) for l in [f"Function : {n}"] + bodies[n]]
     with open(os.path.join(gate.run_dir, f"target_{tag}.sass"), "w") as f:
         f.write("\n".join(keep))
     counts = {k: sum(1 for l in keep if k in l) for k in ("QGMMA", "STL", "LDL", "WARPGROUP.DEPBAR", "WARPGROUP.ARRIVE", "BAR.SYNC", "BAR.ARV", "CALL")}
-    return {"functions": len(rows), "rows": rows, "lines": len(keep), "counts": counts}
+    return {"functions": len(rows), "rows": rows, "text_bytes": sizes, "lines": len(keep), "counts": counts}
+
+
+def resource_regressions(prev, cand):
+    """Per-symbol STACK / LOCAL growth (candidate vs previous build, same symbol); also symbols present on one side."""
+    out = [f"{n[:100]}: only in {'previous' if n in prev['rows'] else 'candidate'}" for n in set(prev["rows"]) ^ set(cand["rows"])]
+    for n in sorted(set(prev["rows"]) & set(cand["rows"])):
+        a, b = prev["rows"][n], cand["rows"][n]
+        for k in ("STACK", "LOCAL"):
+            if b[k] > a[k]:
+                out.append(f"{n[:100]}: {k} {a[k]} -> {b[k]}")
+    return out
 
 
 ALLOWED_SKIPS = ("needs two GPUs", "could not import 'flash_attn'")
@@ -159,9 +196,16 @@ def main():
             if r_prev["functions"] != r_cand["functions"]:
                 raise GateFailure(f"target {a.kernel!r}: {r_prev['functions']} functions in the previous build, "
                                   f"{r_cand['functions']} in the candidate")
-            gate.save(resources={"prev": r_prev, "cand": r_cand})
-            print(f"[gate] resources prev {sorted(r_prev['rows'].values(), key=str)} {r_prev['counts']}\n[gate] resources cand "
-                  f"{sorted(r_cand['rows'].values(), key=str)} {r_cand['counts']}  (inspect target_*.sass)", flush=True)
+            regress = resource_regressions(r_prev, r_cand)
+            gate.save(resources={"prev": r_prev, "cand": r_cand}, resource_regressions=regress)
+            for line in regress:
+                print(f"[gate] resource regression: {line}", flush=True)
+            if regress and a.mode == "full":
+                raise GateFailure(f"per-symbol stack / local growth in the target functions ({len(regress)}): {regress[0]}")
+            for n in sorted(set(r_prev["rows"]) | set(r_cand["rows"])):
+                print(f"[gate] resources {n[-90:]}: prev {r_prev['rows'].get(n)} {r_prev['text_bytes'].get(n)} B -> "
+                      f"cand {r_cand['rows'].get(n)} {r_cand['text_bytes'].get(n)} B", flush=True)
+            print(f"[gate] counts prev {r_prev['counts']}\n[gate] counts cand {r_cand['counts']}  (inspect target_*.sass)", flush=True)
         if a.mode == "full":
             # the candidate's own tests, in a process pinned to the fresh build and verified from inside (gate_identity)
             junit = os.path.join(run_dir, "pytest.xml")

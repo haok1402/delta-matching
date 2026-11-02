@@ -230,3 +230,15 @@ What it lacks:
     bandwidth (128 KB per CTA per promote), so the form has to move fewer bytes, not just fewer instructions.
 - All switches (`KDA_FQ`, `KDA_FQX`, `KDA_FQPOS`, `KDA_SK`, `KDA_PE`, `KDA_PT`) default to the accepted kernel. FQ, SK
   and PT builds are timing or numerics probes; do not gate them.
+
+## Re-read under docs/kda-sm90/TASK.md (kda-sm90 after e28c03e)
+
+Nothing here changes status under the new rules:
+- **Stacking (bitwise or residual-v5 gains >= 1% in two jobs):** this branch has no such piece. PE is the only
+  bitwise variant and it is neutral (+0.51% / -0.65%).
+- **Summed time of every touched kernel:** FQ was already judged on pass 1 + pass 2 together (+3% non-deterministic,
+  +34% deterministic, both slower).
+- **Residual-v5:** PT16 / PT32 change dV only, so the dS rows are bitwise. They fail the per-case fp32-error clause:
+  PT16 on my dump shapes, PW32 on the 72-case route.
+
+The branch stays DONE with no READY candidate.

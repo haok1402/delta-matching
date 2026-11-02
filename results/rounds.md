@@ -854,3 +854,10 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   attention is disabled; the next tile's scale reads issued after the ring-turn arrive) on the held C4 PRETURN + SMSC
   stack: gate 21193779 bitwise on all four routes, forward -3.24% geomean, bench -0.6%; confirmation 21193980 (same
   library 401dc8a35a68) -2.90% -> REJECTED (both jobs must clear 3%); held at ~-3.1% for one more bitwise piece.
+- Forward helper, one more piece for the stack (C4 + SMSC rebased on r18_c4 as origin/kda-sm90-fwd-stk 30a05d9): four
+  bitwise turn levers, 3 reps on the 4 shapes vs r18_c4: sl1 (group-0 PV gemm before the ring sync) -2.51% vs stk
+  -2.45%; sl2 (+ its wait and rescale before the sync) -2.32%; vrel (V released after the arrive) -2.55% vs -2.30%;
+  sl2v -2.51%: none adds >= 1%. Taking the rescale and a wait out of the turn changes nothing, so the earlier
+  "ring-turn-bound" phase reading was distorted by the probe's own spills. Per-step cost is the same at 8K and 64K
+  (~1.93 us per step per SM). The helper's stk measures -2.3 .. -2.5% vs r18_c4 (my gate pair of stk + S19-fwd-10:
+  -3.24 / -2.90%). My worker continues on top of S19-fwd-10.

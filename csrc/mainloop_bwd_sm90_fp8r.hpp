@@ -147,6 +147,13 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_SK
 #define KDA_SK 0
 #endif
+// ## kda-bwdport PE (bitwise schedule change): a dV window promote that is not the tile's last runs at the start of the
+// NEXT step, right after the S / dP issue (the S-retire bubble, where the rescale already sits), instead of at the end of
+// its own step where nothing is in flight.  Same fmaf per slot with the same f (fq8_f_prev is updated only after it),
+// the same re-zero; the following rescale multiplies zeros as before.
+#ifndef KDA_PE
+#define KDA_PE 0
+#endif
 #ifndef KDA_FQPOS
 #define KDA_FQPOS 0
 #endif
@@ -923,11 +930,15 @@ struct CollectiveMainloopBwdSm90Fp8R {
         float fq8_q8sc_next = fq8_q8s_base[fq8_qblk(m_block_min)];
         float fq8_do8sc_next = fq8_do8s_base[fq8_qblk(m_block_min)];
         float fq8_f_prev = 1.0f;     // dV window basis (2^-8 * do8sc(i))
+        [[maybe_unused]] bool fq8_pe_pending = false;   // PE: a window promote deferred into the next step
         float fq8_g_max = 0.0f;      // row-global max of the dK basis (the F2b emission floor anchor)
         float* fq8_psired = shared_storage.tensors.mainloop.smem_psired.data();
         static constexpr float kFq8MoE = 8.0f;
         static constexpr float kFq8MoInv = 1.0f / 256.0f;
-        constexpr int kFq8PromoteTiles = 8;   // the 512-row dV promote window (pinned, as P1-A)
+#ifndef KDA_PT
+#define KDA_PT 8
+#endif
+        constexpr int kFq8PromoteTiles = KDA_PT;   // the 512-row dV promote window (pinned, as P1-A); kda-bwdport PT: 16 / 32 = a numerics probe
         auto fq8_clamp_ratio = [](float r) { return fminf(fmaxf(r, 1e-8f), 1e8f); };
 
         // The dS' natural transpose bookkeeping (per lane, per CTA): lane holds key pair ip = lane / 4 of its warp's 16
@@ -1041,6 +1052,17 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
             KP(4);
             // S17 RESCALE-EARLY: the dV window rescale fills the S-retire bubble (the previous dV retired last step).
+#if KDA_PE
+            if (fq8_pe_pending) {
+                #pragma unroll
+                for (int i = 0; i < size(tdVrdV); ++i) {
+                    float* const slot = fq8_smem_dv + i * NumMmaThreads;
+                    *slot = fmaf(tdVrdV(i), fq8_f_prev, *slot);
+                    tdVrdV(i) = 0.0f;
+                }
+                fq8_pe_pending = false;
+            }
+#endif
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
             float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
             if (!(KDA_PK_PROBE & 1) && !(KDA_SK & 4) && !(KDA_SK & 32) && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
@@ -1359,7 +1381,12 @@ struct CollectiveMainloopBwdSm90Fp8R {
             #pragma unroll
             for (int i = 0; i < size(tdKrdK); ++i) { if constexpr (!(KDA_SK & 2)) { tdKrdK(i) = fmaf(fq8_tmpK(i), fq8_g_fold, tdKrdK(i)); } }
             // dV window boundary (geometry-fixed): promote in TRUE units into the overlay, re-zero the window.
+#if KDA_PE
+            if (m_block != m_block_max - 1 && (m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1) { fq8_pe_pending = true; }
+            if (m_block == m_block_max - 1) {
+#else
             if (!(KDA_SK & 4) && !(KDA_SK & 16) && ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1)) {
+#endif
                 #pragma unroll
                 for (int i = 0; i < size(tdVrdV); ++i) {
                     float* const slot = fq8_smem_dv + i * NumMmaThreads;

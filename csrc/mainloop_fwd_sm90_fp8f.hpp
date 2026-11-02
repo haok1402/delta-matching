@@ -1564,7 +1564,15 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     fq8_pre_w[0] = w_(0); fq8_pre_w[1] = w_(1);
                 }
             };
+            // ## kda-fwd PREW4 (bitwise): the 256-key tile without lazy: rho_1..3 and the basis_last weight of the consumed tile
+            // computed where its softmax ends (same expressions, same inputs: nothing writes ms_ / the max / fq8_v between).
+            static constexpr bool kPreW4 = !kFwdLazy && kGroups == 4 && kAtomsPerGroup == 2 && kPVNSplit == 1 && kSchedPVFirst && kHeadDim < 256;
+            typename Softmax::TensorT fq8_p4r1, fq8_p4r2, fq8_p4r3, fq8_p4w;
             auto fq8_prep = [&]() __attribute__((always_inline)) {
+                if constexpr (kPreW4) {
+                    fq8_p4r1 = fq8_rho(softmax, 1); fq8_p4r2 = fq8_rho(softmax, 2); fq8_p4r3 = fq8_rho(softmax, 3);
+                    fq8_p4w = softmax.basis_last(fq8_v[kGroups - 1]);
+                }
                 if constexpr (kPreW) {
                     auto r_ = fq8_rho(softmax, 1);
                     fq8_pre_r1[0] = r_(0); fq8_pre_r1[1] = r_(1);
@@ -1803,10 +1811,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // until max_get_scale_grouped below), the same expression fq8_promote_last uses: bitwise either way.
                     static constexpr bool kPreTurn4 = kGroups == 4 && kAtomsPerGroup == 2 && kPVNSplit == 1 && kHeadDim < 256;
                     if constexpr (kPreTurn4) { fq8_lazy_rebase(cute::bool_constant<Check_inf>{}); }
-                    auto const p4r1_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 1); } else { return typename Softmax::TensorT{}; } }();
-                    auto const p4r2_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 2); } else { return typename Softmax::TensorT{}; } }();
-                    auto const p4r3_ = [&] { if constexpr (kPreTurn4) { return fq8_rho(softmax, 3); } else { return typename Softmax::TensorT{}; } }();
-                    auto const p4w_ = [&] { if constexpr (kPreTurn4) { if constexpr (kFwdLazy) { return softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1]); } else { return softmax.basis_last(fq8_v[kGroups - 1]); } } else { return typename Softmax::TensorT{}; } }();
+                    auto const p4r1_ = [&] { if constexpr (kPreW4) { return fq8_p4r1; } else if constexpr (kPreTurn4) { return fq8_rho(softmax, 1); } else { return typename Softmax::TensorT{}; } }();
+                    auto const p4r2_ = [&] { if constexpr (kPreW4) { return fq8_p4r2; } else if constexpr (kPreTurn4) { return fq8_rho(softmax, 2); } else { return typename Softmax::TensorT{}; } }();
+                    auto const p4r3_ = [&] { if constexpr (kPreW4) { return fq8_p4r3; } else if constexpr (kPreTurn4) { return fq8_rho(softmax, 3); } else { return typename Softmax::TensorT{}; } }();
+                    auto const p4w_ = [&] { if constexpr (kPreW4) { return fq8_p4w; } else if constexpr (kPreTurn4) { if constexpr (kFwdLazy) { return softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1]); } else { return softmax.basis_last(fq8_v[kGroups - 1]); } } else { return typename Softmax::TensorT{}; } }();
                     if constexpr (UseSchedulerBarrier) { cutlass::arch::NamedBarrier::sync(2 * cutlass::NumThreadsPerWarpGroup, fq8_bar_sync_id); }   // ## S19 WGID
                     KF(2);
                     auto tOrD = make_tOrD();

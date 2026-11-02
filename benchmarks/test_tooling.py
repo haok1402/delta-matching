@@ -808,6 +808,15 @@ def test_numerics_v4_error_tolerance_and_mean(tmp_path):
     assert r.returncode == 1 and "+ 1e-05" in r.stdout, r.stdout[-600:]
 
 
+def test_numerics_v4_stale_cases_have_the_correctness_tolerance(tmp_path):
+    st = [k for k, d in EQ.selected_cases("default") if d["mode"] != "matched"][:2]
+    ok = lambda f, m: (_err(f, st[0], "dQ", 1e-3 + 5e-4), _err(f, st[1], "dQ", 1e-3 - 6e-4))
+    assert _numcheck(tmp_path, ok).returncode == 0                          # +5e-4 on a stale case, mean not rising
+    d = tmp_path / "x"; d.mkdir()
+    r = _numcheck(d, lambda f, m: (_err(f, st[0], "dQ", 1e-3 + 2e-3), _err(f, st[1], "dQ", 1e-3 - 3e-3 + 1e-9)))
+    assert r.returncode == 1 and "+ 0.001" in r.stdout, r.stdout[-600:]
+
+
 def test_numerics_v4_ill_conditioned_rows_exempt_but_fixed_by_the_accepted_build(tmp_path):
     def ill(s):                               # row 7 has residual 0.5 in the accepted build: ill-conditioned
         for t in s:

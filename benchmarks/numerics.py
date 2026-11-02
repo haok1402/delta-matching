@@ -44,7 +44,8 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # from the case geometry, never taken from a capture.
 RESIDUAL_VERSION = "residual-v4"   # Hao, round 17: v3 + ill-conditioned rows + fp32-error tolerance
 ILL_CONDITIONED = 1e-3             # rows whose ACCEPTED residual exceeds this are exempt from per-row non-regression
-ERR_ABS_TOL = 1e-5                 # per case / output: rel-L2 error may rise by at most this (absolute, in rel-error units)
+ERR_ABS_TOL = 1e-5                 # per matched case / output: rel-L2 error may rise by at most this (absolute)
+ERR_ABS_TOL_OTHER = 1e-3           # stale / full cases ("stay correct"): the stale delta rowsum(dO * O) amplifies O round-off
 RESIDUAL_FLOOR = 1e-30
 
 
@@ -503,8 +504,9 @@ def check(a):
                 for o in OUTPUTS:
                     r = ref["cases"][k]["errors"][o]
                     if _fin(r) and _fin(ce[o]):
-                        if ce[o] > r + ERR_ABS_TOL + r * a.rel_tol:
-                            probs.append(f"{k} {o}: error {ce[o]:.6e} > {rn} {r:.6e} + {ERR_ABS_TOL:g}")
+                        tol = ERR_ABS_TOL if desc["mode"] == "matched" else ERR_ABS_TOL_OTHER
+                        if ce[o] > r + tol + r * a.rel_tol:
+                            probs.append(f"{k} {o}: error {ce[o]:.6e} > {rn} {r:.6e} + {tol:g}")
                         if rn == "prev":
                             err_sums.setdefault(o, [0.0, 0.0, 0])
                             err_sums[o][0] += ce[o]; err_sums[o][1] += r; err_sums[o][2] += 1

@@ -391,6 +391,8 @@ def main():
         with open(a.calib) as fh:
             meta["calibration_sha256"] = json.load(fh)["sha256"]
     if a.out:
+        from _paths import results_path
+        a.out = results_path(a.out)
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w") as fh:
             json.dump({"meta": meta, "records": recs}, fh, indent=1, default=str)

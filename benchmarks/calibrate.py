@@ -11,7 +11,7 @@
 Everything (raw timings, sizes, GPU, clock, torch / CUDA versions, job id) goes into the JSON, whose sha256 binds it to
 the timing data that uses it.
 """
-import argparse, hashlib, json, os, statistics, subprocess, threading, time
+import argparse, hashlib, json, os, statistics, subprocess, sys, threading, time
 
 import torch
 
@@ -71,6 +71,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _paths import results_path
+    a.out = results_path(a.out)
     clocks, stop = [], threading.Event()
     th = threading.Thread(target=sample_clock, args=(stop, clocks), daemon=True); th.start()
     g = gemm_fp8()

@@ -4,6 +4,9 @@ Status: interim (round 19; updated after every accepted round). Branch `kda-sm90
 020b155 + tooling). Every number below is traced to a committed file; per-round detail and every screened variant are in
 `results/rounds.md`, `results/screens/` and the helpers' `CANDIDATES.md` branches; rules in
 `docs/kda-sm90/rule-change-r10.md`.
+JSON results (raw A/B runs, medians, calibrations, sol4 / numerics reports) live outside the repo in
+`~/workspace/haok1402/kda-results/` under the same relative paths as the `results/...` paths cited here (round 20);
+only `results/progress/A_median.json` / `B_median.json` stay in git.
 
 ## Scope and goal
 

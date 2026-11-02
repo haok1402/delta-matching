@@ -182,7 +182,7 @@ def kernel_src(cfg):
     L.append(f"  #pragma unroll\n  for (int i = 0; i < {nx}; ++i) X[i] = c0 * (float)(i + threadIdx.x);")
     L.append(f"  #pragma unroll\n  for (int i = 0; i < {ni}; ++i) I[i] = threadIdx.x * 7 + i;")
     L.append("  { long long t0 = clock64(); unsigned long long g0; asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(g0)); "
-             "if (threadIdx.x == 0) { stamps[4 * blockIdx.x] = t0; stamps[4 * blockIdx.x + 2] = (long long)g0; } }")
+             "if (threadIdx.x % 128 == 0) { stamps[4 * (blockIdx.x * 8 + wg)] = t0; stamps[4 * (blockIdx.x * 8 + wg) + 2] = (long long)g0; } }")
     if any(g.get("pp_sync") for g in groups):
         L.append('  if (wg == NWG - 1) asm volatile("bar.arrive 1, 256;" ::: "memory");')
     L.append("  __syncwarp();")
@@ -264,7 +264,7 @@ def kernel_src(cfg):
         L.append("  #pragma unroll\n  for (int i = 0; i < 16; ++i) s += (float)(Pscr[i] & 7);")
     L.append(f"  #pragma unroll\n  for (int i = 0; i < {ni}; ++i) s += (float)(I[i] & 3);")
     L.append("  if (s == 1234.5f) out[4 + threadIdx.x] = s;")
-    L.append("  if (threadIdx.x == 0) { stamps[4 * blockIdx.x + 1] = t1; stamps[4 * blockIdx.x + 3] = (long long)g1; }")
+    L.append("  if (threadIdx.x % 128 == 0) { stamps[4 * (blockIdx.x * 8 + wg) + 1] = t1; stamps[4 * (blockIdx.x * 8 + wg) + 3] = (long long)g1; }")
     L.append("}")
     return "\n".join(L)
 
@@ -279,8 +279,8 @@ int main(int argc, char** argv) {
   int smem = 200 * 1024;
   cudaFuncSetAttribute(KNAME, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
   float* out; long long* st; cudaMalloc(&out, 1 << 20); cudaMemset(out, 0, 1 << 20);
-  cudaMalloc(&st, sizeof(long long) * 4 * sms);
-  std::vector<long long> h(4 * sms);
+  cudaMalloc(&st, sizeof(long long) * 32 * sms);
+  std::vector<long long> h(32 * sms);
   cudaEvent_t a, b; cudaEventCreate(&a); cudaEventCreate(&b);
   if (steps <= 0) {           // auto: size one launch to about -steps ms (default 2 ms)
     float want = steps < 0 ? (float)-steps : 2.f, ms = 0.f; int probe = 64;
@@ -300,13 +300,17 @@ int main(int argc, char** argv) {
     for (int l = 0; l < launches; ++l) KNAME<<<sms, NTHREADS, smem>>>(out, st, steps, 0);
     cudaEventRecord(b); cudaEventSynchronize(b);
     float ms; cudaEventElapsedTime(&ms, a, b);
-    cudaMemcpy(h.data(), st, sizeof(long long) * 4 * sms, cudaMemcpyDeviceToHost);
-    double cyc = 0, ns = 0; long long cmax = 0;
-    for (int i = 0; i < sms; ++i) { long long c = h[4*i+1] - h[4*i]; cyc += c; cmax = std::max(cmax, c); ns += (double)(h[4*i+3] - h[4*i+2]); }
-    cyc /= sms; ns /= sms;
+    cudaMemcpy(h.data(), st, sizeof(long long) * 32 * sms, cudaMemcpyDeviceToHost);
+    double wc[8] = {0}, wn[8] = {0}; long long cmax = 0;
+    for (int i = 0; i < sms; ++i) for (int w = 0; w < NWG; ++w) {
+      long long* q = &h[4 * (i * 8 + w)]; long long c = q[1] - q[0]; wc[w] += c; wn[w] += (double)(q[3] - q[2]); cmax = std::max(cmax, c); }
+    double cyc = 0, ns = 0;   // the slowest warpgroup role (CTA average per role)
+    char wl[256]; int o = 0;
+    for (int w = 0; w < NWG; ++w) { wc[w] /= sms; wn[w] /= sms; if (wc[w] > cyc) { cyc = wc[w]; ns = wn[w]; }
+      o += snprintf(wl + o, sizeof(wl) - o, "%s%.1f", w ? ", " : "", wc[w]); }
     printf("{\"kernel\": \"%s\", \"rep\": %d, \"steps\": %d, \"launches\": %d, \"sms\": %d, \"ms\": %.6f, \"cyc_per_launch\": %.1f, "
-           "\"cyc_max\": %lld, \"ns_last\": %.1f, \"mhz_last\": %.1f}\n",
-           KSTR, r, steps, launches, sms, ms, cyc, cmax, ns, cyc / ns * 1e3);
+           "\"cyc_max\": %lld, \"ns_last\": %.1f, \"mhz_last\": %.1f, \"wg_cyc\": [%s]}\n",
+           KSTR, r, steps, launches, sms, ms, cyc, cmax, ns, cyc / ns * 1e3, wl);
   }
   e = cudaDeviceSynchronize();
   if (e != cudaSuccess) { printf("{\"error\": \"%s\"}\n", cudaGetErrorString(e)); return 1; }

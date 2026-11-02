@@ -17,13 +17,22 @@ SMI=$!
 trap "kill $SMI 2>/dev/null || true" EXIT
 python $W/benchmarks/calibrate.py --out calib.json
 nvidia-smi -q -d CLOCK,POWER > smi_q.txt || true
+FROZEN=/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/${REAL_ROOT:-r17_p0s}
+if [ "${REAL:-0}" = 1 ]; then   # the real kernels in the same allocation, same calibration
+  echo "{\"mark\": \"real\", \"t\": $(date +%s.%N)}" > real_marks.jsonl
+  PYTHONPATH=$FROZEN:$PYTHONPATH python $W/benchmarks/kernels.py --grid paper --modes causal-matched --calib calib.json \
+    --out real.json 2>&1 | grep -v -iE "warn" | tail -3
+  echo "{\"mark\": \"end\", \"t\": $(date +%s.%N)}" >> real_marks.jsonl
+  python $W/benchmarks/sol4.py model --runs real.json --calib calib.json --counts $W/results/r17/accepted_p0s/sol4v2_counts.json \
+    --out real_sol4.json --md real_sol4.md --grid paper | head -14
+fi
 for n in $(cat $NAMES); do
   echo "{\"mark\": \"$n\", \"t\": $(date +%s.%N)}" >> runs.jsonl
   timeout 300 $B/bin/$n 0 $L $R >> runs.jsonl || echo "{\"kernel\": \"$n\", \"error\": \"exit $?\"}" >> runs.jsonl
 done
 echo "{\"mark\": \"end\", \"t\": $(date +%s.%N)}" >> runs.jsonl
 if [ "$RC" = 1 ]; then
-  for n in syn_fwd_dep syn_pass1_dep syn_pass0_dep syn_fwd_dep_z syn_pass1_dep_z t_SS128_w2 t_SS128_w2_z; do   # sustained: ~3 s each
+  for n in ${SUSTAIN:-syn_fwd_dep syn_pass1_dep syn_pass0_dep syn_fwd_dep_z syn_pass1_dep_z t_SS128_w2 t_SS128_w2_z}; do   # sustained: ~3 s each
     echo "{\"mark\": \"sustain_$n\", \"t\": $(date +%s.%N)}" >> sustain.jsonl
     $B/bin/$n 0 150 10 | sed 's/"kernel"/"sustain": 1, "kernel"/' >> sustain.jsonl
   done

@@ -1,0 +1,1400 @@
+{
+ "real_fwd": {
+  "samples": 94,
+  "mhz_median": 1860.0,
+  "mhz_min": 1680.0,
+  "watts_median": 689.455,
+  "temp_max": 63,
+  "reasons": {
+   "0x0000000000000004": 94
+  },
+  "ms_per_call": 42.91786760602679,
+  "shape": [
+   1,
+   65536,
+   32,
+   4
+  ]
+ },
+ "real_bwd": {
+  "samples": 96,
+  "mhz_median": 1822.5,
+  "mhz_min": 1635.0,
+  "watts_median": 690.38,
+  "temp_max": 62,
+  "reasons": {
+   "0x0000000000000004": 96
+  },
+  "ms_per_call": 192.57496643066406,
+  "shape": [
+   1,
+   65536,
+   32,
+   4
+  ]
+ },
+ "sus_sustain_syn_fwd_dep": {
+  "samples": 57,
+  "mhz_median": 1905.0,
+  "mhz_min": 1815.0,
+  "watts_median": 688.26,
+  "temp_max": 59,
+  "reasons": {
+   "0x0000000000000004": 53,
+   "0x0000000000000000": 4
+  }
+ },
+ "sus_sustain_syn_pass1_dep": {
+  "samples": 57,
+  "mhz_median": 1935.0,
+  "mhz_min": 1785.0,
+  "watts_median": 687.69,
+  "temp_max": 61,
+  "reasons": {
+   "0x0000000000000004": 53,
+   "0x0000000000000000": 4
+  }
+ },
+ "sus_sustain_syn_pass0_dep": {
+  "samples": 58,
+  "mhz_median": 1845.0,
+  "mhz_min": 1770.0,
+  "watts_median": 687.135,
+  "temp_max": 62,
+  "reasons": {
+   "0x0000000000000004": 55,
+   "0x0000000000000000": 3
+  }
+ },
+ "sus_sustain_v_fwd_spec": {
+  "samples": 59,
+  "mhz_median": 1950.0,
+  "mhz_min": 1935.0,
+  "watts_median": 676.25,
+  "temp_max": 61,
+  "reasons": {
+   "0x0000000000000004": 52,
+   "0x0000000000000000": 7
+  }
+ },
+ "sus_sustain_v_pass1_spec": {
+  "samples": 56,
+  "mhz_median": 1935.0,
+  "mhz_min": 1710.0,
+  "watts_median": 689.8,
+  "temp_max": 63,
+  "reasons": {
+   "0x0000000000000004": 52,
+   "0x0000000000000000": 4
+  }
+ },
+ "sus_sustain_v_pass0_spec": {
+  "samples": 56,
+  "mhz_median": 1882.5,
+  "mhz_min": 1725.0,
+  "watts_median": 690.635,
+  "temp_max": 64,
+  "reasons": {
+   "0x0000000000000004": 53,
+   "0x0000000000000000": 3
+  }
+ },
+ "syn_fwd_dep": {
+  "samples": 8,
+  "mhz_median": 1965.0,
+  "mhz_min": 1905.0,
+  "watts_median": 137.76,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "syn_fwd_free": {
+  "samples": 8,
+  "mhz_median": 1965.0,
+  "mhz_min": 1965.0,
+  "watts_median": 319.12,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 3
+  }
+ },
+ "syn_pass1_dep": {
+  "samples": 10,
+  "mhz_median": 1980.0,
+  "mhz_min": 1950.0,
+  "watts_median": 214.805,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000000": 8,
+   "0x0000000000000004": 2
+  }
+ },
+ "syn_pass1_free": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 187.09,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "syn_pass0_dep": {
+  "samples": 6,
+  "mhz_median": 1920.0,
+  "mhz_min": 1860.0,
+  "watts_median": 290.745,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "syn_pass0_free": {
+  "samples": 7,
+  "mhz_median": 1920.0,
+  "mhz_min": 1860.0,
+  "watts_median": 313.46,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS64_w1": {
+  "samples": 7,
+  "mhz_median": 1860.0,
+  "mhz_min": 1845.0,
+  "watts_median": 317.61,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS64_w1_dbl": {
+  "samples": 7,
+  "mhz_median": 1710.0,
+  "mhz_min": 1680.0,
+  "watts_median": 334.61,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS128_w1": {
+  "samples": 6,
+  "mhz_median": 1815.0,
+  "mhz_min": 1800.0,
+  "watts_median": 328.475,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS128_w1_dbl": {
+  "samples": 7,
+  "mhz_median": 1875.0,
+  "mhz_min": 1725.0,
+  "watts_median": 316.11,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 2
+  }
+ },
+ "t_SS256_w1": {
+  "samples": 6,
+  "mhz_median": 1822.5,
+  "mhz_min": 1770.0,
+  "watts_median": 343.375,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 4,
+   "0x0000000000000000": 2
+  }
+ },
+ "t_RS128_w1": {
+  "samples": 6,
+  "mhz_median": 1942.5,
+  "mhz_min": 1890.0,
+  "watts_median": 342.91999999999996,
+  "temp_max": 55,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_RS128_w1_dbl": {
+  "samples": 6,
+  "mhz_median": 1852.5,
+  "mhz_min": 1770.0,
+  "watts_median": 328.35,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS64_w2": {
+  "samples": 9,
+  "mhz_median": 1965.0,
+  "mhz_min": 1635.0,
+  "watts_median": 259.09,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 4
+  }
+ },
+ "t_SS64_w2_dbl": {
+  "samples": 8,
+  "mhz_median": 1822.5,
+  "mhz_min": 1665.0,
+  "watts_median": 283.26,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 2
+  }
+ },
+ "t_SS128_w2": {
+  "samples": 9,
+  "mhz_median": 1965.0,
+  "mhz_min": 1725.0,
+  "watts_median": 238.19,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 4
+  }
+ },
+ "t_SS128_w2_dbl": {
+  "samples": 7,
+  "mhz_median": 1740.0,
+  "mhz_min": 1725.0,
+  "watts_median": 360.62,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS256_w2": {
+  "samples": 6,
+  "mhz_median": 1852.5,
+  "mhz_min": 1740.0,
+  "watts_median": 351.075,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_RS128_w2": {
+  "samples": 6,
+  "mhz_median": 1770.0,
+  "mhz_min": 1755.0,
+  "watts_median": 346.71500000000003,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_RS128_w2_dbl": {
+  "samples": 6,
+  "mhz_median": 1852.5,
+  "mhz_min": 1755.0,
+  "watts_median": 355.72,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS64_w3": {
+  "samples": 6,
+  "mhz_median": 1672.5,
+  "mhz_min": 1665.0,
+  "watts_median": 336.48,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS64_w3_dbl": {
+  "samples": 6,
+  "mhz_median": 1770.0,
+  "mhz_min": 1680.0,
+  "watts_median": 343.54499999999996,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS128_w3": {
+  "samples": 5,
+  "mhz_median": 1755.0,
+  "mhz_min": 1725.0,
+  "watts_median": 346.11,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5
+  }
+ },
+ "t_SS128_w3_dbl": {
+  "samples": 6,
+  "mhz_median": 1777.5,
+  "mhz_min": 1725.0,
+  "watts_median": 335.82,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_RS128_w3": {
+  "samples": 12,
+  "mhz_median": 1980.0,
+  "mhz_min": 1755.0,
+  "watts_median": 255.84500000000003,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000000": 7,
+   "0x0000000000000004": 5
+  }
+ },
+ "t_RS128_w3_dbl": {
+  "samples": 7,
+  "mhz_median": 1890.0,
+  "mhz_min": 1755.0,
+  "watts_median": 300.27,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 2
+  }
+ },
+ "t_SS64_w4": {
+  "samples": 6,
+  "mhz_median": 1755.0,
+  "mhz_min": 1635.0,
+  "watts_median": 340.21000000000004,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "t_SS64_w4_dbl": {
+  "samples": 10,
+  "mhz_median": 1942.5,
+  "mhz_min": 1665.0,
+  "watts_median": 259.135,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 4
+  }
+ },
+ "t_SS128_w4": {
+  "samples": 5,
+  "mhz_median": 1740.0,
+  "mhz_min": 1710.0,
+  "watts_median": 343.95,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5
+  }
+ },
+ "t_SS128_w4_dbl": {
+  "samples": 5,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 318.23,
+  "temp_max": 45,
+  "reasons": {
+   "0x0000000000000000": 5
+  }
+ },
+ "t_RS128_w4": {
+  "samples": 7,
+  "mhz_median": 1875.0,
+  "mhz_min": 1770.0,
+  "watts_median": 287.14,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 2
+  }
+ },
+ "t_RS128_w4_dbl": {
+  "samples": 5,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 313.82,
+  "temp_max": 43,
+  "reasons": {
+   "0x0000000000000000": 5
+  }
+ },
+ "t_fwd_dep": {
+  "samples": 6,
+  "mhz_median": 1830.0,
+  "mhz_min": 1755.0,
+  "watts_median": 293.495,
+  "temp_max": 54,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "x_fwd_dep": {
+  "samples": 5,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 291.62,
+  "temp_max": 45,
+  "reasons": {
+   "0x0000000000000000": 5
+  }
+ },
+ "t_pass1_dep": {
+  "samples": 6,
+  "mhz_median": 1822.5,
+  "mhz_min": 1755.0,
+  "watts_median": 269.595,
+  "temp_max": 53,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 1
+  }
+ },
+ "x_pass1_dep": {
+  "samples": 6,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 294.71,
+  "temp_max": 46,
+  "reasons": {
+   "0x0000000000000000": 6
+  }
+ },
+ "t_pass0_dep": {
+  "samples": 7,
+  "mhz_median": 1710.0,
+  "mhz_min": 1665.0,
+  "watts_median": 268.47,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 2
+  }
+ },
+ "x_pass0_dep": {
+  "samples": 6,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 281.395,
+  "temp_max": 44,
+  "reasons": {
+   "0x0000000000000000": 6
+  }
+ },
+ "a_MUFU_EX2": {
+  "samples": 12,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 135.76,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 12
+  }
+ },
+ "a_FFMA": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 155.16,
+  "temp_max": 42,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "a_FMUL": {
+  "samples": 11,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 164.1,
+  "temp_max": 41,
+  "reasons": {
+   "0x0000000000000000": 11
+  }
+ },
+ "a_FADD": {
+  "samples": 24,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 127.91499999999999,
+  "temp_max": 40,
+  "reasons": {
+   "0x0000000000000000": 24
+  }
+ },
+ "a_FMNMX": {
+  "samples": 10,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 160.75,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 10
+  }
+ },
+ "a_ALU": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 149.085,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_IMAD": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 156.16,
+  "temp_max": 40,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_SHFL": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 161.765,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_LDS": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 167.64999999999998,
+  "temp_max": 41,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_FSEL": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 175.99,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_F2FP": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 155.745,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_MUFU_EX2_FFMA_1to1": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 155.04,
+  "temp_max": 37,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_MUFU_EX2_FFMA_1to4": {
+  "samples": 10,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 142.6,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 10
+  }
+ },
+ "a_MUFU_EX2_FFMA_1to8": {
+  "samples": 13,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 147.4,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000000": 13
+  }
+ },
+ "a_MUFU_EX2_FMNMX_1to1": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 163.305,
+  "temp_max": 36,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_MUFU_EX2_FMNMX_1to4": {
+  "samples": 9,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 137.36,
+  "temp_max": 37,
+  "reasons": {
+   "0x0000000000000000": 9
+  }
+ },
+ "a_MUFU_EX2_FMNMX_1to8": {
+  "samples": 13,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 138.57,
+  "temp_max": 37,
+  "reasons": {
+   "0x0000000000000000": 13
+  }
+ },
+ "a_FFMA_FMNMX_1to1": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 160.97,
+  "temp_max": 40,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_FFMA_FMNMX_1to4": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 171.09,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_FFMA_FMNMX_1to8": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 156.29,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_FFMA_ALU_1to1": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 165.68,
+  "temp_max": 40,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_FFMA_ALU_1to4": {
+  "samples": 11,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 154.48,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 11
+  }
+ },
+ "a_FFMA_ALU_1to8": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 156.4,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "a_MUFU_EX2_ALU_1to1": {
+  "samples": 14,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 136.755,
+  "temp_max": 36,
+  "reasons": {
+   "0x0000000000000000": 14
+  }
+ },
+ "a_MUFU_EX2_ALU_1to4": {
+  "samples": 9,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 139.56,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 9
+  }
+ },
+ "a_MUFU_EX2_ALU_1to8": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 156.27499999999998,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "w_MUFU_EX2_64": {
+  "samples": 8,
+  "mhz_median": 1957.5,
+  "mhz_min": 1860.0,
+  "watts_median": 209.435,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "w_MUFU_EX2_128": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 270.1,
+  "temp_max": 47,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "w_MUFU_EX2_256": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 207.755,
+  "temp_max": 41,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "w_MUFU_EX2_512": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 173.385,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "w_FFMA_64": {
+  "samples": 9,
+  "mhz_median": 1905.0,
+  "mhz_min": 1710.0,
+  "watts_median": 204.57,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 3
+  }
+ },
+ "w_FFMA_128": {
+  "samples": 8,
+  "mhz_median": 1852.5,
+  "mhz_min": 1680.0,
+  "watts_median": 304.41499999999996,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 2
+  }
+ },
+ "w_FFMA_256": {
+  "samples": 15,
+  "mhz_median": 1980.0,
+  "mhz_min": 1800.0,
+  "watts_median": 241.57,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000000": 8,
+   "0x0000000000000004": 7
+  }
+ },
+ "w_FFMA_512": {
+  "samples": 7,
+  "mhz_median": 1965.0,
+  "mhz_min": 1890.0,
+  "watts_median": 261.37,
+  "temp_max": 49,
+  "reasons": {
+   "0x0000000000000004": 4,
+   "0x0000000000000000": 3
+  }
+ },
+ "w_FMNMX_64": {
+  "samples": 9,
+  "mhz_median": 1905.0,
+  "mhz_min": 1695.0,
+  "watts_median": 272.05,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 3
+  }
+ },
+ "w_FMNMX_128": {
+  "samples": 7,
+  "mhz_median": 1710.0,
+  "mhz_min": 1665.0,
+  "watts_median": 292.41,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 2
+  }
+ },
+ "w_FMNMX_256": {
+  "samples": 7,
+  "mhz_median": 1965.0,
+  "mhz_min": 1905.0,
+  "watts_median": 284.47,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 2
+  }
+ },
+ "w_FMNMX_512": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 256.97,
+  "temp_max": 47,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "b_wait_SS64_w1": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 211.805,
+  "temp_max": 43,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "b_wait4_SS64_w1": {
+  "samples": 13,
+  "mhz_median": 1980.0,
+  "mhz_min": 1965.0,
+  "watts_median": 174.29,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000000": 10,
+   "0x0000000000000004": 3
+  }
+ },
+ "b_wait_SS64_w2": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 245.15,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "b_wait4_SS64_w2": {
+  "samples": 9,
+  "mhz_median": 1845.0,
+  "mhz_min": 1680.0,
+  "watts_median": 269.95,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 3
+  }
+ },
+ "b_wait_SS128_w1": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 220.935,
+  "temp_max": 46,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "b_wait4_SS128_w1": {
+  "samples": 9,
+  "mhz_median": 1965.0,
+  "mhz_min": 1875.0,
+  "watts_median": 215.33,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000000": 5,
+   "0x0000000000000004": 4
+  }
+ },
+ "b_wait_SS128_w2": {
+  "samples": 9,
+  "mhz_median": 1965.0,
+  "mhz_min": 1860.0,
+  "watts_median": 253.28,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 4
+  }
+ },
+ "b_wait4_SS128_w2": {
+  "samples": 8,
+  "mhz_median": 1920.0,
+  "mhz_min": 1710.0,
+  "watts_median": 278.6,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 3
+  }
+ },
+ "b_pingpong_w2": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 260.33,
+  "temp_max": 37,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "b_pingpong_w3": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 137.62,
+  "temp_max": 37,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "v_fwd_ilv": {
+  "samples": 8,
+  "mhz_median": 1972.5,
+  "mhz_min": 1965.0,
+  "watts_median": 179.815,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "v_fwd_spec": {
+  "samples": 8,
+  "mhz_median": 1972.5,
+  "mhz_min": 1965.0,
+  "watts_median": 256.71,
+  "temp_max": 49,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "v_fwd_spec_noT": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 234.51999999999998,
+  "temp_max": 41,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "v_fwd_spec_mufu": {
+  "samples": 8,
+  "mhz_median": 1972.5,
+  "mhz_min": 1920.0,
+  "watts_median": 215.22,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "v_fwd_spec_nomufu": {
+  "samples": 15,
+  "mhz_median": 1980.0,
+  "mhz_min": 1890.0,
+  "watts_median": 234.08,
+  "temp_max": 49,
+  "reasons": {
+   "0x0000000000000000": 10,
+   "0x0000000000000004": 5
+  }
+ },
+ "v_pass1_ilv": {
+  "samples": 8,
+  "mhz_median": 1972.5,
+  "mhz_min": 1950.0,
+  "watts_median": 240.57999999999998,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 5,
+   "0x0000000000000004": 3
+  }
+ },
+ "v_pass1_spec": {
+  "samples": 7,
+  "mhz_median": 1965.0,
+  "mhz_min": 1965.0,
+  "watts_median": 284.58,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 4,
+   "0x0000000000000000": 3
+  }
+ },
+ "v_pass1_spec_noT": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 259.99,
+  "temp_max": 44,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "v_pass1_spec_mufu": {
+  "samples": 8,
+  "mhz_median": 1897.5,
+  "mhz_min": 1695.0,
+  "watts_median": 251.925,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "v_pass1_spec_nomufu": {
+  "samples": 7,
+  "mhz_median": 1965.0,
+  "mhz_min": 1965.0,
+  "watts_median": 288.52,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 4,
+   "0x0000000000000000": 3
+  }
+ },
+ "v_pass0_ilv": {
+  "samples": 6,
+  "mhz_median": 1950.0,
+  "mhz_min": 1860.0,
+  "watts_median": 271.2,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 4,
+   "0x0000000000000000": 2
+  }
+ },
+ "v_pass0_spec": {
+  "samples": 7,
+  "mhz_median": 1965.0,
+  "mhz_min": 1890.0,
+  "watts_median": 292.89,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 5,
+   "0x0000000000000000": 2
+  }
+ },
+ "v_pass0_spec_noT": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 248.43,
+  "temp_max": 42,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "v_pass0_spec_mufu": {
+  "samples": 9,
+  "mhz_median": 1950.0,
+  "mhz_min": 1815.0,
+  "watts_median": 221.73,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 3
+  }
+ },
+ "v_pass0_spec_nomufu": {
+  "samples": 7,
+  "mhz_median": 1935.0,
+  "mhz_min": 1815.0,
+  "watts_median": 300.59,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000004": 4,
+   "0x0000000000000000": 3
+  }
+ },
+ "i_FFMA_T": {
+  "samples": 7,
+  "mhz_median": 1965.0,
+  "mhz_min": 1920.0,
+  "watts_median": 300.01,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000004": 4,
+   "0x0000000000000000": 3
+  }
+ },
+ "i_FFMA_0": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 241.42,
+  "temp_max": 42,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "i_MUFU_EX2_T": {
+  "samples": 13,
+  "mhz_median": 1980.0,
+  "mhz_min": 1665.0,
+  "watts_median": 169.37,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 8,
+   "0x0000000000000004": 5
+  }
+ },
+ "i_MUFU_EX2_0": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 260.03,
+  "temp_max": 37,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "i_FMNMX_T": {
+  "samples": 8,
+  "mhz_median": 1957.5,
+  "mhz_min": 1815.0,
+  "watts_median": 192.35,
+  "temp_max": 52,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "i_FMNMX_0": {
+  "samples": 7,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 257.25,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000000": 7
+  }
+ },
+ "i_LDS_T": {
+  "samples": 8,
+  "mhz_median": 1957.5,
+  "mhz_min": 1785.0,
+  "watts_median": 211.36,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "i_LDS_0": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 250.54000000000002,
+  "temp_max": 43,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "i_SHFL_T": {
+  "samples": 12,
+  "mhz_median": 1972.5,
+  "mhz_min": 1905.0,
+  "watts_median": 249.135,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000000": 7,
+   "0x0000000000000004": 5
+  }
+ },
+ "i_SHFL_0": {
+  "samples": 9,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 142.96,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000000": 9
+  }
+ },
+ "i_IMAD_T": {
+  "samples": 8,
+  "mhz_median": 1972.5,
+  "mhz_min": 1800.0,
+  "watts_median": 184.52499999999998,
+  "temp_max": 51,
+  "reasons": {
+   "0x0000000000000000": 4,
+   "0x0000000000000004": 4
+  }
+ },
+ "i_IMAD_0": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 259.265,
+  "temp_max": 41,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "v_fwd_pp": {
+  "samples": 12,
+  "mhz_median": 1965.0,
+  "mhz_min": 1890.0,
+  "watts_median": 183.07,
+  "temp_max": 50,
+  "reasons": {
+   "0x0000000000000000": 6,
+   "0x0000000000000004": 6
+  }
+ },
+ "syn_fwd_dep_z": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 248.435,
+  "temp_max": 43,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "syn_pass1_dep_z": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 187.61,
+  "temp_max": 42,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "syn_pass0_dep_z": {
+  "samples": 8,
+  "mhz_median": 1980.0,
+  "mhz_min": 1980.0,
+  "watts_median": 182.775,
+  "temp_max": 41,
+  "reasons": {
+   "0x0000000000000000": 8
+  }
+ },
+ "t_SS128_w2_z": {
+  "samples": 9,
+  "mhz_median": 1890.0,
+  "mhz_min": 1785.0,
+  "watts_median": 181.54,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 3
+  }
+ },
+ "t_RS128_w3_z": {
+  "samples": 8,
+  "mhz_median": 1905.0,
+  "mhz_min": 1860.0,
+  "watts_median": 169.575,
+  "temp_max": 40,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 2
+  }
+ },
+ "t_SS64_w4_z": {
+  "samples": 9,
+  "mhz_median": 1920.0,
+  "mhz_min": 1710.0,
+  "watts_median": 169.53,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 3
+  }
+ },
+ "t_fwd_dep_z": {
+  "samples": 8,
+  "mhz_median": 1897.5,
+  "mhz_min": 1845.0,
+  "watts_median": 168.375,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 2
+  }
+ },
+ "t_pass1_dep_z": {
+  "samples": 16,
+  "mhz_median": 1980.0,
+  "mhz_min": 1800.0,
+  "watts_median": 147.585,
+  "temp_max": 39,
+  "reasons": {
+   "0x0000000000000000": 11,
+   "0x0000000000000004": 5
+  }
+ },
+ "t_pass0_dep_z": {
+  "samples": 10,
+  "mhz_median": 1912.5,
+  "mhz_min": 1725.0,
+  "watts_median": 156.77,
+  "temp_max": 38,
+  "reasons": {
+   "0x0000000000000004": 6,
+   "0x0000000000000000": 4
+  }
+ }
+}

@@ -1,0 +1,5193 @@
+{
+ "calib": {
+  "job": "21183777",
+  "host": "pool0-01834",
+  "sm_clock_mhz": 1800.0,
+  "sha256": "f20f440e27283f722093dfa252268dab23cb4d6f93af6977f61ad5278d00f5b9"
+ },
+ "peak_tflops": 1437.303142269347,
+ "results": {
+  "syn_fwd_dep": {
+   "ms_launch": 1.9627487,
+   "steps": 1103,
+   "cyc_per_step": 2987.1794197642794,
+   "mhz": 1734.2,
+   "wgs": 3,
+   "instr_per_warp_step": 599,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 4212.305399785101,
+   "tflops": 933.3959337494402,
+   "ipc_sm": 2.406283316108013,
+   "mufu_lanes_per_clk_sm": 9.64120193432259,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 4,
+    "IMAD": 36,
+    "LOP3": 23,
+    "ISETP": 2,
+    "UIADD3": 8,
+    "ULEA": 1,
+    "ULOP3": 4,
+    "USHF": 2,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "FADD": 72,
+    "MUFU.EX2": 74,
+    "FMNMX": 82,
+    "FFMA": 140,
+    "FMUL": 85,
+    "SHFL": 8,
+    "FSEL": 2,
+    "F2FP": 32,
+    "PRMT": 10,
+    "MUFU.RCP": 1,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.8851040000000001,
+    1.9271999499999999,
+    1.9627487,
+    1.9672943,
+    1.9697088
+   ],
+   "floors_ms": {
+    "tensor": 1.2746244001522427,
+    "mufu": 1.103,
+    "issue": 1.1011616666666668
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 64.94078432721635,
+   "wg_cyc_per_step": [
+    2987.1794197642794,
+    2986.0367180417043,
+    2984.8338168631008
+   ]
+  },
+  "syn_fwd_free": {
+   "ms_launch": 1.9225663999999998,
+   "steps": 1152,
+   "cyc_per_step": 2922.621440972222,
+   "mhz": 1790.4,
+   "wgs": 3,
+   "instr_per_warp_step": 597,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 4305.351293054992,
+   "tflops": 995.2363311706687,
+   "ipc_sm": 2.4512240619219114,
+   "mufu_lanes_per_clk_sm": 9.854167083103162,
+   "hist": {
+    "WARPGROUP": 3,
+    "UIADD3": 5,
+    "FADD": 72,
+    "UMOV": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "MUFU.EX2": 74,
+    "FMNMX": 82,
+    "FFMA": 140,
+    "FMUL": 85,
+    "SHFL": 8,
+    "F2FP": 32,
+    "PRMT": 4,
+    "LOP3": 36,
+    "IMAD": 38,
+    "ISETP": 2,
+    "MUFU.RCP": 1,
+    "FSEL": 2,
+    "MOV": 3,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.90316315,
+    1.9124047999999998,
+    1.9299808500000002,
+    1.9306,
+    1.9225663999999998
+   ],
+   "floors_ms": {
+    "tensor": 1.3312486935406922,
+    "mufu": 1.1520000000000001,
+    "issue": 1.14624
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 69.24331422523001,
+   "wg_cyc_per_step": [
+    2922.621440972222,
+    2911.2405381944445,
+    2885.8733506944445
+   ]
+  },
+  "syn_pass1_dep": {
+   "ms_launch": 1.8713663,
+   "steps": 1498,
+   "cyc_per_step": 2224.6432576769025,
+   "mhz": 1810.2,
+   "wgs": 2,
+   "instr_per_warp_step": 658,
+   "mufu_per_warp_step": 35,
+   "flop_per_clk_sm": 3770.7654793874035,
+   "tflops": 886.3736573048259,
+   "ipc_sm": 2.3662220816010584,
+   "mufu_lanes_per_clk_sm": 4.027612053789036,
+   "hist": {
+    "UIADD3": 8,
+    "WARPGROUP": 7,
+    "ULOP3": 4,
+    "LOP3": 80,
+    "IMAD": 72,
+    "USHF": 2,
+    "UMOV": 2,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "MUFU.EX2": 32,
+    "LDS": 18,
+    "FMUL": 107,
+    "FADD": 32,
+    "FFMA": 128,
+    "SHFL": 21,
+    "FMNMX": 82,
+    "MUFU.RCP": 3,
+    "STS": 1,
+    "F2FP": 32,
+    "PRMT": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.8713663,
+    1.87088165,
+    1.87094555,
+    1.90353605,
+    1.9152271500000002
+   ],
+   "floors_ms": {
+    "tensor": 1.1540570271550676,
+    "mufu": 0.46604444444444443,
+    "issue": 1.0952044444444444
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 61.66922142153931,
+   "wg_cyc_per_step": [
+    2224.637449933244,
+    2224.6432576769025
+   ]
+  },
+  "syn_pass1_free": {
+   "ms_launch": 1.8765440000000002,
+   "steps": 1429,
+   "cyc_per_step": 2338.7881035689293,
+   "mhz": 1808.1,
+   "wgs": 2,
+   "instr_per_warp_step": 658,
+   "mufu_per_warp_step": 35,
+   "flop_per_clk_sm": 3586.732798580258,
+   "tflops": 843.2130287507247,
+   "ipc_sm": 2.2507383169801805,
+   "mufu_lanes_per_clk_sm": 3.8310439437960517,
+   "hist": {
+    "UIADD3": 8,
+    "WARPGROUP": 5,
+    "ULOP3": 4,
+    "MUFU.EX2": 32,
+    "FMNMX": 82,
+    "USHF": 2,
+    "FMUL": 107,
+    "UMOV": 2,
+    "FADD": 32,
+    "FFMA": 128,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "SHFL": 21,
+    "IMAD": 72,
+    "LOP3": 103,
+    "UISETP": 1,
+    "PLOP3": 1,
+    "LDS": 18,
+    "MUFU.RCP": 3,
+    "STS": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "F2FP": 16,
+    "PRMT": 7,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.87407835,
+    1.87648965,
+    1.8772127,
+    1.8774544,
+    1.8765440000000002
+   ],
+   "floors_ms": {
+    "tensor": 1.1008995272393804,
+    "mufu": 0.44457777777777774,
+    "issue": 1.044757777777778
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 58.66633168416942,
+   "wg_cyc_per_step": [
+    2338.758712386284,
+    2338.7881035689293
+   ]
+  },
+  "syn_pass0_dep": {
+   "ms_launch": 1.9579281000000002,
+   "steps": 1809,
+   "cyc_per_step": 1789.7107794361525,
+   "mhz": 1676.8,
+   "wgs": 4,
+   "instr_per_warp_step": 269,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 4687.130510910163,
+   "tflops": 1023.0707282376711,
+   "ipc_sm": 2.4048578404137304,
+   "mufu_lanes_per_clk_sm": 9.154551779121412,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "IMAD": 21,
+    "LOP3": 17,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 2,
+    "FMNMX": 32,
+    "MUFU.EX2": 32,
+    "FFMA": 64,
+    "FMUL": 37,
+    "FADD": 36,
+    "SHFL": 4,
+    "FSEL": 4,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.83443355,
+    1.92729605,
+    1.95892485,
+    1.9581454999999999,
+    1.9579281000000002
+   ],
+   "floors_ms": {
+    "tensor": 1.3936509760504123,
+    "mufu": 1.0291199999999998,
+    "issue": 1.08138
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 71.179885310927,
+   "wg_cyc_per_step": [
+    1789.7107794361525,
+    1787.9852404643448,
+    1782.897899391929,
+    1772.9334438916528
+   ]
+  },
+  "syn_pass0_free": {
+   "ms_launch": 1.9379553,
+   "steps": 1861,
+   "cyc_per_step": 1724.4849543256314,
+   "mhz": 1675.5,
+   "wgs": 4,
+   "instr_per_warp_step": 269,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 4864.413562413716,
+   "tflops": 1063.3260387460948,
+   "ipc_sm": 2.4958176580224793,
+   "mufu_lanes_per_clk_sm": 9.50080773908929,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 3,
+    "MUFU.EX2": 32,
+    "FMNMX": 32,
+    "FFMA": 64,
+    "FMUL": 37,
+    "FADD": 36,
+    "ISETP": 2,
+    "IMAD": 21,
+    "ULEA": 1,
+    "UIADD3": 8,
+    "ULOP3": 4,
+    "USHF": 2,
+    "FSEL": 4,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "LOP3": 6,
+    "SHFL": 4,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.8030239000000001,
+    1.8950144000000002,
+    1.9379553,
+    1.9484928,
+    1.944088
+   ],
+   "floors_ms": {
+    "tensor": 1.4337117006245534,
+    "mufu": 1.0587022222222222,
+    "issue": 1.1124644444444445
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 73.98063828533886,
+   "wg_cyc_per_step": [
+    1724.4849543256314,
+    1715.1141859215475,
+    1695.7850080601827,
+    1668.4299838796346
+   ]
+  },
+  "t_SS64_w1": {
+   "ms_launch": 2.0947071,
+   "steps": 10829,
+   "cyc_per_step": 318.0172684458399,
+   "mhz": 1662.2,
+   "wgs": 1,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 6594.459509223653,
+   "tflops": 1431.0963996140558,
+   "ipc_sm": 0.33960419988448837,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9839647500000002,
+    2.0812496,
+    2.0947071,
+    2.09758875,
+    2.0977647999999998
+   ],
+   "floors_ms": {
+    "tensor": 2.085661473141226,
+    "mufu": 0.0,
+    "issue": 0.162435
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 99.56816746079804,
+   "wg_cyc_per_step": [
+    318.0172684458399
+   ]
+  },
+  "t_SS64_w1_dbl": {
+   "ms_launch": 2.1972560999999997,
+   "steps": 12844,
+   "cyc_per_step": 256.0207100591716,
+   "mhz": 1514.7,
+   "wgs": 1,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8191.33733171549,
+   "tflops": 1618.1674398428113,
+   "ipc_sm": 0.3280984572716242,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.99118235,
+    2.18981285,
+    2.2013296,
+    2.1972560999999997,
+    2.19744645
+   ],
+   "floors_ms": {
+    "tensor": 2.4737497424532195,
+    "mufu": 0.0,
+    "issue": 0.14984666666666668
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.58358743221693,
+   "wg_cyc_per_step": [
+    256.0207100591716
+   ]
+  },
+  "t_SS128_w1": {
+   "ms_launch": 2.0586463999999998,
+   "steps": 5748,
+   "cyc_per_step": 574.0381002087682,
+   "mhz": 1629.4,
+   "wgs": 1,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 7306.664833701108,
+   "tflops": 1545.8552958604257,
+   "ipc_sm": 0.18814082194321627,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.8770609,
+    2.0390815499999997,
+    2.0586463999999998,
+    2.06236955,
+    2.06118715
+   ],
+   "floors_ms": {
+    "tensor": 2.214125431270804,
+    "mufu": 0.0,
+    "issue": 0.08621999999999999
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 107.55248843467263,
+   "wg_cyc_per_step": [
+    574.0381002087682
+   ]
+  },
+  "t_SS128_w1_dbl": {
+   "ms_launch": 2.0506687,
+   "steps": 6225,
+   "cyc_per_step": 512.0626024096385,
+   "mhz": 1574.4,
+   "wgs": 1,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.998483901489,
+   "tflops": 1680.651582969009,
+   "ipc_sm": 0.16404244247620703,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.8849888,
+    2.0491520000000003,
+    2.07808,
+    2.0506687,
+    2.0509344
+   ],
+   "floors_ms": {
+    "tensor": 2.397865485327202,
+    "mufu": 0.0,
+    "issue": 0.07262500000000001
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 116.93090577367283,
+   "wg_cyc_per_step": [
+    512.0626024096385
+   ]
+  },
+  "t_SS256_w1": {
+   "ms_launch": 2.1408272,
+   "steps": 3137,
+   "cyc_per_step": 1086.1092445011159,
+   "mhz": 1604.7,
+   "wgs": 1,
+   "instr_per_warp_step": 34,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 7723.539821128354,
+   "tflops": 1622.5449466785547,
+   "ipc_sm": 0.12521760650556757,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x256x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "NOP": 7,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.95497435,
+    2.1018944,
+    2.1486255499999998,
+    2.15501765,
+    2.1408272
+   ],
+   "floors_ms": {
+    "tensor": 2.4167402497900183,
+    "mufu": 0.0,
+    "issue": 0.05925444444444444
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.88815135523402,
+   "wg_cyc_per_step": [
+    1086.1092445011159
+   ]
+  },
+  "t_RS128_w1": {
+   "ms_launch": 1.9736047500000002,
+   "steps": 5381,
+   "cyc_per_step": 622.046088087716,
+   "mhz": 1719.6,
+   "wgs": 1,
+   "instr_per_warp_step": 28,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 6742.754404089352,
+   "tflops": 1509.5122651929164,
+   "ipc_sm": 0.18005096751642402,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 2,
+    "UIADD3": 9,
+    "ISETP": 1,
+    "ULEA": 1,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.8828912500000001,
+    1.9698320500000002,
+    1.99652635,
+    1.9806400499999999,
+    1.9736047500000002
+   ],
+   "floors_ms": {
+    "tensor": 2.072757297437056,
+    "mufu": 0.0,
+    "issue": 0.08370444444444444
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 105.02393133361964,
+   "wg_cyc_per_step": [
+    622.046088087716
+   ]
+  },
+  "t_RS128_w1_dbl": {
+   "ms_launch": 2.05756475,
+   "steps": 6369,
+   "cyc_per_step": 512.0696027633851,
+   "mhz": 1604.7,
+   "wgs": 1,
+   "instr_per_warp_step": 26,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.886507157282,
+   "tflops": 1713.7662021241372,
+   "ipc_sm": 0.20309739035233432,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 4,
+    "UIADD3": 5,
+    "ISETP": 1,
+    "ULEA": 1,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.90557115,
+    2.00243685,
+    2.05778085,
+    2.05756475,
+    2.0576128000000002
+   ],
+   "floors_ms": {
+    "tensor": 2.4533341808913973,
+    "mufu": 0.0,
+    "issue": 0.09199666666666667
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 119.2348469661233,
+   "wg_cyc_per_step": [
+    512.0696027633851
+   ]
+  },
+  "t_SS64_w2": {
+   "ms_launch": 2.12430555,
+   "steps": 6189,
+   "cyc_per_step": 512.0464049119406,
+   "mhz": 1513.5,
+   "wgs": 2,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8191.257588697097,
+   "tflops": 1613.0110210332032,
+   "ipc_sm": 0.42183676699604344,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.886384,
+    1.94918405,
+    2.19298075,
+    2.15055525,
+    2.12430555
+   ],
+   "floors_ms": {
+    "tensor": 2.383998311436153,
+    "mufu": 0.0,
+    "issue": 0.18567
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.22483090702998,
+   "wg_cyc_per_step": [
+    512.0082727419616,
+    512.0464049119406
+   ]
+  },
+  "t_SS64_w2_dbl": {
+   "ms_launch": 2.12595995,
+   "steps": 6222,
+   "cyc_per_step": 512.0609289617487,
+   "mhz": 1514.7,
+   "wgs": 2,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8191.025252608792,
+   "tflops": 1620.3497400861197,
+   "ipc_sm": 0.32808595715481687,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9752865,
+    2.14418565,
+    2.12595995,
+    2.1257696,
+    2.1372383
+   ],
+   "floors_ms": {
+    "tensor": 2.3967098875029476,
+    "mufu": 0.0,
+    "issue": 0.14517999999999998
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.73542041574902,
+   "wg_cyc_per_step": [
+    512.0609289617487,
+    512.0258919961427
+   ]
+  },
+  "t_SS128_w2": {
+   "ms_launch": 2.1511408,
+   "steps": 3243,
+   "cyc_per_step": 1024.1215849522048,
+   "mhz": 1559.6,
+   "wgs": 2,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8191.027435860062,
+   "tflops": 1669.3290175185184,
+   "ipc_sm": 0.21091245724508442,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9670160500000002,
+    2.0326336,
+    2.17861445,
+    2.1511408,
+    2.1513727
+   ],
+   "floors_ms": {
+    "tensor": 2.498402496037306,
+    "mufu": 0.0,
+    "issue": 0.09729
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 116.14314116664545,
+   "wg_cyc_per_step": [
+    1024.1215849522048,
+    1023.9847055195806
+   ]
+  },
+  "t_SS128_w2_dbl": {
+   "ms_launch": 2.1597313,
+   "steps": 3266,
+   "cyc_per_step": 1024.1882731169626,
+   "mhz": 1559.7,
+   "wgs": 2,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.494091941257,
+   "tflops": 1674.4812524113534,
+   "ipc_sm": 0.16403234093739164,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9723568,
+    2.12529755,
+    2.17539995,
+    2.1692833,
+    2.1597313
+   ],
+   "floors_ms": {
+    "tensor": 2.516121662675869,
+    "mufu": 0.0,
+    "issue": 0.07620666666666666
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 116.50160659688866,
+   "wg_cyc_per_step": [
+    1024.1882731169626,
+    1024.0517146356399
+   ]
+  },
+  "t_SS256_w2": {
+   "ms_launch": 2.05614395,
+   "steps": 1564,
+   "cyc_per_step": 2048.4048593350385,
+   "mhz": 1574.7,
+   "wgs": 2,
+   "instr_per_warp_step": 34,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.380882735402,
+   "tflops": 1684.5234443668207,
+   "ipc_sm": 0.13278625012064155,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x256x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "NOP": 7,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.87589285,
+    1.99262715,
+    2.05614395,
+    2.0566463500000003,
+    2.05700475
+   ],
+   "floors_ms": {
+    "tensor": 2.409806662844494,
+    "mufu": 0.0,
+    "issue": 0.05908444444444444
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 117.20028954414859,
+   "wg_cyc_per_step": [
+    2048.4048593350385,
+    2047.8348465473148
+   ]
+  },
+  "t_RS128_w2": {
+   "ms_launch": 2.16188315,
+   "steps": 3322,
+   "cyc_per_step": 1024.1475015051174,
+   "mhz": 1589.8,
+   "wgs": 2,
+   "instr_per_warp_step": 28,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.820157908753,
+   "tflops": 1701.4972166428142,
+   "ipc_sm": 0.21871849481720454,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 2,
+    "UIADD3": 9,
+    "ISETP": 1,
+    "ULEA": 1,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    2.016992,
+    2.11870405,
+    2.16188315,
+    2.16291675,
+    2.1630129
+   ],
+   "floors_ms": {
+    "tensor": 2.559263981448021,
+    "mufu": 0.0,
+    "issue": 0.10335111111111112
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 118.38123542653177,
+   "wg_cyc_per_step": [
+    1024.1475015051174,
+    1023.9951836243227
+   ]
+  },
+  "t_RS128_w2_dbl": {
+   "ms_launch": 2.16476955,
+   "steps": 3346,
+   "cyc_per_step": 1024.2173042438733,
+   "mhz": 1603.7,
+   "wgs": 2,
+   "instr_per_warp_step": 26,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.261934885855,
+   "tflops": 1711.5047061596003,
+   "ipc_sm": 0.20308190375045035,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 4,
+    "UIADD3": 5,
+    "ISETP": 1,
+    "ULEA": 1,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9729328,
+    2.1278736,
+    2.1777712,
+    2.16521605,
+    2.16476955
+   ],
+   "floors_ms": {
+    "tensor": 2.577753546636086,
+    "mufu": 0.0,
+    "issue": 0.09666222222222222
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 119.07750396046018,
+   "wg_cyc_per_step": [
+    1024.1054692169755,
+    1024.2173042438733
+   ]
+  },
+  "t_SS64_w3": {
+   "ms_launch": 2.16386565,
+   "steps": 4222,
+   "cyc_per_step": 768.0767882520133,
+   "mhz": 1514.5,
+   "wgs": 3,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8191.18100719861,
+   "tflops": 1620.3656611601555,
+   "ipc_sm": 0.4218328231703996,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9605295000000003,
+    2.1771600500000003,
+    2.17745285,
+    2.1638096,
+    2.16386565
+   ],
+   "floors_ms": {
+    "tensor": 2.4394670070003484,
+    "mufu": 0.0,
+    "issue": 0.18999
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.7365281204195,
+   "wg_cyc_per_step": [
+    768.0767882520133,
+    768.0477972524869,
+    768.0202510658456
+   ]
+  },
+  "t_SS64_w3_dbl": {
+   "ms_launch": 2.1783118999999997,
+   "steps": 4252,
+   "cyc_per_step": 768.1276810912511,
+   "mhz": 1514.8,
+   "wgs": 3,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.638294745421,
+   "tflops": 1621.057003078393,
+   "ipc_sm": 0.3280704578202321,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9323776,
+    2.1559376,
+    2.1783118999999997,
+    2.18555525,
+    2.1877968
+   ],
+   "floors_ms": {
+    "tensor": 2.4568009743641595,
+    "mufu": 0.0,
+    "issue": 0.14882
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.78462805827576,
+   "wg_cyc_per_step": [
+    768.1276810912511,
+    752.889557855127,
+    720.8589604891815
+   ]
+  },
+  "t_SS128_w3": {
+   "ms_launch": 2.0142736500000002,
+   "steps": 2023,
+   "cyc_per_step": 1536.2356401384084,
+   "mhz": 1559.8,
+   "wgs": 3,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.743445365148,
+   "tflops": 1668.140021010551,
+   "ipc_sm": 0.21090514471517466,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.8332912499999998,
+    1.9570112000000002,
+    2.0142736500000002,
+    2.01597595,
+    2.01959515
+   ],
+   "floors_ms": {
+    "tensor": 2.33777439846599,
+    "mufu": 0.0,
+    "issue": 0.091035
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 116.060417037476,
+   "wg_cyc_per_step": [
+    1536.2356401384084,
+    1536.1795847750864,
+    1535.92140385566
+   ]
+  },
+  "t_SS128_w3_dbl": {
+   "ms_launch": 2.00364,
+   "steps": 2026,
+   "cyc_per_step": 1536.450542941757,
+   "mhz": 1573.5,
+   "wgs": 3,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8189.597808926666,
+   "tflops": 1679.480007378571,
+   "ipc_sm": 0.16401439093347547,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.8227727999999999,
+    1.9151808,
+    2.0143152,
+    2.00364,
+    2.02050245
+   ],
+   "floors_ms": {
+    "tensor": 2.341241191938752,
+    "mufu": 0.0,
+    "issue": 0.07091
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 116.84939370040287,
+   "wg_cyc_per_step": [
+    1536.450542941757,
+    1475.6479269496547,
+    1474.1442250740376
+   ]
+  },
+  "t_RS128_w3": {
+   "ms_launch": 2.1957184,
+   "steps": 2250,
+   "cyc_per_step": 1536.3001777777777,
+   "mhz": 1589.7,
+   "wgs": 3,
+   "instr_per_warp_step": 28,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.399364661201,
+   "tflops": 1702.0055322212538,
+   "ipc_sm": 0.21870725842524874,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 2,
+    "UIADD3": 9,
+    "ISETP": 1,
+    "ULEA": 1,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    2.03305285,
+    2.14795035,
+    2.1957184,
+    2.1957697,
+    2.1959408
+   ],
+   "floors_ms": {
+    "tensor": 2.6000951045716647,
+    "mufu": 0.0,
+    "issue": 0.10500000000000001
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 118.41660135341876,
+   "wg_cyc_per_step": [
+    1536.3001777777777,
+    1535.9911555555557,
+    1536.0749333333333
+   ]
+  },
+  "t_RS128_w3_dbl": {
+   "ms_launch": 2.0141839999999998,
+   "steps": 2003,
+   "cyc_per_step": 1580.4842236645031,
+   "mhz": 1589.8,
+   "wgs": 3,
+   "instr_per_warp_step": 70,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 7961.428410101634,
+   "tflops": 1651.7217896438463,
+   "ipc_sm": 0.5314826857634681,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "VIADD": 5,
+    "LOP3": 21,
+    "STL": 2,
+    "ULEA": 1,
+    "UIADD3": 5,
+    "WARPGROUP": 16,
+    "IMAD": 2,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "LDL": 2,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.8085296499999999,
+    1.96326085,
+    2.02882555,
+    2.0141839999999998,
+    2.0157215
+   ],
+   "floors_ms": {
+    "tensor": 2.314662441980909,
+    "mufu": 0.0,
+    "issue": 0.23368333333333333
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 114.91812277234399,
+   "wg_cyc_per_step": [
+    1580.4842236645031,
+    1580.4286070893659,
+    1580.4064403394907
+   ]
+  },
+  "t_SS64_w4": {
+   "ms_launch": 2.19575365,
+   "steps": 3212,
+   "cyc_per_step": 1024.1278642590287,
+   "mhz": 1513.6,
+   "wgs": 4,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.977213640485,
+   "tflops": 1619.7789648542766,
+   "ipc_sm": 0.42182232812555903,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9552912,
+    2.19575365,
+    2.2318479499999997,
+    2.1948065,
+    2.2149376
+   ],
+   "floors_ms": {
+    "tensor": 2.474520141002722,
+    "mufu": 0.0,
+    "issue": 0.19272
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.69570887438681,
+   "wg_cyc_per_step": [
+    1024.1278642590287,
+    1024.0969489414695,
+    1023.9587795765879,
+    1023.9717310087174
+   ]
+  },
+  "t_SS64_w4_dbl": {
+   "ms_launch": 2.20585115,
+   "steps": 3229,
+   "cyc_per_step": 1024.2192629296997,
+   "mhz": 1514.7,
+   "wgs": 4,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.246272077561,
+   "tflops": 1620.8979516247052,
+   "ipc_sm": 0.328054755618341,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9764816499999998,
+    2.20351675,
+    2.21292475,
+    2.20585115,
+    2.22238405
+   ],
+   "floors_ms": {
+    "tensor": 2.487616916344268,
+    "mufu": 0.0,
+    "issue": 0.15068666666666666
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.7735620939005,
+   "wg_cyc_per_step": [
+    1024.2192629296997,
+    1002.6467017652525,
+    998.7886342520904,
+    940.8761226385878
+   ]
+  },
+  "t_SS128_w4": {
+   "ms_launch": 2.0501425,
+   "steps": 1559,
+   "cyc_per_step": 2048.4333547145607,
+   "mhz": 1574.5,
+   "wgs": 4,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.266947853826,
+   "tflops": 1684.053535892261,
+   "ipc_sm": 0.21089287528233844,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.90609435,
+    2.0848608,
+    2.0822128500000003,
+    2.0501425,
+    2.04991835
+   ],
+   "floors_ms": {
+    "tensor": 2.4021026773494665,
+    "mufu": 0.0,
+    "issue": 0.09354
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 117.1675957817306,
+   "wg_cyc_per_step": [
+    2048.4333547145607,
+    2048.292944194997,
+    2047.8704297626684,
+    2047.9642078255292
+   ]
+  },
+  "t_SS128_w4_dbl": {
+   "ms_launch": 1.8338672500000002,
+   "steps": 251,
+   "cyc_per_step": 12023.158964143426,
+   "mhz": 1811.8,
+   "wgs": 4,
+   "instr_per_warp_step": 137,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 1395.408315737533,
+   "tflops": 303.1095737774913,
+   "ipc_sm": 0.18231481481174663,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 16,
+    "ULEA": 1,
+    "UIADD3": 8,
+    "ULOP3": 4,
+    "USHF": 2,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "STL": 46,
+    "LDL": 46,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.8338672500000002,
+    1.8334385000000002,
+    1.8328497,
+    1.8358911500000001,
+    1.8351824
+   ],
+   "floors_ms": {
+    "tensor": 0.3867400718503632,
+    "mufu": 0.0,
+    "issue": 0.07641555555555556
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 21.08877138464429,
+   "wg_cyc_per_step": [
+    12023.158964143426,
+    11987.998007968128,
+    11918.725099601594,
+    11772.512749003985
+   ]
+  },
+  "t_RS128_w4": {
+   "ms_launch": 2.05514395,
+   "steps": 1593,
+   "cyc_per_step": 2048.567922159448,
+   "mhz": 1604.6,
+   "wgs": 4,
+   "instr_per_warp_step": 28,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8189.728941139871,
+   "tflops": 1716.5930744734449,
+   "ipc_sm": 0.21868935618583335,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 2,
+    "UIADD3": 9,
+    "ISETP": 1,
+    "ULEA": 1,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.9299343,
+    2.02019995,
+    2.055624,
+    2.05514395,
+    2.05520325
+   ],
+   "floors_ms": {
+    "tensor": 2.454489778715651,
+    "mufu": 0.0,
+    "issue": 0.09912
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 119.43152588973882,
+   "wg_cyc_per_step": [
+    2048.567922159448,
+    2048.2539234149403,
+    2048.0984306340238,
+    2048.001443816698
+   ]
+  },
+  "t_RS128_w4_dbl": {
+   "ms_launch": 1.9168207,
+   "steps": 155,
+   "cyc_per_step": 19947.75806451613,
+   "mhz": 1809.1,
+   "wgs": 4,
+   "instr_per_warp_step": 166,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 841.0577241682104,
+   "tflops": 179.07874187710934,
+   "ipc_sm": 0.13314779492561618,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 16,
+    "ULEA": 1,
+    "UIADD3": 5,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "STL": 64,
+    "LDL": 64,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    1.91716155,
+    1.91466715,
+    1.91563205,
+    1.9168207,
+    1.91729925
+   ],
+   "floors_ms": {
+    "tensor": 0.2388235503458418,
+    "mufu": 0.0,
+    "issue": 0.05717777777777778
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 12.459357849476573,
+   "wg_cyc_per_step": [
+    19947.75806451613,
+    19901.793548387097,
+    19794.281290322582,
+    19536.890967741936
+   ]
+  },
+  "t_fwd_dep": {
+   "ms_launch": 1.9987295,
+   "steps": 2046,
+   "cyc_per_step": 1536.3511730205278,
+   "mhz": 1589.8,
+   "wgs": 3,
+   "instr_per_warp_step": 20,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.1275053290665,
+   "tflops": 1700.2261735087216,
+   "ipc_sm": 0.15621428499849446,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UIADD3": 5,
+    "UMOV": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor_of",
+   "spread_ms": [
+    1.8210224,
+    1.90210875,
+    1.9987295,
+    1.9987392499999999,
+    1.9988239499999998
+   ],
+   "floors_ms": {
+    "tensor": 2.3643531484238336,
+    "mufu": 0.0,
+    "issue": 0.06820000000000001
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 118.2928029242493,
+   "wg_cyc_per_step": [
+    1536.3511730205278,
+    1536.175513196481,
+    1536.1537634408603
+   ]
+  },
+  "x_fwd_dep": {
+   "ms_launch": 1.8356655,
+   "steps": 1817,
+   "cyc_per_step": 1973.7426527242708,
+   "mhz": 1980.0,
+   "wgs": 3,
+   "instr_per_warp_step": 580,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.5262955838712893,
+   "mufu_lanes_per_clk_sm": 14.591567933260508,
+   "hist": {
+    "FADD": 72,
+    "FMNMX": 82,
+    "FMUL": 85,
+    "MUFU.EX2": 74,
+    "FFMA": 140,
+    "R2UR": 12,
+    "ISETP": 1,
+    "F2FP": 32,
+    "FSEL": 2,
+    "PRMT": 10,
+    "LOP3": 23,
+    "IMAD": 36,
+    "UIADD3": 1,
+    "UISETP": 1,
+    "PLOP3": 1,
+    "MUFU.RCP": 1,
+    "WARPGROUP": 2,
+    "MOV": 4,
+    "BRA": 1
+   },
+   "kind": "alu_of",
+   "spread_ms": [
+    1.8356159,
+    1.83584955,
+    1.8356655,
+    1.8356224,
+    1.8363376500000002
+   ],
+   "floors_ms": {
+    "tensor": 0.0,
+    "mufu": 1.817,
+    "issue": 1.7564333333333333
+   },
+   "controlling": "mufu",
+   "pct_of_floor": 98.98317531162404,
+   "wg_cyc_per_step": [
+    1973.7426527242708,
+    1943.256191524491,
+    1904.9671986791413
+   ]
+  },
+  "t_pass1_dep": {
+   "ms_launch": 2.1617584,
+   "steps": 3277,
+   "cyc_per_step": 1038.2836740921575,
+   "mhz": 1589.8,
+   "wgs": 2,
+   "instr_per_warp_step": 32,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8079.302611913583,
+   "tflops": 1678.5454983831678,
+   "ipc_sm": 0.24656074865458932,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 7,
+    "UMOV": 5,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "BRA": 1
+   },
+   "kind": "tensor_of",
+   "spread_ms": [
+    1.9990320000000001,
+    2.1331585,
+    2.1617584,
+    2.16192475,
+    2.1620928
+   ],
+   "floors_ms": {
+    "tensor": 2.5245960467203985,
+    "mufu": 0.0,
+    "issue": 0.11651555555555555
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 116.78437547509465,
+   "wg_cyc_per_step": [
+    1038.2836740921575,
+    1038.2237717424473
+   ]
+  },
+  "x_pass1_dep": {
+   "ms_launch": 1.953376,
+   "steps": 2777,
+   "cyc_per_step": 1376.882283039251,
+   "mhz": 1979.8,
+   "wgs": 2,
+   "instr_per_warp_step": 612,
+   "mufu_per_warp_step": 35,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.5558595388364287,
+   "mufu_lanes_per_clk_sm": 6.50745536519085,
+   "hist": {
+    "MUFU.EX2": 32,
+    "FMUL": 107,
+    "FFMA": 128,
+    "WARPGROUP": 3,
+    "FMNMX": 82,
+    "LDS": 18,
+    "FADD": 32,
+    "SHFL": 4,
+    "F2FP": 32,
+    "PRMT": 13,
+    "MUFU.RCP": 3,
+    "LOP3": 80,
+    "IMAD": 73,
+    "STS": 1,
+    "UIADD3": 1,
+    "ISETP": 1,
+    "MOV": 1,
+    "BRA": 1
+   },
+   "kind": "alu_of",
+   "spread_ms": [
+    1.95331515,
+    1.9538143000000001,
+    1.953376,
+    1.9536337,
+    1.9533199499999998
+   ],
+   "floors_ms": {
+    "tensor": 0.0,
+    "mufu": 0.8639555555555556,
+    "issue": 1.88836
+   },
+   "controlling": "issue",
+   "pct_of_floor": 96.67160853824355,
+   "wg_cyc_per_step": [
+    1376.8805185451927,
+    1376.882283039251
+   ]
+  },
+  "t_pass0_dep": {
+   "ms_launch": 2.20699195,
+   "steps": 3229,
+   "cyc_per_step": 1024.2579436358005,
+   "mhz": 1513.7,
+   "wgs": 4,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8189.9369705867475,
+   "tflops": 1620.0601051689382,
+   "ipc_sm": 0.3280423667570528,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor_of",
+   "spread_ms": [
+    2.0182928,
+    2.14259835,
+    2.2151457,
+    2.20699195,
+    2.21496315
+   ],
+   "floors_ms": {
+    "tensor": 2.487616916344268,
+    "mufu": 0.0,
+    "issue": 0.15068666666666666
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.71526914016465,
+   "wg_cyc_per_step": [
+    1024.1980179622174,
+    1024.183864973676,
+    1024.1724992257664,
+    1024.2579436358005
+   ]
+  },
+  "x_pass0_dep": {
+   "ms_launch": 1.9407295000000002,
+   "steps": 3357,
+   "cyc_per_step": 1131.57908847185,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 249,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.5207437470236616,
+   "mufu_lanes_per_clk_sm": 14.4788819154708,
+   "hist": {
+    "FMNMX": 32,
+    "MUFU.EX2": 32,
+    "FFMA": 64,
+    "IMAD": 21,
+    "LOP3": 17,
+    "FMUL": 37,
+    "FADD": 36,
+    "UIADD3": 1,
+    "ISETP": 2,
+    "FSEL": 4,
+    "WARPGROUP": 2,
+    "BRA": 1
+   },
+   "kind": "alu_of",
+   "spread_ms": [
+    1.9406688500000002,
+    1.9411119500000003,
+    1.9408943,
+    1.9406736500000001,
+    1.9407295000000002
+   ],
+   "floors_ms": {
+    "tensor": 0.0,
+    "mufu": 1.90976,
+    "issue": 1.85754
+   },
+   "controlling": "mufu",
+   "pct_of_floor": 98.40423407795882,
+   "wg_cyc_per_step": [
+    1131.57908847185,
+    1028.756747095621,
+    958.1413464402741,
+    1025.8804587429254
+   ]
+  },
+  "a_MUFU_EX2": {
+   "ms_launch": 1.74920805,
+   "steps": 417,
+   "cyc_per_step": 8192.4,
+   "mhz": 1979.4,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 256,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 0.5077877056784337,
+   "mufu_lanes_per_clk_sm": 15.999218788145111,
+   "hist": {
+    "MUFU.EX2": 256,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.7493105,
+    1.7492318999999998,
+    1.74920805,
+    1.7489215999999999,
+    1.74898395
+   ],
+   "wg_cyc_per_step": [
+    8192.4,
+    8186.723980815347,
+    8138.401918465228,
+    7542.036211031175
+   ]
+  },
+  "a_FFMA": {
+   "ms_launch": 1.9302799,
+   "steps": 3613,
+   "cyc_per_step": 1044.9246055909216,
+   "mhz": 1979.9,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.9811484749633714,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "FFMA": 256,
+    "UIADD3": 1,
+    "ISETP": 1,
+    "WARPGROUP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.9304735000000002,
+    1.9304943,
+    1.9302655999999998,
+    1.93009605,
+    1.9302799
+   ],
+   "wg_cyc_per_step": [
+    1044.9246055909216,
+    914.7892333241074,
+    782.3169388319956,
+    524.4785220038749
+   ]
+  },
+  "a_FMUL": {
+   "ms_launch": 1.9304383999999999,
+   "steps": 3613,
+   "cyc_per_step": 1044.9040409631884,
+   "mhz": 1979.9,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.9812268274561635,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "FMUL": 256,
+    "UIADD3": 1,
+    "ISETP": 1,
+    "WARPGROUP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.9303294999999998,
+    1.9305648999999998,
+    1.9306736,
+    1.9304383999999999,
+    1.9303552499999999
+   ],
+   "wg_cyc_per_step": [
+    1044.9040409631884,
+    914.7333794630501,
+    782.3479656794908,
+    524.4180736230279
+   ]
+  },
+  "a_FADD": {
+   "ms_launch": 1.9293407500000002,
+   "steps": 3611,
+   "cyc_per_step": 1044.9034616449737,
+   "mhz": 1979.9,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.9812290347387527,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "FADD": 256,
+    "UIADD3": 1,
+    "ISETP": 1,
+    "WARPGROUP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.9295263500000002,
+    1.9293088999999999,
+    1.9293407500000002,
+    1.9291776500000002,
+    1.9293455000000002
+   ],
+   "wg_cyc_per_step": [
+    1044.9034616449737,
+    914.761977291609,
+    782.4000553863197,
+    524.3314871226806
+   ]
+  },
+  "a_FMNMX": {
+   "ms_launch": 1.8612465,
+   "steps": 1771,
+   "cyc_per_step": 2057.137718802936,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.022227273349854,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "FMNMX": 256,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8613905,
+    1.86130715,
+    1.86109125,
+    1.8612465,
+    1.8609822999999999
+   ],
+   "wg_cyc_per_step": [
+    2057.137718802936,
+    2006.21185770751,
+    1966.1532467532468,
+    1934.5405420666289
+   ]
+  },
+  "a_ALU": {
+   "ms_launch": 1.85822565,
+   "steps": 1768,
+   "cyc_per_step": 2057.3201357466064,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.022047967994211,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "LOP3": 256,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.85854875,
+    1.8583343500000002,
+    1.8579727,
+    1.85822565,
+    1.8581487500000002
+   ],
+   "wg_cyc_per_step": [
+    2057.3201357466064,
+    2007.3022058823528,
+    1962.4947398190047,
+    1937.8536764705882
+   ]
+  },
+  "a_IMAD": {
+   "ms_launch": 1.83387205,
+   "steps": 1749,
+   "cyc_per_step": 2049.2237850200113,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.030036948824199,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "IMAD": 256,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8339184,
+    1.83387205,
+    1.8338815499999999,
+    1.8338192,
+    1.83373125
+   ],
+   "wg_cyc_per_step": [
+    2049.2237850200113,
+    2000.769182389937,
+    1973.8867924528302,
+    1904.5078330474557
+   ]
+  },
+  "a_SHFL": {
+   "ms_launch": 1.9320991500000002,
+   "steps": 923,
+   "cyc_per_step": 4096.373131094258,
+   "mhz": 1979.6,
+   "wgs": 4,
+   "instr_per_warp_step": 260,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 1.015532488586738,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "SHFL": 256,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.9322304,
+    1.93204955,
+    1.9320991500000002,
+    1.9323328,
+    1.9319952
+   ],
+   "wg_cyc_per_step": [
+    4096.373131094258,
+    4093.2700975081257,
+    3989.9760563380282,
+    3807.3850487540626
+   ]
+  },
+  "a_LDS": {
+   "ms_launch": 1.72970085,
+   "steps": 412,
+   "cyc_per_step": 8193.358980582523,
+   "mhz": 1979.6,
+   "wgs": 4,
+   "instr_per_warp_step": 774,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 1.5114680107815237,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "SHF": 1,
+    "LDS": 256,
+    "UIADD3": 1,
+    "LOP3": 1,
+    "ISETP": 1,
+    "FFMA": 512,
+    "WARPGROUP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.7297407,
+    1.7299696,
+    1.72970085,
+    1.7295568500000003,
+    1.7294832
+   ],
+   "wg_cyc_per_step": [
+    8193.358980582523,
+    8158.042961165049,
+    8045.182281553398,
+    7774.020388349514
+   ]
+  },
+  "a_FSEL": {
+   "ms_launch": 1.8603055999999998,
+   "steps": 1759,
+   "cyc_per_step": 2069.328538942581,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 261,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.0180459126775103,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 2,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "FSEL": 256,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8604463500000001,
+    1.8603055999999998,
+    1.8603409,
+    1.8601473,
+    1.86013925
+   ],
+   "wg_cyc_per_step": [
+    2069.328538942581,
+    1976.041444002274,
+    1982.8478681068789,
+    1979.0438317225696
+   ]
+  },
+  "a_F2FP": {
+   "ms_launch": 1.9403888500000002,
+   "steps": 14284,
+   "cyc_per_step": 264.06197843741245,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 36,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.1813060835508455,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "UIADD3": 1,
+    "F2FP": 32,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.9402816999999999,
+    1.9403888500000002,
+    1.9406288,
+    1.94025765,
+    1.94044475
+   ],
+   "wg_cyc_per_step": [
+    264.06197843741245,
+    264.0552856342761,
+    264.04928591430973,
+    264.04438532623914
+   ]
+  },
+  "a_MUFU_EX2_FFMA_1to1": {
+   "ms_launch": 1.85868645,
+   "steps": 1749,
+   "cyc_per_step": 2075.9052601486565,
+   "mhz": 1979.5,
+   "wgs": 4,
+   "instr_per_warp_step": 132,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 1.0173874697194798,
+   "mufu_lanes_per_clk_sm": 15.784920742314354,
+   "hist": {
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "FFMA": 64,
+    "ISETP": 1,
+    "WARPGROUP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.85868645,
+    1.8587919,
+    1.8583583999999997,
+    1.8586879499999998,
+    1.8584335500000002
+   ],
+   "wg_cyc_per_step": [
+    2075.9052601486565,
+    2071.481017724414,
+    2055.769182389937,
+    2045.42944539737
+   ]
+  },
+  "a_MUFU_EX2_FFMA_1to4": {
+   "ms_launch": 1.8490720499999997,
+   "steps": 1699,
+   "cyc_per_step": 2122.79270158917,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 324,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.4420660557760265,
+   "mufu_lanes_per_clk_sm": 15.436269389596612,
+   "hist": {
+    "FFMA": 256,
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8490656,
+    1.84917605,
+    1.8490720499999997,
+    1.8494240000000002,
+    1.8488734999999998
+   ],
+   "wg_cyc_per_step": [
+    2122.79270158917,
+    2091.7174220129486,
+    2021.081812831077,
+    1953.7260741612713
+   ]
+  },
+  "a_MUFU_EX2_FFMA_1to8": {
+   "ms_launch": 1.86598395,
+   "steps": 1496,
+   "cyc_per_step": 2435.745254010695,
+   "mhz": 1979.9,
+   "wgs": 4,
+   "instr_per_warp_step": 580,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.809922234157929,
+   "mufu_lanes_per_clk_sm": 13.452966785440411,
+   "hist": {
+    "FFMA": 512,
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "ISETP": 1,
+    "WARPGROUP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.86598395,
+    1.86606235,
+    1.8658224,
+    1.8658416500000001,
+    1.86599675
+   ],
+   "wg_cyc_per_step": [
+    2435.745254010695,
+    2330.0101604278075,
+    2210.476537433155,
+    2079.749799465241
+   ]
+  },
+  "a_MUFU_EX2_FMNMX_1to1": {
+   "ms_launch": 1.86196325,
+   "steps": 1778,
+   "cyc_per_step": 2048.0893138357706,
+   "mhz": 1979.6,
+   "wgs": 4,
+   "instr_per_warp_step": 132,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 1.0312050288688506,
+   "mufu_lanes_per_clk_sm": 15.999302266086408,
+   "hist": {
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "FMNMX": 64,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.86196325,
+    1.8619951000000001,
+    1.86184805,
+    1.8618929000000002,
+    1.8619856
+   ],
+   "wg_cyc_per_step": [
+    2048.0893138357706,
+    2048.0154105736783,
+    2047.9871766029248,
+    2047.5660854893138
+   ]
+  },
+  "a_MUFU_EX2_FMNMX_1to4": {
+   "ms_launch": 1.86470565,
+   "steps": 1755,
+   "cyc_per_step": 2077.002849002849,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 324,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.4959041353692863,
+   "mufu_lanes_per_clk_sm": 15.776579226037958,
+   "hist": {
+    "FMNMX": 256,
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8646591000000001,
+    1.86527195,
+    1.8643984,
+    1.86470565,
+    1.8649616000000002
+   ],
+   "wg_cyc_per_step": [
+    2077.002849002849,
+    2073.0072364672365,
+    2057.8068945868945,
+    2044.6917948717949
+   ]
+  },
+  "a_MUFU_EX2_FMNMX_1to8": {
+   "ms_launch": 1.9350401000000002,
+   "steps": 920,
+   "cyc_per_step": 4113.203804347826,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 580,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.256148841978279,
+   "mufu_lanes_per_clk_sm": 7.966539359261234,
+   "hist": {
+    "FMNMX": 512,
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.93497755,
+    1.93514235,
+    1.9349024,
+    1.9350401000000002,
+    1.9350559
+   ],
+   "wg_cyc_per_step": [
+    4113.203804347826,
+    4110.44097826087,
+    4096.759891304348,
+    4073.5489130434785
+   ]
+  },
+  "a_FFMA_FMNMX_1to1": {
+   "ms_launch": 1.8621471499999998,
+   "steps": 6840,
+   "cyc_per_step": 532.9736111111112,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 132,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.9626727402075876,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "UIADD3": 1,
+    "FFMA": 64,
+    "FMNMX": 64,
+    "ISETP": 1,
+    "WARPGROUP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8624080500000002,
+    1.86217115,
+    1.8621471499999998,
+    1.8618561,
+    1.8618431000000002
+   ],
+   "wg_cyc_per_step": [
+    532.9736111111112,
+    463.2600292397661,
+    396.6129532163743,
+    265.36597953216375
+   ]
+  },
+  "a_FFMA_FMNMX_1to4": {
+   "ms_launch": 1.8638063500000002,
+   "steps": 1774,
+   "cyc_per_step": 2056.1592446448703,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 324,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.521205501714608,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "FMNMX": 256,
+    "FFMA": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.86404325,
+    1.86410715,
+    1.8638063500000002,
+    1.8637792499999999,
+    1.8637119500000001
+   ],
+   "wg_cyc_per_step": [
+    2056.1592446448703,
+    2055.432581736189,
+    2054.357497181511,
+    2051.951183765502
+   ]
+  },
+  "a_FFMA_FMNMX_1to8": {
+   "ms_launch": 1.93526075,
+   "steps": 923,
+   "cyc_per_step": 4104.590357529794,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 580,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.260883350509269,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "FMNMX": 512,
+    "FFMA": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.93526075,
+    1.93554555,
+    1.93514405,
+    1.9353409,
+    1.9347856499999998
+   ],
+   "wg_cyc_per_step": [
+    4104.590357529794,
+    4091.18082340195,
+    4074.058071505959,
+    4030.522643553629
+   ]
+  },
+  "a_FFMA_ALU_1to1": {
+   "ms_launch": 1.8928127499999998,
+   "steps": 5597,
+   "cyc_per_step": 661.4186885831696,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 132,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 3.193136263694231,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "LOP3": 64,
+    "UIADD3": 1,
+    "FFMA": 64,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8931072,
+    1.8929537,
+    1.8928127499999998,
+    1.89254875,
+    1.8925359499999999
+   ],
+   "wg_cyc_per_step": [
+    661.4186885831696,
+    591.0386814364838,
+    524.8619796319457,
+    524.7720028586742
+   ]
+  },
+  "a_FFMA_ALU_1to4": {
+   "ms_launch": 1.8617070999999998,
+   "steps": 1752,
+   "cyc_per_step": 2077.78801369863,
+   "mhz": 1979.5,
+   "wgs": 4,
+   "instr_per_warp_step": 324,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.494960970908703,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "LOP3": 256,
+    "UIADD3": 1,
+    "FFMA": 64,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8617070999999998,
+    1.86175195,
+    1.8617824500000002,
+    1.86157285,
+    1.8615104500000001
+   ],
+   "wg_cyc_per_step": [
+    2077.78801369863,
+    2006.6382990867578,
+    2002.3999429223745,
+    1982.7558219178084
+   ]
+  },
+  "a_FFMA_ALU_1to8": {
+   "ms_launch": 1.9352495,
+   "steps": 917,
+   "cyc_per_step": 4130.286259541985,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 580,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.2468176336593864,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "LOP3": 512,
+    "UIADD3": 1,
+    "FFMA": 64,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.93519365,
+    1.9354528500000001,
+    1.9352927999999998,
+    1.93510245,
+    1.9352495
+   ],
+   "wg_cyc_per_step": [
+    4130.286259541985,
+    3946.2420937840784,
+    3938.0628135223556,
+    3904.4749182115593
+   ]
+  },
+  "a_MUFU_EX2_ALU_1to1": {
+   "ms_launch": 1.86142885,
+   "steps": 1777,
+   "cyc_per_step": 2048.0256049521668,
+   "mhz": 1979.5,
+   "wgs": 4,
+   "instr_per_warp_step": 132,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 1.031237107042579,
+   "mufu_lanes_per_clk_sm": 15.999799963812134,
+   "hist": {
+    "LOP3": 64,
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8613551999999998,
+    1.8616079500000002,
+    1.8615279999999998,
+    1.8614270999999998,
+    1.86142885
+   ],
+   "wg_cyc_per_step": [
+    2048.0256049521668,
+    2047.254642656162,
+    2047.10005627462,
+    2046.7278559369724
+   ]
+  },
+  "a_MUFU_EX2_ALU_1to4": {
+   "ms_launch": 1.8633968500000002,
+   "steps": 1758,
+   "cyc_per_step": 2062.454721274175,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 324,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.513509725341921,
+   "mufu_lanes_per_clk_sm": 15.88786394290202,
+   "hist": {
+    "LOP3": 256,
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.8632784,
+    1.8631088500000001,
+    1.8633968500000002,
+    1.86356965,
+    1.86359675
+   ],
+   "wg_cyc_per_step": [
+    2062.454721274175,
+    2062.0032992036404,
+    2061.412059158134,
+    2059.6896473265074
+   ]
+  },
+  "a_MUFU_EX2_ALU_1to8": {
+   "ms_launch": 1.9382065000000002,
+   "steps": 917,
+   "cyc_per_step": 4130.81919302072,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 580,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.2465277627447713,
+   "mufu_lanes_per_clk_sm": 7.932566996726364,
+   "hist": {
+    "LOP3": 512,
+    "MUFU.EX2": 64,
+    "UIADD3": 1,
+    "WARPGROUP": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "alu",
+   "spread_ms": [
+    1.93788795,
+    1.9388160500000002,
+    1.93807355,
+    1.9382065000000002,
+    1.93824635
+   ],
+   "wg_cyc_per_step": [
+    4128.457797164667,
+    4130.81919302072,
+    4108.83653217012,
+    4100.564122137404
+   ]
+  },
+  "w_MUFU_EX2_64": {
+   "ms_launch": 2.07915995,
+   "steps": 2668,
+   "cyc_per_step": 1293.2110569715144,
+   "mhz": 1678.5,
+   "wgs": 2,
+   "instr_per_warp_step": 91,
+   "mufu_per_warp_step": 64,
+   "flop_per_clk_sm": 6486.650384543361,
+   "tflops": 1420.894246740372,
+   "ipc_sm": 0.5629398202833613,
+   "mufu_lanes_per_clk_sm": 12.669239032311252,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "MUFU.EX2": 64,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.9557023999999998,
+    2.0304655,
+    2.0796448,
+    2.0792991499999998,
+    2.07915995
+   ],
+   "floors_ms": {
+    "tensor": 2.055423330073245,
+    "mufu": 1.5177955555555556,
+    "issue": 0.2697644444444444
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 98.85835527339995,
+   "wg_cyc_per_step": [
+    1293.2110569715144,
+    1292.9755247376313
+   ]
+  },
+  "w_MUFU_EX2_128": {
+   "ms_launch": 1.8816127999999999,
+   "steps": 1457,
+   "cyc_per_step": 2300.3635552505148,
+   "mhz": 1804.3,
+   "wgs": 2,
+   "instr_per_warp_step": 155,
+   "mufu_per_warp_step": 128,
+   "flop_per_clk_sm": 3646.644453592233,
+   "tflops": 857.41904231944,
+   "ipc_sm": 0.5390452292507134,
+   "mufu_lanes_per_clk_sm": 14.24470489684466,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "MUFU.EX2": 128,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.8863968,
+    1.8873008500000001,
+    1.8766431999999997,
+    1.8767311,
+    1.8816127999999999
+   ],
+   "floors_ms": {
+    "tensor": 1.1224706866254563,
+    "mufu": 1.6577422222222222,
+    "issue": 0.2509277777777778
+   },
+   "controlling": "mufu",
+   "pct_of_floor": 88.10219733954948,
+   "wg_cyc_per_step": [
+    2300.3635552505148,
+    2210.9037062457105
+   ]
+  },
+  "w_MUFU_EX2_256": {
+   "ms_launch": 1.9382943999999998,
+   "steps": 783,
+   "cyc_per_step": 4354.0080459770115,
+   "mhz": 1801.0,
+   "wgs": 2,
+   "instr_per_warp_step": 283,
+   "mufu_per_warp_step": 256,
+   "flop_per_clk_sm": 1926.6404451757621,
+   "tflops": 447.3071626518655,
+   "ipc_sm": 0.5199806651923568,
+   "mufu_lanes_per_clk_sm": 15.051878477935642,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "MUFU.EX2": 256,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.9367328499999998,
+    1.9382943999999998,
+    1.93937605,
+    1.94063835,
+    1.93565445
+   ],
+   "floors_ms": {
+    "tensor": 0.6032220642606262,
+    "mufu": 1.78176,
+    "issue": 0.24621
+   },
+   "controlling": "mufu",
+   "pct_of_floor": 91.9241163777804,
+   "wg_cyc_per_step": [
+    4354.0080459770115,
+    4136.243933588761
+   ]
+  },
+  "w_MUFU_EX2_512": {
+   "ms_launch": 1.7801296,
+   "steps": 370,
+   "cyc_per_step": 8450.04891891892,
+   "mhz": 1786.4,
+   "wgs": 2,
+   "instr_per_warp_step": 539,
+   "mufu_per_warp_step": 512,
+   "flop_per_clk_sm": 992.7289274288864,
+   "tflops": 230.15156577363803,
+   "ipc_sm": 0.5102929037896822,
+   "mufu_lanes_per_clk_sm": 15.51138949107635,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "MUFU.EX2": 512,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.7815296,
+    1.7801296,
+    1.77993925,
+    1.78070395,
+    1.77988165
+   ],
+   "floors_ms": {
+    "tensor": 0.2850474633160047,
+    "mufu": 1.6839111111111111,
+    "issue": 0.2215888888888889
+   },
+   "controlling": "mufu",
+   "pct_of_floor": 94.59486045909867,
+   "wg_cyc_per_step": [
+    8450.04891891892,
+    7997.604864864865
+   ]
+  },
+  "w_FFMA_64": {
+   "ms_launch": 2.14386885,
+   "steps": 3196,
+   "cyc_per_step": 1024.125093867334,
+   "mhz": 1544.8,
+   "wgs": 2,
+   "instr_per_warp_step": 91,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.99937130011,
+   "tflops": 1650.7161033549228,
+   "ipc_sm": 0.7108506610758878,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FFMA": 64,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.9824127,
+    2.1335903,
+    2.14415685,
+    2.14386885,
+    2.14636155
+   ],
+   "floors_ms": {
+    "tensor": 2.462193764210679,
+    "mufu": 0.0,
+    "issue": 0.3231511111111111
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 114.84815240497005,
+   "wg_cyc_per_step": [
+    1024.125093867334,
+    1023.9989048811013
+   ]
+  },
+  "w_FFMA_128": {
+   "ms_launch": 2.1555231,
+   "steps": 3095,
+   "cyc_per_step": 1060.1547011308562,
+   "mhz": 1543.5,
+   "wgs": 2,
+   "instr_per_warp_step": 155,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 7912.6263280745325,
+   "tflops": 1589.9073001444522,
+   "ipc_sm": 1.1696406181827093,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FFMA": 128,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.9577520499999999,
+    2.1555231,
+    2.17683525,
+    2.15155355,
+    2.15724485
+   ],
+   "floors_ms": {
+    "tensor": 2.3843835107109044,
+    "mufu": 0.0,
+    "issue": 0.5330277777777778
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 110.61739541139247,
+   "wg_cyc_per_step": [
+    1060.1168336025848,
+    1060.1547011308562
+   ]
+  },
+  "w_FFMA_256": {
+   "ms_launch": 2.1260336,
+   "steps": 2710,
+   "cyc_per_step": 1261.1911439114392,
+   "mhz": 1630.5,
+   "wgs": 2,
+   "instr_per_warp_step": 283,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 6651.337539513398,
+   "tflops": 1411.441876440711,
+   "ipc_sm": 1.7951283680746952,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FFMA": 256,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.976256,
+    2.1253153,
+    2.1260336,
+    2.12613925,
+    2.12633115
+   ],
+   "floors_ms": {
+    "tensor": 2.087780069152359,
+    "mufu": 0.0,
+    "issue": 0.8521444444444445
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 98.20070901759779,
+   "wg_cyc_per_step": [
+    1261.1911439114392,
+    1261.142398523985
+   ]
+  },
+  "w_FFMA_512": {
+   "ms_launch": 1.8739311,
+   "steps": 1864,
+   "cyc_per_step": 1698.570118025751,
+   "mhz": 1720.4,
+   "wgs": 2,
+   "instr_per_warp_step": 539,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 4938.6292099322245,
+   "tflops": 1101.4280200504702,
+   "ipc_sm": 2.538605827477902,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FFMA": 512,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.8118208,
+    1.84052485,
+    1.8833663999999999,
+    1.87506715,
+    1.8739311
+   ],
+   "floors_ms": {
+    "tensor": 1.4360228962730615,
+    "mufu": 0.0,
+    "issue": 1.116328888888889
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 76.63157392889532,
+   "wg_cyc_per_step": [
+    1698.570118025751,
+    1698.4978004291845
+   ]
+  },
+  "w_FMNMX_64": {
+   "ms_launch": 2.17378235,
+   "steps": 3214,
+   "cyc_per_step": 1024.183634100809,
+   "mhz": 1529.9,
+   "wgs": 2,
+   "instr_per_warp_step": 91,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.531190595378,
+   "tflops": 1637.1695017139132,
+   "ipc_sm": 0.7108100303117555,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FMNMX": 64,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.95654565,
+    2.1218033,
+    2.17378235,
+    2.1743889,
+    2.1765327500000002
+   ],
+   "floors_ms": {
+    "tensor": 2.4760609381017273,
+    "mufu": 0.0,
+    "issue": 0.3249711111111111
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 113.9056510465147,
+   "wg_cyc_per_step": [
+    1024.183634100809,
+    1024.1000933416303
+   ]
+  },
+  "w_FMNMX_128": {
+   "ms_launch": 2.1709921000000003,
+   "steps": 3175,
+   "cyc_per_step": 1024.2885354330708,
+   "mhz": 1514.6,
+   "wgs": 2,
+   "instr_per_warp_step": 155,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8189.692366763905,
+   "tflops": 1619.3820386541245,
+   "ipc_sm": 1.210596386764913,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FMNMX": 128,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.9608528,
+    2.1636896,
+    2.1868273,
+    2.1709921000000003,
+    2.1711008
+   ],
+   "floors_ms": {
+    "tensor": 2.4460153946711216,
+    "mufu": 0.0,
+    "issue": 0.5468055555555555
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 112.66809283512,
+   "wg_cyc_per_step": [
+    1024.2885354330708,
+    1024.167748031496
+   ]
+  },
+  "w_FMNMX_256": {
+   "ms_launch": 2.0413711500000002,
+   "steps": 2271,
+   "cyc_per_step": 1540.2816820783796,
+   "mhz": 1733.2,
+   "wgs": 2,
+   "instr_per_warp_step": 283,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 5446.151893906073,
+   "tflops": 1231.8533047633202,
+   "ipc_sm": 1.4698610172037305,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FMNMX": 256,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.9596081,
+    2.02943365,
+    2.04632475,
+    2.0416176,
+    2.0413711500000002
+   ],
+   "floors_ms": {
+    "tensor": 1.7495751059206668,
+    "mufu": 0.0,
+    "issue": 0.7141033333333334
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 85.70587988963528,
+   "wg_cyc_per_step": [
+    1540.2816820783796,
+    1540.0265521796564
+   ]
+  },
+  "w_FMNMX_512": {
+   "ms_launch": 1.8930767,
+   "steps": 1314,
+   "cyc_per_step": 2570.941324200913,
+   "mhz": 1808.7,
+   "wgs": 2,
+   "instr_per_warp_step": 539,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 3262.854706576123,
+   "tflops": 768.5833756149447,
+   "ipc_sm": 1.6772066944546988,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "FMNMX": 512,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "mixed",
+   "spread_ms": [
+    1.8922367000000002,
+    1.8930767,
+    1.89279995,
+    1.8948703999999998,
+    1.8982321
+   ],
+   "floors_ms": {
+    "tensor": 1.012303694046568,
+    "mufu": 0.0,
+    "issue": 0.78694
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 53.473992577615476,
+   "wg_cyc_per_step": [
+    2570.941324200913,
+    2457.6751141552513
+   ]
+  },
+  "b_wait_SS64_w1": {
+   "ms_launch": 1.8263857000000001,
+   "steps": 30902,
+   "cyc_per_step": 105.00608374862469,
+   "mhz": 1808.3,
+   "wgs": 1,
+   "instr_per_warp_step": 8,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 2496.464877478429,
+   "tflops": 585.4744445360035,
+   "ipc_sm": 0.30474424773906605,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 2,
+    "UIADD3": 1,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.8276159499999998,
+    1.828088,
+    1.8263857000000001,
+    1.8191215499999998,
+    1.81873915
+   ],
+   "wg_cyc_per_step": [
+    105.00608374862469
+   ]
+  },
+  "b_wait4_SS64_w1": {
+   "ms_launch": 1.9306831500000001,
+   "steps": 17907,
+   "cyc_per_step": 190.01066063550567,
+   "mhz": 1786.1,
+   "wgs": 1,
+   "instr_per_warp_step": 15,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 5518.511416638175,
+   "tflops": 1283.7654158964406,
+   "ipc_sm": 0.31577175617054987,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 4,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.9107792,
+    1.91452485,
+    1.9449648,
+    1.9315777,
+    1.9306831500000001
+   ],
+   "wg_cyc_per_step": [
+    190.01066063550567
+   ]
+  },
+  "b_wait_SS64_w2": {
+   "ms_launch": 1.82031995,
+   "steps": 31534,
+   "cyc_per_step": 103.04217035580642,
+   "mhz": 1812.5,
+   "wgs": 2,
+   "instr_per_warp_step": 8,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 5088.091586091639,
+   "tflops": 1198.8785315152975,
+   "ipc_sm": 0.6211049299428271,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 2,
+    "UIADD3": 1,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.8385744,
+    1.8389536,
+    1.82031995,
+    1.8146353000000002,
+    1.8146208000000001
+   ],
+   "wg_cyc_per_step": [
+    103.03911016680408,
+    103.04217035580642
+   ]
+  },
+  "b_wait4_SS64_w2": {
+   "ms_launch": 2.20230715,
+   "steps": 12899,
+   "cyc_per_step": 256.0222963020389,
+   "mhz": 1514.7,
+   "wgs": 2,
+   "instr_per_warp_step": 15,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8191.286580469979,
+   "tflops": 1621.3694813350623,
+   "ipc_sm": 0.46870917780704374,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 4,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    2.0111456,
+    2.1945408,
+    2.20230715,
+    2.2072847500000004,
+    2.2130625
+   ],
+   "wg_cyc_per_step": [
+    256.01849755795024,
+    256.0222963020389
+   ]
+  },
+  "b_wait_SS128_w1": {
+   "ms_launch": 1.8426544,
+   "steps": 24030,
+   "cyc_per_step": 137.00879317519767,
+   "mhz": 1813.2,
+   "wgs": 1,
+   "instr_per_warp_step": 8,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 3826.674097695143,
+   "tflops": 902.5135502783374,
+   "ipc_sm": 0.2335616514706508,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 2,
+    "UIADD3": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.8620815499999999,
+    1.8615968500000002,
+    1.8426544,
+    1.8415056,
+    1.84159525
+   ],
+   "wg_cyc_per_step": [
+    137.00879317519767
+   ]
+  },
+  "b_wait4_SS128_w1": {
+   "ms_launch": 2.0389696,
+   "steps": 10714,
+   "cyc_per_step": 318.01990853089416,
+   "mhz": 1691.7,
+   "wgs": 1,
+   "instr_per_warp_step": 15,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 6594.404764430877,
+   "tflops": 1454.6038458327184,
+   "ipc_sm": 0.18866743367474204,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.9368879499999998,
+    1.9919647,
+    2.0389696,
+    2.0391329,
+    2.0393567999999997
+   ],
+   "wg_cyc_per_step": [
+    318.01990853089416
+   ]
+  },
+  "b_wait_SS128_w2": {
+   "ms_launch": 1.9990032,
+   "steps": 23207,
+   "cyc_per_step": 143.01799026155902,
+   "mhz": 1679.2,
+   "wgs": 2,
+   "instr_per_warp_step": 8,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 7331.776918989755,
+   "tflops": 1606.864874765583,
+   "ipc_sm": 0.4474961498406833,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 2,
+    "UIADD3": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.8752928,
+    1.9491089,
+    1.99913595,
+    1.9990032,
+    2.00139675
+   ],
+   "wg_cyc_per_step": [
+    143.01540483474813,
+    143.01799026155902
+   ]
+  },
+  "b_wait4_SS128_w2": {
+   "ms_launch": 2.0668990999999997,
+   "steps": 6246,
+   "cyc_per_step": 512.0561959654178,
+   "mhz": 1559.7,
+   "wgs": 2,
+   "instr_per_warp_step": 15,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8191.100963229564,
+   "tflops": 1673.0793522954268,
+   "ipc_sm": 0.2343492783516759,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.8885663999999998,
+    1.9109535000000002,
+    2.0668990999999997,
+    2.08578245,
+    2.0751728
+   ],
+   "wg_cyc_per_step": [
+    512.0561959654178,
+    512.0366634646174
+   ]
+  },
+  "b_pingpong_w2": {
+   "ms_launch": 1.94592475,
+   "steps": 51418,
+   "cyc_per_step": 74.00252051810651,
+   "mhz": 1979.5,
+   "wgs": 2,
+   "instr_per_warp_step": 7,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 0.7567309817007956,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "BAR": 2,
+    "UIADD3": 1,
+    "FFMA": 1,
+    "WARPSYNC": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.9458431,
+    1.9461856999999998,
+    1.94570715,
+    1.94592475,
+    1.9460432
+   ],
+   "wg_cyc_per_step": [
+    74.00185538138395,
+    74.00252051810651
+   ]
+  },
+  "b_pingpong_w3": {
+   "ms_launch": 1.8513504,
+   "steps": 30940,
+   "cyc_per_step": 117.00678086619263,
+   "mhz": 1979.6,
+   "wgs": 3,
+   "instr_per_warp_step": 7,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 0.7179071108371169,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "BAR": 2,
+    "UIADD3": 1,
+    "FFMA": 1,
+    "WARPSYNC": 1,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "latency",
+   "spread_ms": [
+    1.8514543499999998,
+    1.85137595,
+    1.8513504,
+    1.8511568,
+    1.851264
+   ],
+   "wg_cyc_per_step": [
+    117.00388493859083,
+    117.00507110536522,
+    117.00678086619263
+   ]
+  },
+  "v_fwd_ilv": {
+   "ms_launch": 1.90502395,
+   "steps": 1084,
+   "cyc_per_step": 3103.4312730627307,
+   "mhz": 1794.7,
+   "wgs": 3,
+   "instr_per_warp_step": 599,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 4054.5160800619597,
+   "tflops": 945.1134261361912,
+   "ipc_sm": 2.3161460227557313,
+   "mufu_lanes_per_clk_sm": 9.28005084242697,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 4,
+    "IMAD": 36,
+    "LOP3": 23,
+    "ISETP": 2,
+    "UIADD3": 8,
+    "ULEA": 1,
+    "ULOP3": 4,
+    "USHF": 2,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "FADD": 72,
+    "MUFU.EX2": 74,
+    "FMNMX": 82,
+    "FFMA": 140,
+    "FMUL": 85,
+    "SHFL": 8,
+    "FSEL": 2,
+    "F2FP": 32,
+    "PRMT": 10,
+    "MUFU.RCP": 1,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.9031296000000002,
+    1.90100325,
+    1.9085535,
+    1.9109247,
+    1.90502395
+   ],
+   "floors_ms": {
+    "tensor": 1.2526680414914153,
+    "mufu": 1.0839999999999999,
+    "issue": 1.0821933333333333
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 65.75602587523456,
+   "wg_cyc_per_step": [
+    3103.4312730627307,
+    3079.078966789668,
+    3034.2252767527675
+   ]
+  },
+  "v_fwd_spec": {
+   "ms_launch": 1.9104353,
+   "steps": 1152,
+   "cyc_per_step": 2909.003732638889,
+   "mhz": 1786.0,
+   "wgs": 3,
+   "instr_per_warp_step": 599,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 4325.505622017704,
+   "tflops": 1001.5559963574792,
+   "ipc_sm": 2.470949046696286,
+   "mufu_lanes_per_clk_sm": 9.9002966812539,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 4,
+    "IMAD": 36,
+    "LOP3": 23,
+    "ISETP": 2,
+    "UIADD3": 8,
+    "ULEA": 1,
+    "ULOP3": 4,
+    "USHF": 2,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "FADD": 72,
+    "MUFU.EX2": 74,
+    "FMNMX": 82,
+    "FFMA": 140,
+    "FMUL": 85,
+    "SHFL": 8,
+    "FSEL": 2,
+    "F2FP": 32,
+    "PRMT": 10,
+    "MUFU.RCP": 1,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.9048463999999998,
+    1.9050495,
+    1.9116815500000002,
+    1.9104353,
+    1.9111503500000002
+   ],
+   "floors_ms": {
+    "tensor": 1.3312486935406922,
+    "mufu": 1.1520000000000001,
+    "issue": 1.15008
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 69.68300332079774,
+   "wg_cyc_per_step": [
+    1536.7109375,
+    2909.003732638889,
+    2891.2830729166667,
+    2865.9934895833335
+   ]
+  },
+  "v_fwd_spec_noT": {
+   "ms_launch": 1.84278715,
+   "steps": 1724,
+   "cyc_per_step": 2084.966705336427,
+   "mhz": 1979.7,
+   "wgs": 3,
+   "instr_per_warp_step": 599,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 6035.066156113818,
+   "tflops": 1553.8789262861965,
+   "ipc_sm": 3.4475370669481054,
+   "mufu_lanes_per_clk_sm": 13.813170218156015,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 4,
+    "IMAD": 36,
+    "LOP3": 23,
+    "ISETP": 2,
+    "UIADD3": 8,
+    "ULEA": 1,
+    "ULOP3": 4,
+    "USHF": 2,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "FADD": 72,
+    "MUFU.EX2": 74,
+    "FMNMX": 82,
+    "FFMA": 140,
+    "FMUL": 85,
+    "SHFL": 8,
+    "FSEL": 2,
+    "F2FP": 32,
+    "PRMT": 10,
+    "MUFU.RCP": 1,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.84278715,
+    1.84330405,
+    1.8431055,
+    1.84275035,
+    1.84263515
+   ],
+   "floors_ms": {
+    "tensor": 1.9922506490140224,
+    "mufu": 1.724,
+    "issue": 1.7211266666666667
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 108.11073047769095,
+   "wg_cyc_per_step": [
+    134.81479118329466,
+    2084.966705336427,
+    2074.11873549884,
+    2060.7794083526683
+   ]
+  },
+  "v_fwd_spec_mufu": {
+   "ms_launch": 1.8837551000000001,
+   "steps": 1518,
+   "cyc_per_step": 2161.8332015810274,
+   "mhz": 1772.6,
+   "wgs": 4,
+   "instr_per_warp_step": 132,
+   "mufu_per_warp_step": 74,
+   "flop_per_clk_sm": 23281.929412126075,
+   "tflops": 5353.803315329046,
+   "ipc_sm": 0.9769486371360276,
+   "mufu_lanes_per_clk_sm": 17.525866460137223,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 2,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 6,
+    "UMOV": 4,
+    "UIADD3": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 24,
+    "BSSY": 1,
+    "MUFU.EX2": 74,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.8736719000000002,
+    1.8767791500000002,
+    1.8837551000000001,
+    1.88859045,
+    1.89229605
+   ],
+   "wg_cyc_per_step": [
+    1536.464163372859,
+    2161.8332015810274,
+    2149.8350461133073,
+    2061.509420289855
+   ]
+  },
+  "v_fwd_spec_nomufu": {
+   "ms_launch": 1.92718715,
+   "steps": 1265,
+   "cyc_per_step": 2599.2983399209484,
+   "mhz": 1733.9,
+   "wgs": 4,
+   "instr_per_warp_step": 700,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 4.30885513524416,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "FFMA": 131,
+    "FMNMX": 77,
+    "FADD": 175,
+    "FMUL": 80,
+    "IMAD": 37,
+    "F2FP": 8,
+    "PRMT": 10,
+    "LOP3": 52,
+    "MOV": 46,
+    "BSYNC": 2,
+    "BRA": 2,
+    "WARPSYNC": 9,
+    "WARPGROUP": 1,
+    "CS2R": 2,
+    "S2R": 2,
+    "I2FP": 28,
+    "IADD3": 8,
+    "FSETP": 1,
+    "LDC": 2,
+    "STG": 3,
+    "EXIT": 2,
+    "SHF": 2,
+    "LEA": 1,
+    "BSSY": 1,
+    "SHFL": 8,
+    "ENDCOLLECTIVE": 8,
+    "FSEL": 2
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.8950945000000001,
+    1.9176143499999998,
+    1.92718715,
+    1.92977125,
+    1.9297888
+   ],
+   "wg_cyc_per_step": [
+    1536.9230830039526,
+    2599.2983399209484,
+    2583.937391304348,
+    2558.018181818182
+   ]
+  },
+  "v_pass1_ilv": {
+   "ms_launch": 1.88955995,
+   "steps": 1520,
+   "cyc_per_step": 2162.5124342105264,
+   "mhz": 1779.7,
+   "wgs": 2,
+   "instr_per_warp_step": 658,
+   "mufu_per_warp_step": 35,
+   "flop_per_clk_sm": 3879.1027821592384,
+   "tflops": 890.7313626752091,
+   "ipc_sm": 2.4342056566818036,
+   "mufu_lanes_per_clk_sm": 4.14332877733073,
+   "hist": {
+    "UIADD3": 8,
+    "WARPGROUP": 7,
+    "ULOP3": 4,
+    "LOP3": 80,
+    "IMAD": 72,
+    "USHF": 2,
+    "UMOV": 2,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "MUFU.EX2": 32,
+    "LDS": 18,
+    "FMUL": 107,
+    "FADD": 32,
+    "FFMA": 128,
+    "SHFL": 21,
+    "FMNMX": 82,
+    "MUFU.RCP": 3,
+    "STS": 1,
+    "F2FP": 32,
+    "PRMT": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.8588976,
+    1.8628416,
+    1.8919952500000001,
+    1.8910145,
+    1.88955995
+   ],
+   "floors_ms": {
+    "tensor": 1.1710057952441275,
+    "mufu": 0.4728888888888889,
+    "issue": 1.111288888888889
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 61.97240766264799,
+   "wg_cyc_per_step": [
+    2162.5124342105264,
+    2161.700394736842
+   ]
+  },
+  "v_pass1_spec": {
+   "ms_launch": 1.86414565,
+   "steps": 1485,
+   "cyc_per_step": 2255.411447811448,
+   "mhz": 1834.6,
+   "wgs": 2,
+   "instr_per_warp_step": 658,
+   "mufu_per_warp_step": 35,
+   "flop_per_clk_sm": 3719.3249188035898,
+   "tflops": 882.085013131887,
+   "ipc_sm": 2.333942219326746,
+   "mufu_lanes_per_clk_sm": 3.972667607364674,
+   "hist": {
+    "UIADD3": 8,
+    "WARPGROUP": 7,
+    "ULOP3": 4,
+    "LOP3": 80,
+    "IMAD": 72,
+    "USHF": 2,
+    "UMOV": 2,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "MUFU.EX2": 32,
+    "LDS": 18,
+    "FMUL": 107,
+    "FADD": 32,
+    "FFMA": 128,
+    "SHFL": 21,
+    "FMNMX": 82,
+    "MUFU.RCP": 3,
+    "STS": 1,
+    "F2FP": 32,
+    "PRMT": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.86414565,
+    1.8636896,
+    1.8641264,
+    1.8714111500000001,
+    1.8714975500000002
+   ],
+   "floors_ms": {
+    "tensor": 1.1440418460115325,
+    "mufu": 0.462,
+    "issue": 1.0856999999999999
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 61.37084009565092,
+   "wg_cyc_per_step": [
+    1173.1396632996632,
+    2255.411447811448,
+    2249.7902356902355
+   ]
+  },
+  "v_pass1_spec_noT": {
+   "ms_launch": 1.95934565,
+   "steps": 2471,
+   "cyc_per_step": 1528.7706191825173,
+   "mhz": 1978.7,
+   "wgs": 2,
+   "instr_per_warp_step": 658,
+   "mufu_per_warp_step": 35,
+   "flop_per_clk_sm": 5487.159351927929,
+   "tflops": 1396.4504162785163,
+   "ipc_sm": 3.4432896171270153,
+   "mufu_lanes_per_clk_sm": 5.860918497237472,
+   "hist": {
+    "UIADD3": 8,
+    "WARPGROUP": 7,
+    "ULOP3": 4,
+    "LOP3": 80,
+    "IMAD": 72,
+    "USHF": 2,
+    "UMOV": 2,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "MUFU.EX2": 32,
+    "LDS": 18,
+    "FMUL": 107,
+    "FADD": 32,
+    "FFMA": 128,
+    "SHFL": 21,
+    "FMNMX": 82,
+    "MUFU.RCP": 3,
+    "STS": 1,
+    "F2FP": 32,
+    "PRMT": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.95934565,
+    1.9607023000000001,
+    1.9608831500000001,
+    1.9558511500000002,
+    1.9555664
+   ],
+   "floors_ms": {
+    "tensor": 1.9036548158212099,
+    "mufu": 0.7687555555555555,
+    "issue": 1.8065755555555554
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 97.15768199557898,
+   "wg_cyc_per_step": [
+    244.5100768919466,
+    1528.7706191825173,
+    1528.2129097531365
+   ]
+  },
+  "v_pass1_spec_mufu": {
+   "ms_launch": 2.24023515,
+   "steps": 3313,
+   "cyc_per_step": 1024.1773317235134,
+   "mhz": 1529.7,
+   "wgs": 3,
+   "instr_per_warp_step": 93,
+   "mufu_per_warp_step": 33,
+   "flop_per_clk_sm": 24571.74477553635,
+   "tflops": 4912.617092176238,
+   "ipc_sm": 1.089655048429909,
+   "mufu_lanes_per_clk_sm": 12.372857324107354,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 2,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 4,
+    "UMOV": 4,
+    "UIADD3": 17,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 16,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BSSY": 1,
+    "MUFU.EX2": 32,
+    "MUFU.RCP": 1,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.9532672999999998,
+    2.0868143,
+    2.25200005,
+    2.24023515,
+    2.2405184
+   ],
+   "wg_cyc_per_step": [
+    1024.1773317235134,
+    715.805191669182,
+    683.3249924539692
+   ]
+  },
+  "v_pass1_spec_nomufu": {
+   "ms_launch": 1.8452096999999998,
+   "steps": 1541,
+   "cyc_per_step": 2156.5004542504867,
+   "mhz": 1842.2,
+   "wgs": 3,
+   "instr_per_warp_step": 897,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 4.991420233083668,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "F2FP": 24,
+    "IMAD": 75,
+    "FADD": 155,
+    "FMUL": 104,
+    "PRMT": 15,
+    "FFMA": 126,
+    "LOP3": 107,
+    "MOV": 71,
+    "FMNMX": 80,
+    "BSYNC": 2,
+    "BRA": 2,
+    "WARPSYNC": 22,
+    "WARPGROUP": 1,
+    "CS2R": 2,
+    "S2R": 2,
+    "I2FP": 28,
+    "IADD3": 8,
+    "FSETP": 1,
+    "LDC": 2,
+    "STG": 3,
+    "EXIT": 2,
+    "SHF": 2,
+    "LEA": 1,
+    "LDS": 18,
+    "BSSY": 1,
+    "SHFL": 21,
+    "ENDCOLLECTIVE": 21,
+    "STS": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.8423040499999999,
+    1.8405712,
+    1.8452096999999998,
+    1.8469393,
+    1.84709605
+   ],
+   "wg_cyc_per_step": [
+    1201.0469175859832,
+    2156.5004542504867,
+    2152.6772874756653
+   ]
+  },
+  "v_pass0_ilv": {
+   "ms_launch": 1.9080303,
+   "steps": 1846,
+   "cyc_per_step": 1724.4795232936078,
+   "mhz": 1692.5,
+   "wgs": 4,
+   "instr_per_warp_step": 269,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 4864.428882274276,
+   "tflops": 1071.2979183695352,
+   "ipc_sm": 2.4958255182872393,
+   "mufu_lanes_per_clk_sm": 9.500837660691944,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "IMAD": 21,
+    "LOP3": 17,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 2,
+    "FMNMX": 32,
+    "MUFU.EX2": 32,
+    "FFMA": 64,
+    "FMUL": 37,
+    "FADD": 36,
+    "SHFL": 4,
+    "FSEL": 4,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.81774235,
+    1.85152475,
+    1.91910875,
+    1.91448,
+    1.9080303
+   ],
+   "floors_ms": {
+    "tensor": 1.4221557223820127,
+    "mufu": 1.050168888888889,
+    "issue": 1.1034977777777777
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 74.53527977946749,
+   "wg_cyc_per_step": [
+    1724.4795232936078,
+    1715.2770314192849,
+    1696.0431744312027,
+    1668.9593716143013
+   ]
+  },
+  "v_pass0_spec": {
+   "ms_launch": 1.8632496,
+   "steps": 1795,
+   "cyc_per_step": 1796.3692479108634,
+   "mhz": 1765.7,
+   "wgs": 4,
+   "instr_per_warp_step": 269,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 4669.757072359015,
+   "tflops": 1066.7367268024639,
+   "ipc_sm": 2.3959439324656966,
+   "mufu_lanes_per_clk_sm": 9.120619281951202,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "IMAD": 21,
+    "LOP3": 17,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 2,
+    "FMNMX": 32,
+    "MUFU.EX2": 32,
+    "FFMA": 64,
+    "FMUL": 37,
+    "FADD": 36,
+    "SHFL": 4,
+    "FSEL": 4,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.8365841,
+    1.84836805,
+    1.8632496,
+    1.86510885,
+    1.8702944
+   ],
+   "floors_ms": {
+    "tensor": 1.3828653963573743,
+    "mufu": 1.0211555555555556,
+    "issue": 1.0730111111111111
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 74.21793603805814,
+   "wg_cyc_per_step": [
+    1170.7614484679664,
+    1796.3692479108634,
+    1788.2685236768802,
+    1776.9010027855152,
+    1761.220111420613
+   ]
+  },
+  "v_pass0_spec_noT": {
+   "ms_launch": 1.9339472,
+   "steps": 3155,
+   "cyc_per_step": 1192.534326465927,
+   "mhz": 1979.8,
+   "wgs": 4,
+   "instr_per_warp_step": 269,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 7034.269633864227,
+   "tflops": 1806.4193726074836,
+   "ipc_sm": 3.6091204290570778,
+   "mufu_lanes_per_clk_sm": 13.738807878641069,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "IMAD": 21,
+    "LOP3": 17,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 2,
+    "FMNMX": 32,
+    "MUFU.EX2": 32,
+    "FFMA": 64,
+    "FMUL": 37,
+    "FADD": 36,
+    "SHFL": 4,
+    "FSEL": 4,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.9339472,
+    1.9341487999999998,
+    1.9335327,
+    1.9338910999999999,
+    1.93445435
+   ],
+   "floors_ms": {
+    "tensor": 2.4306074236810673,
+    "mufu": 1.7948444444444445,
+    "issue": 1.885988888888889
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 125.68116770101415,
+   "wg_cyc_per_step": [
+    306.3968621236133,
+    1192.534326465927,
+    1184.870618066561,
+    1166.2941362916006,
+    1140.4178763866878
+   ]
+  },
+  "v_pass0_spec_mufu": {
+   "ms_launch": 2.0223921000000002,
+   "steps": 2624,
+   "cyc_per_step": 1285.2643673780487,
+   "mhz": 1677.8,
+   "wgs": 5,
+   "instr_per_warp_step": 100,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 32633.784196137167,
+   "tflops": 7183.437315998216,
+   "ipc_sm": 1.5561000917500099,
+   "mufu_lanes_per_clk_sm": 15.934464939520101,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 2,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 8,
+    "UMOV": 4,
+    "UIADD3": 13,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 32,
+    "BSSY": 1,
+    "MUFU.EX2": 32,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.97398565,
+    1.9979102999999998,
+    2.0223921000000002,
+    2.0322544000000002,
+    2.03247835
+   ],
+   "wg_cyc_per_step": [
+    1024.214519817073,
+    1285.2643673780487,
+    1278.1002667682926,
+    1264.6315167682926,
+    1237.939519817073
+   ]
+  },
+  "v_pass0_spec_nomufu": {
+   "ms_launch": 1.8458912,
+   "steps": 1879,
+   "cyc_per_step": 1647.8602448110696,
+   "mhz": 1708.4,
+   "wgs": 5,
+   "instr_per_warp_step": 363,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 4.405713423126105,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "IMAD": 21,
+    "LOP3": 28,
+    "FADD": 123,
+    "MOV": 18,
+    "FFMA": 56,
+    "FMNMX": 28,
+    "FMUL": 32,
+    "BSYNC": 2,
+    "BRA": 2,
+    "WARPSYNC": 5,
+    "WARPGROUP": 1,
+    "CS2R": 2,
+    "S2R": 2,
+    "I2FP": 12,
+    "IADD3": 8,
+    "FSETP": 1,
+    "LDC": 2,
+    "STG": 3,
+    "EXIT": 2,
+    "SHF": 2,
+    "LEA": 1,
+    "BSSY": 1,
+    "SHFL": 4,
+    "ENDCOLLECTIVE": 4,
+    "FSEL": 3
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.79377595,
+    1.8309951999999998,
+    1.8458912,
+    1.8516865,
+    1.86271685
+   ],
+   "wg_cyc_per_step": [
+    1164.5856838744012,
+    1647.8602448110696,
+    1641.3487493347525,
+    1631.867642362959,
+    1616.6820649281533
+   ]
+  },
+  "i_FFMA_T": {
+   "ms_launch": 1.8427007499999999,
+   "steps": 1889,
+   "cyc_per_step": 1686.704764425622,
+   "mhz": 1753.4,
+   "wgs": 4,
+   "instr_per_warp_step": 304,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 19893.482669699093,
+   "tflops": 4540.471647572727,
+   "ipc_sm": 2.883729329866659,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "IADD3": 2,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 4,
+    "UMOV": 4,
+    "UIADD3": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 16,
+    "BSSY": 1,
+    "FFMA": 256,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.8294256,
+    1.83355845,
+    1.8427007499999999,
+    1.8565424,
+    1.8518175
+   ],
+   "wg_cyc_per_step": [
+    1024.435044997353,
+    1686.704764425622,
+    1673.0935944944415,
+    1644.6978824775013
+   ]
+  },
+  "i_FFMA_0": {
+   "ms_launch": 1.9084961,
+   "steps": 4443,
+   "cyc_per_step": 834.1487508440243,
+   "mhz": 1979.6,
+   "wgs": 4,
+   "instr_per_warp_step": 268,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 5.140569947100243,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "IADD3": 1,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 2,
+    "BSSY": 1,
+    "FFMA": 256,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.9087696,
+    1.9084961,
+    1.9083233,
+    1.90853765,
+    1.9083744
+   ],
+   "wg_cyc_per_step": [
+    834.1389376547378,
+    834.1487508440243,
+    834.1487058293945,
+    834.1028809363044
+   ]
+  },
+  "i_MUFU_EX2_T": {
+   "ms_launch": 2.1763792,
+   "steps": 3207,
+   "cyc_per_step": 1024.2216089803555,
+   "mhz": 1529.3,
+   "wgs": 4,
+   "instr_per_warp_step": 80,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 32760.910047000943,
+   "tflops": 6526.618326423998,
+   "ipc_sm": 1.249729539756811,
+   "mufu_lanes_per_clk_sm": 15.99653810888718,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 2,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 4,
+    "UMOV": 4,
+    "UIADD3": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 16,
+    "BSSY": 1,
+    "MUFU.EX2": 32,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.95600165,
+    2.1413168,
+    2.2099537000000002,
+    2.1773905,
+    2.1763792
+   ],
+   "wg_cyc_per_step": [
+    1024.2216089803555,
+    1024.220361708762,
+    1024.205269722482,
+    1024.1198628001248
+   ]
+  },
+  "i_MUFU_EX2_0": {
+   "ms_launch": 1.91399365,
+   "steps": 4873,
+   "cyc_per_step": 769.6945823927765,
+   "mhz": 1980.0,
+   "wgs": 4,
+   "instr_per_warp_step": 44,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 0.9146485061794908,
+   "mufu_lanes_per_clk_sm": 21.286365234722695,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 1,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 2,
+    "BSSY": 1,
+    "MUFU.EX2": 32,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.9139919500000002,
+    1.9140272,
+    1.91399365,
+    1.91405125,
+    1.91399365
+   ],
+   "wg_cyc_per_step": [
+    67.78300841370819,
+    769.6945823927765,
+    766.5811409809153,
+    728.6876667350708
+   ]
+  },
+  "i_FMNMX_T": {
+   "ms_launch": 2.0039552499999997,
+   "steps": 2574,
+   "cyc_per_step": 1304.8682983682984,
+   "mhz": 1696.8,
+   "wgs": 4,
+   "instr_per_warp_step": 176,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 25714.803587426322,
+   "tflops": 5689.11019933005,
+   "ipc_sm": 2.1580722004828607,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 2,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 4,
+    "UMOV": 4,
+    "UIADD3": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 16,
+    "BSSY": 1,
+    "FMNMX": 128,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.9614977,
+    1.9846464000000001,
+    2.0039552499999997,
+    2.0139536,
+    2.0268368
+   ],
+   "wg_cyc_per_step": [
+    1024.3042735042736,
+    1304.8682983682984,
+    1290.295104895105,
+    1278.7329836829838
+   ]
+  },
+  "i_FMNMX_0": {
+   "ms_launch": 1.95532645,
+   "steps": 4653,
+   "cyc_per_step": 795.4668600902643,
+   "mhz": 1979.7,
+   "wgs": 4,
+   "instr_per_warp_step": 140,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.815956405457067,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 1,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 2,
+    "BSSY": 1,
+    "FMNMX": 128,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.9531584,
+    1.96117915,
+    1.9581920499999999,
+    1.9551311500000002,
+    1.95532645
+   ],
+   "wg_cyc_per_step": [
+    92.64251020846766,
+    795.4668600902643,
+    779.8191274446593,
+    777.4142058886739
+   ]
+  },
+  "i_LDS_T": {
+   "ms_launch": 2.0770096,
+   "steps": 2233,
+   "cyc_per_step": 1540.39789520824,
+   "mhz": 1667.6,
+   "wgs": 4,
+   "instr_per_warp_step": 145,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 21782.964066867877,
+   "tflops": 4761.83170197769,
+   "ipc_sm": 1.5061043690184794,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "IADD3": 1,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 4,
+    "UMOV": 4,
+    "UIADD3": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 16,
+    "BSSY": 1,
+    "IMAD": 1,
+    "LOP3": 1,
+    "LDS": 32,
+    "FFMA": 64,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.9706415,
+    2.00230235,
+    2.0770096,
+    2.0859855499999997,
+    2.0886575499999998
+   ],
+   "wg_cyc_per_step": [
+    1056.0729959695477,
+    1540.39789520824,
+    1540.2908195253021,
+    1539.8001343484102
+   ]
+  },
+  "i_LDS_0": {
+   "ms_launch": 1.9095312,
+   "steps": 4706,
+   "cyc_per_step": 792.182936676583,
+   "mhz": 1979.5,
+   "wgs": 4,
+   "instr_per_warp_step": 111,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.241906405420432,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 1,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 2,
+    "BSSY": 1,
+    "S2R": 1,
+    "LDS": 32,
+    "IMAD": 1,
+    "LOP3": 1,
+    "FFMA": 64,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.90918235,
+    1.9098960999999999,
+    1.90952795,
+    1.9095312,
+    1.9095712500000002
+   ],
+   "wg_cyc_per_step": [
+    78.02515937101573,
+    792.182936676583,
+    790.2143221419465,
+    787.9408627284319
+   ]
+  },
+  "i_SHFL_T": {
+   "ms_launch": 1.9861601,
+   "steps": 2243,
+   "cyc_per_step": 1540.9442710655371,
+   "mhz": 1769.9,
+   "wgs": 4,
+   "instr_per_warp_step": 519,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 5.388903515801985,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "BSYNC": 2,
+    "BRA": 2,
+    "WARPSYNC": 65,
+    "WARPGROUP": 1,
+    "CS2R": 2,
+    "FADD": 92,
+    "S2R": 2,
+    "IMAD": 139,
+    "LOP3": 5,
+    "VIADD": 3,
+    "IADD3": 1,
+    "I2FP": 4,
+    "FSETP": 1,
+    "LDC": 2,
+    "MOV": 63,
+    "STG": 3,
+    "EXIT": 2,
+    "SHF": 1,
+    "BSSY": 1,
+    "SHFL": 64,
+    "ENDCOLLECTIVE": 64
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.961928,
+    1.9687231,
+    1.9861601,
+    1.9894417,
+    1.9871471499999998
+   ],
+   "wg_cyc_per_step": [
+    1056.29375835934,
+    1540.9442710655371,
+    1538.3269282211322,
+    1514.1805171645117
+   ]
+  },
+  "i_SHFL_0": {
+   "ms_launch": 1.9104496000000002,
+   "steps": 4867,
+   "cyc_per_step": 768.6722210807479,
+   "mhz": 1980.0,
+   "wgs": 4,
+   "instr_per_warp_step": 455,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 9.470876923019762,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "BSYNC": 2,
+    "BRA": 2,
+    "WARPSYNC": 65,
+    "WARPGROUP": 1,
+    "CS2R": 2,
+    "FADD": 28,
+    "S2R": 2,
+    "IMAD": 138,
+    "LOP3": 5,
+    "VIADD": 3,
+    "I2FP": 4,
+    "FSETP": 1,
+    "LDC": 2,
+    "IADD3": 1,
+    "STG": 3,
+    "EXIT": 2,
+    "SHF": 1,
+    "BSSY": 1,
+    "MOV": 34,
+    "SHFL": 64,
+    "ENDCOLLECTIVE": 64,
+    "HFMA2": 30
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.9104496000000002,
+    1.910528,
+    1.9104272999999998,
+    1.91043205,
+    1.91045115
+   ],
+   "wg_cyc_per_step": [
+    67.58056297513869,
+    768.6722210807479,
+    765.5140538319293,
+    742.2250873227861
+   ]
+  },
+  "i_IMAD_T": {
+   "ms_launch": 2.0117552,
+   "steps": 2537,
+   "cyc_per_step": 1303.8576665352778,
+   "mhz": 1681.6,
+   "wgs": 4,
+   "instr_per_warp_step": 177,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 25734.735363533742,
+   "tflops": 5585.591331334945,
+   "ipc_sm": 2.1720162197806703,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 1,
+    "IADD3": 1,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 4,
+    "UMOV": 4,
+    "UIADD3": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 16,
+    "BSSY": 1,
+    "LOP3": 1,
+    "IMAD": 128,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.969088,
+    1.99567355,
+    2.0117552,
+    2.02926405,
+    2.03100965
+   ],
+   "wg_cyc_per_step": [
+    1024.289318092235,
+    1303.8576665352778,
+    1294.7898305084746,
+    1279.9012219156484
+   ]
+  },
+  "i_IMAD_0": {
+   "ms_launch": 1.9662081,
+   "steps": 4735,
+   "cyc_per_step": 787.161393875396,
+   "mhz": 1979.6,
+   "wgs": 4,
+   "instr_per_warp_step": 141,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 0.0,
+   "tflops": 0.0,
+   "ipc_sm": 2.8659942135794254,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "ISETP": 3,
+    "VIADD": 1,
+    "BRA": 3,
+    "WARPSYNC": 1,
+    "WARPGROUP": 2,
+    "BSSY": 1,
+    "LOP3": 1,
+    "IMAD": 128,
+    "BSYNC": 1
+   },
+   "kind": "probe",
+   "spread_ms": [
+    1.963768,
+    1.9663967,
+    1.9662081,
+    1.9662384,
+    1.96573925
+   ],
+   "wg_cyc_per_step": [
+    77.11579725448786,
+    787.161393875396,
+    750.4285322069694,
+    747.5302428722281
+   ]
+  },
+  "v_fwd_pp": {
+   "ms_launch": 1.95460645,
+   "steps": 1130,
+   "cyc_per_step": 2964.634424778761,
+   "mhz": 1720.8,
+   "wgs": 3,
+   "instr_per_warp_step": 599,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 4244.338490719311,
+   "tflops": 960.2276478316132,
+   "ipc_sm": 2.424582248631351,
+   "mufu_lanes_per_clk_sm": 9.714519860960337,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 4,
+    "IMAD": 36,
+    "LOP3": 23,
+    "ISETP": 2,
+    "UIADD3": 8,
+    "ULEA": 1,
+    "ULOP3": 4,
+    "USHF": 2,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "FADD": 72,
+    "MUFU.EX2": 74,
+    "FMNMX": 82,
+    "FFMA": 140,
+    "FMUL": 85,
+    "SHFL": 8,
+    "FSEL": 2,
+    "F2FP": 32,
+    "PRMT": 10,
+    "MUFU.RCP": 1,
+    "BRA": 1
+   },
+   "kind": "variant",
+   "spread_ms": [
+    1.8862207500000001,
+    1.94088325,
+    1.95460645,
+    1.9904848000000002,
+    1.99598715
+   ],
+   "floors_ms": {
+    "tensor": 1.3058255414071027,
+    "mufu": 1.13,
+    "issue": 1.1281166666666667
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 66.80759399965669,
+   "wg_cyc_per_step": [
+    2963.4813274336284,
+    2964.190796460177,
+    2964.634424778761
+   ]
+  },
+  "syn_fwd_dep_z": {
+   "ms_launch": 1.99224165,
+   "steps": 1166,
+   "cyc_per_step": 2999.121269296741,
+   "mhz": 1814.6,
+   "wgs": 3,
+   "instr_per_warp_step": 599,
+   "mufu_per_warp_step": 75,
+   "flop_per_clk_sm": 4195.53291452951,
+   "tflops": 972.1015278161663,
+   "ipc_sm": 2.3967020185500876,
+   "mufu_lanes_per_clk_sm": 9.602812762137246,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 3,
+    "WARPGROUP": 4,
+    "IMAD": 36,
+    "LOP3": 23,
+    "ISETP": 2,
+    "UIADD3": 8,
+    "ULEA": 1,
+    "ULOP3": 4,
+    "USHF": 2,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "FADD": 72,
+    "MUFU.EX2": 74,
+    "FMNMX": 82,
+    "SHFL": 8,
+    "FFMA": 140,
+    "FMUL": 85,
+    "FSEL": 2,
+    "F2FP": 32,
+    "PRMT": 10,
+    "MUFU.RCP": 1,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.9891617,
+    2.00384485,
+    1.9814207,
+    1.99224165,
+    1.99381275
+   ],
+   "floors_ms": {
+    "tensor": 1.3474270630802494,
+    "mufu": 1.166,
+    "issue": 1.1640566666666667
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 67.63371617495545,
+   "wg_cyc_per_step": [
+    2999.121269296741,
+    2997.8349056603774,
+    2996.944253859348
+   ]
+  },
+  "syn_pass1_dep_z": {
+   "ms_launch": 1.9598255000000002,
+   "steps": 1589,
+   "cyc_per_step": 2228.9519194461927,
+   "mhz": 1814.9,
+   "wgs": 2,
+   "instr_per_warp_step": 658,
+   "mufu_per_warp_step": 35,
+   "flop_per_clk_sm": 3763.476424419348,
+   "tflops": 897.7808232334969,
+   "ipc_sm": 2.361648070590907,
+   "mufu_lanes_per_clk_sm": 4.019826503133459,
+   "hist": {
+    "UIADD3": 8,
+    "WARPGROUP": 7,
+    "ULOP3": 4,
+    "LOP3": 80,
+    "IMAD": 72,
+    "USHF": 2,
+    "UMOV": 2,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "MUFU.EX2": 32,
+    "LDS": 18,
+    "FMUL": 107,
+    "FADD": 32,
+    "FFMA": 128,
+    "SHFL": 21,
+    "FMNMX": 82,
+    "MUFU.RCP": 3,
+    "STS": 1,
+    "F2FP": 32,
+    "PRMT": 13,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.9598976000000001,
+    1.9598255000000002,
+    1.9597584000000001,
+    1.95982725,
+    1.9597696500000001
+   ],
+   "floors_ms": {
+    "tensor": 1.224163295159815,
+    "mufu": 0.4943555555555556,
+    "issue": 1.1617355555555557
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 62.462872085285895,
+   "wg_cyc_per_step": [
+    2228.9465072372564,
+    2228.9519194461927
+   ]
+  },
+  "syn_pass0_dep_z": {
+   "ms_launch": 1.950408,
+   "steps": 1957,
+   "cyc_per_step": 1803.6306591722025,
+   "mhz": 1814.8,
+   "wgs": 4,
+   "instr_per_warp_step": 269,
+   "mufu_per_warp_step": 32,
+   "flop_per_clk_sm": 4650.956645331174,
+   "tflops": 1111.0387021546262,
+   "ipc_sm": 2.386297869861766,
+   "mufu_lanes_per_clk_sm": 9.083899697912448,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "IMAD": 21,
+    "LOP3": 17,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 2,
+    "FMNMX": 32,
+    "MUFU.EX2": 32,
+    "FFMA": 64,
+    "FMUL": 37,
+    "FADD": 36,
+    "SHFL": 4,
+    "FSEL": 4,
+    "BRA": 1
+   },
+   "kind": "syn",
+   "spread_ms": [
+    1.9502960000000003,
+    1.9504064499999998,
+    1.95044155,
+    1.950408,
+    1.95168955
+   ],
+   "floors_ms": {
+    "tensor": 1.5076699613768143,
+    "mufu": 1.1133155555555554,
+    "issue": 1.1698511111111112
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 77.30023468816854,
+   "wg_cyc_per_step": [
+    1803.6306591722025,
+    1801.30454777721,
+    1795.3623914154318,
+    1786.4935104752171
+   ]
+  },
+  "t_SS128_w2_z": {
+   "ms_launch": 2.20715525,
+   "steps": 3507,
+   "cyc_per_step": 1024.12874251497,
+   "mhz": 1634.2,
+   "wgs": 2,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.970189353298,
+   "tflops": 1759.4086187602798,
+   "ipc_sm": 0.21091098319295792,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    2.04296,
+    2.2353121000000002,
+    2.2117201,
+    2.20715525,
+    2.20695685
+   ],
+   "floors_ms": {
+    "tensor": 2.701787713106023,
+    "mufu": 0.0,
+    "issue": 0.10521
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 122.41040647711678,
+   "wg_cyc_per_step": [
+    1024.12874251497,
+    1023.9973481608213
+   ]
+  },
+  "t_RS128_w3_z": {
+   "ms_launch": 2.13856165,
+   "steps": 2346,
+   "cyc_per_step": 1536.3014066496164,
+   "mhz": 1694.1,
+   "wgs": 3,
+   "instr_per_warp_step": 28,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.392813244217,
+   "tflops": 1822.05433491431,
+   "ipc_sm": 0.21870708348354156,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "S2UR": 1,
+    "UMOV": 2,
+    "WARPGROUP": 2,
+    "UIADD3": 9,
+    "ISETP": 1,
+    "ULEA": 1,
+    "ULOP3": 2,
+    "USHF": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    2.04205435,
+    2.13567525,
+    2.1401825,
+    2.1404608,
+    2.13856165
+   ],
+   "floors_ms": {
+    "tensor": 2.7110324957000556,
+    "mufu": 0.0,
+    "issue": 0.10948000000000001
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 126.76896622082677,
+   "wg_cyc_per_step": [
+    1536.012872975277,
+    1536.3014066496164,
+    1536.1780477408356
+   ]
+  },
+  "t_SS64_w4_z": {
+   "ms_launch": 2.2935936000000003,
+   "steps": 3507,
+   "cyc_per_step": 1024.1332192757343,
+   "mhz": 1574.2,
+   "wgs": 4,
+   "instr_per_warp_step": 27,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.934384427461,
+   "tflops": 1693.102025481759,
+   "ipc_sm": 0.42182012248905454,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 2,
+    "UMOV": 1,
+    "UIADD3": 14,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor",
+   "spread_ms": [
+    2.0156719,
+    2.35039045,
+    2.33628805,
+    2.2935936000000003,
+    2.29134885
+   ],
+   "floors_ms": {
+    "tensor": 2.701787713106023,
+    "mufu": 0.0,
+    "issue": 0.21042
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 117.79714214000347,
+   "wg_cyc_per_step": [
+    1024.1332192757343,
+    1024.0589677787282,
+    1024.0700598802396,
+    1023.9728257770174
+   ]
+  },
+  "t_fwd_dep_z": {
+   "ms_launch": 2.15041445,
+   "steps": 2346,
+   "cyc_per_step": 1536.2233162830348,
+   "mhz": 1679.7,
+   "wgs": 3,
+   "instr_per_warp_step": 20,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.809152958928,
+   "tflops": 1812.0114124344727,
+   "ipc_sm": 0.15622728639524322,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UIADD3": 5,
+    "UMOV": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor_of",
+   "spread_ms": [
+    2.0358448,
+    2.1482977,
+    2.15041445,
+    2.1504608000000003,
+    2.1504495500000003
+   ],
+   "floors_ms": {
+    "tensor": 2.7110324957000556,
+    "mufu": 0.0,
+    "issue": 0.0782
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 126.07023244751986,
+   "wg_cyc_per_step": [
+    1536.1554134697358,
+    1536.2233162830348,
+    1536.2055839727195
+   ]
+  },
+  "t_pass1_dep_z": {
+   "ms_launch": 2.14662075,
+   "steps": 3421,
+   "cyc_per_step": 1038.2669102601578,
+   "mhz": 1663.7,
+   "wgs": 2,
+   "instr_per_warp_step": 32,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8079.4330601348665,
+   "tflops": 1764.6621983766813,
+   "ipc_sm": 0.2465647296183736,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 7,
+    "UMOV": 5,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "QGMMA.64x128x32.F32.E4M3.E4M3": 4,
+    "BRA": 1
+   },
+   "kind": "tensor_of",
+   "spread_ms": [
+    1.9923696499999999,
+    2.1720720499999997,
+    2.1770431500000003,
+    2.14662075,
+    2.1457296500000003
+   ],
+   "floors_ms": {
+    "tensor": 2.63553343784879,
+    "mufu": 0.0,
+    "issue": 0.12163555555555555
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 122.77592294068666,
+   "wg_cyc_per_step": [
+    1038.2669102601578,
+    1038.191493715288
+   ]
+  },
+  "t_pass0_dep_z": {
+   "ms_launch": 2.2652992000000003,
+   "steps": 3467,
+   "cyc_per_step": 1024.184222670897,
+   "mhz": 1574.2,
+   "wgs": 4,
+   "instr_per_warp_step": 21,
+   "mufu_per_warp_step": 0,
+   "flop_per_clk_sm": 8190.526483725698,
+   "tflops": 1694.6971594533734,
+   "ipc_sm": 0.32806597930572445,
+   "mufu_lanes_per_clk_sm": 0.0,
+   "hist": {
+    "WARPGROUP": 4,
+    "UMOV": 1,
+    "UIADD3": 6,
+    "QGMMA.64x64x32.F32.E4M3.E4M3": 8,
+    "ISETP": 1,
+    "BRA": 1
+   },
+   "kind": "tensor_of",
+   "spread_ms": [
+    2.0647887999999996,
+    2.2936672000000002,
+    2.2704912,
+    2.2652992000000003,
+    2.26523035
+   ],
+   "floors_ms": {
+    "tensor": 2.6709717711259144,
+    "mufu": 0.0,
+    "issue": 0.16179333333333332
+   },
+   "controlling": "tensor",
+   "pct_of_floor": 117.90812317975102,
+   "wg_cyc_per_step": [
+    1024.184222670897,
+    1024.0392558407846,
+    1024.10908566484,
+    1024.063570810499
+   ]
+  }
+ }
+}

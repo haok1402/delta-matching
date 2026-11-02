@@ -115,6 +115,45 @@ def build(cfgs):
             for g in v["groups"][:-1]:
                 g["ops"] = [[n, "SS", acc, z, ar] for n, k, acc, z, ar in g["ops"]]
         out.append(v)
+        # the same split without the tensor role (its wgmma removed): ALU-role cycles alone, same kernel shape
+        n = copy.deepcopy(v); n["name"] = f"v_{cat}_spec_noT"
+        for g in n["groups"][:-1]:
+            g["ops"] = []
+        out.append(n)
+        # ALU roles with only the MUFU part / only the non-MUFU part of the mix (tensor role active)
+        for part in ("mufu", "nomufu"):
+            m = copy.deepcopy(v); m["name"] = f"v_{cat}_spec_{part}"; m.pop("equiv")
+            m["kind"] = "probe"
+            a = m["groups"][-1]["alu"]
+            m["groups"][-1]["alu"] = {k: n for k, n in a.items() if k.startswith("MUFU") == (part == "mufu")}
+            if part == "mufu":
+                m["groups"][-1]["f2fp"] = 0
+            out.append(m)
+    # --- interference: warpgroup 0 streams SS n128 wgmma (alternating waits); warpgroups 1-3 run one pipe class
+    # ALU-role work per step sized to ~768 cycles per SMSP alone (the tensor role needs 1024 per step), so the tensor
+    # stream covers the ALU roles' whole run
+    for op, cnt in (("FFMA", 256), ("MUFU.EX2", 32), ("FMNMX", 128), ("LDS", 32), ("SHFL", 64), ("IMAD", 128)):
+        for T in (1, 0):
+            nm = f"i_{op.replace('.', '_')}_{'T' if T else '0'}"
+            out.append({"name": nm, "mode": "dep", "wgs": 4, "accs": {"T": 128}, "xregs": 24, "kind": "probe",
+                        "groups": [{"ops": [[128, "SS", "T", True, None]] * (8 if T else 0), "wait_after": 1, "only": [0]},
+                                   {"ops": [[128, "SS", "T", True, None]] * (8 if T else 0), "wait_after": 1, "only": [0]},
+                                   {"alu": {op: cnt}, "only": [1, 2, 3]}]})
+    # interference vs tensor-stream shape: same FLOP rate, different instruction count / operand source
+    for n, kind, cnt in ((64, "SS", 16), (256, "SS", 4), (128, "RS", 8)):
+        for op, oc in (("FFMA", 256), ("FMNMX", 128)):
+            out.append({"name": f"i_{op}_T{kind}{n}", "mode": "dep", "wgs": 4, "accs": {"T": n}, "pregs": {"P": 16},
+                        "xregs": 24, "kind": "probe",
+                        "groups": [{"ops": [[n, kind, "T", True, "P"]] * cnt, "wait_after": 1, "only": [0]},
+                                   {"ops": [[n, kind, "T", True, "P"]] * cnt, "wait_after": 1, "only": [0]},
+                                   {"alu": {op: oc}, "only": [1, 2, 3]}]})
+    # ALU roles with fewer warps (2 ALU warpgroups) next to the tensor stream
+    for T in (1, 0):
+        out.append({"name": f"i_FFMA_2wg_{'T' if T else '0'}", "mode": "dep", "wgs": 3, "accs": {"T": 128}, "xregs": 24,
+                    "kind": "probe",
+                    "groups": [{"ops": [[128, "SS", "T", True, None]] * (8 if T else 0), "wait_after": 1, "only": [0]},
+                               {"ops": [[128, "SS", "T", True, None]] * (8 if T else 0), "wait_after": 1, "only": [0]},
+                               {"alu": {"FFMA": 384}, "only": [1, 2]}]})
     # forward: FA3-style ping-pong of the three warpgroups' GEMM issue (named barriers, as the real BM192 kernel)
     v = copy.deepcopy(byname["syn_fwd_dep"]); v["name"] = "v_fwd_pp"; v["kind"] = "variant"; v["equiv"] = ["syn_fwd_dep", 1]
     v["groups"][0]["pp_sync"] = True; v["groups"][1]["pp_arrive"] = True

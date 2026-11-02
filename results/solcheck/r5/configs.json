@@ -1,0 +1,9994 @@
+[
+ {
+  "mode": "dep",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "syn_fwd_dep",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "fold": [
+     [
+      "O",
+      "A",
+      64
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "alu": {
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "MUFU.EX2": 74,
+     "FADD": 8,
+     "SHFL": 8,
+     "FSEL": 2,
+     "MUFU.RCP": 1,
+     "ALU": 23,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "P"
+   }
+  ]
+ },
+ {
+  "mode": "free",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "syn_fwd_free",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "fold": [
+     [
+      "O",
+      "A",
+      64
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "alu": {
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "MUFU.EX2": 74,
+     "FADD": 8,
+     "SHFL": 8,
+     "FSEL": 2,
+     "MUFU.RCP": 1,
+     "ALU": 36,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "P"
+   }
+  ]
+ },
+ {
+  "mode": "dep",
+  "target_instr": 658.0,
+  "cat": "pass1",
+  "free_depth": 1,
+  "name": "syn_pass1_dep",
+  "wgs": 2,
+  "accs": {
+   "S": 64,
+   "dP": 64,
+   "dV": 128,
+   "dK": 128
+  },
+  "pregs": {
+   "P": 8,
+   "dS": 8
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 54,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 10,
+     "LDS": 9,
+     "STS": 0,
+     "ALU": 40,
+     "IMAD": 36,
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 16,
+    "f2fp_dst": "P"
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 53,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 11,
+     "LDS": 9,
+     "STS": 1,
+     "ALU": 40,
+     "IMAD": 36
+    },
+    "f2fp": 16,
+    "f2fp_dst": "dS"
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ],
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ]
+    ],
+    "post_wait": 0
+   }
+  ]
+ },
+ {
+  "mode": "free",
+  "target_instr": 658.0,
+  "cat": "pass1",
+  "free_depth": 1,
+  "name": "syn_pass1_free",
+  "wgs": 2,
+  "accs": {
+   "S": 64,
+   "dP": 64,
+   "dV": 128,
+   "dK": 128
+  },
+  "pregs": {
+   "P": 8,
+   "dS": 8
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 54,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 10,
+     "LDS": 9,
+     "STS": 0,
+     "ALU": 52,
+     "IMAD": 36,
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 16,
+    "f2fp_dst": "P"
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 53,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 11,
+     "LDS": 9,
+     "STS": 1,
+     "ALU": 51,
+     "IMAD": 36
+    },
+    "f2fp": 16,
+    "f2fp_dst": "dS"
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ],
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ]
+    ],
+    "post_wait": 0
+   }
+  ]
+ },
+ {
+  "mode": "dep",
+  "target_instr": 269.0,
+  "cat": "pass0",
+  "free_depth": 1,
+  "name": "syn_pass0_dep",
+  "wgs": 4,
+  "accs": {
+   "S": 64,
+   "dP": 64
+  },
+  "xregs": 12,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 18,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 8,
+     "IMAD": 10,
+     "MUFU.EX2": 32
+    }
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 19,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 9,
+     "IMAD": 11
+    }
+   }
+  ]
+ },
+ {
+  "mode": "free",
+  "target_instr": 269.0,
+  "cat": "pass0",
+  "free_depth": 1,
+  "name": "syn_pass0_free",
+  "wgs": 4,
+  "accs": {
+   "S": 64,
+   "dP": 64
+  },
+  "xregs": 12,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 18,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 3,
+     "IMAD": 10,
+     "MUFU.EX2": 32
+    }
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 19,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 3,
+     "IMAD": 11
+    }
+   }
+  ]
+ },
+ {
+  "name": "t_SS64_w1",
+  "mode": "free",
+  "wgs": 1,
+  "accs": {
+   "A": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152
+ },
+ {
+  "name": "t_SS64_w1_dbl",
+  "mode": "dep",
+  "wgs": 1,
+  "accs": {
+   "A": 64,
+   "B": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS128_w1",
+  "mode": "free",
+  "wgs": 1,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_SS128_w1_dbl",
+  "mode": "dep",
+  "wgs": 1,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS256_w1",
+  "mode": "free",
+  "wgs": 1,
+  "accs": {
+   "A": 256
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 8388608
+ },
+ {
+  "name": "t_RS128_w1",
+  "mode": "free",
+  "wgs": 1,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_RS128_w1_dbl",
+  "mode": "dep",
+  "wgs": 1,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS64_w2",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152
+ },
+ {
+  "name": "t_SS64_w2_dbl",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {
+   "A": 64,
+   "B": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS128_w2",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_SS128_w2_dbl",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS256_w2",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 256
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      256,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 8388608
+ },
+ {
+  "name": "t_RS128_w2",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_RS128_w2_dbl",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS64_w3",
+  "mode": "free",
+  "wgs": 3,
+  "accs": {
+   "A": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152
+ },
+ {
+  "name": "t_SS64_w3_dbl",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {
+   "A": 64,
+   "B": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS128_w3",
+  "mode": "free",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_SS128_w3_dbl",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_RS128_w3",
+  "mode": "free",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_RS128_w3_dbl",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS64_w4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {
+   "A": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152
+ },
+ {
+  "name": "t_SS64_w4_dbl",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "A": 64,
+   "B": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_SS128_w4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_SS128_w4_dbl",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "name": "t_RS128_w4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "t_RS128_w4_dbl",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "A": 128,
+   "B": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 1,
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "B",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1
+   }
+  ]
+ },
+ {
+  "mode": "dep",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "t_fwd_dep",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "f2fp_dst": "P"
+   }
+  ],
+  "kind": "tensor_of"
+ },
+ {
+  "mode": "dep",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "x_fwd_dep",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "fold": [
+     [
+      "O",
+      "A",
+      64
+     ]
+    ]
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "alu": {
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "MUFU.EX2": 74,
+     "FADD": 8,
+     "SHFL": 8,
+     "FSEL": 2,
+     "MUFU.RCP": 1,
+     "ALU": 23,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "P"
+   }
+  ],
+  "kind": "alu_of"
+ },
+ {
+  "mode": "dep",
+  "target_instr": 658.0,
+  "cat": "pass1",
+  "free_depth": 1,
+  "name": "t_pass1_dep",
+  "wgs": 2,
+  "accs": {
+   "S": 64,
+   "dP": 64,
+   "dV": 128,
+   "dK": 128
+  },
+  "pregs": {
+   "P": 8,
+   "dS": 8
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "f2fp_dst": "P"
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "f2fp_dst": "dS"
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ],
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ]
+    ],
+    "post_wait": 0
+   }
+  ],
+  "kind": "tensor_of"
+ },
+ {
+  "mode": "dep",
+  "target_instr": 658.0,
+  "cat": "pass1",
+  "free_depth": 1,
+  "name": "x_pass1_dep",
+  "wgs": 2,
+  "accs": {
+   "S": 64,
+   "dP": 64,
+   "dV": 128,
+   "dK": 128
+  },
+  "pregs": {
+   "P": 8,
+   "dS": 8
+  },
+  "xregs": 16,
+  "groups": [
+   {},
+   {
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 54,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 10,
+     "LDS": 9,
+     "STS": 0,
+     "ALU": 40,
+     "IMAD": 36,
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 16,
+    "f2fp_dst": "P"
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 53,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 11,
+     "LDS": 9,
+     "STS": 1,
+     "ALU": 40,
+     "IMAD": 36
+    },
+    "f2fp": 16,
+    "f2fp_dst": "dS"
+   },
+   {},
+   {
+    "post_wait": 0
+   }
+  ],
+  "kind": "alu_of"
+ },
+ {
+  "mode": "dep",
+  "target_instr": 269.0,
+  "cat": "pass0",
+  "free_depth": 1,
+  "name": "t_pass0_dep",
+  "wgs": 4,
+  "accs": {
+   "S": 64,
+   "dP": 64
+  },
+  "xregs": 12,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ]
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ]
+   }
+  ],
+  "kind": "tensor_of"
+ },
+ {
+  "mode": "dep",
+  "target_instr": 269.0,
+  "cat": "pass0",
+  "free_depth": 1,
+  "name": "x_pass0_dep",
+  "wgs": 4,
+  "accs": {
+   "S": 64,
+   "dP": 64
+  },
+  "xregs": 12,
+  "groups": [
+   {},
+   {
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 18,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 8,
+     "IMAD": 10,
+     "MUFU.EX2": 32
+    }
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 19,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 9,
+     "IMAD": 11
+    }
+   }
+  ],
+  "kind": "alu_of"
+ },
+ {
+  "name": "a_MUFU_EX2",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FFMA",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FFMA": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FMUL",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FMUL": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FADD",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FADD": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FMNMX",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FMNMX": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_ALU",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "ALU": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_IMAD",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "IMAD": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_SHFL",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "SHFL": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_LDS",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "LDS": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FSEL",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FSEL": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_F2FP",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "f2fp": 256
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_FFMA_1to1",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "FFMA": 64
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_FFMA_1to4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "FFMA": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_FFMA_1to8",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "FFMA": 512
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_FMNMX_1to1",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "FMNMX": 64
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_FMNMX_1to4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "FMNMX": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_FMNMX_1to8",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "FMNMX": 512
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FFMA_FMNMX_1to1",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FFMA": 64,
+     "FMNMX": 64
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FFMA_FMNMX_1to4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FFMA": 64,
+     "FMNMX": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FFMA_FMNMX_1to8",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FFMA": 64,
+     "FMNMX": 512
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FFMA_ALU_1to1",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FFMA": 64,
+     "ALU": 64
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FFMA_ALU_1to4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FFMA": 64,
+     "ALU": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_FFMA_ALU_1to8",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "FFMA": 64,
+     "ALU": 512
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_ALU_1to1",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "ALU": 64
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_ALU_1to4",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "ALU": 256
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "a_MUFU_EX2_ALU_1to8",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {},
+  "xregs_free": 32,
+  "groups": [
+   {
+    "alu": {
+     "MUFU.EX2": 64,
+     "ALU": 512
+    }
+   }
+  ],
+  "kind": "alu"
+ },
+ {
+  "name": "w_MUFU_EX2_64",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "MUFU.EX2": 64
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_MUFU_EX2_128",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "MUFU.EX2": 128
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_MUFU_EX2_256",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "MUFU.EX2": 256
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_MUFU_EX2_512",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "MUFU.EX2": 512
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FFMA_64",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FFMA": 64
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FFMA_128",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FFMA": 128
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FFMA_256",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FFMA": 256
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FFMA_512",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FFMA": 512
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FMNMX_64",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FMNMX": 64
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FMNMX_128",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FMNMX": 128
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FMNMX_256",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FMNMX": 256
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "w_FMNMX_512",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs_free": 32,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "alu": {
+     "FMNMX": 512
+    }
+   }
+  ],
+  "kind": "mixed",
+  "flop_per_step_wg": 4194304
+ },
+ {
+  "name": "b_wait_SS64_w1",
+  "mode": "dep",
+  "wgs": 1,
+  "accs": {
+   "A": 64
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 262144
+ },
+ {
+  "name": "b_wait4_SS64_w1",
+  "mode": "dep",
+  "wgs": 1,
+  "accs": {
+   "A": 64
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 1048576
+ },
+ {
+  "name": "b_wait_SS64_w2",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {
+   "A": 64
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 262144
+ },
+ {
+  "name": "b_wait4_SS64_w2",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {
+   "A": 64
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 1048576
+ },
+ {
+  "name": "b_wait_SS128_w1",
+  "mode": "dep",
+  "wgs": 1,
+  "accs": {
+   "A": 128
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 524288
+ },
+ {
+  "name": "b_wait4_SS128_w1",
+  "mode": "dep",
+  "wgs": 1,
+  "accs": {
+   "A": 128
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 2097152
+ },
+ {
+  "name": "b_wait_SS128_w2",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 524288
+ },
+ {
+  "name": "b_wait4_SS128_w2",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "xregs": 1,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   }
+  ],
+  "kind": "latency",
+  "flop_per_step_wg": 2097152
+ },
+ {
+  "name": "b_pingpong_w2",
+  "mode": "dep",
+  "wgs": 2,
+  "accs": {},
+  "xregs": 1,
+  "groups": [
+   {
+    "pp_sync": true,
+    "pp_arrive": true,
+    "alu": {
+     "FFMA": 1
+    }
+   }
+  ],
+  "kind": "latency"
+ },
+ {
+  "name": "b_pingpong_w3",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {},
+  "xregs": 1,
+  "groups": [
+   {
+    "pp_sync": true,
+    "pp_arrive": true,
+    "alu": {
+     "FFMA": 1
+    }
+   }
+  ],
+  "kind": "latency"
+ },
+ {
+  "mode": "free",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "v_fwd_ilv",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "fold": [
+     [
+      "O",
+      "A",
+      64
+     ]
+    ],
+    "interleave": true,
+    "alu": {
+     "FFMA": 70,
+     "FMUL": 42,
+     "FMNMX": 41,
+     "MUFU.EX2": 37,
+     "FADD": 68,
+     "SHFL": 4,
+     "FSEL": 1,
+     "MUFU.RCP": 0,
+     "ALU": 18,
+     "IMAD": 18
+    }
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "alu": {
+     "FFMA": 70,
+     "FMUL": 43,
+     "FMNMX": 41,
+     "MUFU.EX2": 37,
+     "FADD": 4,
+     "SHFL": 4,
+     "FSEL": 1,
+     "MUFU.RCP": 1,
+     "ALU": 18,
+     "IMAD": 18
+    },
+    "f2fp": 32,
+    "f2fp_dst": "P",
+    "interleave": true
+   }
+  ],
+  "kind": "variant",
+  "equiv": [
+   "syn_fwd_dep",
+   1
+  ]
+ },
+ {
+  "name": "v_fwd_spec",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 8,
+  "kind": "variant",
+  "equiv": [
+   "syn_fwd_dep",
+   3
+  ],
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FADD": 72,
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "MUFU.EX2": 74,
+     "SHFL": 8,
+     "FSEL": 2,
+     "MUFU.RCP": 1,
+     "ALU": 23,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_fwd_spec_noT",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 8,
+  "kind": "variant",
+  "equiv": [
+   "syn_fwd_dep",
+   3
+  ],
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FADD": 72,
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "MUFU.EX2": 74,
+     "SHFL": 8,
+     "FSEL": 2,
+     "MUFU.RCP": 1,
+     "ALU": 23,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_fwd_spec_mufu",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 8,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "MUFU.EX2": 74,
+     "MUFU.RCP": 1
+    },
+    "f2fp": 0,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_fwd_spec_nomufu",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 8,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FADD": 72,
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "SHFL": 8,
+     "FSEL": 2,
+     "ALU": 23,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "mode": "free",
+  "target_instr": 658.0,
+  "cat": "pass1",
+  "free_depth": 1,
+  "name": "v_pass1_ilv",
+  "wgs": 2,
+  "accs": {
+   "S": 64,
+   "dP": 64,
+   "dV": 128,
+   "dK": 128
+  },
+  "pregs": {
+   "P": 8,
+   "dS": 8
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ],
+    "interleave": true
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 54,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 10,
+     "LDS": 9,
+     "STS": 0,
+     "ALU": 52,
+     "IMAD": 36,
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 16,
+    "f2fp_dst": "P",
+    "interleave": true
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 53,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 11,
+     "LDS": 9,
+     "STS": 1,
+     "ALU": 51,
+     "IMAD": 36
+    },
+    "f2fp": 16,
+    "f2fp_dst": "dS"
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ]
+    ],
+    "interleave": true
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ],
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ]
+    ],
+    "post_wait": 0,
+    "interleave": true
+   }
+  ],
+  "kind": "variant",
+  "equiv": [
+   "syn_pass1_dep",
+   1
+  ]
+ },
+ {
+  "name": "v_pass1_spec",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "variant",
+  "equiv": [
+   "syn_pass1_dep",
+   2
+  ],
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 92,
+     "FMUL": 107,
+     "FMNMX": 82,
+     "FADD": 32,
+     "SHFL": 21,
+     "LDS": 18,
+     "STS": 1,
+     "ALU": 80,
+     "IMAD": 72,
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 32,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_pass1_spec_noT",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "variant",
+  "equiv": [
+   "syn_pass1_dep",
+   2
+  ],
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 92,
+     "FMUL": 107,
+     "FMNMX": 82,
+     "FADD": 32,
+     "SHFL": 21,
+     "LDS": 18,
+     "STS": 1,
+     "ALU": 80,
+     "IMAD": 72,
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 32,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_pass1_spec_mufu",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 0,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_pass1_spec_nomufu",
+  "mode": "dep",
+  "wgs": 3,
+  "accs": {
+   "T": 128
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 92,
+     "FMUL": 107,
+     "FMNMX": 82,
+     "FADD": 32,
+     "SHFL": 21,
+     "LDS": 18,
+     "STS": 1,
+     "ALU": 80,
+     "IMAD": 72
+    },
+    "f2fp": 32,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "mode": "free",
+  "target_instr": 269.0,
+  "cat": "pass0",
+  "free_depth": 1,
+  "name": "v_pass0_ilv",
+  "wgs": 4,
+  "accs": {
+   "S": 64,
+   "dP": 64
+  },
+  "xregs": 12,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ],
+    "interleave": true
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 18,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 3,
+     "IMAD": 10,
+     "MUFU.EX2": 32
+    },
+    "interleave": true
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 19,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 3,
+     "IMAD": 11
+    }
+   }
+  ],
+  "kind": "variant",
+  "equiv": [
+   "syn_pass0_dep",
+   1
+  ]
+ },
+ {
+  "name": "v_pass0_spec",
+  "mode": "dep",
+  "wgs": 5,
+  "accs": {
+   "T": 64
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "variant",
+  "equiv": [
+   "syn_pass0_dep",
+   4
+  ],
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 64,
+     "FMUL": 37,
+     "FADD": 36,
+     "FMNMX": 32,
+     "FSEL": 4,
+     "SHFL": 4,
+     "ALU": 17,
+     "IMAD": 21,
+     "MUFU.EX2": 32
+    },
+    "f2fp": 0,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3,
+     4
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_pass0_spec_noT",
+  "mode": "dep",
+  "wgs": 5,
+  "accs": {
+   "T": 64
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "variant",
+  "equiv": [
+   "syn_pass0_dep",
+   4
+  ],
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 64,
+     "FMUL": 37,
+     "FADD": 36,
+     "FMNMX": 32,
+     "FSEL": 4,
+     "SHFL": 4,
+     "ALU": 17,
+     "IMAD": 21,
+     "MUFU.EX2": 32
+    },
+    "f2fp": 0,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3,
+     4
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_pass0_spec_mufu",
+  "mode": "dep",
+  "wgs": 5,
+  "accs": {
+   "T": 64
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "MUFU.EX2": 32
+    },
+    "f2fp": 0,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3,
+     4
+    ]
+   }
+  ]
+ },
+ {
+  "name": "v_pass0_spec_nomufu",
+  "mode": "dep",
+  "wgs": 5,
+  "accs": {
+   "T": 64
+  },
+  "pregs": {
+   "P": 16,
+   "Q": 16
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "T",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 64,
+     "FMUL": 37,
+     "FADD": 36,
+     "FMNMX": 32,
+     "FSEL": 4,
+     "SHFL": 4,
+     "ALU": 17,
+     "IMAD": 21
+    },
+    "f2fp": 0,
+    "f2fp_dst": "Q",
+    "only": [
+     1,
+     2,
+     3,
+     4
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_FFMA_T",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 256
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_FFMA_0",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FFMA": 256
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_MUFU_EX2_T",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "MUFU.EX2": 32
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_MUFU_EX2_0",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "MUFU.EX2": 32
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_FMNMX_T",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FMNMX": 128
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_FMNMX_0",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "FMNMX": 128
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_LDS_T",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "LDS": 32
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_LDS_0",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "LDS": 32
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_SHFL_T",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "SHFL": 64
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_SHFL_0",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "SHFL": 64
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_IMAD_T",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "T",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "IMAD": 128
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "name": "i_IMAD_0",
+  "mode": "dep",
+  "wgs": 4,
+  "accs": {
+   "T": 128
+  },
+  "xregs": 24,
+  "kind": "probe",
+  "groups": [
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "ops": [],
+    "wait_after": 1,
+    "only": [
+     0
+    ]
+   },
+   {
+    "alu": {
+     "IMAD": 128
+    },
+    "only": [
+     1,
+     2,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "mode": "dep",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "v_fwd_pp",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "fold": [
+     [
+      "O",
+      "A",
+      64
+     ]
+    ],
+    "pp_sync": true
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "alu": {
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "MUFU.EX2": 74,
+     "FADD": 8,
+     "SHFL": 8,
+     "FSEL": 2,
+     "MUFU.RCP": 1,
+     "ALU": 23,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "P",
+    "pp_arrive": true
+   }
+  ],
+  "kind": "variant",
+  "equiv": [
+   "syn_fwd_dep",
+   1
+  ]
+ },
+ {
+  "mode": "dep",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "syn_fwd_dep_z",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "fold": [
+     [
+      "O",
+      "A",
+      64
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "alu": {
+     "FFMA": 140,
+     "FMUL": 85,
+     "FMNMX": 82,
+     "MUFU.EX2": 74,
+     "FADD": 8,
+     "SHFL": 8,
+     "FSEL": 2,
+     "MUFU.RCP": 1,
+     "ALU": 23,
+     "IMAD": 36
+    },
+    "f2fp": 32,
+    "f2fp_dst": "P"
+   }
+  ],
+  "rand_smem": 0
+ },
+ {
+  "mode": "dep",
+  "target_instr": 658.0,
+  "cat": "pass1",
+  "free_depth": 1,
+  "name": "syn_pass1_dep_z",
+  "wgs": 2,
+  "accs": {
+   "S": 64,
+   "dP": 64,
+   "dV": 128,
+   "dK": 128
+  },
+  "pregs": {
+   "P": 8,
+   "dS": 8
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 54,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 10,
+     "LDS": 9,
+     "STS": 0,
+     "ALU": 40,
+     "IMAD": 36,
+     "MUFU.EX2": 32,
+     "MUFU.RCP": 3
+    },
+    "f2fp": 16,
+    "f2fp_dst": "P"
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 46,
+     "FMUL": 53,
+     "FMNMX": 41,
+     "FADD": 16,
+     "SHFL": 11,
+     "LDS": 9,
+     "STS": 1,
+     "ALU": 40,
+     "IMAD": 36
+    },
+    "f2fp": 16,
+    "f2fp_dst": "dS"
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ],
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ]
+    ],
+    "post_wait": 0
+   }
+  ],
+  "rand_smem": 0
+ },
+ {
+  "mode": "dep",
+  "target_instr": 269.0,
+  "cat": "pass0",
+  "free_depth": 1,
+  "name": "syn_pass0_dep_z",
+  "wgs": 4,
+  "accs": {
+   "S": 64,
+   "dP": 64
+  },
+  "xregs": 12,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 18,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 8,
+     "IMAD": 10,
+     "MUFU.EX2": 32
+    }
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "alu": {
+     "FFMA": 32,
+     "FMUL": 19,
+     "FADD": 18,
+     "FMNMX": 16,
+     "FSEL": 2,
+     "SHFL": 2,
+     "ALU": 9,
+     "IMAD": 11
+    }
+   }
+  ],
+  "rand_smem": 0
+ },
+ {
+  "name": "t_SS128_w2_z",
+  "mode": "free",
+  "wgs": 2,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "rand_smem": 0
+ },
+ {
+  "name": "t_RS128_w3_z",
+  "mode": "free",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 4194304,
+  "rand_smem": 0
+ },
+ {
+  "name": "t_SS64_w4_z",
+  "mode": "free",
+  "wgs": 4,
+  "accs": {
+   "A": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs_free": 1,
+  "free_depth": 0,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      64,
+      "SS",
+      "A",
+      true,
+      "P"
+     ]
+    ]
+   }
+  ],
+  "kind": "tensor",
+  "flop_per_step_wg": 2097152,
+  "rand_smem": 0
+ },
+ {
+  "mode": "dep",
+  "target_instr": 599.0,
+  "cat": "fwd",
+  "free_depth": 0,
+  "name": "t_fwd_dep_z",
+  "wgs": 3,
+  "accs": {
+   "A": 128
+  },
+  "fregs": {
+   "O": 64
+  },
+  "pregs": {
+   "P": 16
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "A",
+      true,
+      "P"
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ],
+     [
+      128,
+      "SS",
+      "A",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 0,
+    "reads": [
+     "A"
+    ],
+    "f2fp_dst": "P"
+   }
+  ],
+  "kind": "tensor_of",
+  "rand_smem": 0
+ },
+ {
+  "mode": "dep",
+  "target_instr": 658.0,
+  "cat": "pass1",
+  "free_depth": 1,
+  "name": "t_pass1_dep_z",
+  "wgs": 2,
+  "accs": {
+   "S": 64,
+   "dP": 64,
+   "dV": 128,
+   "dK": 128
+  },
+  "pregs": {
+   "P": 8,
+   "dS": 8
+  },
+  "xregs": 16,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ],
+    "f2fp_dst": "P"
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ],
+    "f2fp_dst": "dS"
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ],
+     [
+      128,
+      "RS",
+      "dV",
+      false,
+      "P"
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ],
+     [
+      128,
+      "RS",
+      "dK",
+      true,
+      "dS"
+     ]
+    ],
+    "post_wait": 0
+   }
+  ],
+  "kind": "tensor_of",
+  "rand_smem": 0
+ },
+ {
+  "mode": "dep",
+  "target_instr": 269.0,
+  "cat": "pass0",
+  "free_depth": 1,
+  "name": "t_pass0_dep_z",
+  "wgs": 4,
+  "accs": {
+   "S": 64,
+   "dP": 64
+  },
+  "xregs": 12,
+  "groups": [
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "S",
+      true,
+      null
+     ]
+    ]
+   },
+   {
+    "ops": [
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ],
+     [
+      64,
+      "SS",
+      "dP",
+      true,
+      null
+     ]
+    ],
+    "wait_after": 1,
+    "reads": [
+     "S"
+    ]
+   },
+   {
+    "wait_after": 0,
+    "reads": [
+     "dP"
+    ]
+   }
+  ],
+  "kind": "tensor_of",
+  "rand_smem": 0
+ }
+]

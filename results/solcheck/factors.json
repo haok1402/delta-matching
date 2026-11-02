@@ -1,0 +1,9 @@
+{
+ "model": "sol4c-v1 (kda-solcheck): ideal-mix floor = sol4-v2 floor / ideal_fraction_of_sol4",
+ "source": "best synthetic step kernel per kernel (same step-loop mix as frozen r17_p0s, sol4-v2 counts), jobs 21183777 + 21183778, results/solcheck/summary_r5r6.md",
+ "kernels": {
+  "fwd":   {"ideal_fraction_of_sol4": 0.699, "best_variant": "v_fwd_spec (warp-specialized, no data dependence)", "per_job": [0.697, 0.701]},
+  "pass1": {"ideal_fraction_of_sol4": 0.620, "best_variant": "v_pass1_ilv (free, wgmma interleaved in the ALU work)", "per_job": [0.620, 0.621]},
+  "pass0": {"ideal_fraction_of_sol4": 0.745, "best_variant": "v_pass0_ilv / syn_pass0_free", "per_job": [0.745, 0.746]}
+ }
+}

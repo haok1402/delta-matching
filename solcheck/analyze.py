@@ -72,6 +72,8 @@ def main():
                   "issue": warps * steps * st["instr"] / (4 * clk) * 1e3}
             ctl = max(fl, key=fl.get)
             d.update(floors_ms=fl, controlling=ctl, pct_of_floor=100 * fl[ctl] / ms)
+        if rs[0].get("wg_cyc"):
+            d["wg_cyc_per_step"] = [statistics.median(r["wg_cyc"][w] for r in rs) / steps for w in range(len(rs[0]["wg_cyc"]))]
         res[name] = d
     lines = [f"calibration: fp8 GEMM {calib['gemm_fp8']['peak_tflops']:.1f} TFLOP/s, nvidia-smi clock "
              f"{calib['sm_clock_mhz']:.0f} MHz ({calib['gemm_fp8']['peak_tflops'] * 1e12 / (132 * clk):.0f} FLOP/clk/SM "
@@ -90,6 +92,12 @@ def main():
                      f"| {name} | {d['wgs']} | {d['cyc_per_step']:.1f} | {d['mhz']:.0f} | {d['tflops']:.0f} | "
                      f"{d['flop_per_clk_sm']:.0f} | {d['ipc_sm']:.2f} | {d['mufu_lanes_per_clk_sm']:.2f} | "
                      f"{d['instr_per_warp_step']} | | | |")
+    lines += ["", "Per-warpgroup cycles per step (role-split kernels; warpgroup 0 = tensor role):", "",
+              "| kernel | MHz | cycles per step per warpgroup |", "|---|---|---|"]
+    for name in sorted(res):
+        d = res[name]
+        if name.startswith(("v_", "i_")) and d.get("wg_cyc_per_step"):
+            lines.append(f"| {name} | {d['mhz']:.0f} | " + " / ".join(f"{x:.0f}" for x in d["wg_cyc_per_step"]) + " |")
     out = "\n".join(lines)
     print(out)
     if a.md:

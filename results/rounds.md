@@ -667,3 +667,14 @@ accepted round; paper C.2 reconciliation. All recorded in docs/kda-sm90/rule-cha
   does not reproduce on this H100 (results/paper_c2.md).
 - Waiting at the gate: C4 (P0ALL, split.py: pass 0 once on all heads; needs the equivalence schema for one all-heads
   delta call on split routes), forward C1 / C2 (numerics, need Hao's error-tolerance decision).
+
+Evidence for the open tolerance decision (kda-pass0 helper, residual-v3 checker on the default route vs the r17_c3
+certificate; its reports in kda-work/p0/num): output-changing pass-0 cuts on the C3(+C4) stack, determinism and exempt
+sets unchanged in all three:
+- DEFER (fp64 per-lane row partials; pass 0 -16.6% vs -14.4% for the stack): 77 per-row regressions, ALL on stress
+  cases (scale3 37, scale10 9, outliers 31; zero on the Gaussian cases); fp32 error +0.1 .. +3 ppm.
+- LAZY (dP descale per 8-key half partial; -18.3%): 250 regressions (Gaussian cases 1-3 each, stress 242); <= +2.0 ppm.
+- LAZY + DEFER (-21.25%): 283 regressions (same pattern); <= +1.7 ppm.
+The stress-case rows already sit near residual 1 in the accepted build. A rule with a noise tolerance on the fp32 error
+(<= ~1e-5 relative) and an ill-conditioned exemption for rows whose ACCEPTED residual is already above a threshold
+(e.g. 1e-3) would accept DEFER and the forward C1; LAZY would still regress a handful of Gaussian rows.

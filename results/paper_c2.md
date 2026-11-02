@@ -101,3 +101,15 @@ repeated KV heads), not this H100. Our matched fwd+bwd (491.7) is above the pape
 16/4: accepted 579.9 / 481.2 / 505.7 TFLOP/s fwd / bwd / fwd+bwd (cuDNN BF16 597.2 / 476.7 / 505.8; FA3 BF16 696.5 /
 501.0 / 544.6). 32/4: accepted 620.8 / 498.9 / 528.5 (cuDNN BF16 not in this table's excerpt; FA3 BF16 725.1 / 521.7 /
 567.1).
+
+## Correction (round 17): the ~0.3 ms in the forward's per-call window is launch latency, not host work
+
+The reconciliation above attributed the ~0.3 ms between the per-call event time (1.086 ms) and the forward kernel
+(0.781 ms) to host-side work inside `fwd_fp8`. The forward helper measured it directly (job 21180725, r17_p0s, B2
+N8192 16/4, 50 back-to-back `ops.fwd_fp8` calls, nsys cuda_api_sum): host time per call is 0.015 ms (cudaLaunchKernel
+median 3.3 us, cuTensorMapEncodeTiled 0.12 us each, one cudaMemsetAsync for the tile semaphore), and back-to-back
+calls run at kernel speed (0.684 ms wall per call). The gap is the start latency of a kernel launched onto an idle
+GPU, which a per-call event pair (the paper's protocol, followed here unchanged) includes. So it is a property of the
+timing window, not of the op: there is no host-path lever in `fwd_fp8`, and the earlier "candidate (forward host
+path)" is withdrawn. The conclusion stands: the forward KERNEL runs at the measured kernel rate (704 TFLOP/s at
+r14_h3), and the paper's 661 reflects a smaller idle-start latency on its machine.

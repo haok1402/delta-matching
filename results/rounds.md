@@ -763,3 +763,5 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Forward helper: C4 + SMSC stack stays at -2.46% / -2.42% (not READY); the STACK 16 -> 40 growth is in the
   non-causal instantiation (nothing to recover); two masked-step pieces failed (+18% / +20%, in-step branches spill;
   S52-S53). Pointed it at a third bitwise piece on BM192 and at the ~0.3 ms fwd_fp8 host path (end-to-end lever).
+- Forward host-path lever withdrawn: fwd_fp8 host time is 0.015 ms per call (forward helper, job 21180725, nsys);
+  the ~0.3 ms in paper C.2's per-call window is idle-GPU launch latency (results/paper_c2.md correction).

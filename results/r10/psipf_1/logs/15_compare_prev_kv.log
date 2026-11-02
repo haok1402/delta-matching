@@ -1,0 +1,2 @@
+route kv, FULL SUITE, A d2eee98774eb vs B e1119aaaa89c
+compared 72 cases: BITWISE EQUAL; error vs fp32 larger in 0 (case, tensor) pairs

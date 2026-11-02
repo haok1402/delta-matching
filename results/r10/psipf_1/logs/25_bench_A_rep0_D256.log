@@ -1,0 +1,4 @@
+B2 H16 Hk4 N8192 D256, median ms over 20
+  delta_matching (matched)     forward   2.021   forward+backward   8.615
+  delta_matching (stale)       forward   2.054   forward+backward   7.513
+  flash-attn 3 (bf16)          forward   1.420   forward+backward   8.187

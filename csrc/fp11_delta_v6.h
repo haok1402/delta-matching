@@ -413,7 +413,15 @@ struct DeltaV6 {
                         #pragma unroll
                         for (int i = 0; i < size(scores); ++i) { scores(i) = __fadd_rn(scores(i), kFq8MoE); }
                     }
-#if KDA_NOCLAMP == 2
+#if KDA_NOCLAMP == 4
+                    if (orig) {
+                        #pragma unroll
+                        for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(fminf(scores(i), 12.0f)); }
+                    } else {
+                        #pragma unroll
+                        for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(scores(i)); }
+                    }
+#elif KDA_NOCLAMP == 2
                     if (isfinite(B0 + B1 + dsc_g0 + dsc_g1)) {
                         #pragma unroll
                         for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(scores(i)); }

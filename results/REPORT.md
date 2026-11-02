@@ -1,7 +1,7 @@
 # kda-sm90: delta-matching fp8 attention on H100 — interim report
 
-Status: interim (round 19; updated after every accepted round). Branch `kda-sm90`; accepted build `r19_fwd` (kda-sm90
-020b155 + tooling). Every number below is traced to a committed file; per-round detail and every screened variant are in
+Status: interim (round 21; updated after every accepted round). Branch `kda-sm90`; accepted build `r21_clean` (kda-sm90
+e80de8f + tooling): the clean baseline after the residual-v5 re-audit. Every number below is traced to a committed file; per-round detail and every screened variant are in
 `results/rounds.md`, `results/screens/` and the helpers' `CANDIDATES.md` branches; rules in
 `docs/kda-sm90/rule-change-r10.md`.
 JSON results (raw A/B runs, medians, calibrations, sol4 / numerics reports) live outside the repo in
@@ -154,3 +154,25 @@ Source: `results/r17/accepted_pk/sol4c.md` (`benchmarks/sol4.py`).
   2-warpgroup geometry is the only workable point under the per-tile scale contract and the 240-register budget.
 - Further progress needs a different kernel structure (kda-bwdport: pass 1 rebuilt from FA3's BF16 backward) or a
   change to the numerics contract itself (per-group P basis, per-tile psi), which the current rules do not admit.
+
+## Update: round 21, residual-v5 re-audit and the clean baseline r21_clean (job 21206028, calibration 1436.2 TFLOP/s)
+
+The stricter numerics contract (TASK.md residual-v5: every matched row within the summation round-off of its residual
+in the ORIGINAL kernel, no exemptions; per-case fp32 error at most 1e-5 above the original and no rise of the mean)
+was applied to every accepted numerics change (`results/residual_v5_audit.md`). All passed the row check; the error
+clause failed for forward C3g (its 192 x 128 tiling: 32 of 33 failing case-outputs) and EXPBX64 (1). Both were
+REVERTED; C4 (bitwise) and every bitwise change stay. The clean build is byte-identical to the original on all 72 cases
+x 4 routes except the repaired all-zero-input defect.
+
+| kernel | measured ms | sol4-v2 % (fixed ref.) | sol4c % (fixed ref.) | sol4c % (same job) | target 90% |
+|---|---:|---:|---:|---:|---|
+| pass 1 | 176.506 | 41.7% | 67.3% | 69.4% | not met |
+| forward | 73.846 | 50.0% | 71.5% | 73.8% | not met |
+| pass 0 | 54.355 | 67.9% | 91.2% | 94.0% | met |
+| pass 2 | 37.692 | 94.5% | 94.5% | 94.5% | met |
+
+- Forward / FA3 fp8 forward: 1.285x (r19_fwd was 1.108x with C3g).
+- Original -> now (four shapes, same job): e2e forward -4.7%, e2e fwd+bwd -8.3% (`results/progress/ab.md`); r19_fwd's
+  -13.3% overstated the speedup that survives the stricter numerics.
+- Paper protocol 16/4: 534.7 / 490.6 / 502.4 TFLOP/s fwd / bwd / fwd+bwd (`results/paper_c2/r21_clean_table.md`).
+- The accepted-changes table above keeps C3g and EXPBX64 for the record; both are reverted as of round 21.

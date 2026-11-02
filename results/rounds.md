@@ -841,3 +841,9 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   sensitivity holds only on the S-retire -> dK-issue per-element chain (where SHFL8 / the clamp drop paid). dS in one
   op impossible (two products of P^); dropping the amax pass leaves only a 1e2-1e3 too loose bound; packed f16x2 dS
   saves <= 16 instr (~1.2%) even if v4 passed. No candidate.
+- Forward helper round (on C3g + C4 + SMSC): phase probe per WG step ~4020 cycles: pre-turn 9%, waiting for the ring
+  token 24%, the ring turn 33% (PV gemms + rescale + promote + QK issue), post-turn 33% (QK wait + softmax): the forward
+  is ring-turn-bound, softmax has slack. Two-token rings (bitwise): TOK2 named barriers deadlock (lapping); TOK2b smem
+  semaphores +28.9% (vs its 1-token control +48.6%: a second token is worth ~12% but the spin loop spills); TOK2p
+  parity-alternating barriers +23.1% (control +19.8%). At 3 WGs any extra per-thread state or branch spills at 160
+  registers. No candidate; C4 + SMSC (-2.4%) stays the only held forward piece.

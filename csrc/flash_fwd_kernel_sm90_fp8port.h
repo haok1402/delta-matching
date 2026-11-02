@@ -240,6 +240,8 @@ public:
 
         static_assert(is_same_v<PipelineParamsK, PipelineParamsVt>);
         PipelineParamsVt pipeline_params_vt = pipeline_params_k;
+        // ## SMSC: K's byte count may carry the staged scales; V's TMA never does.
+        if constexpr (Use_TMA_KV) { pipeline_params_vt.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV; }
         if constexpr (Use_TMA_KV && !SameHeadDim) {
             pipeline_params_vt.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
             if constexpr (LargeHeadDimV) { pipeline_params_vt.num_consumers = NumMmaThreads; }

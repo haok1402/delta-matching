@@ -153,4 +153,14 @@ bhnd / heldout; 22 without the envelope); PW16 FAIL (d128_bhnd matched dV +1.67e
 | SHFL8 + DOST=2 | -1.95% / -2.20% | 4 routes |
 | SHFL8 + QST=3, DOST=3 | -2.15% / -2.45% | default route |
 
-None reaches the 3% bar; C2 stays held for stacking with another bitwise piece.
+None reaches the 3% bar alone.
+
+### C3: SHFL8 + QST=3 / DOST=3 (DOTST 1): READY for stacking (-2.15% / -2.45%)
+
+- Branch `kda-sm90-pass1-c3` (on c1ceece): `KDA_P1_SHFL8` default 1; release flags `FA3FP11_HD128_QST` 2 -> 3 and
+  `FA3FP11_HD128_DOST` 1 -> 3, changed consistently in `_buildcfg.FLAGS` and `csrc/dm_flagset.h` (bitwise outputs).
+- The branch default build (no DM_XDEFS / DM_XFLAGS): pass-1 SASS identical to the measured f3s8q3 build; REG 168,
+  STACK 0, LOCAL 0, no ptxas diagnostics; pytest 49 / 3; BITWISE EQUAL vs frozen r17_fwd on default / kv / head /
+  streams2 (72 cases each, job 21179120).
+- Pass 1 vs r17_fwd, paper grid, 3 reps, two jobs: geomean -2.15% / -2.45% (per shape -1.79 .. -2.59%).
+- Waits for a bitwise pass-1 partner of >= ~1% (kda-p1redesign / kda-p1packed).

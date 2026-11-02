@@ -136,6 +136,7 @@ public:
         pipeline_params.is_leader = warp_group_thread_idx == 0;
         pipeline_params.num_consumers = NumMmaThreads;
         if (warp_idx == 0 && lane_predicate) { shared_storage.pipelines.barrier_KV.init(1 /*numThreads*/); }
+        if (warp_idx == 0 && lane_predicate) { CollectiveMainloop::poff_init(shared_storage); }
         MainloopPipeline pipeline_q(shared_storage.pipelines.pipeline_q, pipeline_params, ClusterShape{});
         auto role_dO = warp_group_idx == 0 ? MainloopPipeline_dO::ThreadCategory::Producer : MainloopPipeline_dO::ThreadCategory::Consumer;
         // The dO pipeline carries raw dO + dPsum. Its transaction count tracked Q's while both were e4m3;
@@ -183,6 +184,18 @@ public:
                 mainloop.load_tail_gt(pipeline_q, pipeline_do, pipeline_qt, pipeline_dot,
                                       smem_pipe_write, smem_pipe_write_do, smem_pipe_write_qt, smem_pipe_write_dot);
             }
+#if KDA_P1_POFF
+            else {   // warps 1..3: the dV window promote workers (one work tile per CTA)
+                for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler);
+                     work_tile_info.is_valid(params.scheduler);
+                     work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
+                    auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+                    auto [n_block, bidh, bidb, _ /*split_idx*/] = block_coord_;
+                    mainloop.poff_worker(params.mainloop, shared_storage, cute::tuple<int32_t, int32_t, int32_t>{n_block, bidh, bidb},
+                                         threadIdx.x - cutlass::NumThreadsPerWarp);
+                }
+            }
+#endif
         } else {  // Consumer
             cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
             TiledMmadKV tiled_mma_dKV;

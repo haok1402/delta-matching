@@ -73,6 +73,13 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_P1_PV4
 #define KDA_P1_PV4 0
 #endif
+// kda-pass1 KDA_P1_POFF (bitwise): the dV window promote (all but the tile's last window) is offloaded to the producer
+// warpgroup's idle warps 1..3: the consumers stage the raw window accumulator (16 STS.128) + its basis f and arrive on
+// an mbarrier; the producer warps do overlay = fma(stage, f, overlay) per element (the consumers' exact FMA) and
+// release the staging buffer.  Needs PV4 (float4 overlay) and DVZI (no re-zero); one work tile per CTA.
+#ifndef KDA_P1_POFF
+#define KDA_P1_POFF 0
+#endif
 #if KDA_P1_DSDEFER
 #undef FA3FP11_P1R_DSDEFER
 #define FA3FP11_P1R_DSDEFER 1
@@ -376,6 +383,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQt>, SmemAlignmentQKVdO> smem_qt;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutdOt>, SmemAlignmentQKVdO> smem_dot;
         cute::array_aligned<ElementAccum, kDvOverlayFloats, 128> smem_dvacc;
+#if KDA_P1_POFF
+        cute::array_aligned<ElementAccum, kDvOverlayFloats, 128> smem_dvstage;   // the staged raw window accumulator
+        cute::array_aligned<ElementAccum, 2, 16> smem_dvstage_f;                  // its basis, parity-buffered
+        cute::array_aligned<uint64_t, 2, 16> smem_dvstage_bar;                    // [0] full (256 arrivals), [1] empty (96)
+#endif
         cute::array_aligned<Element, NumMmaWarpGroups * (1 + FA3FP11_P1R_DSDEFER) * kDsHalfElems, 1024> smem_ds;   // SW64 half tiles per WG (x2 under DSDEFER); 1024-B aligned: the swizzle anchors to the address
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_lse;
         cute::array_aligned<ElementAccum, cute::cosize_v<SmemLayoutLSE>, 128> smem_dpsum;
@@ -385,6 +397,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
 #endif
     };
     static_assert(offsetof(TensorStorage, smem_dvacc) >= 64 * 1024, "P1-R: the dV overlay must sit past the epilogue's 64-KB staging window");
+    static_assert(!KDA_P1_POFF || (KDA_P1_PV4 && KDA_P1_DVZI && KDA_P1_TOPFILL != 1), "POFF needs PV4 + DVZI, and keeps the promote at the step end");
+    static constexpr int kPoffWorkers = 3 * cutlass::NumThreadsPerWarp;   // producer warps 1..3
+
+
 
     // Host side kernel arguments: byte-compatible with the v10 collective's Arguments (the launch header brace-initializes it).
     struct Arguments {
@@ -524,6 +540,47 @@ struct CollectiveMainloopBwdSm90Fp8R {
         cute::prefetch_tma_descriptor(params.tma_load_Qt.get_tma_descriptor());
         cute::prefetch_tma_descriptor(params.tma_load_dOt.get_tma_descriptor());
         cute::prefetch_tma_descriptor(params.tma_store_dS8.get_tma_descriptor());
+    }
+
+    // POFF: barrier init (one thread, before the kernel's __syncthreads) and the producer-side worker.
+    template <typename SharedStorage>
+    CUTLASS_DEVICE static void poff_init(SharedStorage& shared_storage) {
+#if KDA_P1_POFF
+        uint64_t* bar = shared_storage.tensors.mainloop.smem_dvstage_bar.data();
+        cutlass::arch::ClusterBarrier::init(bar + 0, NumMmaThreads);
+        cutlass::arch::ClusterBarrier::init(bar + 1, kPoffWorkers);
+#endif
+    }
+    template <typename SharedStorage>
+    CUTLASS_DEVICE void
+    poff_worker(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord, int wtid) {
+#if KDA_P1_POFF
+        auto [n_block, bidh, bidb] = block_coord;
+        SeqlenInfo_t seqlen_info{bidb, get<0>(params.shape_Q), size<0>(params.shape_K),
+                                 params.cu_seqlens_q, params.cu_seqlens_k, params.seqused_q, params.seqused_k};
+        auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(
+            seqlen_info, n_block, bidb, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/);
+        if (m_block_max <= m_block_min) { return; }
+        // windows the consumers offload: boundaries m with (m & 7) == 7, m < m_block_max - 1
+        int nwin = 0;
+        for (int m = m_block_min; m < m_block_max - 1; ++m) { nwin += (m & (KDA_P1_PROMOTE - 1)) == KDA_P1_PROMOTE - 1; }
+        uint64_t* bar = shared_storage.tensors.mainloop.smem_dvstage_bar.data();
+        float4* const ov = reinterpret_cast<float4*>(shared_storage.tensors.mainloop.smem_dvacc.data());
+        float4 const* const st = reinterpret_cast<float4 const*>(shared_storage.tensors.mainloop.smem_dvstage.data());
+        #pragma unroll 1
+        for (int w = 0; w < nwin; ++w) {
+            cutlass::arch::ClusterBarrier::wait(bar + 0, w & 1);
+            float const f = shared_storage.tensors.mainloop.smem_dvstage_f[w & 1];
+            #pragma unroll 4
+            for (int idx = wtid; idx < kDvOverlayFloats / 4; idx += kPoffWorkers) {
+                float4 o = ov[idx];
+                float4 const v = st[idx];
+                o.x = fmaf(v.x, f, o.x); o.y = fmaf(v.y, f, o.y); o.z = fmaf(v.z, f, o.z); o.w = fmaf(v.w, f, o.w);
+                ov[idx] = o;
+            }
+            cutlass::arch::ClusterBarrier::arrive(bar + 1);
+        }
+#endif
     }
 
     KT_MEMBERS   // the producer's tile counter (timeline-only build)
@@ -854,6 +911,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         };
 #endif
         bool fq8_promote_pending = false;
+        int fq8_poff_n = 0;   // POFF: windows staged so far
 #if KDA_P1_FOLDSPLIT
         float fq8_khi[32];                 // the deferred upper half of the previous step's dK temp
         float fq8_khi_g = 0.0f;
@@ -1363,6 +1421,26 @@ struct CollectiveMainloopBwdSm90Fp8R {
 #if KDA_P1_TOPFILL == 1
             if (!KDA_A(3) && (m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 && m_block != m_block_max - 1) {
                 fq8_promote_pending = true;
+            } else
+#endif
+#if KDA_P1_POFF
+            if ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 && m_block != m_block_max - 1) {
+                uint64_t* bar = shared_storage.tensors.mainloop.smem_dvstage_bar.data();
+                if (fq8_poff_n > 0) { cutlass::arch::ClusterBarrier::wait(bar + 1, (fq8_poff_n - 1) & 1); }
+                float4* const st = reinterpret_cast<float4*>(shared_storage.tensors.mainloop.smem_dvstage.data()) + thread_idx;
+                #pragma unroll
+                for (int j = 0; j < size(tdVrdV) / 4; ++j) {
+                    st[j * NumMmaThreads] = make_float4(tdVrdV(4 * j), tdVrdV(4 * j + 1), tdVrdV(4 * j + 2), tdVrdV(4 * j + 3));
+                }
+                if (thread_idx == 0) { shared_storage.tensors.mainloop.smem_dvstage_f[fq8_poff_n & 1] = fq8_f_prev; }
+                cutlass::arch::ClusterBarrier::arrive(bar + 0);
+                ++fq8_poff_n;
+            } else
+            if (m_block == m_block_max - 1) {   // the tile's last window: after the workers drained every staged one
+                if (fq8_poff_n > 0) {
+                    cutlass::arch::ClusterBarrier::wait(shared_storage.tensors.mainloop.smem_dvstage_bar.data() + 1, (fq8_poff_n - 1) & 1);
+                }
+                dv_promote4(fq8_f_prev);
             } else
 #endif
             if (!KDA_A(3) && ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1)) {

@@ -740,3 +740,6 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   (SHFL8 alone -2.20% / -1.74%), held for stacking with a >= 1% bitwise partner; ~135 screened pass-1 variants
   (DVZI, LSEPRE, PV4, FENCE2, PCONVEARLY, EXPSPLIT, STLATE, REDUX trees, EARLY / KRS / DKSPLIT) neutral or slower
   (CANDIDATES.md on origin/kda-sm90-pass1-v2).
+- Forward helper C4 (PRETURN: lazy rebase / rho_1 / promote weight computed before the ring sync; bitwise, O sha equal
+  on the four shapes): forward -1.10% / -1.12% vs r17_fwd in two jobs -> held for stacking (needs a >= 3% forward
+  stack); C4b (+ K try-wait token) -0.58% / -0.75%, rejected.

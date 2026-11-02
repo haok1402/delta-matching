@@ -182,3 +182,40 @@ Current ranking from the accepted DO2 arm of round 6 (results/r6 ab_main A_media
 | pass 0 | 35.675 | 16.042 | 19.633 | 45.0% |
 
 The order is unchanged since round 3. Forward is the largest eligible gap: the next campaign profiles it (round 7).
+
+## Round 7: forward profile, then PVIL (forward, both head dims): interleaved half-width PV temp chains: REJECTED
+
+- Profile (`results/timeline_fwd.md`, `results/forward_design_diff.md`, `results/r7/`): the forward sparse trace is a
+  failed diagnostic (+5 .. +48% overhead, and its forward O / LSE differ from DO2 on every case family: the probes change
+  code generation), so the profile rests on static SASS against FA3's fp8 forward and on timing-only ablations (job
+  21163152). Largest measured cost: the rho rescale between the serialized PV sub-gemm groups, -19.8 .. -20.2% of the
+  D256 forward and -7.7 .. -8.1% of D128 when removed; S descale -2.9 .. -9.0%; exposed k-scale loads -0.8 .. -3.2%
+  (the only bitwise knob, below 3%).
+- Hypothesis PVIL (from that profile): run the PV temp as two half-width temps driven as interleaved rho chains (each
+  temp's rescale under the other's sub-gemm). D128 NSPLIT 1 -> 2 (one pair of 32-register temps), D256 NSPLIT 2 -> 4
+  (two pairs); PV-phase registers unchanged (D128 160, D256 208 fp32 / thread). Certified flag set changed in the
+  candidate: FA3FP8F_TP_NSPLIT 2 -> 4, FA3FP11_HD128_NSPLIT 1 -> 2, FA3FP11_FWD_PVIL 0 -> 1 (`results/r7/pvil/pvil.patch`).
+- Gate (job 21163612, `benchmarks/gate.py --mode full`, all steps rc 0, `results/r7/pvil/`): tooling tests pass;
+  candidate pytest 49 passed / 3 skipped inside the identity-verified process; **bitwise equal on all four routes (72
+  cases each) against the frozen baseline and against DO2**; resources: 4 forward functions on both sides, REG 168,
+  LOCAL 0, STACK 24 / 24 / 24 / 32 -> 24 / 24 / 24 / 40, CALL 0, no spill / serialization diagnostics; QGMMA 140 -> 220,
+  WARPGROUP.DEPBAR 70 -> 130, STL 35 -> 53, LDL 59 -> 75 (all four instantiations); the emitted PV phase has two
+  `QGMMA.64x64x32` groups in flight before each `WARPGROUP.DEPBAR` (`pv_order_*_d256_full.txt`).
+- Measurement (A = DO2, B = PVIL, 3 alternating reps): forward main grid 186.763 -> 183.875 ms (**-1.55%**; D256
+  -3.03%, D128 -0.08%), held-out 17.175 -> 17.001 ms (-1.01%; D256 -2.57%); e2e fwd+bwd -0.11% main / -0.17%
+  held-out; four D128 main shapes +1.04 .. +1.54% fwd+bwd, all within their repetition spreads; held-out none over 1%;
+  bench.py matched forward D128 1.097 / 1.093 / 1.095 -> 1.080 / 1.082 / 1.080 ms, D256 2.018 / 2.020 / 2.020 ->
+  1.999 / 1.999 / 2.002 ms.
+- Verdict: REJECTED (the change affects the forward at both head dims; -1.55% on its affected sum, below 3%); not
+  merged. Reading: interleaving two chains does not shorten either chain; each temp still runs four dependent
+  sub-gemm -> wait -> rescale stages, so the PV phase stays latency-bound. The ablation bound (knob 2 / 3) is reached
+  only by removing the dependency between the groups (independent group temps), which changes the accumulation order
+  (non-bitwise; needs the numerics gate Q2 / Q3).
+- Counters: forward eligible 0 -> 1.
+
+| kernel | profile-based consecutive failures (eligible counter) | historical (pre-profile) rejections |
+|---|---:|---|
+| pass 1 | 2 (H1b, PINGPONG): closed | 1 (H1a, round 1) |
+| forward | 1 (PVIL) | 0 |
+| pass 2 | 0 | 0 |
+| torch glue | 0 | 0 |

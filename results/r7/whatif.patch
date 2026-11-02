@@ -1,0 +1,129 @@
+diff --git a/csrc/mainloop_fwd_sm90_fp8f.hpp b/csrc/mainloop_fwd_sm90_fp8f.hpp
+index 2203667..ea5fbbc 100644
+--- a/csrc/mainloop_fwd_sm90_fp8f.hpp
++++ b/csrc/mainloop_fwd_sm90_fp8f.hpp
+@@ -507,6 +507,14 @@ struct CollectiveMainloopFwdSm90Fp8F {
+ // PV chain (tOrO 64 + tSrS 64 + tOrD 64 + tOrP 16 = 208 <= 240; the d256 plan needs PV-first because the same overlap
+ // is 272 there).  FA3FP11_HD128_PVFIRST=0 selects the mainloop's !kSchedPVFirst path (FA3's IntraWGOverlap order) for
+ // the hd128 instantiation ONLY; the d256 pin FA3FP8F_TP_PVFIRST is untouched.  Issue order only: O bitwise expected.
++#ifndef KDA_WI
++#define KDA_WI 0
++#endif
++    // r7 what-if knobs (timing only, numerics wrong): 1 no S descale, 2 no rho rescale in the PV chain,
++    // 3 no rho and no inner PV waits (one pipelined chain per slab)
++    static constexpr bool kWiNoDescale = KDA_WI == 1;
++    static constexpr bool kWiNoRho = KDA_WI == 2 || KDA_WI == 3;
++    static constexpr int kWiW0 = KDA_WI == 3 ? -1 : 0;
+     static constexpr bool kSchedPVFirst = ((kHeadDimV >= 256 ? FA3FP8F_TP_PVFIRST : FA3FP11_HD128_PVFIRST) != 0) && IntraWGOverlap && !HasQv;
+ 
+     // ## HasQv guard (NO numeric effect on the shipped
+@@ -1357,6 +1365,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
+         int const fq8_bh_k = (bidb * get<2>(params.shape_K) + bidh_kv) * params.nblk_k;
+         float fq8_v[4] = {1.f, 1.f, 1.f, 1.f};
+         auto fq8_descale = [&](auto& tSrS_, int n_blk) {
++            if constexpr (kWiNoDescale) { return; }
+             auto sc_ = make_tensor(tSrS_.data(), flash::convert_layout_acc_rowcol(tSrS_.layout()));
+             static_assert(decltype(size<1>(sc_))::value == kRowcol, "delta_matching fwd: rowcol width must match kBlockN / 4");
+             if constexpr (kGroups == 4 && kColsPerGroup == 8) {
+@@ -1394,6 +1403,20 @@ struct CollectiveMainloopFwdSm90Fp8F {
+             }
+             }
+         };
++        auto fq8_k_prefetch = [&](float (&kpf_)[4], int n_blk) {
++            static_assert(kGroups == 4, "k-scale prefetch: four groups per tile");
++            #pragma unroll
++            for (int i = 0; i < 4; ++i) { kpf_[i] = params.ptr_k8s[fq8_bh_k + 4 * n_blk + i]; }
++        };
++        auto fq8_descale_pf = [&](auto& tSrS_, float const (&kpf_)[4]) {
++            auto sc_ = make_tensor(tSrS_.data(), flash::convert_layout_acc_rowcol(tSrS_.layout()));
++            float const g_[4] = {fq8_q8sc * kpf_[0], fq8_q8sc * kpf_[1], fq8_q8sc * kpf_[2], fq8_q8sc * kpf_[3]};
++            #pragma unroll
++            for (int mi = 0; mi < size<0>(sc_); ++mi) {
++                #pragma unroll
++                for (int ni = 0; ni < size<1>(sc_); ++ni) { sc_(mi, ni) *= g_[ni / kColsPerGroup]; }
++            }
++        };
+         auto fq8_load_v = [&](int n_blk) {
+             if constexpr (kGroups == 4) {
+             fq8_v[0] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 0];
+@@ -1509,40 +1532,40 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                     // ## Delta-Matching-128: two 64-key groups per 128-key tile = two 2-atom sub-gemms into the
+                     // zero-init temp, ONE rho rescale (group 1 onto group 0's basis) and one promote per tile
+                     // (the d256 chain below with 4 groups: three rho rescales).  Same realization class.
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 1));
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 0, 2>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 1)); }
+                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/Defer ? -1 : 0, 2, 4>(tiled_mma_pv, tOrP, B_, D_);
+                 } else if constexpr (kGroups == 4 && kAtomsPerGroup == 2) {
+                     // ## Delta-Matching-128 F3: four 64-key groups per 256-key tile (2 k-atoms each), the d256 chain's shape.
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 1));
+-                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 2, 4>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 2));
+-                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 4, 6>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 3));
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 0, 2>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 1)); }
++                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/kWiW0, 2, 4>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 2)); }
++                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/kWiW0, 4, 6>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 3)); }
+                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/Defer ? -1 : 0, 6, 8>(tiled_mma_pv, tOrP, B_, D_);
+                 } else if constexpr (kGroupsPerPromote == 4) {
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 1>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 1));
+-                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 1, 2>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 2));
+-                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 2, 3>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 3));
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 0, 1>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 1)); }
++                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/kWiW0, 1, 2>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 2)); }
++                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/kWiW0, 2, 3>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 3)); }
+                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/Defer ? -1 : 0, 3, 4>(tiled_mma_pv, tOrP, B_, D_);
+                 } else if constexpr (kGroupsPerPromote == 2) {
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 1>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 1));
+-                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 1, 2>(tiled_mma_pv, tOrP, B_, D_);
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 0, 1>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 1)); }
++                    fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/kWiW0, 1, 2>(tiled_mma_pv, tOrP, B_, D_);
+                     softmax.promote_o(O_, D_, softmax.template basis<1>(fq8_v[1]));
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 2, 3>(tiled_mma_pv, tOrP, B_, D_);
+-                    softmax.rescale_o(D_, fq8_rho(softmax, 3));
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 2, 3>(tiled_mma_pv, tOrP, B_, D_);
++                    if constexpr (!kWiNoRho) { softmax.rescale_o(D_, fq8_rho(softmax, 3)); }
+                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/Defer ? -1 : 0, 3, 4>(tiled_mma_pv, tOrP, B_, D_);
+                 } else {
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 1>(tiled_mma_pv, tOrP, B_, D_);
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 0, 1>(tiled_mma_pv, tOrP, B_, D_);
+                     softmax.promote_o(O_, D_, softmax.template basis<0>(fq8_v[0]));
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 1, 2>(tiled_mma_pv, tOrP, B_, D_);
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 1, 2>(tiled_mma_pv, tOrP, B_, D_);
+                     softmax.promote_o(O_, D_, softmax.template basis<1>(fq8_v[1]));
+-                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 2, 3>(tiled_mma_pv, tOrP, B_, D_);
++                    fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/kWiW0, 2, 3>(tiled_mma_pv, tOrP, B_, D_);
+                     softmax.promote_o(O_, D_, softmax.template basis<2>(fq8_v[2]));
+                     fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/Defer ? -1 : 0, 3, 4>(tiled_mma_pv, tOrP, B_, D_);
+                 }
+@@ -1678,6 +1701,8 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                 if constexpr (kSchedPVFirst) {
+                     static_assert(!HasQv, "delta_matching fwd: PV-first schedule assumes !HasQv");
+                     // ---- PV + promote for the CONSUMED tile (codes in tOrP) ----
++                    float kpf_[4];
++                    if constexpr (KDA_WI == 4) { fq8_k_prefetch(kpf_, n_block); }
+                     KF_VAL(30, smem_pipe_read_v.index()); KF_VAL(31, smem_pipe_read_v.phase()); KF(0);
+                     consumer_wait(pipeline_v, smem_pipe_read_v);
+                     KF(1);
+@@ -1706,7 +1731,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
+                     KF(8);
+                     scoremod_premask_fn(tSrS);
+                     mask_fn(tSrS, n_block);
+-                    fq8_descale(tSrS, n_block);   // ## FQ8
++                    if constexpr (KDA_WI == 4) { fq8_descale_pf(tSrS, kpf_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
+                     KF(9);
+                     cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
+                     if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }

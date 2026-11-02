@@ -877,3 +877,8 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   layout space (S20-p1-*: tile shapes vs psi granularity, warpgroup count, register split, Q / dO / K depths, dS' store
   layout, scheduler order, 2 CTAs / SM), bitwise or residual-v4. kda-p1fresh DONE and stopped; kda-bwdport starts pass 1
   from FA3's BF16 backward structure (its candidates are gated when READY).
+- Forward helper ablations on r19_fwd (timing-only, 3 reps, control within +-0.15%): dropping the group-max quad
+  all-reduce (8 SHFL + 8 FMNMX) -1.93%, the fold exp2 -0.67%, the lazy check -0.09%, the basis scalars -0.17%: the
+  softmax is NOT slack (corrects the S19 SASS-diff note); the shuffle latency cannot be hidden bitwise (each group's
+  basis floor needs the whole tile max). FLOORPREV (floor from the previous max) is unsound (rho guards bind, O error
+  0.27 -> 0.37 on scale10 / outliers) and +1% slower: rejected.

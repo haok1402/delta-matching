@@ -757,3 +757,6 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   ptxas C7517; more accumulators spill); the output-changing cuts (FOLD -13%, LAZY, DEFER, NORM) fail residual-v4.
   Next structural lever (proposed): share pass 0's S / dP work with pass 1 (pass 0 recomputes the same products pass 1
   needs, e.g. on the diagonal tiles), i.e. a cross-kernel redesign rather than further pass-0 tuning.
+- Accepted build r17_p0s (job 21179953): % of calibrated limit pass1 42.7%, forward 58.2%, pass0 70.6%, pass2 94.3%;
+  forward / FA3 fp8 1.146 (FA3-referenced 87%); original -> now e2e fwd -12.9%, fwd+bwd -8.9% (this job; job-to-job
+  calibration / clock spread ~1%); paper C.2 16/4 fwd+bwd 505.7 (cuDNN BF16 505.8), 32/4 528.5 TFLOP/s.

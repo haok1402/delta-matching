@@ -74,13 +74,36 @@ bitwise (fminf(fl(x + 8), 12) == fl(fminf(x, 4) + 8) holds but is still two ops)
   where fl(lse log2e) absorbs the +-1 ulp LSE move). (kda-pass1 rejected the same idea before the envelope existed,
   with 22 rows; the envelope removes all but these two.)
 
-### EXPBX (KDA_PK_EXPB=3): EXPB off the diagonal 128 x 128 block
+### EXPBX family: EXPB off the diagonal tiles (KDA_PK_EXPB = 3, 4, 5, 6)
 
-- Change: the EXPB line on every (64-row m-block, 128-key block) tile outside pass 1's masked range
-  (m_block >= ((n128 + 1) 128 - (seqlen_k - seqlen_q) + 63) / 64, INT_MAX for the seqlen_k tail block), the certified
-  line inside it; pass 1 selects by loop (masked loop = certified, unmasked loop = EXPB, compile-time), pass 0 by the
-  same predicate per 64-key n-block (`kda_expbx_mask_end`). Every row with <= 128 visible keys has all its keys in its
-  diagonal block, so its P^, delta and residual are bitwise the accepted ones; rows with >= 129 keys have a per-row
-  tolerance >= 1.5e-5, which EXPB's movement never came near (margin <= -1.5e-5 above). Rationale is the geometry of
-  the per-row tolerance, not the identity of the failing rows. Commit (see git log, "EXPBX").
-- Status: screen + numerics gate in flight.
+Design: keep the certified exp line on the diagonal tiles, where the rows with the fewest visible keys (the smallest
+per-row tolerance k_r 2^-23) live, and use EXPB everywhere else; pass 0 and pass 1 apply the same geometric predicate,
+so both form the same P^ and delta stays matched. The rationale is the geometry of the tolerance (EXPB's margin grows
+with k: see the EXPB table), not the identity of the two failing rows.
+
+| variant | certified-line region | pass 0 implementation | pass 0 W4 loop (static SASS) |
+|---|---|---|---|
+| 3 | pass 1's masked range (diagonal 128 x 128 + tail) | per-n-block runtime branch (two exp copies) | 928 |
+| 4 | same as 3 | stage loop split at a closed-form stage index (verified by brute force vs pass 1's bound) | 699 + 697 (two loops) |
+| 5 | same as 3 | one loop; per-stage bias select + warp-uniform +8 branch | 777 |
+| 6 (EXPBX64) | pass 0's own masked tiles (64 x 64 diagonal + tail); pass 1 per warpgroup in its masked loop | one loop; need_mask (already computed) selects the bias and the +8 branch | 726 (64 of them the branched FADDs) |
+
+(accepted r17_p1: 715; EXPB=1: 651.) In 4 and 5 the extra live stage index costs ptxas the 8 hoisted wgmma descriptor
+pairs: it reuses one uniform register pair with 2 UMOVs before every QGMMA (+23 UMOV, +14 UIADD3, ... per stage). 6 adds
+no loop state and keeps the descriptors hoisted (UMOV / UIADD3 counts equal to EXPB=1).
+
+Screens (pass 0 / pass 1, H16 / H32, vs r17_p1): 3: +1.95 / +1.36%, -1.71 / -2.29%; 4: -2.95 / -3.19%, -1.62 / -1.66%
+(rerun -3.24 / -3.82%, -1.77 / -2.39%); 5: -2.34 / -3.68%, -1.53 / -2.66%; 6: -3.52 / -3.64%, -1.37 / -1.70% (EXPB=1 in
+the same job: -4.19 / -4.46%, -1.65 / -1.80%).
+
+- EXPB=3, numerics gate (job 21178591, `runs/ngate_expb3_1`): **PASS on all four routes** (ac23_eligible, residual-v4
+  with envelope and defect repair); mean errors dQ -4.35e-8, dK -1.22e-7, dV -1.93e-8, O 0; worst per-case rise 4.7e-6
+  of the error; rows with <= 128 visible keys unchanged (moved 0), rows 129-512 keys max excess -1.5e-5, > 512 -6.1e-5;
+  0 regressions. Paper A/B (same job): pass 1 -2.34%, pass 0 +2.08% (the per-n-block branch), e2e fwd+bwd -0.76% ->
+  target pass 0 fails.
+- EXPB=4, numerics gate (job 21178963, `runs/ngate_expb4_1`): PASS on all four routes (same P^ as 3); paper A/B pass 0
+  **-3.58%** geomean (target met), pass 1 -1.77%, e2e fwd+bwd -1.52%, no shape slower, bench D128 matched -0.34%.
+  Confirmation (job 21179399, `runs/abpaper_expb4_2`): pass 0 **-2.98%** geomean (-3.34% by sum), pass 1 -1.67%,
+  e2e fwd+bwd -1.17%, no shape slower -> misses 3% by 0.02 in the second job. Candidate branch `kda-sm90-p1packed-c1`
+  (af57474, default 4) was pushed before the confirmation; superseded by 6 if 6 passes (below).
+- EXPB=6: numerics gate + paper A/B in flight.

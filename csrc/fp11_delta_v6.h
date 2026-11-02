@@ -343,8 +343,16 @@ struct DeltaV6 {
 
             cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_QdO.try_wait(0));
             if (barrier_token == cutlass::BarrierStatus::WaitAgain) { shared_storage.pipelines.barrier_QdO.wait(0); }
+#ifndef KDA_EXPB
+#define KDA_EXPB 0
+#endif
+#if KDA_EXPB   // kda-pass1 EXPB (output-changing; pass 1 mirrors it): the 2^8 offset folded into the row bias
+            float const lse0 = __fadd_rn(__fmul_rn(sLSE(row0, wg), float(M_LOG2E)), -kFq8MoE);
+            float const lse1 = __fadd_rn(__fmul_rn(sLSE(row1, wg), float(M_LOG2E)), -kFq8MoE);
+#else
             float const lse0 = __fmul_rn(sLSE(row0, wg), float(M_LOG2E));   // the host prep's exact multiply
             float const lse1 = __fmul_rn(sLSE(row1, wg), float(M_LOG2E));
+#endif
             // The v4b per-tile arithmetic, VERBATIM: (1) S~ -> P~ (mask, descale, LSE, F1 clamp, exp2), (2) the fixed-order
             // half row sums; (3) the M5 reduce's fp64 fold (n-block ascending, half 0 then half 1) in registers.
             // ## M21 diet: the mask is a no-op on every n-block whose keys all lie at or below the row block's diagonal and
@@ -365,7 +373,11 @@ struct DeltaV6 {
                     #pragma unroll
                     for (int ni = 0; ni < 16; ++ni) {
                         float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
+#if KDA_EXPB
+                        scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled, kFq8MoE + 4.0f));
+#else
                         scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+#endif
                     }
                 }
             };

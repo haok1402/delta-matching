@@ -2,6 +2,7 @@
 // other values were removed), so a build with any other value would compile unverified code: stop it here.
 // The build passes the first group (delta_matching/_buildcfg.py); the second group are in-file defaults.
 #pragma once
+#ifndef KDA_FLAGSET_DEV   // what-if builds with DM_XFLAGS skip the release check
 #if !defined(FA3FP11_HD128) || (FA3FP11_HD128) != 1
 #error "delta_matching: FA3FP11_HD128 must be 1 (the release flag set)"
 #endif
@@ -224,3 +225,4 @@
 #if defined(FA3FP11_P1R_UNROLL2) && (FA3FP11_P1R_UNROLL2) != 0
 #error "delta_matching: FA3FP11_P1R_UNROLL2 is fixed at 0 in this release"
 #endif
+#endif  // KDA_FLAGSET_DEV

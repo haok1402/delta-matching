@@ -98,6 +98,26 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #define FA3FP11_P1R_SAGEDP 0
 #endif
 
+// ## kda-pass1 v2 switches (development; 0 = the accepted code byte for byte):
+//   KDA_P1_DVZI (bitwise): the first dV gemm of every promote window runs with scale-d = 0; the promote no longer
+//     re-zeroes the window accumulator and the window's first rescale is skipped.
+//   KDA_P1_LSEPRE (bitwise): the host forms lse * log2e (the kernel's exact __fmul_rn) once per call for the hd128 pass 1.
+//   KDA_EXPB (output-changing; pass 0 mirrors it so the matched P stays identical): the 2^8 offset folded into the
+//     per-row bias, b = fl(fl(lse * log2e) - 8), P^ = exp2(min(fl(s * dsc - b), 12)).
+//   KDA_P1_PROMOTE (output-changing): the dV promote window in m-blocks (8 = the accepted 512 rows).
+#ifndef KDA_P1_DVZI
+#define KDA_P1_DVZI 0
+#endif
+#ifndef KDA_P1_LSEPRE
+#define KDA_P1_LSEPRE 0
+#endif
+#ifndef KDA_EXPB
+#define KDA_EXPB 0
+#endif
+#ifndef KDA_P1_PROMOTE
+#define KDA_P1_PROMOTE 8
+#endif
+
 #include "kda_prof.h"
 
 namespace flash {
@@ -680,7 +700,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         float* fq8_psired = shared_storage.tensors.mainloop.smem_psired.data();
         static constexpr float kFq8MoE = 8.0f;
         static constexpr float kFq8MoInv = 1.0f / 256.0f;
-        constexpr int kFq8PromoteTiles = 8;   // the 512-row dV promote window (pinned, as P1-A)
+        constexpr int kFq8PromoteTiles = KDA_P1_PROMOTE;   // the 512-row dV promote window (pinned at 8, as P1-A)
         auto fq8_clamp_ratio = [](float r) { return fminf(fmaxf(r, 1e-8f), 1e8f); };
 
         // The dS' natural transpose bookkeeping (per lane, per CTA): lane holds key pair ip = lane / 4 of its warp's 16
@@ -771,7 +791,13 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // S17 RESCALE-EARLY: the dV window rescale fills the S-retire bubble (the previous dV retired last step).
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
             float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
+#if KDA_P1_DVZI
+            // DVZI: the first tile of a promote window starts from scale-d = 0 (not re-zeroed, not rescaled).
+            bool const fq8_dv_fresh = m_block == m_block_min || (m_block & (kFq8PromoteTiles - 1)) == 0;
+            if (!fq8_dv_fresh && fq8_rf != 1.0f) {
+#else
             if (fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
+#endif
             #pragma unroll
             for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) *= fq8_rf; }
             }
@@ -784,11 +810,21 @@ struct CollectiveMainloopBwdSm90Fp8R {
             mask_fn(tSrS, m_block);
             #pragma unroll
             for (int mi = 0; mi < size<0>(scores); ++mi) {
+#if KDA_P1_LSEPRE
+                float const lse_scaled = tLSEsLSE(mi, stage_q);   // the host-formed __fmul_rn(lse, log2e) (- 8 under EXPB)
+#elif KDA_EXPB
+                float const lse_scaled = __fadd_rn(__fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E)), -kFq8MoE);
+#else
                 float const lse_scaled = __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));   // LSEK: the host prep's exact multiply
+#endif
                 #pragma unroll
                 for (int ni = 0; ni < size<1>(scores); ++ni) {
                     // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
+#if KDA_EXPB
+                    scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled, kFq8MoE + 4.0f));
+#else
                     scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+#endif
                 }
             }
             // The stage's LSE rows were read by the loop above and the S gemm has retired: raw Q's readers are done.
@@ -884,6 +920,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
             KT(23);
             consumer_wait(pipeline_dot, smem_pipe_read_dot);
             KT(24);
+#if KDA_P1_DVZI
+            tiled_mma_dKV.accumulate_ = fq8_dv_fresh ? GMMA::ScaleOut::Zero : GMMA::ScaleOut::One;
+#endif
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, Int<0>{}), tdVrdV);
             } else {
@@ -991,7 +1030,9 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 for (int i = 0; i < size(tdVrdV); ++i) {
                     float* const slot = fq8_smem_dv + i * NumMmaThreads;
                     *slot = fmaf(tdVrdV(i), fq8_f_prev, *slot);
+#if !KDA_P1_DVZI
                     tdVrdV(i) = 0.0f;
+#endif
                 }
             }
             KP(18);

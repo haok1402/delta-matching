@@ -43,8 +43,9 @@ CATS = ("fwd", "prod_fwd", "prod_bwd", "pass0", "pass1", "pass2", "twin", "glue"
 # loops over rows); peel = steps per warpgroup per work tile issued outside the step loop (fwd: the first n-block,
 # mainloop_fwd_sm90_fp8f.hpp, before fwd_step; others: assumed 1, which only lowers the bound).
 KERNELS_D128_CAUSAL = {
-    "fwd": {"symbol": r"FlashAttnFwdSm90Fq8F.*ILi128EEENS7_ILi256EEESA_.*DynamicPersistent", "unit": (128, 256), "wgs": 2,
-            "step_elems_per_wg": 64 * 256, "gemm_flop_per_elem": 2 * 2 * 128, "work_tile_axis": 0, "peel": 1},
+    "fwd": {"symbol": r"FlashAttnFwdSm90Fq8F.*ILi192EEENS7_ILi128EEESB_EEELi128E.*DynamicPersistent", "unit": (192, 128),
+            "wgs": 3, "step_elems_per_wg": 64 * 128, "gemm_flop_per_elem": 2 * 2 * 128, "work_tile_axis": 0, "peel": 1},
+            # round 17 C3g: BM192 (192 x 128 tiles, three consumer warpgroups)
     "pass1": {"symbol": r"INS1_20FlashAttnBwdSm90Fp8R.*SingleTileBwdLPTScheduler", "unit": (64, 128), "wgs": 2,
               "step_elems_per_wg": 64 * 64, "gemm_flop_per_elem": 4 * 2 * 128, "work_tile_axis": 1, "peel": 1},
     "pass0": {"symbol": r"DeltaV6ILb1ELi4E", "unit": (256, 64), "wgs": 4,   # round 17 C3: P0W4 (4 WGs / 256-row CTA)

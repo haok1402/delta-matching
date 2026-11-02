@@ -720,3 +720,16 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   only because its zero-input NaN pattern moved (the zero-scale floor is on the fold path only). Requested C3n2 with a
   zero-scale guard on the non-fold path. Pass-0 helper: FOLD (-13.1%) and the identity-exact NORM also fail v4; it
   concludes the pass-0 numerics path is closed under strict per-row non-regression and returns to bitwise levers.
+- Forward C3n2 (C3n + zero-scale floor on the non-fold path): numerics gate 21177865 PASS on all four routes (with the
+  LSE envelope and defect repair), forward -8.49%; confirmation 21178214 -8.66%. Superseded by C3g before merging.
+- Forward C3g (kda-fwd helper; BM192 = 192 x 128 tiles with three consumer warpgroups, FWDLAZY lazy O rescale,
+  FWDDFOLD S-descale fold on UNMASKED steps only, RHOPRE, 3 K/V stages, zero-scale floors; NAMED NUMERICS CHANGE):
+  numerics gate 21178215 PASS on default / kv / head / streams2 (residual-v4 with the LSE +-1 ulp envelope, the
+  repaired zero-input defect: finite O = 0), forward -12.89% geomean (0.873 / 0.867 / 0.876 / 0.868), bench -2.8%;
+  confirmation 21178561 (same library e21133d5e72f) -12.68%: ACCEPTED (cherry-picked c6ebf3c .. b0db717 code commits;
+  accepted root r17_fwd + r17_fwd_dbg + LSE controls). sol4 declares the forward as BM192 (>= 599 instructions, >= 75
+  MUFU per warp per 64 x 128 step).
+- Stacking candidates held (bitwise, >= 1% in two jobs, < 3% alone): pass-1 C2 SHFL8 (-1.78% / -1.50%), pass-0 C5
+  nomaskloop + register split (-1.27% / -1.42%). 64K split route (Hao via kda-fuse): forced per-KV-group splits and
+  workspace limits 40 / 72 GB change the 64K fwd+bwd by <= +-0.5% (job 21177857; glue 0.5-3 ms of 115-230 ms);
+  in-place outputs (~1%) need an out= path in the ops (queued).

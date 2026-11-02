@@ -225,7 +225,8 @@ def main():
     ap.add_argument("--prev-dbg-root", default=None, help="numerics: a DM_DBG=1 build root of the previous revision")
     ap.add_argument("--ws", choices=("same", "differs"), default="differs",
                     help="numerics: whether the candidate's dS' / psi workspaces are declared unchanged")
-    ap.add_argument("--routes", default=",".join(ROUTES), help="numerics: routes to certify (default all four)")
+    ap.add_argument("--routes", default=",".join(ROUTES), help="numerics: must be all four routes (certification)")
+    ap.add_argument("--defects", default=None, help="numerics: the frozen defect manifest ({route} expands per route)")
     ap.add_argument("--base-dumps", default=""); ap.add_argument("--prev-dumps", default="")
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--reps", type=int, default=3)
@@ -258,6 +259,9 @@ def main():
                     if os.path.lexists(link):
                         os.remove(link)          # a different library (or a dangling link): never the input itself
                     os.symlink(lib, link)
+                stamp = os.path.join(os.path.dirname(lib), "_build_info.py")   # the library's build stamp, as the JIT
+                if os.path.isfile(stamp):                                       # build installs it beside the package
+                    shutil.copyfile(stamp, os.path.join(wt, "delta_matching", "_build_info.py"))
             else:
                 jit = os.path.join(run_dir, "jit")
                 build_log = gate.run("build", [gate.py, "-m", "delta_matching.jit"], cwd=wt,
@@ -299,22 +303,29 @@ def main():
             check_junit(junit)
         if a.mode == "numerics":
             # output-changing candidate: numerical certification instead of byte equality (benchmarks/numerics.py)
-            if not a.base_root or not a.cand_dbg_root or (a.ws == "same" and not a.prev_dbg_root):
-                raise GateFailure("numerics mode needs --base-root, --cand-dbg-root (and --prev-dbg-root with --ws same)")
+            routes = a.routes.split(",")
+            if sorted(set(routes)) != sorted(ROUTES) or len(routes) != len(ROUTES):
+                raise GateFailure(f"numerics certification needs exactly the four routes {ROUTES}, got {routes}")
+            if not (a.base_root and a.cand_dbg_root and a.prev_dbg_root and a.defects):
+                raise GateFailure("numerics mode needs --base-root, --cand-dbg-root, --prev-dbg-root and --defects")
             N = os.path.join(HERE, "numerics.py")
-            caps = {"base": os.path.abspath(a.base_root), "prev": os.path.abspath(a.prev_root), "cand": wt,
-                    "cand-repeat": wt}
-            dbgs = {"cand-dbg": os.path.abspath(a.cand_dbg_root), "cand-dbg-repeat": os.path.abspath(a.cand_dbg_root)}
-            if a.ws == "same":
-                dbgs["prev-dbg"] = os.path.abspath(a.prev_dbg_root)
-            for r in a.routes.split(","):
+            roles = {"base": (a.base_root, False), "prev": (a.prev_root, False), "cand": (wt, False),
+                     "cand-repeat": (wt, False), "cand-dbg": (a.cand_dbg_root, True), "cand-dbg-repeat": (a.cand_dbg_root, True),
+                     "prev-dbg": (a.prev_dbg_root, True)}
+            for r in routes:
                 files = {}
-                for tag, root in list(caps.items()) + list(dbgs.items()):
+                for tag, (root, dbg) in roles.items():
+                    root = os.path.abspath(root)
+                    libs = sorted(x for x in os.listdir(os.path.join(root, "delta_matching")) if x.startswith("_C") and x.endswith(".so"))
+                    if len(libs) != 1:
+                        raise GateFailure(f"{tag}: {root} must hold exactly one library")
                     out = os.path.join(run_dir, f"num_{r}_{tag}.json")
-                    gate.run(f"numcap_{r}_{tag}", [gate.py, N, "capture", "--root", root, "--route", r, "--out", out]
-                             + (["--dbg"] if tag in dbgs else []), env=dict(env, PYTHONPATH=root))
+                    gate.run(f"numcap_{r}_{tag}", [gate.py, N, "capture", "--root", root, "--route", r, "--out", out,
+                                                   "--expect-sha", sha256(os.path.join(root, "delta_matching", libs[0]))]
+                             + (["--dbg"] if dbg else []), env=dict(env, PYTHONPATH=root))
                     files[tag] = out
-                gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws,
+                defects = a.defects.replace("{route}", r)
+                gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws, "--defects", defects,
                                            "--report", os.path.join(run_dir, f"num_{r}_report.json")]
                          + [x for tag, f in files.items() for x in (f"--{tag}", f)])
         if a.mode == "full":

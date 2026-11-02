@@ -636,109 +636,160 @@ def test_full_gate_fails_on_a_spill_warning_only_build_log(tmp_path):
     assert r.returncode == 1 and "build diagnostics" in r.stdout, r.stdout[-600:]
 
 
-# ---- numerics.py check: synthetic captures ----
+# ---- numerics.py (schema v2): synthetic captures ----
+import hashlib as _hl  # noqa: E402
 import numerics as NUM  # noqa: E402
 
+_H = lambda t: _hl.sha256(t.encode()).hexdigest()
 
-def _cap(dbg=False, err=1e-3, h="h", ws="w", residual=1e-7, route="default"):
-    cases = {}
-    for k, desc in EQ.selected_cases(route):
-        c = {"errors": {o: err for o in NUM.OUTPUTS}, "out_hash": {o: h + o for o in NUM.OUTPUTS}, "ref_id": "r" + k}
+
+def _sig(tag):
+    return {"bytes": _H("b" + tag), "nan_mask": _H("n"), "inf_mask": _H("i"), "finite": _H("f" + tag), "n_nan": 0, "n_inf": 0}
+
+
+def _cap(dbg=False, route="default", err=1e-3, code_sha="c0de", lib="L"):
+    cases = EQ.selected_cases(route)
+    out = {"schema": NUM.SCHEMA, "route": route, "dbg": dbg,
+           "identity": {"library_sha256": _H(lib + str(dbg)), "python_sha256": _H("py"), "code_sha": code_sha,
+                        "flags": {"F": 1}, "dbg_build": dbg, "prof": False, "trace": False},
+           "descriptors_sha256": _hl.sha256(json.dumps(cases, sort_keys=True).encode()).hexdigest(), "cases": {}}
+    for key, desc in cases:
+        c = {"errors": {o: err for o in NUM.OUTPUTS}, "outputs": {o: _sig(key + o) for o in NUM.OUTPUTS},
+             "reference_finite": True, "input_id": _H("in" + key), "ref_id": _H("ref" + key)}
         if dbg:
-            g = {"heads": desc["H"], "problems": [], "ws_hash": ws, "visited_tiles": 3}
-            if desc["mode"] == "matched":
-                g.update(residual=residual, residual_bound=NUM.residual_bound(desc["N"]), zero_den_nonzero_num=0)
-            c["groups"] = [g]
-        cases[k] = c
-    return {"schema": NUM.SCHEMA, "route": route, "dbg": dbg, "library": "x", "library_sha256": "y", "cases": cases}
+            sch = NUM.expected_group_schema(desc, route)
+            gs = []
+            for gi in range(sch["groups"]):
+                g = {"heads": sch["heads"], "problems": [], "visited_tiles": sch["visited_tiles"],
+                     "region_hashes": [_H(f"{key}{gi}a"), _H(f"{key}{gi}b")]}
+                if desc["mode"] == "matched":
+                    g.update(residual_plan=0.5, residual_centered=1e-6, zero_den_nonzero_num=0)
+                gs.append(g)
+            c["groups"] = gs
+        out["cases"][key] = c
+    return out
 
 
-def _numcheck(tmp_path, mutate=None, ws="differs"):
-    files = {"base": _cap(), "prev": _cap(), "cand": _cap(), "cand-repeat": _cap(), "cand-dbg": _cap(True),
-             "cand-dbg-repeat": _cap(True), "prev-dbg": _cap(True)}
+def _numcheck(tmp_path, mutate=None, ws="same", manifest=None, extra=()):
+    files = {"base": _cap(lib="base"), "prev": _cap(lib="prev"), "cand": _cap(), "cand-repeat": _cap(),
+             "cand-dbg": _cap(True), "cand-dbg-repeat": _cap(True), "prev-dbg": _cap(True, lib="prev")}
+    man = manifest if manifest is not None else {"route": "default", "base_library_sha256": files["base"]["identity"]["library_sha256"],
+                                                  "allow_repair": False, "cases": {}}
     if mutate:
-        mutate(files)
-    args = ["check", "--route", "default", "--ws", ws]
+        mutate(files, man)
+    args = ["check", "--route", "default", "--ws", ws] + list(extra)
     for tag, d in files.items():
+        if d is None:
+            continue
         p = tmp_path / f"{tag}.json"; p.write_text(json.dumps(d)); args += [f"--{tag}", str(p)]
+    mp = tmp_path / "defects.json"; mp.write_text(json.dumps(man)); args += ["--defects", str(mp)]
     return subprocess.run([sys.executable, os.path.join(HERE, "numerics.py")] + args, capture_output=True, text=True)
 
 
+def _c(f, tag, key="d128_gqa4/causal/matched"):
+    return f[tag]["cases"][key]
+
+
 def test_numerics_check_passes_a_self_certificate(tmp_path):
-    r = _numcheck(tmp_path, ws="same")
+    r = _numcheck(tmp_path)
     assert r.returncode == 0 and "PASS" in r.stdout, r.stdout[-800:]
 
 
-def _first(files, tag):
-    return next(iter(files[tag]["cases"].values()))
-
-
 @pytest.mark.parametrize("why,mutate", [
-    ("missing cases", lambda f: f["cand"]["cases"].pop(next(iter(f["cand"]["cases"])))),
-    ("non-finite errors", lambda f: _first(f, "cand")["errors"].update(dQ=float("nan"))),
-    ("error", lambda f: _first(f, "cand")["errors"].update(dK=2e-3)),
-    ("nondeterministic", lambda f: _first(f, "cand-repeat")["out_hash"].update(O="other")),
-    ("DBG-build outputs differ", lambda f: _first(f, "cand-dbg")["out_hash"].update(dV="other")),
-    ("workspace", lambda f: _first(f, "cand-dbg")["groups"][0]["problems"].append("zero-psi tile with codes")),
-    ("workspaces differ between", lambda f: _first(f, "cand-dbg-repeat")["groups"][0].update(ws_hash="z")),
-    ("reference identities differ", lambda f: _first(f, "prev")["ref_id"].__class__ and _first(f, "prev").update(ref_id="q")),
-    ("no captured backward groups", lambda f: _first(f, "cand-dbg").update(groups=[])),
+    ("missing cases", lambda f, m: f["cand"]["cases"].pop("d128_min/causal/matched")),
+    ("non-finite error", lambda f, m: _c(f, "cand")["errors"].update(dQ=float("nan"))),
+    ("non-finite error", lambda f, m: _c(f, "cand-dbg")["outputs"]["dK"].update(n_nan=3)),
+    ("error 2.0", lambda f, m: _c(f, "cand")["errors"].update(dK=2e-3)),
+    ("nondeterministic", lambda f, m: _c(f, "cand-repeat")["outputs"]["O"].update(bytes=_H("x"))),
+    ("DBG-build run's outputs differ", lambda f, m: _c(f, "cand-dbg-repeat")["outputs"]["O"].update(bytes=_H("x"))),
+    ("capture required", lambda f, m: f.update({"cand-dbg": None})),
+    ("groups", lambda f, m: [_c(f, t)["groups"].pop() for t in ("cand-dbg", "cand-dbg-repeat", "prev-dbg")]),
+    ("coverage / region hashes invalid", lambda f, m: [_c(f, t)["groups"][0].update(visited_tiles=0, region_hashes=[None, None])
+                                                      for t in ("cand-dbg", "cand-dbg-repeat", "prev-dbg")]),
+    ("workspaces differ between", lambda f, m: _c(f, "cand-dbg-repeat")["groups"][0].update(region_hashes=[_H("p"), _H("q")])),
+    ("declared unchanged", lambda f, m: [_c(f, t)["groups"][0].update(region_hashes=[_H("p"), _H("q")]) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("out of range", lambda f, m: [_c(f, t)["groups"][0].update(residual_plan=1.5) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("out of range", lambda f, m: [_c(f, t)["groups"][0].update(residual_centered=float("nan")) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("centered residual diagnostic", lambda f, m: [_c(f, t)["groups"][0].update(residual_centered=1.0) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("above the previous", lambda f, m: [_c(f, t)["groups"][0].update(residual_plan=0.9) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("zero-denominator", lambda f, m: [_c(f, t)["groups"][0].update(zero_den_nonzero_num=2) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("missing library", lambda f, m: [f[t]["identity"].update(library_sha256=None) for t in f]),
+    ("not from the candidate's source", lambda f, m: [f[t]["identity"].update(code_sha="other") for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("different numerical flags", lambda f, m: [f[t]["identity"].update(flags={"F": 2}) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("not a DBG build", lambda f, m: f["cand-dbg"]["identity"].update(dbg_build=False)),
+    ("non-finite fp32 reference", lambda f, m: _c(f, "prev").update(reference_finite=False)),
+    ("input / reference identities", lambda f, m: _c(f, "prev").update(ref_id=_H("other"))),
+    ("workspace", lambda f, m: _c(f, "cand-dbg")["groups"][0]["problems"].append("NaN e4m3 code on a visited tile")),
 ])
 def test_numerics_check_rejects(tmp_path, why, mutate):
     r = _numcheck(tmp_path, mutate)
     assert r.returncode == 1 and why in r.stdout, (why, r.stdout[-800:])
 
 
-def test_numerics_check_rejects_perturbed_centering_and_changed_unchanged_workspaces(tmp_path):
-    def centering(f):
-        for c in f["cand-dbg"]["cases"].values():
-            for g in c["groups"]:
-                if "residual" in g:
-                    g["residual"] = 1.0
-                    return
-    r = _numcheck(tmp_path, centering)
-    assert r.returncode == 1 and "matched residual" in r.stdout, r.stdout[-600:]
-    (tmp_path / "w").mkdir()
-    r = _numcheck(tmp_path / "w", lambda f: [g.update(ws_hash="new") for t in ("cand-dbg", "cand-dbg-repeat")
-                                             for c in f[t]["cases"].values() for g in c["groups"]], ws="same")
-    assert r.returncode == 1 and "declared unchanged" in r.stdout, r.stdout[-600:]
+def _nan_case(f, m, key="d128_zeros/causal/matched", sigs=("base", "prev", "cand", "cand-repeat", "cand-dbg",
+                                                              "cand-dbg-repeat", "prev-dbg")):
+    for t in sigs:
+        o = f[t]["cases"][key]
+        o["errors"]["O"] = float("nan"); o["outputs"]["O"].update(n_nan=7, nan_mask=_H("mask"), finite=_H("fin"))
+    m["cases"][key] = {"outputs": {"O": {"nan_mask": _H("mask"), "inf_mask": _H("i"), "finite": _H("fin"), "n_nan": 7, "n_inf": 0}},
+                       "workspace_problems": []}
+
+
+def test_numerics_known_defects_pass_qualified_and_are_bound(tmp_path):
+    r = _numcheck(tmp_path, _nan_case)
+    assert r.returncode == 0 and "qualified by known defects" in r.stdout, r.stdout[-600:]
+    for i, extra in enumerate([lambda f, m: f["cand"]["cases"]["d128_zeros/causal/matched"]["outputs"]["O"].update(nan_mask=_H("moved")),
+                               lambda f, m: f["cand-repeat"]["cases"]["d128_zeros/causal/matched"]["outputs"]["O"].update(finite=_H("changed")),
+                               lambda f, m: m.update(base_library_sha256=_H("someone else")),
+                               lambda f, m: f["cand-dbg"]["cases"]["d128_zeros/causal/matched"]["groups"][0]["problems"].append("psi (1,) shape")]):
+        d = tmp_path / f"k{i}"; d.mkdir()
+        r = _numcheck(d, lambda f, m: (_nan_case(f, m), extra(f, m)))
+        assert r.returncode == 1, (i, r.stdout[-600:])
+
+
+def test_numerics_gate_needs_all_four_routes(tmp_path):
+    for n in ("base", "cdbg", "pdbg"):
+        (tmp_path / n / "delta_matching").mkdir(parents=True)
+        (tmp_path / n / "delta_matching" / "_C.so").write_bytes(b"x")
+    r = run_gate(tmp_path, "numerics", "", args=["--routes", "default", "--base-root", str(tmp_path / "base"),
+                                                 "--cand-dbg-root", str(tmp_path / "cdbg"), "--prev-dbg-root",
+                                                 str(tmp_path / "pdbg"), "--defects", str(tmp_path / "m.json")])
+    assert r.returncode == 1 and "exactly the four routes" in r.stdout, r.stdout[-600:]
+
+
+def test_check_workspace_schema_nan_codes_and_per_half_sentinel():
+    desc = {"D": 128, "B": 1, "H": 2, "Hk": 2, "N": 256, "attn": "causal"}
+    sch = NUM.expected_group_schema(desc, "default")
+    ds8 = torch.zeros(sch["ds8"], dtype=torch.float8_e4m3fn); psi = torch.ones(sch["psi"])
+    rows = torch.zeros(sch["rows"]); ra = torch.zeros(sch["rows"])
+    probs, regions, nvis = NUM.check_workspace(ds8, psi, rows, ra, sch, True)
+    assert not probs and len(regions) == 2 and nvis == sch["visited_tiles"]
+    bad = ds8.view(torch.uint8).clone(); bad[0, 0, 0, 0, 0] = 0x7F
+    assert any("NaN e4m3" in p for p in NUM.check_workspace(bad.view(torch.float8_e4m3fn), psi, rows, ra, sch, True)[0])
+    empty = torch.zeros([0] + sch["ds8"][1:], dtype=torch.float8_e4m3fn)
+    assert NUM.check_workspace(empty, psi, rows, ra, sch, True)[1] is None
+    sch2 = NUM.expected_group_schema(desc, "default", psi_halves=2)
+    psi2 = torch.ones(sch2["psi"]); psi2[0, 0, 0, 1] = 0.0
+    codes = ds8.view(torch.uint8).clone(); codes[0, 0, 0, 3, 100] = 0x38   # key 100 is in half 1 (64..127)
+    p = NUM.check_workspace(codes.view(torch.float8_e4m3fn), psi2, rows, ra, sch2, True)[0]
+    assert any("zero-psi key half 1" in x for x in p), p
+    incons = ra.clone(); r2 = rows.clone(); r2[0, 0, 0, 0] = 1.0
+    assert any("inconsistent" in x for x in NUM.check_workspace(ds8, psi, r2, incons, sch, True)[0])
 
 
 def test_row_residual_and_workspace_validation():
-    rows = torch.zeros(1, 2, 2, 2)                     # [BH 1, nbn 2, wg 2, sq 2]
+    rows = torch.zeros(1, 2, 2, 2)
     rows[0, 0, 0] = torch.tensor([1.0, 2.0]); rows[0, 1, 0] = torch.tensor([-1.0, -2.0])
-    ratio, bad = NUM.row_residual(rows, rows.abs())
+    ratio, bad, _ = NUM.row_residual(rows, rows.abs())
     assert ratio == 0.0 and bad == 0
-    rows[0, 1, 1, 0] = 0.5                              # row 0: |0.5| / 2.5
+    rows[0, 1, 1, 0] = 0.5
     assert abs(NUM.row_residual(rows, rows.abs())[0] - 0.2) < 1e-12
-    z = torch.zeros(1, 2, 2, 1)
-    assert NUM.row_residual(z, z) == (0.0, 0)
-    ds8 = torch.zeros(1, 2, 2, 64, 128, dtype=torch.uint8)
-    psi = torch.ones(1, 2, 2, 1)
-    probs, h, nvis = NUM.check_workspace(ds8, psi, 128, causal=True)
-    assert not probs and nvis == 2       # causal at kbn 128: n-tile 1 is visited by neither m-block 0 nor 1
-    psi[0, 0, 0, 0] = 0.0; ds8[0, 0, 0, 3, 5] = 0x38
-    assert "zero-psi tile" in NUM.check_workspace(ds8, psi, 128, causal=True)[0][0]
-    assert NUM.check_workspace(ds8[..., :64], psi, 128, causal=True)[1] is None
 
 
-def test_numerics_baseline_defect_cases_must_match_the_baseline_pattern(tmp_path):
-    def nan_everywhere(f):
-        for tag in ("base", "prev", "cand", "cand-repeat"):
-            _first(f, tag)["errors"]["O"] = float("nan")
-    r = _numcheck(tmp_path, nan_everywhere)
-    assert r.returncode == 0 and "PASS" in r.stdout, r.stdout[-600:]
-    (tmp_path / "b").mkdir()
 
-    def cand_differs(f):
-        for tag in ("base", "prev", "cand-repeat"):
-            _first(f, tag)["errors"]["O"] = float("nan")
-    r = _numcheck(tmp_path / "b", cand_differs)
-    assert r.returncode == 1 and "differs from the baseline defect" in r.stdout, r.stdout[-600:]
-
-
-def test_row_residual_uses_the_centering_magnitude():
+def test_row_residual_plan_is_ill_conditioned_and_the_diagnostic_is_not():
     rows = torch.zeros(1, 1, 2, 1); rows[0, 0, 0, 0] = 1e-6          # a one-key row: one tiny residue
-    assert NUM.row_residual(rows, rows.abs())[0] == 1.0                # plain ratio: always 1
+    r, _, worst = NUM.row_residual(rows, rows.abs())
+    assert r == 1.0 and worst["num"] == worst["den"] > 0             # the plan's ratio: always 1 on such a row
     delta = torch.full((1, 1), 1.0)
     assert NUM.row_residual(rows, rows.abs(), delta)[0] < 1e-8         # residue / (|t| + 2^8 |delta|)

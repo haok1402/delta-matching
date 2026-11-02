@@ -26,6 +26,9 @@
 #ifndef KDA_PK_EXPB
 #define KDA_PK_EXPB 0
 #endif
+#if KDA_PK_EXPB >= 3 && KDA_PK_EXPB <= 5
+#error "KDA_PK_EXPB 3 / 4 / 5 were built on the pre-P0NML pass 0 (branch kda-sm90-p1packed-r1) and are superseded by 6"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -365,6 +368,14 @@ struct DeltaV6 {
             float const lse0 = __fmul_rn(sLSE(row0, wg), float(M_LOG2E));   // the host prep's exact multiply
             float const lse1 = __fmul_rn(sLSE(row1, wg), float(M_LOG2E));
 #endif
+#if KDA_PK_EXPB == 6
+            // ## KDA_PK_EXPB=6 (EXPBX64, named numerics arm, pass 0 + pass 1 identically): P-hat = exp2(min(fma(s, dsc, -b), 12))
+            // with b = fma(lse, log2e, -8) on every 64 x 64 tile this kernel does not mask; the certified line on the tiles it
+            // masks (the diagonal tile and the seqlen_k tail), where the rows with the fewest visible keys (smallest per-row
+            // tolerance) live.  Pass 1 applies the same predicate per warpgroup (mainloop_bwd_sm90_fp8r.hpp).
+            float const bx0 = __fmaf_rn(sLSE(row0, wg), float(M_LOG2E), -kFq8MoE);
+            float const bx1 = __fmaf_rn(sLSE(row1, wg), float(M_LOG2E), -kFq8MoE);
+#endif
             // The v4b per-tile arithmetic, VERBATIM: (1) S~ -> P~ (mask, descale, LSE, F1 clamp, exp2), (2) the fixed-order
             // half row sums; (3) the M5 reduce's fp64 fold (n-block ascending, half 0 then half 1) in registers.
             // ## M21 diet: the mask is a no-op on every n-block whose keys all lie at or below the row block's diagonal and
@@ -380,13 +391,34 @@ struct DeltaV6 {
                 if (MayMask && need_mask) {
                     mask.template apply<true /*Seqlenk_mask*/, Is_causal, false /*Is_local*/>(tSrS, m_block, n_block);
                 }
+#if KDA_PK_EXPB == 6
+                {   // one line: y = fma(s, dsc, -B), B = b off the masked tiles / fl(lse log2e) on them, then + 8 only on them
+                    bool const orig = MayMask && need_mask;   // the mask-free loop (P0NML) never holds a masked tile
+                    float const B0 = orig ? lse0 : bx0, B1 = orig ? lse1 : bx1;
+                    #pragma unroll
+                    for (int mi = 0; mi < 2; ++mi) {
+                        #pragma unroll
+                        for (int ni = 0; ni < 16; ++ni) {
+                            float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
+                            scores(mi, ni) = __fmaf_rn(scores(mi, ni), dsc, -(mi == 0 ? B0 : B1));
+                        }
+                    }
+                    if (orig) {
+                        #pragma unroll
+                        for (int i = 0; i < size(scores); ++i) { scores(i) = __fadd_rn(scores(i), kFq8MoE); }
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(fminf(scores(i), kFq8MoE + 4.0f)); }
+                    return;
+                }
+#endif
                 #pragma unroll
                 for (int mi = 0; mi < 2; ++mi) {
                     float const lse_scaled = mi == 0 ? lse0 : lse1;
                     #pragma unroll
                     for (int ni = 0; ni < 16; ++ni) {
                         float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
-#if KDA_PK_EXPB
+#if KDA_PK_EXPB == 1 || KDA_PK_EXPB == 2
                         scores(mi, ni) = exp2f(fminf(__fmaf_rn(scores(mi, ni), dsc, -lse_scaled), kFq8MoE + 4.0f));
 #else
                         scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));

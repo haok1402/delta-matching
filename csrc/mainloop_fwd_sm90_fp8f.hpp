@@ -1557,12 +1557,17 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/Defer ? -1 : 0, 2, 4>(tiled_mma_pv, tOrP, B_, D_);
                 } else if constexpr (kGroups == 4 && kAtomsPerGroup == 2) {
                     // ## Delta-Matching-128 F3: four 64-key groups per 256-key tile (2 k-atoms each), the d256 chain's shape.
+                    // ## kda-fwd RHOPRE: the three per-row rho are computed before the chain (same expressions, bitwise),
+                    // so no exp2 / clamp sits between a sub-gemm's retire and the next issue.
+                    auto const rho1_ = fq8_rho(softmax, 1);
+                    auto const rho2_ = fq8_rho(softmax, 2);
+                    auto const rho3_ = fq8_rho(softmax, 3);
                     fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 2>(tiled_mma_pv, tOrP, B_, D_);
-                    softmax.rescale_o(D_, fq8_rho(softmax, 1));
+                    softmax.rescale_o(D_, rho1_);
                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 2, 4>(tiled_mma_pv, tOrP, B_, D_);
-                    softmax.rescale_o(D_, fq8_rho(softmax, 2));
+                    softmax.rescale_o(D_, rho2_);
                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/0, 4, 6>(tiled_mma_pv, tOrP, B_, D_);
-                    softmax.rescale_o(D_, fq8_rho(softmax, 3));
+                    softmax.rescale_o(D_, rho3_);
                     fq8_gemm_krange</*zero_init=*/false, /*wg_wait=*/Defer ? -1 : 0, 6, 8>(tiled_mma_pv, tOrP, B_, D_);
                 } else if constexpr (kGroupsPerPromote == 4) {
                     fq8_gemm_krange</*zero_init=*/true,  /*wg_wait=*/0, 0, 1>(tiled_mma_pv, tOrP, B_, D_);

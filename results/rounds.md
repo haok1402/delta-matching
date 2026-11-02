@@ -736,3 +736,7 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - Accepted build r17_fwd (job 21178641; results/r17/accepted_fwd/sol4v2.md): % of calibrated limit pass1 43.9%,
   forward 59.0%, pass0 68.0%, pass2 94.5%; forward / FA3 fp8 forward kernel 1.163 (was 1.32); original -> now e2e fwd
   -13.59%, fwd+bwd -9.19%; paper C.2 16/4 fwd 581.6 / fwd+bwd 502.4 TFLOP/s, 32/4 fwd+bwd 523.1 (cuDNN BF16 500.0).
+- Pass-1 helper on r17_fwd: no bitwise stack of its own reaches 3%; best SHFL8 + QST=3 / DOST=3 at -2.15% / -2.45%
+  (SHFL8 alone -2.20% / -1.74%), held for stacking with a >= 1% bitwise partner; ~135 screened pass-1 variants
+  (DVZI, LSEPRE, PV4, FENCE2, PCONVEARLY, EXPSPLIT, STLATE, REDUX trees, EARLY / KRS / DKSPLIT) neutral or slower
+  (CANDIDATES.md on origin/kda-sm90-pass1-v2).

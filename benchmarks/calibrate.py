@@ -77,7 +77,7 @@ def main():
     stop.set(); th.join()
     c = copy_bw()
     p = torch.cuda.get_device_properties(0)
-    out = {"version": 1, "gpu": p.name, "sms": p.multi_processor_count, "torch": torch.__version__,
+    out = {"version": 1, "gpu": p.name, "device_uuid": str(getattr(p, "uuid", "")) or None, "sms": p.multi_processor_count, "torch": torch.__version__,
            "cuda": torch.version.cuda, "job": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename,
            "time": time.strftime("%Y-%m-%dT%H:%M:%S"), "sm_clock_mhz_samples": clocks,
            "sm_clock_mhz": statistics.median(clocks) if clocks else None, "gemm_fp8": g, "copy": c}

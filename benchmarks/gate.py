@@ -9,13 +9,13 @@ directory; the first failing step stops the gate with a non-zero exit naming the
 Modes: full (bitwise candidates: build or --lib prebuilt reuse, build-diagnostic scan (C7510 / serialization / actual
 spill warnings / positive spill counts fatal), ELF-complete resources / SASS (per-symbol STACK / LOCAL growth recorded as a
 warning), candidate pytest with in-process identity, four 72-case byte-equivalence suites vs the baseline and the
-previous accepted revision, ONE A/B on the target grid (kernels.py --grid d128m) vs the previous accepted revision,
+previous accepted revision, ONE A/B on the target grid (kernels.py --grid paper: the four round-16 acceptance shapes) vs the previous accepted revision,
 bench.py D128 matched), numerics (output-changing candidates: as full, with benchmarks/numerics.py captures and checks
 on every route in place of the byte suites), confirm (A/B + bench only, against an already built candidate root),
 timing (build, resources, A/B, bench: feasibility only, never an acceptance).  CPU tooling tests only with
---tooling-tests.  Acceptance (Hao, rounds 10-13; docs/kda-sm90/rule-change-r10.md): the --target kernel >= 3% faster
-summed over the D128 causal matched N 4k / 8k target configurations, no target or 16k / 32k guard configuration slower
-beyond its run-to-run spread (ab.py decision()), bench.py D128 matched fwd+bwd within 1%; a full / numerics job and a
+--tooling-tests.  Acceptance (Hao, rounds 10-16; docs/kda-sm90/rule-change-r10.md): the --target kernel >= 3% faster
+over the four round-16 acceptance shapes (D128 causal matched, Hq 16 / 32, Hk 4, B2 N8192 / B1 N65536, the paper's
+training shapes; geometric mean of per-shape ratios), no acceptance shape slower beyond its run-to-run spread (ab.py decision()), bench.py D128 matched fwd+bwd within 1%; a full / numerics job and a
 fresh confirm job must both pass.  The run directory must not exist (fresh).
 GATE_PYTHON / GATE_CUOBJDUMP override the executables (CPU failure-injection tests).
 """
@@ -357,7 +357,7 @@ def main():
         # job must each pass.
         d = os.path.join(run_dir, "ab_all")
         gate.run("ab_all", [gate.py, os.path.join(HERE, "ab.py"), "run", "--a", os.path.abspath(a.prev_root), "--b", wt,
-                            "--grid", "d128m", "--reps", str(a.reps), "--target", a.target, "--out-dir", d]
+                            "--grid", "paper", "--reps", str(a.reps), "--target", a.target, "--out-dir", d]
                  + (["--subset", a.subset] if a.subset else []), env=ab_env)
         if not os.path.isfile(os.path.join(d, "ab.json")):
             raise GateFailure("A/B wrote no ab.json")

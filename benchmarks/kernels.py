@@ -47,6 +47,15 @@ D128_VARIANTS = ((16, 16), (16, 4), (32, 8), (8, 8))
 D128_TARGET = [(128, 32768 // N, H, Hk, N) for N in (4096, 8192) for H, Hk in D128_VARIANTS]
 D128_GUARD = [(128, 32768 // N, H, Hk, N) for N in (16384, 32768) for H, Hk in D128_VARIANTS]
 D128M = D128_TARGET + D128_GUARD
+# Model focus (Hao, round 16; final set, replaces the round-13 d128m target / guard): the acceptance set is the paper's
+# 1.67B GDN/GQA hybrid attention (Hq 16, Hk 4) and Qwen3-30B-A3B attention (Hq 32, Hk 4), D128 causal matched, at
+# the paper's TRAINING shapes only (arXiv 2609.37852, B.2.4): pretraining at per-GPU batch 2 x 8192 and the 8K-to-64K
+# context extension at 1 x 65536; four shapes, equal weight per shape (ab.decision: geometric mean of per-shape ratios).
+# 4k / 16k / 32k are evaluation lengths only: every other shape only has to stay correct.
+PAPER_SET = [(128, B, H, 4, N) for H in (16, 32) for B, N in ((2, 8192), (1, 65536))]
+PAPER_GUARD = []
+GRIDS = {"main": MAIN, "holdout": HOLDOUT, "all": ALL, "d128m": D128M, "paper": PAPER_SET + PAPER_GUARD}
+MATCHED_ONLY = ("d128m", "paper")
 MODES = (("causal", "matched"), ("causal", "stale"), ("full", "stale"))
 
 CATS = ("fwd", "prod_fwd", "prod_bwd", "pass0", "pass1", "pass2", "twin", "glue")
@@ -63,8 +72,8 @@ def sha256(path):
 
 def expected_configs(grid, modes="all", one=None):
     """The (D, B, H, Hk, N, attn, mode) keys a kernels.py run must produce."""
-    shapes = {"main": MAIN, "holdout": HOLDOUT, "all": ALL, "d128m": D128M}.get(grid, [one])
-    md = (("causal", "matched"),) if grid == "d128m" else \
+    shapes = GRIDS.get(grid, [one])
+    md = (("causal", "matched"),) if grid in MATCHED_ONLY else \
         MODES if modes in (None, "all") else tuple(tuple(m.split("-")) for m in modes.split(","))
     return [(D, B, H, Hk, N, attn, mode) for (D, B, H, Hk, N) in shapes for attn, mode in md]
 
@@ -281,12 +290,30 @@ def run_config(D, B, H, Hk, N, attn, mode, iters, clock, fa3, clk_sustained):
         per[classify(n)] += ms
     rec["kernels"] = names
     rec["ms"] = per
+    rec["route"] = route_info(B, H, Hk, N, names)   # sol4-v2 (B19): the resolved backward split and producer backend
     rec["sol"] = model_sol(rec, clk_sustained)
     if fa3:
         rec["fa3"] = fa3_arms(q, k, v, do, causal, iters)
     del q, k, v, do
     torch.cuda.empty_cache()
     return rec
+
+
+def device_uuid():
+    try:
+        return str(torch.cuda.get_device_properties(0).uuid)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def route_info(B, H, Hk, N, names):
+    """The backward head split as delta_matching.split resolves it, the stream count, and the producer backend the
+    timed call actually ran (from its kernel names: strided H3 kernels or the contiguous-copy fallback)."""
+    from delta_matching import split as S
+    hp = S._bwd_heads_per_call(B, H, Hk, H // Hk, N)
+    strided = any("_strided_kernel" in n for n in names)
+    return {"heads_per_call": hp, "streams": S._BWD_STREAMS, "head_groups_env": S._BWD_GROUPS,
+            "ws_limit_bytes": S._BWD_WS_LIMIT, "producers": "strided" if strided else "copy", "layout": "bnhd"}
 
 
 def fa3_arms(q, k, v, do, causal, iters):
@@ -318,7 +345,7 @@ def fa3_arms(q, k, v, do, causal, iters):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid", choices=("d128m", "all", "main", "holdout", "one"), default="one")
+    ap.add_argument("--grid", choices=("paper", "d128m", "all", "main", "holdout", "one"), default="one")
     ap.add_argument("--D", type=int, default=128); ap.add_argument("--N", type=int, default=8192)
     ap.add_argument("--B", type=int, default=2); ap.add_argument("--H", type=int, default=16)
     ap.add_argument("--Hk", type=int, default=4)
@@ -332,8 +359,8 @@ def main():
     a = ap.parse_args()
     global dm
     import delta_matching as dm
-    shapes = {"main": MAIN, "holdout": HOLDOUT, "all": ALL, "d128m": D128M}.get(a.grid, [(a.D, a.B, a.H, a.Hk, a.N)])
-    modes = (("causal", "matched"),) if a.grid == "d128m" else \
+    shapes = GRIDS.get(a.grid, [(a.D, a.B, a.H, a.Hk, a.N)])
+    modes = (("causal", "matched"),) if a.grid in MATCHED_ONLY else \
         MODES if a.modes == "all" else tuple(tuple(m.split("-")) for m in a.modes.split(","))
     recs = []
     with ClockSampler() as clock:
@@ -358,7 +385,8 @@ def main():
             "library_sha256": sha256(so), "grid": a.grid, "modes": a.modes, "shapes": shapes, "iters": a.iters,
             "sustained_clock_mhz": clk, "torch": torch.__version__, "cuda": torch.version.cuda, "device": torch.cuda.get_device_name(0),
             "kernel_version": {k: v for k, v in dm.kernel_version().items() if k != "numerics"},
-            "env": {k: v for k, v in os.environ.items() if k.startswith("DM_")}}
+            "env": {k: v for k, v in os.environ.items() if k.startswith("DM_")},
+            "job": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename, "device_uuid": device_uuid()}
     if a.calib:   # bind the same-allocation calibration (sol4 model) to these timings
         with open(a.calib) as fh:
             meta["calibration_sha256"] = json.load(fh)["sha256"]

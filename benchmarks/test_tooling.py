@@ -333,7 +333,7 @@ if "ab.py" in line:
     d = args[args.index("--out-dir") + 1]; os.makedirs(d, exist_ok=True)
     if "ab" not in fail.split(","):
         acc = os.environ.get("STUB_DECISION", "accept") == "accept"
-        if "--target" not in args or args[args.index("--grid") + 1] != "d128m":
+        if "--target" not in args or args[args.index("--grid") + 1] != "paper":
             sys.exit(9)
         open(os.path.join(d, "ab.json"), "w").write(
             '{"decision": {"accept": %s, "checks": {"target_gain": %s}, "tune_dim": 128, "target_tune_change_pct": -4.0}}'
@@ -483,13 +483,18 @@ def test_gate_rejects_when_the_acceptance_predicates_fail(tmp_path):
     assert r.returncode == 1 and "acceptance predicates not met" in r.stdout, r.stdout[-600:]
 
 
-def _recs(times, d_pass2):
-    """One repetition: two D128 shapes and one D256 shape; e2e times per shape, pass2 per head dim."""
+def _recs(t, p2, d256=(30.0, 1.0), slow=None, ratio=None):
+    """One repetition: the eight acceptance shapes (kernels.PAPER_SET; e2e t + index, pass2 p2, `slow` = {index: extra
+    e2e ms}, `ratio` = {index: pass2}) and one D256 shape (e2e, pass2)."""
     out = []
-    for (D, N), e2e in zip(((128, 4096), (128, 8192), (256, 2048)), times):
-        ms = {c: 1.0 for c in K.CATS}; ms["pass2"] = d_pass2[D]
-        out.append({"D": D, "B": 1, "H": 16, "Hk": 16, "N": N, "attn": "causal", "mode": "matched",
+    for i, (D, B, H, Hk, N) in enumerate(K.PAPER_SET):
+        ms = {c: 1.0 for c in K.CATS}; ms["pass2"] = (ratio or {}).get(i, p2)
+        e2e = t + i + (slow or {}).get(i, 0.0)
+        out.append({"D": D, "B": B, "H": H, "Hk": Hk, "N": N, "attn": "causal", "mode": "matched",
                     "e2e_fwd_ms": e2e / 2, "e2e_fwdbwd_ms": e2e, "ms": ms, "kernels": {}})
+    ms = {c: 1.0 for c in K.CATS}; ms["pass2"] = d256[1]
+    out.append({"D": 256, "B": 1, "H": 16, "Hk": 16, "N": 2048, "attn": "causal", "mode": "matched",
+                "e2e_fwd_ms": d256[0] / 2, "e2e_fwdbwd_ms": d256[0], "ms": ms, "kernels": {}})
     return out
 
 
@@ -498,39 +503,49 @@ def _decide(a_runs, b_runs, target="pass2"):
     return ab.decision(a_runs, b_runs, res, target)
 
 
-def test_decision_accepts_a_d128_gain_with_noise_only():
-    A = [_recs((10.0 + 0.02 * i, 20.0 + 0.02 * i, 30.0 + 0.02 * i), {128: 1.00, 256: 1.0}) for i in range(3)]
-    B = [_recs((10.03, 20.01, 30.0 + 0.01 * i), {128: 0.95, 256: 1.0}) for i in range(3)]   # +0.01 ms vs a 0.04 ms range
+def test_paper_set_is_the_four_round16_training_shapes():
+    assert sorted(K.PAPER_SET) == sorted((128, B, H, 4, N) for H in (16, 32) for B, N in ((2, 8192), (1, 65536)))
+    assert K.GRIDS["paper"] == K.PAPER_SET and K.PAPER_GUARD == []
+
+
+def test_decision_accepts_a_gain_with_noise_only():
+    A = [_recs(10.0 + 0.02 * i, 1.0, (30.0 + 0.02 * i, 1.0)) for i in range(3)]
+    B = [_recs(10.03, 0.95, (30.0 + 0.01 * i, 1.0)) for i in range(3)]   # +0.01 ms vs a 0.04 ms range
     d = _decide(A, B)
-    assert d["accept"] and abs(d["target_tune_change_pct"] + 5.0) < 1e-6, d
+    assert d["accept"] and abs(d["target_tune_change_pct"] + 5.0) < 1e-6 and d["tuned_configs"] == 4, d
 
 
-def test_decision_rejects_small_gain_slow_d128_shape_and_slow_d256():
-    A = [_recs((10.0 + 0.01 * i, 20.0, 30.0 + 0.01 * i), {128: 1.0, 256: 1.0}) for i in range(3)]
-    small = _decide(A, [_recs((10.0, 20.0, 30.0), {128: 0.98, 256: 1.0}) for _ in range(3)])
+def test_decision_rejects_small_gain_slow_shape_and_reports_d256():
+    A = [_recs(10.0 + 0.01 * i, 1.0, (30.0 + 0.01 * i, 1.0)) for i in range(3)]
+    small = _decide(A, [_recs(10.0, 0.98) for _ in range(3)])
     assert not small["accept"] and not small["checks"]["target_gain"]
-    slow = _decide(A, [_recs((10.5, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)])
-    assert not slow["accept"] and slow["tune_shapes_slower_beyond_spread"] == [[128, 1, 16, 16, 4096, "causal", "matched"]]
-    # scope (round 12): a slower D256 shape / target is reported, not gated
-    other = _decide(A, [_recs((10.0, 20.0, 31.0), {128: 0.9, 256: 1.2}) for _ in range(3)])
+    last = len(K.PAPER_SET) - 1                     # B1 N65536 H32 / 4: in the acceptance set since round 16
+    slow = _decide(A, [_recs(10.0, 0.9, slow={last: 0.5}) for _ in range(3)])
+    assert not slow["accept"] and slow["tune_shapes_slower_beyond_spread"] == [list(K.PAPER_SET[last]) + ["causal", "matched"]]
+    other = _decide(A, [_recs(10.0, 0.9, d256=(31.0, 1.2)) for _ in range(3)])
     assert other["accept"] and other["other_shapes_slower_beyond_spread"] and other["target_other_slower_beyond_spread"]
 
 
-def test_decision_gates_only_d128_causal_matched():
-    A = [_recs((10.0 + 0.01 * i, 20.0, 30.0), {128: 1.0, 256: 1.0}) for i in range(3)]
-    B = [_recs((10.0, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)]
+def test_decision_weights_every_shape_equally():
+    A = [_recs(10.0 + 0.01 * i, 1.0) for i in range(3)]
+    one = _decide(A, [_recs(10.0, 1.0, ratio={0: 0.88}) for _ in range(3)])       # one shape -12%: gm 0.88 ** (1/4)
+    assert one["accept"] and abs(one["target_tune_change_pct"] - 100 * (0.88 ** 0.25 - 1)) < 1e-9, one
+    assert abs(one["target_tune_sum_change_pct"] + 3.0) < 1e-9                    # the plain sum, recorded only
+
+
+def test_decision_needs_the_complete_matched_set():
+    A = [_recs(10.0 + 0.01 * i, 1.0) for i in range(3)]
+    B = [_recs(10.0, 0.9) for _ in range(3)]
     for runs in (A, B):
         for recs in runs:
-            recs[1]["mode"] = "stale"   # the second D128 shape is stale: not a tuned configuration
-    for recs in B:
-        recs[1]["e2e_fwdbwd_ms"] = 25.0
+            recs[1]["mode"] = "stale"   # a stale shape is not an acceptance shape
     d = _decide(A, B)
-    assert d["accept"] and d["tuned_configs"] == 1 and d["other_shapes_slower_beyond_spread"]
+    assert not d["accept"] and d["tuned_configs"] == 3 and not d["checks"]["complete_set"]
 
 
 def test_slower_within_spread_is_not_flagged():
-    A = [_recs((10.0 + 0.2 * i, 20.0, 30.0), {128: 1.0, 256: 1.0}) for i in range(3)]
-    B = [_recs((10.3, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)]
+    A = [_recs(10.0 + 0.2 * i, 1.0) for i in range(3)]
+    B = [_recs(10.3, 0.9) for _ in range(3)]
     res, _, _ = ab.analyze(A, B)
     assert not res["shapes"][0]["slower_beyond_spread"]   # +0.1 ms median vs a 0.4 ms A range
 
@@ -610,23 +625,6 @@ def test_build_diagnostics_parse_counts_not_words(tmp_path, text, fatal):
     sys.path.insert(0, HERE)
     import gate as G
     assert bool(G.build_diagnostics(str(log))) == fatal
-
-
-def test_decision_targets_4k_8k_and_guards_16k_32k():
-    def recs(t, p2):
-        out = []
-        for N, e2e, x in ((2048, t[0], p2[0]), (8192, t[1], p2[1]), (32768, t[2], p2[2])):
-            ms = {c: 1.0 for c in K.CATS}; ms["pass2"] = x
-            out.append({"D": 128, "B": 1, "H": 16, "Hk": 16, "N": N, "attn": "causal", "mode": "matched",
-                        "e2e_fwd_ms": e2e / 2, "e2e_fwdbwd_ms": e2e, "ms": ms, "kernels": {}})
-        return out
-    A = [recs((10.0 + 0.01 * i, 20.0 + 0.01 * i, 30.0 + 0.01 * i), (1.0, 1.0, 1.0)) for i in range(3)]
-    # 2k much slower (correctness-only, not gated); 8k target 10% faster; 32k guard unchanged -> accept
-    d = _decide(A, [recs((15.0, 20.0, 30.0), (2.0, 0.9, 1.0)) for _ in range(3)])
-    assert d["accept"] and d["tuned_configs"] == 1 and abs(d["target_tune_change_pct"] + 10) < 1e-6, d
-    # the 32k guard slower beyond spread -> reject
-    g = _decide(A, [recs((10.0, 20.0, 31.0), (1.0, 0.9, 1.0)) for _ in range(3)])
-    assert not g["accept"] and g["tune_shapes_slower_beyond_spread"] == [[128, 1, 16, 16, 32768, "causal", "matched"]]
 
 
 def test_full_gate_fails_on_a_spill_warning_only_build_log(tmp_path):
@@ -796,61 +794,166 @@ def test_row_residual_plan_is_ill_conditioned_and_the_diagnostic_is_not():
 
 
 
-# ---- sol4 (four-floor model) ----
+# ---- sol4-v2 (four-floor model, round 16) ----
 import sol4 as S4  # noqa: E402
 
-
-def _calib(tflops=1000.0, gbs=3000.0, clk=2000.0, sms=100):
-    return {"sha256": "c" * 64, "sm_clock_mhz": clk, "sms": sms, "gemm_fp8": {"peak_tflops": tflops},
-            "copy": {"peak_gbs": gbs}}
+_TOY = {"symbol": "toy", "unit": (64, 64), "wgs": 1, "step_elems_per_wg": 64 * 64, "gemm_flop_per_elem": 64,
+        "work_tile_axis": 0, "peel": 1}                       # one QGMMA.64x64x32 (262144 FLOPs) per step
 
 
-def _counts():
-    k = lambda instr, mufu, steps: {"chosen": {"instr": instr, "mufu_ex2": mufu, "qgmma": 1, "steps": steps}}
-    return {"kernels": {"fwd": k(1000, 128, 1), "pass1": k(1000, 32, 1), "pass0": k(700, 64, 2), "pass2": k(300, 0, 1)}}
+def _sass(lines, name="toy"):
+    return f"\t\tFunction : {name}\n" + "".join(f"        /*{a:04x}*/  {t} ;\n" for a, t in lines)
 
 
-def _rec(N=4096, B=1, H=1, Hk=1):
+def _ledger(lines):
+    return S4.kernel_ledger(S4.parse_sass(_sass(lines))["toy"], _TOY)
+
+
+def test_sol4_ledger_skips_rare_arm_and_never_sums_exclusive_arms():
+    L = [(0x00, "MOV R0, R1"), (0x10, "QGMMA.64x64x32.F32.E4M3.E4M3 R24, gdesc[UR4], R24"), (0x20, "@P0 BRA 0x60"),
+         (0x30, "FMUL R1, R1, R2"), (0x40, "FMUL R1, R1, R2"), (0x50, "FMUL R1, R1, R2"),   # promotion: rarely taken
+         (0x60, "@P1 BRA 0x90"), (0x70, "FADD R1, R1, R2"), (0x80, "BRA 0xa0"),             # arm A (2 instructions)
+         (0x90, "FMUL R1, R1, R2"),                                                         # arm B (1 instruction)
+         (0xa0, "MUFU.EX2 R3, R3"), (0xb0, "@P2 MUFU.RCP R4, R4"), (0xc0, "@P3 BRA 0x0"), (0xd0, "EXIT")]
+    led = _ledger(L)
+    loop = [r for r in led["loops"] if r["innermost"]][0]
+    assert loop["static_instr"] == 13 and loop["static_mufu"] == 2
+    assert led["per_step_instr"] == 8      # 0x00 0x10 0x20 0x60 0x90 0xa0 0xb0 0xc0 (hand count)
+    assert led["per_step_mufu"] == 1       # EX2 counted, the predicated RCP not (lane participation unknown)
+
+
+def test_sol4_ledger_counts_one_of_two_exclusive_qgmma_arms():
+    L = [(0x00, "MOV R0, R1"), (0x10, "@P0 BRA 0x40"), (0x20, "QGMMA.64x64x32.F32.E4M3.E4M3 R24, gdesc[UR4], RZ, !UPT"),
+         (0x30, "BRA 0x50"), (0x40, "QGMMA.64x64x32.F32.E4M3.E4M3 R24, gdesc[UR4], R24"), (0x50, "@P1 BRA 0x0")]
+    led = _ledger(L)
+    loop = [r for r in led["loops"] if r["innermost"]][0]
+    assert loop["static_qgmma"] == 2 and loop["steps"] == 1 and led["per_step_instr"] == 4   # 0x00 0x10 0x40 0x50
+
+
+def test_sol4_ledger_charges_the_full_work_path_and_flags_data_dependent_skips():
+    L = [(0x00, "@P0 BRA 0x30"), (0x10, "FMUL R1, R1, R2"), (0x20, "QGMMA.64x64x32.F32.E4M3.E4M3 R24, gdesc[UR4], R24"),
+         (0x30, "@P1 BRA 0x0")]
+    led = _ledger(L)
+    loop = [r for r in led["loops"] if r["innermost"]][0]
+    assert led["per_step_instr"] == 4 and loop["path_instr_any"] == 2 and loop["data_dependent_skip"]
+
+
+def test_sol4_ledger_picks_the_innermost_step_loop_and_rejects_unsupported_flow():
+    inner = [(0x10, "MOV R0, R1"), (0x20, "QGMMA.64x64x32.F32.E4M3.E4M3 R24, gdesc[UR4], R24"), (0x30, "@P1 BRA 0x10")]
+    L = [(0x00, "MOV R0, R1")] + inner + [(0x40, "QGMMA.64x64x32.F32.E4M3.E4M3 R24, gdesc[UR4], R24"), (0x50, "@P2 BRA 0x0")]
+    led = _ledger(L)
+    assert led["step_loops"] == [(0x10, 0x30)] and led["per_step_instr"] == 3
+    with pytest.raises(S4.ModelError, match="no step loop"):
+        _ledger([(0x00, "BRX R2"), (0x10, "QGMMA.64x64x32.F32.E4M3.E4M3 R24, gdesc[UR4], R24"), (0x20, "@P1 BRA 0x0")])
+    with pytest.raises(S4.ModelError, match="no step loop"):     # QGMMA work not a whole declared step
+        _ledger([(0x00, "QGMMA.64x32x32.F32.E4M3.E4M3 R24, gdesc[UR4], R24"), (0x10, "@P1 BRA 0x0")])
+
+
+def _calib4(gbs=3000.0, job="7"):
+    c = {"version": 1, "sms": 100, "sm_clock_mhz": 2000.0, "gemm_fp8": {"peak_tflops": 1000.0},
+         "copy": {"peak_gbs": gbs}, "job": job, "host": "h"}
+    c["sha256"] = S4.calib_digest(c)
+    return c
+
+
+def _counts4(lib="L", version=S4.COUNTS_VERSION):
+    k = lambda i, m: {"per_step_instr": i, "per_step_mufu": m}
+    return {"version": version, "declared": json.loads(json.dumps(S4.KERNELS_D128_CAUSAL)), "library_sha256": lib,
+            "kernels": {"fwd": k(1000, 128), "pass1": k(600, 32), "pass0": k(280, 32), "pass2": k(70, 0)}}
+
+
+def _rec4(B=1, H=16, Hk=4, N=4096, names=("_quant_strided_kernel",)):
     return {"D": 128, "B": B, "H": H, "Hk": Hk, "N": N, "attn": "causal", "mode": "matched",
-            "ms": {c: 1.0 for c in S4.CATS}}
+            "ms": {c: 1.0 for c in S4.CATS}, "kernels": {n: 0.1 for n in names}}
 
 
-def test_sol4_hand_computed_fwd_floors():
-    f = S4.floors(_rec(), _calib(), _counts(), "strided")["fwd"]["floors_ms"]
-    units = sum(min(16, -(-((mb + 1) * 128) // 256)) for mb in range(32))     # 128-row x 256-key causal units at N 4096
-    assert units == S4.visited_units(4096, 128, 256, True)
-    elems = units * 128 * 256
-    assert abs(f["tensor"] - elems * 512 / 1e15 * 1e3) < 1e-12               # 2 GEMMs x 2 x D 128 FLOP per element
-    warp_iters = units * 2 * 4                                                # 2 warpgroups x 4 warps, one step each
-    assert abs(f["issue"] - warp_iters * 1000 / (4 * 100 * 2e9) * 1e3) < 1e-12
-    assert abs(f["mufu"] - warp_iters * 128 * 32 / (16 * 100 * 2e9) * 1e3) < 1e-12
+def _runs4(calib, recs=None, lib="L", job="7"):
+    recs = recs if recs is not None else [_rec4(B, H, Hk, N) for D, B, H, Hk, N in K.PAPER_SET]
+    for r in recs:
+        if S4.heads_per_call(r["B"], r["H"], r["Hk"], r["N"]) < r["H"]:
+            r["kernels"]["CatArrayBatchedCopy_x"] = 0.1
+    return {"meta": {"calibration_sha256": calib["sha256"], "library_sha256": lib, "job": job}, "records": recs}
 
 
-def test_sol4_pass0_loop_covers_two_steps_and_glue_follows_the_producer_mode():
-    r = S4.floors(_rec(), _calib(), _counts(), "strided")
-    units = S4.visited_units(4096, 128, 64, True)
-    assert abs(r["pass0"]["floors_ms"]["issue"] - units * 2 * 4 / 2 * 700 / (4 * 100 * 2e9) * 1e3) < 1e-12
-    gq = S4.floors(_rec(H=4, Hk=1), _calib(), _counts(), "strided")["glue"]["floors_ms"]["bytes"]
-    gc = S4.floors(_rec(H=4, Hk=1), _calib(), _counts(), "copy")["glue"]["floors_ms"]["bytes"]
-    assert 0 < gq < gc                                                        # strided: only the GQA fold remains
-    assert S4.floors(_rec(), _calib(), _counts(), "strided")["glue"]["floors_ms"]["bytes"] == 0.0
+def test_sol4_hand_computed_fwd_floors_with_peeled_steps():
+    f, _ = S4.floors(_rec4(B=1, H=1, Hk=1), _calib4(), _counts4())
+    f = f["fwd"]["floors_ms"]
+    units = S4.visited_units(4096, 128, 256, True)
+    assert units == sum(min(16, -(-((mb + 1) * 128) // 256)) for mb in range(32))
+    assert abs(f["tensor"] - units * 128 * 256 * 512 / 1e15 * 1e3) < 1e-12
+    loop_steps = units * 2 - 32 * 2                      # 2 warpgroups; the first n-block of each of 32 m-blocks peeled
+    assert abs(f["issue"] - loop_steps * 4 * 1000 / (4 * 100 * 2e9) * 1e3) < 1e-12
+    assert abs(f["mufu"] - loop_steps * 4 * 128 * 32 / (16 * 100 * 2e9) * 1e3) < 1e-12
 
 
-@pytest.mark.parametrize("why,calib,counts", [
-    ("calibration", {}, _counts()), ("calibration", dict(_calib(), sha256=None), _counts()),
-    ("non-positive", _calib(tflops=0.0), _counts()), ("counts for", _calib(), {"kernels": {}})])
-def test_sol4_rejects_missing_inputs(why, calib, counts):
-    with pytest.raises(S4.ModelError, match=why):
-        S4.floors(_rec(), calib, counts, "strided")
+def test_sol4_glue_ledger_follows_the_route():
+    ND = 32768 * 128
+    split = S4.glue_bytes(128, 1, 16, 16, 32768, "strided", 1)           # MHA 32k, B1: per-head slices are views
+    assert split == 3 * 2 * 2 * 16 * ND                                   # only the output concatenation
+    grp = S4.glue_bytes(128, 1, 16, 4, 32768, "strided", 4)               # per-KV-group calls: dO8 / Q8 copied
+    assert grp == 2 * 2 * 16 * ND + 3 * 2 * 2 * 16 * ND + 2 * 2 * 16 * ND + 2 * 2 * 4 * ND   # + the GQA fold
+    b2 = S4.glue_bytes(128, 2, 32, 8, 16384, "strided", 4)                # B > 1: every slice is copied
+    ND2, calls = 16384 * 128, 8
+    assert b2 == (2 * 2 * 64 * ND2 + 2 * 4 * 64 * 16384 + 2 * 2 * 64 * ND2 + 2 * 2 * 2 * ND2 * calls + 2 * 2 * ND2 * calls
+                  + 3 * 2 * 2 * 64 * ND2 + 2 * 2 * 64 * ND2 + 2 * 2 * 16 * ND2)
+    assert S4.glue_bytes(128, 2, 16, 16, 8192, "strided", 16) == 0       # unsplit MHA, strided producers
+    fold = 2 * 2 * 8 * 16 * 4096 * 128 + 2 * 2 * 8 * 4 * 4096 * 128
+    assert S4.glue_bytes(128, 8, 16, 4, 4096, "strided", 16) == fold
+    assert S4.glue_bytes(128, 8, 16, 4, 4096, "copy", 16) == fold + 2 * 2 * (8 * 16 + 2 * 8 * 4) * 4096 * 128
+    r = S4.record_route(_rec4(1, 16, 16, 32768, names=("_quant_strided_kernel", "CatArrayBatchedCopy_x")))
+    assert r == {"producers": "strided", "heads_per_call": 1, "recorded": False}
+    assert S4.record_route(_rec4(names=("_quant_kernel",)))["producers"] == "copy"     # the contiguous fallback
+    with pytest.raises(S4.ModelError, match="concatenation"):
+        S4.record_route(_rec4(1, 16, 16, 32768))                                       # split rule vs. no cat kernel
+    bad = dict(_rec4(), route={"producers": "copy", "heads_per_call": 16, "streams": 1})
+    with pytest.raises(S4.ModelError, match="disagrees"):
+        S4.record_route(bad)
 
 
-def test_sol4_loop_choice_and_rejection():
-    cands = [{"start": 0, "end": 9, "instr": 900, "mufu_ex2": 146, "qgmma": 12},
-             {"start": 10, "end": 19, "instr": 800, "mufu_ex2": 146, "qgmma": 12},
-             {"start": 20, "end": 29, "instr": 100, "mufu_ex2": 0, "qgmma": 0}]
-    assert S4.choose_loop(cands, 128)["start"] == 10
-    with pytest.raises(S4.ModelError):
-        S4.choose_loop(cands[2:], 128)
+def test_sol4_inputs_bound_before_modeling():
+    c = _calib4()
+    assert len(S4.validate_inputs(_runs4(c), c, _counts4())) == 4
+    tampered = dict(c, copy={"peak_gbs": 1.0})                            # content changed, old digest kept
+    with pytest.raises(S4.ModelError, match="does not match its sha256"):
+        S4.validate_inputs(_runs4(c), tampered, _counts4())
+    other = _calib4(gbs=2000.0)
+    with pytest.raises(S4.ModelError, match="another calibration"):
+        S4.validate_inputs(_runs4(c), other, _counts4())
+    with pytest.raises(S4.ModelError, match="not the timed library"):
+        S4.validate_inputs(_runs4(c), c, _counts4(lib="M"))
+    with pytest.raises(S4.ModelError, match="counts version"):
+        S4.validate_inputs(_runs4(c), c, _counts4(version="not-sol4"))
+    with pytest.raises(S4.ModelError, match="job differ"):
+        S4.validate_inputs(_runs4(c, job="8"), c, _counts4())
+    runs = _runs4(c); runs["records"].pop()                               # a configuration missing
+    with pytest.raises(S4.ModelError, match="exactly once"):
+        S4.validate_inputs(runs, c, _counts4())
+    runs = _runs4(c); runs["records"][-1] = dict(runs["records"][0])      # a configuration duplicated
+    with pytest.raises(S4.ModelError, match="exactly once"):
+        S4.validate_inputs(runs, c, _counts4())
+    runs = _runs4(c); runs["records"][0]["ms"]["fwd"] = float("nan")
+    with pytest.raises(S4.ModelError, match="malformed"):
+        S4.validate_inputs(runs, c, _counts4())
+
+
+def test_sol4_memory_kernels_report_issue_unmodeled():
+    c = _calib4()
+    res = S4.model_records(S4.validate_inputs(_runs4(c), c, _counts4()), c, _counts4())
+    t = res["totals"]["acceptance"]["kernels"]
+    assert t["glue"]["floors_ms"]["issue"] is None and t["fwd"]["floors_ms"]["issue"] > 0
+    assert "| glue |" in "\n".join(S4.table(res)) and "n/a" in "\n".join(S4.table(res))
+
+
+def test_median_records_aggregates_fa3_over_the_repetitions():
+    def rec(fp8, bf16):
+        return {"D": 128, "B": 1, "H": 1, "Hk": 1, "N": 4096, "attn": "causal", "mode": "matched", "e2e_fwd_ms": 1.0,
+                "e2e_fwdbwd_ms": 2.0, "ms": {c: 1.0 for c in K.CATS},
+                "fa3": {"fp8_fwd_kernel_ms": fp8, "bf16_fwd_ms": bf16, "note": "x"}}
+    med = ab.median_records([[rec(5.0, 1.0)], [rec(1.0, 2.0)], [rec(2.0, 3.0)]])[0]
+    assert med["fa3"]["fp8_fwd_kernel_ms"] == 2.0 and med["fa3"]["bf16_fwd_ms"] == 2.0 and med["fa3"]["note"] == "x"
+    assert abs(med["fa3_spread_pct"]["fp8_fwd_kernel_ms"] - 200.0) < 1e-9
+    with pytest.raises(SystemExit, match="missing"):
+        ab.median_records([[rec(1.0, 1.0)], [dict(rec(1.0, 1.0), fa3=None)], [rec(1.0, 1.0)]])
 
 
 def test_gate_lib_stamp_handling(tmp_path):

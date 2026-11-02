@@ -12,7 +12,7 @@ kernels.py format, so summarize.py --base works on them) and <dir>/ab.md (per-ke
 per-shape end-to-end changes).  The same benchmarks/kernels.py (this file's directory) measures both builds.
 `--slow-b CYCLES` adds a spin kernel to every B step (KDA_BENCH_SLOWDOWN_CYCLES): a self-test that a slower B shows up.
 """
-import argparse, json, os, shutil, statistics, subprocess, sys
+import argparse, json, math, os, shutil, statistics, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -118,8 +118,31 @@ def median_records(runs):
         m["e2e_fwdbwd_ms"] = statistics.median(r["e2e_fwdbwd_ms"] for r in rs)
         m["ms"] = {c: statistics.median(r["ms"][c] for r in rs) for c in K.CATS}
         m["reps"] = len(rs)
+        if any(r.get("fa3") for r in rs):   # B20: the FA3 reference over the same repetitions, never repetition 0 alone
+            m["fa3"], m["fa3_spread_pct"] = median_fa3([r.get("fa3") for r in rs], k_)
         out.append(m)
     return out
+
+
+def median_fa3(arms, k_):
+    """Per-field median (and spread %) of the FA3 reference timings; every repetition must carry the same finite fields."""
+    if any(not a for a in arms):
+        raise SystemExit(f"configuration {k_}: FA3 timings missing in some repetitions")
+    fields = set(arms[0])
+    if any(set(a) != fields for a in arms):
+        raise SystemExit(f"configuration {k_}: FA3 field sets differ between repetitions")
+    med, spr = {}, {}
+    for f in sorted(fields):
+        v = [a[f] for a in arms]
+        if all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            if not all(math.isfinite(x) and x > 0 for x in v):
+                raise SystemExit(f"configuration {k_}: non-finite / non-positive FA3 {f}")
+            med[f], spr[f] = statistics.median(v), spread(v)
+        else:
+            if any(x != v[0] for x in v):
+                raise SystemExit(f"configuration {k_}: FA3 {f} differs between repetitions")
+            med[f] = v[0]
+    return med, spr
 
 
 def spread(v):
@@ -192,20 +215,22 @@ def is_matched(r, tune_dim=TUNE_DIM):
 
 
 def is_tuned(r, tune_dim=TUNE_DIM):
-    """The TARGET configurations (Hao, round 13): D128 causal matched at N 4096 / 8192."""
-    return is_matched(r, tune_dim) and r["N"] in (4096, 8192)
+    """The acceptance set (Hao, round 16): kernels.PAPER_SET, D128 causal matched Hq 16 / 32, Hk 4, at B2 N8192 and
+    B1 N65536 (the paper's training shapes)."""
+    return is_matched(r, tune_dim) and (r["D"], r["B"], r["H"], r["Hk"], r["N"]) in K.PAPER_SET
 
 
 def is_guarded(r, tune_dim=TUNE_DIM):
-    """The no-regression guard (Hao, round 13): D128 causal matched at N 16384 / 32768."""
-    return is_matched(r, tune_dim) and r["N"] in (16384, 32768)
+    """No separate guard since round 16 (kernels.PAPER_GUARD is empty): every acceptance shape is itself gated."""
+    return is_matched(r, tune_dim) and (r["D"], r["B"], r["H"], r["Hk"], r["N"]) in K.PAPER_GUARD
 TARGET_PCT = 3.0
 
 
 def decision(raw_a, raw_b, res, target, tune_dim=TUNE_DIM, threshold=TARGET_PCT):
-    """Acceptance predicates for target kernel category `target` (Hao, round 13): (1) the target's summed median over the
-    TARGET configurations (D128 causal matched, N 4096 / 8192) improves by >= threshold %; (2) no target or guard
-    (N 16384 / 32768) configuration is slower beyond its spread.  Other configurations are reported, not gated."""
+    """Acceptance predicates for target kernel category `target` (Hao, round 16): (1) over the four acceptance shapes
+    (kernels.PAPER_SET), the geometric mean of the per-shape target-kernel median ratios improves by >= threshold %
+    (equal weight per shape); (2) no acceptance shape is slower beyond its spread; (3) all four shapes measured.
+    Other configurations are reported, not gated."""
     def per_rep(runs, sel):
         return [sum(r["ms"][target] for r in recs if sel(r)) for recs in runs]
     med_a, med_b = median_records(raw_a), median_records(raw_b)
@@ -217,18 +242,25 @@ def decision(raw_a, raw_b, res, target, tune_dim=TUNE_DIM, threshold=TARGET_PCT)
     oa = sum(r["ms"][target] for r in med_a if other(r)); ob = sum(r["ms"][target] for r in med_b if other(r))
     ra, rb = per_rep(raw_a, other), per_rep(raw_b, other)
     other_rng = max(max(ra) - min(ra), max(rb) - min(rb)) if ra else 0.0
-    kt = lambda k: (is_tuned(dict(D=k[0], N=k[4], attn=k[5], mode=k[6]), tune_dim)
-                    or is_guarded(dict(D=k[0], N=k[4], attn=k[5], mode=k[6]), tune_dim))
+    kd = lambda k: dict(D=k[0], B=k[1], H=k[2], Hk=k[3], N=k[4], attn=k[5], mode=k[6])
+    kt = lambda k: is_tuned(kd(k), tune_dim) or is_guarded(kd(k), tune_dim)
     slow_tune = [s for s in res["shapes"] if kt(s["key"]) and s["slower_beyond_spread"]]
     slow_other = [s for s in res["shapes"] if not kt(s["key"]) and s["slower_beyond_spread"]]
-    d = {"target": target, "tune_dim": tune_dim, "threshold_pct": threshold,
-         "target_tune_A": sa, "target_tune_B": sb, "target_tune_change_pct": 100 * (sb / sa - 1),
+    # equal weight per shape (Hao, round 16): the geometric mean of the per-shape target-kernel median ratios
+    by_b = {key(r): r for r in med_b}
+    ratios = [by_b[key(r)]["ms"][target] / r["ms"][target] for r in med_a if tune(r) and r["ms"][target] > 0]
+    gm = math.exp(sum(math.log(x) for x in ratios) / len(ratios))
+    d = {"target": target, "tune_dim": tune_dim, "threshold_pct": threshold, "weighting": "geometric mean per shape",
+         "target_tune_A": sa, "target_tune_B": sb, "target_tune_change_pct": 100 * (gm - 1),
+         "target_tune_sum_change_pct": 100 * (sb / sa - 1),
+         "target_shape_ratios": {str(k): v for k, v in zip([key(r) for r in med_a if tune(r) and r["ms"][target] > 0], ratios)},
          "target_other_A": oa, "target_other_B": ob, "target_other_change_pct": 100 * (ob / oa - 1) if oa > 0 else 0.0,
          "target_other_slower_beyond_spread": ob - oa > other_rng,
          "tune_shapes_slower_beyond_spread": [s["key"] for s in slow_tune],
          "other_shapes_slower_beyond_spread": [s["key"] for s in slow_other]}
-    d["checks"] = {"target_gain": d["target_tune_change_pct"] <= -threshold, "tune_shapes": not slow_tune}
     d["tuned_configs"] = sum(1 for r in med_a if tune(r))
+    d["checks"] = {"target_gain": d["target_tune_change_pct"] <= -threshold, "tune_shapes": not slow_tune,
+                   "complete_set": d["tuned_configs"] == len(K.PAPER_SET) == len(ratios)}
     d["accept"] = all(d["checks"].values())
     return d
 
@@ -335,7 +367,7 @@ def main():
     f.add_argument("--rev", required=True); f.add_argument("--so", required=True); f.add_argument("--out", required=True)
     r = sp.add_parser("run")
     r.add_argument("--a", required=True); r.add_argument("--b", required=True)
-    r.add_argument("--grid", choices=("d128m", "all", "main", "holdout", "one"), default="d128m")
+    r.add_argument("--grid", choices=("paper", "d128m", "all", "main", "holdout", "one"), default="paper")
     r.add_argument("--target", choices=K.CATS, default=None, help="evaluate the acceptance predicates for this kernel")
     r.add_argument("--reps", type=int, default=3); r.add_argument("--iters", type=int, default=10)
     r.add_argument("--sustain", type=float, default=2.0)

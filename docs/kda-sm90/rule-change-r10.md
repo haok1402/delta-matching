@@ -51,3 +51,17 @@ Extends the D128-only, all-shapes rule above:
 8. Builds and CPU tests out of GPU jobs where possible; build all variants of a round in one job that times them right
    away; never rebuild inside gate.py when the .so exists.
 9. Wait on job IDs or PIDs only, never pgrep / pkill patterns on this shared account.
+
+## Scope change (Hao, round 12): the matched-delta method only
+
+- Target grid: D128, causal, mode "matched" only (matched supports causal only): the 13 D128 shapes of the one grid
+  (`kernels.py --grid d128m`). Stale mode and full attention are dropped from ranking, tuning and acceptance; they
+  (and D256) must stay correct (tests, the four 72-case equivalence routes) but are not measured for gains or
+  regressions.
+- Kernels that matter: those a matched forward+backward runs: forward, producers and glue, pass 0 (matched delta),
+  pass 1, pass 2; re-ranked by waste over the D128 causal matched shapes. Pass 0 (never profiled) gets a place in the
+  order.
+- Acceptance as before (>= 3% on the target kernel summed over the tuned configurations, stacking of confirmed >= 1%
+  identical-output gains, a second fresh job, no D128 causal matched shape slower beyond its spread), measured on this
+  grid only; bench.py predicate on D128 matched only. Enforced by `ab.py decision()` (`is_tuned`) and `gate.py`
+  (A/B on `--grid d128m`). The shorter A/B jobs leave room for more candidates.

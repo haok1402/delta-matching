@@ -159,7 +159,7 @@ def resource_regressions(prev, cand):
 
 
 BENCH_PCT = 1.0
-BENCH_ROWS = ("delta_matching (matched)", "delta_matching (stale)")
+BENCH_ROWS = ("delta_matching (matched)",)   # scope (Hao, round 12): matched only, at D128
 
 
 def bench_decision(files):
@@ -306,7 +306,7 @@ def main():
         # job must each pass.
         d = os.path.join(run_dir, "ab_all")
         gate.run("ab_all", [gate.py, os.path.join(HERE, "ab.py"), "run", "--a", os.path.abspath(a.prev_root), "--b", wt,
-                            "--grid", "all", "--reps", str(a.reps), "--target", a.target, "--out-dir", d]
+                            "--grid", "d128m", "--reps", str(a.reps), "--target", a.target, "--out-dir", d]
                  + (["--subset", a.subset] if a.subset else []), env=ab_env)
         if not os.path.isfile(os.path.join(d, "ab.json")):
             raise GateFailure("A/B wrote no ab.json")
@@ -321,7 +321,7 @@ def main():
             order = ("A", "B") if rep != 1 else ("B", "A")
             for x in order:
                 root = os.path.abspath(a.prev_root) if x == "A" else wt
-                for D in (128, 256):
+                for D in (128,):
                     bj = os.path.join(run_dir, f"bench_{x}_rep{rep}_D{D}.json")
                     bench_files.append((x, D, bj))
                     gate.run(f"bench_{x}_rep{rep}_D{D}", [gate.py, os.path.join(HERE, "bench.py"), "--D", str(D), "--N", "8192",

@@ -333,7 +333,7 @@ if "ab.py" in line:
     d = args[args.index("--out-dir") + 1]; os.makedirs(d, exist_ok=True)
     if "ab" not in fail.split(","):
         acc = os.environ.get("STUB_DECISION", "accept") == "accept"
-        if "--target" not in args or args[args.index("--grid") + 1] != "all":
+        if "--target" not in args or args[args.index("--grid") + 1] != "d128m":
             sys.exit(9)
         open(os.path.join(d, "ab.json"), "w").write(
             '{"decision": {"accept": %s, "checks": {"target_gain": %s}, "tune_dim": 128, "target_tune_change_pct": -4.0}}'
@@ -509,8 +509,21 @@ def test_decision_rejects_small_gain_slow_d128_shape_and_slow_d256():
     assert not small["accept"] and not small["checks"]["target_gain"]
     slow = _decide(A, [_recs((10.5, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)])
     assert not slow["accept"] and slow["tune_shapes_slower_beyond_spread"] == [[128, 1, 16, 16, 2048, "causal", "matched"]]
+    # scope (round 12): a slower D256 shape / target is reported, not gated
     other = _decide(A, [_recs((10.0, 20.0, 31.0), {128: 0.9, 256: 1.2}) for _ in range(3)])
-    assert not other["accept"] and not other["checks"]["other_shapes"] and not other["checks"]["other_target"]
+    assert other["accept"] and other["other_shapes_slower_beyond_spread"] and other["target_other_slower_beyond_spread"]
+
+
+def test_decision_gates_only_d128_causal_matched():
+    A = [_recs((10.0 + 0.01 * i, 20.0, 30.0), {128: 1.0, 256: 1.0}) for i in range(3)]
+    B = [_recs((10.0, 20.0, 30.0), {128: 0.9, 256: 1.0}) for _ in range(3)]
+    for runs in (A, B):
+        for recs in runs:
+            recs[1]["mode"] = "stale"   # the second D128 shape is stale: not a tuned configuration
+    for recs in B:
+        recs[1]["e2e_fwdbwd_ms"] = 25.0
+    d = _decide(A, B)
+    assert d["accept"] and d["tuned_configs"] == 1 and d["other_shapes_slower_beyond_spread"]
 
 
 def test_slower_within_spread_is_not_flagged():
@@ -530,7 +543,8 @@ def test_gate_rejects_a_bench_regression_even_when_every_child_succeeds(tmp_path
 def test_gate_records_the_bench_decision_on_success(tmp_path):
     r = run_gate(tmp_path, "confirm", "")
     rec = json.load(open(tmp_path / "run_confirm_none" / "gate.json"))
-    assert r.returncode == 0 and rec["bench_decision"]["ok"] and len(rec["bench_decision"]["changes_pct"]) == 4
+    assert r.returncode == 0 and rec["bench_decision"]["ok"] and list(rec["bench_decision"]["changes_pct"]) == \
+        ["D128 delta_matching (matched)"]
 
 
 def test_stack_growth_is_a_warning_and_the_ab_still_runs(tmp_path):

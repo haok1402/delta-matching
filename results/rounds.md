@@ -416,3 +416,49 @@ serialization stays fatal; no CPU work or rebuilds in GPU jobs; waits on job IDs
   the gate); CPU tooling tests opt-in (`--tooling-tests`), run on the cpu partition instead.
 
 Next (Hao's order): the stacked D128 pass-1 candidate H1a + H1b (+ AMAX-REDUX) on the current PSIPF base.
+
+## Round 12: stacked H1a + H1b (D128 pass 1): ACCEPTED (1ffffe2); scope narrowed to D128 causal matched
+
+- Candidate (Hao's first stacked candidate; `results/r12/stack_h1a_h1b.patch`): H1b reapplied as is; H1a ported by
+  hand onto it (the P~ conversion, the dV window rescale, the dOt wait and the dV gemm moved to right after the dO
+  release, the fp32 P fragment's last reader, before the cross-warpgroup psi barrier). Emitted: the dV QGMMAs
+  interleave with the psi-amax shuffles before the 256-thread psi BAR.SYNC; FIFO retire unchanged; resources and
+  instruction counts identical to PSIPF; no diagnostics. AMAX-REDUX not included (not ready).
+- Gate (job 21168017, full, prebuilt library, vs PSIPF, merged grid): tooling tests 83 passed (beside the build);
+  pytest 49 / 3; **bitwise on all four routes vs the baseline and PSIPF**; D128 pass 1 267.181 -> 256.414 ms
+  (**-4.03%**), no shape slower beyond spread; bench D128 matched / stale fwd+bwd -6.0% / -5.8%.
+- Confirmation (job 21168255, same candidate 2fb59676beb1 vs PSIPF e1119aaaa89c): **-3.99%**, all predicates pass;
+  bench D128 -3.0% / -3.4%. On the D128 causal-matched subgrid (scope below): -4.23% / -4.39%, no shape slower.
+- Verdict: ACCEPTED. Accepted build 2fb59676beb1 (`.local/frozen/r12_stack`, stamp code_sha 17178b5b6bca). Stack
+  ledger: H1a (round 1, -1.27%, one job) and H1b (round 5, -1.64%, one job) were single-job sub-3% results; the
+  combination was measured on its own (two jobs) and not inferred from their sum. D128 pass-1 counter stays 0.
+- Tooling (the round's bounded commit 656782f): gate.py `--lib` never deletes or self-links its input (B9);
+  diagnostics parse C7510 / serialization and nonzero spill counts (B10); fixture fix (Q15).
+
+### Scope change (Hao, during round 12)
+
+Only the matched-delta method counts: target grid D128 causal matched (13 configurations, `--grid d128m`); stale /
+full / D256 stay correct but are not measured; re-rank the matched fwd+bwd kernels (forward, producers / glue, pass 0,
+pass 1, pass 2); pass 0 gets a place in the order; acceptance as before on this grid only. Recorded in
+`docs/kda-sm90/rule-change-r10.md`; implemented in `kernels.py` (grid d128m), `ab.py` (`is_tuned`, decision gated on
+the tuned configurations only) and `gate.py` (A/B on d128m, bench matched D128 only).
+
+Ranking over the D128 causal matched configurations (accepted stack arm of the confirmation,
+`results/r12/stack_2/ab_all/B_median.json`):
+
+D128 causal matched configurations: 13 (old two-floor model; the four-floor model M3 is pending)
+
+| kernel | measured ms | share of kernel time | modeled SOL ms | modeled waste ms | % of modeled SOL |
+|---|---:|---:|---:|---:|---:|
+| pass1 | 63.460 | 46.0% | 17.748 | 45.712 | 28.0% |
+| fwd | 26.423 | 19.2% | 8.761 | 17.662 | 33.2% |
+| pass0 | 21.749 | 15.8% | 8.761 | 12.988 | 40.3% |
+| glue | 7.505 | 5.4% | 2.631 | 4.875 | 35.0% |
+| pass2 | 13.982 | 10.1% | 11.483 | 2.498 | 82.1% |
+| prod_fwd | 2.753 | 2.0% | 1.954 | 0.799 | 71.0% |
+| prod_bwd | 0.969 | 0.7% | 0.683 | 0.286 | 70.5% |
+| twin | 1.048 | 0.8% | 0.910 | 0.138 | 86.8% |
+Order from here (waste, the audit direction and the scope): pass 1 (psi decoupling next, after the Q2 / Q3 numerics
+gate it needs), with cheap identical-output rounds interleaved (forward k-scale prefetch; H3 glue copies), pass 0
+profiled and placed after forward (12.99 ms waste, 15.8% of matched kernel time), then pass 2 / producers.
+Counters (D128 matched): pass 1 0, forward 0, pass 0 0, glue 0, pass 2 0.

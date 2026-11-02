@@ -182,36 +182,42 @@ def analyze(raw_a, raw_b, subset=None, gate_pct=1.0):
     return res, med_a, med_b
 
 
-TUNE_DIM = 128           # rule (Hao, round 10): the evolved head dim; the other is held to correctness / no slowdown
+TUNE_DIM = 128           # rule (Hao, round 10): the evolved head dim
+# scope (Hao, round 12): the tuned / measured configurations are D128 causal matched only; everything else (stale, full,
+# D256) must stay correct (tests, equivalence) but is reported only, never a predicate
+
+
+def is_tuned(r, tune_dim=TUNE_DIM):
+    return r["D"] == tune_dim and r["attn"] == "causal" and r["mode"] == "matched"
 TARGET_PCT = 3.0
 
 
 def decision(raw_a, raw_b, res, target, tune_dim=TUNE_DIM, threshold=TARGET_PCT):
-    """Acceptance predicates of one merged-grid A/B for target kernel category `target`: (1) the target's summed median
-    over every tune_dim shape improves by >= threshold %; (2) no tune_dim shape is slower beyond its spread; (3) no
-    other-head-dim shape is slower beyond its spread and the other head dims' target sum is not slower beyond the
-    spread of its per-repetition sums."""
+    """Acceptance predicates for target kernel category `target` (scope of round 12): (1) the target's summed median over
+    every tuned configuration (D128 causal matched) improves by >= threshold %; (2) no tuned configuration is slower
+    beyond its spread.  Any other configurations in the run (stale / full / D256) are reported, not gated."""
     def per_rep(runs, sel):
         return [sum(r["ms"][target] for r in recs if sel(r)) for recs in runs]
     med_a, med_b = median_records(raw_a), median_records(raw_b)
-    tune = lambda r: r["D"] == tune_dim
-    other = lambda r: r["D"] != tune_dim
+    tune = lambda r: is_tuned(r, tune_dim)
+    other = lambda r: not is_tuned(r, tune_dim)
     sa = sum(r["ms"][target] for r in med_a if tune(r)); sb = sum(r["ms"][target] for r in med_b if tune(r))
     if sa <= 0:
-        raise SystemExit(f"target {target!r} has no time on the D{tune_dim} shapes")
+        raise SystemExit(f"target {target!r} has no time on the D{tune_dim} causal matched configurations")
     oa = sum(r["ms"][target] for r in med_a if other(r)); ob = sum(r["ms"][target] for r in med_b if other(r))
     ra, rb = per_rep(raw_a, other), per_rep(raw_b, other)
     other_rng = max(max(ra) - min(ra), max(rb) - min(rb)) if ra else 0.0
-    slow_tune = [s for s in res["shapes"] if s["key"][0] == tune_dim and s["slower_beyond_spread"]]
-    slow_other = [s for s in res["shapes"] if s["key"][0] != tune_dim and s["slower_beyond_spread"]]
+    kt = lambda k: is_tuned(dict(D=k[0], attn=k[5], mode=k[6]), tune_dim)
+    slow_tune = [s for s in res["shapes"] if kt(s["key"]) and s["slower_beyond_spread"]]
+    slow_other = [s for s in res["shapes"] if not kt(s["key"]) and s["slower_beyond_spread"]]
     d = {"target": target, "tune_dim": tune_dim, "threshold_pct": threshold,
          "target_tune_A": sa, "target_tune_B": sb, "target_tune_change_pct": 100 * (sb / sa - 1),
          "target_other_A": oa, "target_other_B": ob, "target_other_change_pct": 100 * (ob / oa - 1) if oa > 0 else 0.0,
          "target_other_slower_beyond_spread": ob - oa > other_rng,
          "tune_shapes_slower_beyond_spread": [s["key"] for s in slow_tune],
          "other_shapes_slower_beyond_spread": [s["key"] for s in slow_other]}
-    d["checks"] = {"target_gain": d["target_tune_change_pct"] <= -threshold, "tune_shapes": not slow_tune,
-                   "other_shapes": not slow_other, "other_target": not d["target_other_slower_beyond_spread"]}
+    d["checks"] = {"target_gain": d["target_tune_change_pct"] <= -threshold, "tune_shapes": not slow_tune}
+    d["tuned_configs"] = sum(1 for r in med_a if tune(r))
     d["accept"] = all(d["checks"].values())
     return d
 
@@ -318,7 +324,7 @@ def main():
     f.add_argument("--rev", required=True); f.add_argument("--so", required=True); f.add_argument("--out", required=True)
     r = sp.add_parser("run")
     r.add_argument("--a", required=True); r.add_argument("--b", required=True)
-    r.add_argument("--grid", choices=("all", "main", "holdout", "one"), default="all")
+    r.add_argument("--grid", choices=("d128m", "all", "main", "holdout", "one"), default="d128m")
     r.add_argument("--target", choices=K.CATS, default=None, help="evaluate the acceptance predicates for this kernel")
     r.add_argument("--reps", type=int, default=3); r.add_argument("--iters", type=int, default=10)
     r.add_argument("--sustain", type=float, default=2.0)

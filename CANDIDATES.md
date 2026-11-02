@@ -154,3 +154,15 @@ bhnd / heldout; 22 without the envelope); PW16 FAIL (d128_bhnd matched dV +1.67e
 | SHFL8 + QST=3, DOST=3 | -2.15% / -2.45% | default route |
 
 None reaches the 3% bar; C2 stays held for stacking with another bitwise piece.
+
+### Addendum: on 7a06674 (r17_pk, EXPBX64 accepted), paper grid, two jobs each
+
+| build | pass 1 geomean job 1 / job 2 |
+|---|---:|
+| SHFL8 + QST 3 / DOST 3 (`kda-sm90-pass1-c3pk`) | -1.18% / -0.50% |
+| SHFL8 alone (`kda-sm90-pass1-c2pk`) | **-1.10% / -1.07%** |
+| QST 3 / DOST 3 alone | +0.25% / +0.23% |
+
+The integrator's full gate of the c3 stack on r17_p0s measured -2.26% (job 21181578). On r17_pk the flags no longer
+help, so the stack piece is **C2 on r17_pk: `kda-sm90-pass1-c2pk`**, READY for stacking (>= 1% bitwise in two jobs;
+BITWISE EQUAL vs r17_pk on all four routes, job 21182433; REG 168, STACK 0, no diagnostics).

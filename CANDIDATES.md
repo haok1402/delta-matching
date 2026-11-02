@@ -1,13 +1,20 @@
 # kda-p1split candidates (pass 1 at head dim 128: breaking the register wall)
 
-Helper kda-p1split, branch `kda-sm90-p1split` (on `origin/kda-sm90` 19c238b). Pass 1 here means dK, dV and dS' at
-D128, causal, matched.
+Helper kda-p1split, branch `kda-sm90-p1split`. Pass 1 here means dK, dV and dS' at D128, causal, matched.
+
+- **Base.** The branch is rebased onto `origin/kda-sm90` 70b482e (r17_pk, with EXPBX64 accepted).
+- **Measurements.** All of them were taken on the 19c238b base against frozen `r17_p0s`, whose pass 1 predates
+  EXPBX64. The conclusions are structural and carry over.
+- **Exp line.** The PIPE path's exp line is still the pre-EXPBX certified line. It would need EXPBX64's
+  per-warpgroup line to be bitwise against r17_pk. It is rejected, so it was not ported.
 
 Every design is a compile-time switch in `csrc/mainloop_bwd_sm90_fp8r.hpp`, default OFF. `DM_XDEFS` (extra -D
 defines, ported into `delta_matching/_buildcfg.py` and stamped into the build info) builds a variant.
 
 With no switch set, the build is the accepted kernel. Evidence: the SASS of both pass-1 instantiations is identical
-(md5 of the address-stripped Fp8R functions) to the unmodified source's (TU jobs 21182589 and 21184018).
+(md5 of the address-stripped Fp8R functions) to the unmodified source's:
+- on 19c238b: TU jobs 21182589 and 21184018;
+- after the rebase, against 70b482e's own source: TU jobs 21184091 and 21184092.
 
 Tools are in `kda-work/p1split-aux/` (outside the repo):
 - `jobs/tu.sh`: a single-TU compile with ptxas -v and the C75xx diagnostics, plus SASS.

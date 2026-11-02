@@ -327,9 +327,32 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
             #pragma unroll
             for (int i = 0; i < size(acc1); ++i) { acc1(i) *= r; }
         }
-        if (take0) { gemm_half(acc, s, 0, psi_w0 == 0.0f); psi_w0 = psi_cur.x; }
-        if (take1) { gemm_half(acc1, s, 1, psi_w1 == 0.0f); psi_w1 = psi_cur.y; }
-        if (take0 || take1) { warpgroup_wait<0>(); }
+        // one fenced arrive / commit region for both halves (no accumulator write between the two issues)
+        warpgroup_fence_operand(acc);
+        warpgroup_fence_operand(acc1);
+        warpgroup_arrive();
+        if (take0) {
+            tiled_mma.accumulate_ = psi_w0 == 0.0f ? GMMA::ScaleOut::Zero : GMMA::ScaleOut::One;
+            #pragma unroll
+            for (int kb = 0; kb < 2; ++kb) {
+                cute::gemm(tiled_mma, tCrA(_, _, kb, s), tCrB(_, _, kb, s), acc);
+                tiled_mma.accumulate_ = GMMA::ScaleOut::One;
+            }
+            psi_w0 = psi_cur.x;
+        }
+        if (take1) {
+            tiled_mma.accumulate_ = psi_w1 == 0.0f ? GMMA::ScaleOut::Zero : GMMA::ScaleOut::One;
+            #pragma unroll
+            for (int kb = 2; kb < 4; ++kb) {
+                cute::gemm(tiled_mma, tCrA(_, _, kb, s), tCrB(_, _, kb, s), acc1);
+                tiled_mma.accumulate_ = GMMA::ScaleOut::One;
+            }
+            psi_w1 = psi_cur.y;
+        }
+        warpgroup_commit_batch();
+        warpgroup_wait<0>();
+        warpgroup_fence_operand(acc);
+        warpgroup_fence_operand(acc1);
 #else
         if (take0) {
             if (psi_w != 0.0f) {

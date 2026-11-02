@@ -963,3 +963,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   r21_clean, all rejected: ST3 (3 K/V stages exceed shared memory), PREW4 (+1.13%, 8 reps), A1SKIP (skip O *= alpha
   when alpha == 1: spills, +52%), A1DEF (deferred skip: bitwise, -0.10%). Next: kda-fwd takes a SASS opcode-mix diff of
   the softmax / convert path vs FA3 fp8; my S22 worker takes older round 7-16 levers and 2-WG schedule specifics.
+- S22 worker on r21_clean (results/screens/fwd_r22_log.md; 2-rep screens, noise ~+-1%, all bitwise): PVIL4 (two
+  64-column PV temps, interleaved rho chains) +2.2% / +1.9%; with a moved promote +17.7% (spills); QK split into two
+  64 x 128 halves with the promote between +24% (the compiler issues both halves back to back and spills O); early
+  V release, scheduler-barrier arrive before / after the promote, first one / two PV sub-gemms before the sync:
+  neutral or slower. The register split is at the hardware maximum (24 + 2 x 240 = 504 of 512); QK-first at this tile
+  needs 256-288 registers. The k-scale prefetch is obsolete (scales come from shared memory). Turn scheduling does
+  not set the step time; each warpgroup's own chain does. No candidate; the remaining forward room is the softmax /
+  convert instruction count (kda-fwd's SASS-diff work).

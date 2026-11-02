@@ -243,3 +243,24 @@ The register split was re-swept on W4: 112/24, 112/32, 104/24, 104/40, 96/24, 96
 | resources | launch 96, consumer 104, producer 24; STACK 0, no spills |
 
 Status: **READY for stacking** (bitwise, >= 1% in two jobs).
+
+## Stack C5 + C4 (+ tooling) for kda-sm90 c1ceece — branch kda-sm90-pass0-stack (3766b4f)
+
+Commits on c1ceece: f254c01 (C5: NML + 104/24), 6061e7b (C4: P0ALL, split.py), 3766b4f (tooling:
+benchmarks/equivalence.py v4).
+- The tooling commit canonicalizes the matched delta captures to all.delta_fp8.{lse,out}: the delta_fp8 calls are
+  concatenated in head order, checked to tile [0, H) exactly. Manifest version 3 -> 4.
+- With it, a per-group build (r17_fwd) and the all-heads build (C4) compare byte for byte.
+
+| evidence | result |
+|---|---|
+| equivalence (v4 tooling, stamped build) | BITWISE EQUAL vs frozen r17_fwd on default / kv / head / streams2, 72 cases each, in two jobs (21178884, 21178885) |
+| ab.py paper / pass0 vs r17_fwd | -3.30% (21178884, ACCEPT), -2.86% (21178885, REJECT: B2 H32 8k at -0.06%), -3.29% (21179368, ACCEPT), -3.26% (21179369, ACCEPT); per shape about -1 / -5.1 / -1.2 / -5.4% |
+| resources | consumer 104 / producer 24 at launch 96, STACK 0, no spills |
+
+Status: **READY** (>= 3% in the two most recent fresh jobs; all four jobs disclosed).
+
+Also screened on this stack (sT2, 3 reps, vs r17_fwd; stack ref -3.05%): Q/dO EVICT_FIRST -3.42%, K/V EVICT_NORMAL
+-3.69%, both -3.63%, ring depth 4 -3.90%. All bitwise; all within the 8k H32 shape's repetition range (up to 0.044 ms),
+so not taken. PERS (persistent W4, snake LPT tiles, next-tile K/V prefetch): -9.46% / -9.57% vs C5's -13.64% / -13.89%
+(spills in the tile-loop state; per-tile Q/dO hand-off): REJECTED after two variants (104 and 112 consumer regs).

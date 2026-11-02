@@ -508,6 +508,16 @@ struct CollectiveMainloopFwdSm90Fp8F {
 // is 272 there).  FA3FP11_HD128_PVFIRST=0 selects the mainloop's !kSchedPVFirst path (FA3's IntraWGOverlap order) for
 // the hd128 instantiation ONLY; the d256 pin FA3FP8F_TP_PVFIRST is untouched.  Issue order only: O bitwise expected.
     static constexpr bool kSchedPVFirst = ((kHeadDimV >= 256 ? FA3FP8F_TP_PVFIRST : FA3FP11_HD128_PVFIRST) != 0) && IntraWGOverlap && !HasQv;
+// ## kda-fwd FWDLD (FA3FP11_HD128_FWDLD=1, hd128 PV-first only; d256 untouched), a NAMED NUMERICS CHANGE (round-off class):
+//   D(fold): the S descale q8sc * k8sc_g is folded into the code argument: the group maxima are taken on the raw QK
+//            codes and descaled once per row and group (RN is monotonic, so gm_g, ms_g, row_max and alpha are bitwise
+//            the shipped ones), and the code is exp2(fma(x, RN(g * l2), -ms_g)) instead of exp2(fma(RN(x * g), l2, -ms_g)):
+//            one fp32 rounding fewer in the exp argument, no FMUL per score.
+//   L(azy):  tOrO is kept in a lagging per-row reference basis mref (log2 units) instead of the running max: the promote
+//            weight is v8sc_3 * 2^(ms_3 - mref) (same op count as basis_last), the per-tile tOrO *= alpha is dropped,
+//            and tOrO is rebased (O *= 2^(mref - m l2), mref = m l2) only when |m l2 - mref| > 8 for some row of the
+//            warp; finalize folds 2^(mref - m l2) into 1 / l.  Codes, ms_g, row_max, row_sum and LSE are unchanged.
+    static constexpr bool kFwdLD = FA3FP11_HD128_FWDLD && kHeadDim == 128 && kSchedPVFirst;
 
     // ## HasQv guard (NO numeric effect on the shipped
     // HasQv=false instantiation): the parent's static_assert(!HasQv) sits
@@ -1394,6 +1404,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
             }
             }
         };
+        auto fq8_gsc = [&](int n_blk, float (&g_)[kGroups]) {
+            #pragma unroll
+            for (int g = 0; g < kGroups; ++g) { g_[g] = fq8_q8sc * params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g]; }
+        };
         auto fq8_load_v = [&](int n_blk) {
             if constexpr (kGroups == 4) {
             fq8_v[0] = params.ptr_v8s[fq8_bh_k + 4 * n_blk + 0];
@@ -1438,15 +1452,24 @@ struct CollectiveMainloopFwdSm90Fp8F {
             }
             scoremod_premask_fn(tSrS);
             mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block);
-            fq8_descale(tSrS, n_block);   // ## FQ8: codes -> true S (mask's -inf survives)
+            float fq8_g0_[kGroups];
+            if constexpr (kFwdLD) { fq8_gsc(n_block, fq8_g0_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8: codes -> true S (mask's -inf survives)
 
-            Tensor scores_scale = softmax.template max_get_scale_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            Tensor scores_scale = [&] {
+                if constexpr (kFwdLD) { return softmax.template max_get_scale_grouped_raw</*Is_first=*/true, /*Check_inf=*/true>(tSrS, fq8_g0_); }
+                else { return softmax.template max_get_scale_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS); }
+            }();
             // Don't need to store scales to send to WG1 (in the case of LargeHeadDimV) since it's 1.f
 
             // ## FQ8F: builds this tile's four per-row bases ms_[0..3] and the
             // e4m3-bound codes on them.  No V-fold: the per-32 V descale is
             // carried by the accumulator's basis instead (see rho above).
-            softmax.template online_softmax_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            if constexpr (kFwdLD) {
+                softmax.init_ref();
+                softmax.template online_softmax_grouped_raw</*Is_first=*/true, /*Check_inf=*/true>(tSrS, fq8_g0_);
+            } else {
+                softmax.template online_softmax_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            }
             fq8_load_v(n_block);   // ## FQ8: this P-hat tile's four v-scales
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
             Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV>(tSrS.layout()));
@@ -1494,7 +1517,27 @@ struct CollectiveMainloopFwdSm90Fp8F {
             };
             auto fq8_promote_slab = [&](auto ni_c, auto& D_) {
                 auto O_ = pv_O_slab(ni_c);
-                softmax.promote_o(O_, D_, softmax.basis_last(fq8_v[kGroups - 1]));
+                if constexpr (kFwdLD) { softmax.promote_o(O_, D_, softmax.template basis_ref<kGroups - 1>(fq8_v[kGroups - 1])); }
+                else { softmax.promote_o(O_, D_, softmax.basis_last(fq8_v[kGroups - 1])); }
+            };
+            // ## FWDLD: rebase tOrO onto the running max when it has drifted more than 2^8 from the reference.
+            auto fq8_lazy_rebase = [&]() __attribute__((always_inline)) {
+                if constexpr (kFwdLD) {
+                    bool need_ = false;
+                    #pragma unroll
+                    for (int mi = 0; mi < size(softmax.mref_); ++mi) {
+                        need_ |= fabsf(softmax.template max_l2<true>(mi) - softmax.mref_(mi)) > 8.f;
+                    }
+                    if (__any_sync(0xffffffff, need_)) {
+                        typename Softmax::TensorT f_;
+                        #pragma unroll
+                        for (int mi = 0; mi < size(f_); ++mi) {
+                            float const m_ = softmax.template max_l2<true>(mi);
+                            f_(mi) = exp2f(softmax.mref_(mi) - m_); softmax.mref_(mi) = m_;
+                        }
+                        softmax.rescale_o(tOrO, f_);
+                    }
+                }
             };
 
             // The four-group PV chain for ONE head-dim slab.  With Defer, the
@@ -1692,6 +1735,7 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // ms_[3] AND its running max; max_get_scale_grouped below
                     // destroys both, so every promote of this tile must precede it.
                     fq8_promote_last(tOrD);
+                    fq8_lazy_rebase();
                     pipeline_v.consumer_release(smem_pipe_read_v);  // release V
                     KF(5);
                     // ---- tOrD is dead here; QK reuses its registers ----
@@ -1706,9 +1750,11 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     KF(8);
                     scoremod_premask_fn(tSrS);
                     mask_fn(tSrS, n_block);
-                    fq8_descale(tSrS, n_block);   // ## FQ8
+                    float fq8_g_[kGroups];
+                    if constexpr (kFwdLD) { fq8_gsc(n_block, fq8_g_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
                     KF(9);
-                    cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
+                    if constexpr (kFwdLD) { cute::copy(softmax.template max_get_scale_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_), scores_scale); }
+                    else { cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale); }
                     if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
                     KF(10);
                     // Cross-tile rescale: tOrO is in TRUE exp(-m_prev) units
@@ -1717,9 +1763,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     // the Triton reference forward do.  It is not a P-hat basis quantity, so the
                     // denominator invariant (row_sum *= scores_scale,
                     // softmax_fq8f.h:195) is untouched.
-                    softmax.rescale_o(tOrO, scores_scale);
+                    if constexpr (!kFwdLD) { softmax.rescale_o(tOrO, scores_scale); }
                     KF(11);
-                    softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS);
+                    if constexpr (kFwdLD) { softmax.template online_softmax_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_); }
+                    else { softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS); }
                     KF(12);
                     if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
                     convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
@@ -1822,6 +1869,12 @@ struct CollectiveMainloopFwdSm90Fp8F {
             // did not touch them.
             fq8_promote_last(tOrD);
             pipeline_v.consumer_release(smem_pipe_read);  // release V, otherwise producers will hang
+            if constexpr (kFwdLD) {   // ## FWDLD: tOrO is in the reference basis: O = O_ref * 2^(mref - m l2) / l
+                #pragma unroll
+                for (int mi = 0; mi < size(scores_scale); ++mi) {
+                    scores_scale(mi) *= exp2f(softmax.mref_(mi) - softmax.template max_l2<true>(mi));
+                }
+            }
             softmax.rescale_o(tOrO, scores_scale);
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_output_fp8(tOrO); }
             ++smem_pipe_read;

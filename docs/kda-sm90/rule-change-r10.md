@@ -239,3 +239,6 @@ exhausted levers report DONE; pass-0 work stops (it meets the target).
   kernel that clears 3% as the --target; the other touched kernel must not be slower beyond spread and the e2e fwd+bwd
   must improve. A clamp change that is bitwise on all 72 x 4 certification cases is still recorded as a named numerics
   change (outputs may differ only where the clamp would have bound); the bitwise full gate certifies it.
+- Hao (round 19): the two-job rule stands; a candidate that passes one job and misses the other is not rerun as the
+  same pair. A near-miss stack is extended with one more held piece (bitwise or residual-v4) so it clears 3% with
+  margin, and the larger stack is gated as a fresh pair.

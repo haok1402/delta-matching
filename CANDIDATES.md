@@ -29,9 +29,11 @@ Tools live outside the repo, in `kda-work/p1packed-aux/`:
 - `sass/`: SASS dumps, loop extraction and opcode histograms.
 - Every run directory is under `runs/`.
 
-## READY
+## ACCEPTED
 
-### C3: EXPBX64, the 2^8 offset folded into the exp bias off the masked tiles (pass 0 + pass 1; named numerics change)
+### C3: EXPBX64 -- ACCEPTED by kda-sm90 as 7a06674 (gate 21181579: residual-v4 PASS on 4 routes vs r17_p0s, pass 0 -4.50%, bench -1.4%; confirmation 21181901: -4.04%; new accepted root r17_pk). Branch rebased on 7a06674; further A/Bs go against r17_pk.
+
+### (original hand-off record) C3: EXPBX64, the 2^8 offset folded into the exp bias off the masked tiles (pass 0 + pass 1; named numerics change)
 
 - **Branch:** `kda-sm90-p1packed-c3` (c0e9f43) is `kda-sm90-p1packed` with `KDA_PK_EXPB` defaulting to 6, on
   `origin/kda-sm90` 0379369.
@@ -77,7 +79,7 @@ Tools live outside the repo, in `kda-work/p1packed-aux/`:
   The numerics job (vs r17_fwd) also gave bench D128 matched -1.0%. The fwd entries are an unchanged binary.
 - **Resources:** REG 168 (pass 1; DeltaV6 2-WG) / 96 (DeltaV6 W4), STACK 0, LOCAL 0, no ptxas spill / C7510 / C7511 /
   serialization diagnostics. The pass-0 W4 loop keeps its 8 hoisted wgmma descriptor pairs (see variants 4 / 5 below).
-- **Status: READY.** The target kernel (pass 0) is ≥ 3% faster on the four shapes in two jobs, and residual-v4 passes
+- **Status: READY at hand-off; ACCEPTED (7a06674).** The target kernel (pass 0) is ≥ 3% faster on the four shapes in two jobs, and residual-v4 passes
   on all four routes. Pass 1 gets a further 1.3-1.4%.
 - **Superseded:** branches `kda-sm90-p1packed-c1` (EXPB=4) and `kda-sm90-p1packed-c2` (EXPB=6), both on the old r17_p1
   base, are replaced by C3.

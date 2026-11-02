@@ -273,3 +273,14 @@ Added as given; where it disagrees with plan.md or older notes, TASK.md wins. Fa
   configurations is being added to the gate.
 - Two-kernel changes: "the target kernel (or the summed time of every kernel a change touches)" replaces the round-18
   rule (target the kernel that clears 3%).
+- Decided (round 21), residual-v5 row check: "within fp32 round-off of its residual in the ORIGINAL kernel" is the
+  round-off of computing that row's sum from its actual terms: per row, no exemptions, |Σt|_cand <=
+  |Σt|_orig + k_r 2^-23 S_r with S_r = Σ|P^dP| + |delta_used| ΣP^ of the original's row (t = P^ (dP - delta), P^ already
+  carries the 2^8 factor; fp64 sums from the DBG op's rowsx). Evidence (.local/rounds/r21-v5/REPORT.md): the ratio
+  form (|Σt| / Σ|t| vs the original + k 2^-23) rejects the ORIGINAL kernel against its own +-1 ulp LSE perturbation on
+  4,279 / 4,471 72-case rows (20-30x more than HEAD's 191) because on cancelling rows Σ|t| is 1e-4..1e-2 of S_r; under
+  the summation bound HEAD, C3g, EXPBX64 and C4 all pass on the 72 cases x 4 routes, the acceptance shapes (3 seeds)
+  and the stress suite (max needed factor 0.954 of the bound; C4 bitwise). The +-1 ulp LSE controls exceed this bound
+  (needed factor up to 89): they perturb the input, not the summation, so they do not calibrate it.
+  Delta used vs delta recomputed from the same fp8 P / dP: within fp32 round-off (<= 3.5e-7 relative) in every build.
+  The error-against-fp32 clause of TASK.md is audited next; it decides C3g / EXPBX64.

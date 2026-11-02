@@ -220,6 +220,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
     static constexpr int kVarDesc = kVar / 100 % 10;
     static constexpr int kVarBasis = kVar / 10 % 10;
     static constexpr int kVarPV = kVar % 10;
+    static constexpr int kVarLazy = kVar / 100000 % 10;
     static constexpr int kQuantKeys = 64;
     static constexpr int kQuantRowsQ = 128;
     static constexpr int kGroups = kBlockN % 64 == 0 ? kBlockN / 64 : 0;
@@ -229,7 +230,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
     static constexpr int kColsPerGroup = kGroups > 0 ? kRowcol / kGroups : kRowcol;
     static constexpr int kAtomsPerGroup = 2;
     static constexpr int kPVNSplit = 1;
-    using SoftmaxT = flash::SoftmaxPort<2, kGroups, kRowcol, kVarBasis, kVarDesc, FA3FP8F_PHAT_FLOOR_B>;
+    using SoftmaxT = flash::SoftmaxPort<2, kGroups, kRowcol, kVarBasis, kVarDesc, FA3FP8F_PHAT_FLOOR_B, kVarLazy>;
     using TileShape_MNK_PVAtom = Shape<decltype(get<0>(TileShape_MNK{})),
                                        Int<kHeadDimV / kPVNSplit>,
                                        decltype(get<1>(TileShape_MNK{}))>;
@@ -1400,6 +1401,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         Tensor scores_scale = softmax.template max_get_scale_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS0);
         softmax.template online_softmax_grouped</*Is_first=*/true, /*Check_inf=*/true>(tSrS0);
         fq8_load_v(n_block);
+        softmax.template alpha_o</*Is_first=*/true>(tOrO, scores_scale);
         flash::permute_Cregs_fp8(tSrS0);
         Tensor tOrP_acc = make_tensor(tSrS0.data(), flash::convert_layout_acc_Aregs<TiledMmaPV>(tSrS0.layout()));
         Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
@@ -1494,7 +1496,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 }
                 flash::permute_Cregs_fp8(tSrS);
                 convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
-                softmax.rescale_o(tOrO, scores_scale);
+                softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale);
                 fq8_load_v(n_block);
             } else {
                 // ======== PV-first (the shipped order): PV(n-1) + promote, then QK(n) inside the scheduler section ========
@@ -1522,7 +1524,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
                 mask_fn(tSrS, n_block);
                 fq8_descale(tSrS, n_block);
                 cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
-                softmax.rescale_o(tOrO, scores_scale);
+                softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale);
                 softmax.template online_softmax_grouped</*Is_first=*/false, Check_inf>(tSrS);
                 flash::permute_Cregs_fp8(tSrS);
                 convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
@@ -1646,7 +1648,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         for (; n_block >= n_block_min; --n_block) {
             cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(FwdNamedBarriers::PFull) /*id*/);
             load_scales(scores_scale, smem_pipe_read.index());
-            softmax.rescale_o(tOrO, scores_scale);
+            softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale);
             ++smem_pipe_read;
             if constexpr (!HasQv) {
                 auto barrier_token = pipeline_v.consumer_try_wait(smem_pipe_read);
@@ -1659,7 +1661,7 @@ struct CollectiveMainloopFwdSm90Fp8Port {
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(FwdNamedBarriers::PFull) /*id*/);
         load_scales(scores_scale, smem_pipe_read.index());
         cutlass::arch::NamedBarrier::arrive(NumMmaThreads, static_cast<uint32_t>(FwdNamedBarriers::PEmpty) /*id*/);
-        softmax.rescale_o(tOrO, scores_scale);
+        softmax.template alpha_o</*Is_first=*/false>(tOrO, scores_scale);
         if constexpr (Is_FP8 && !V_colmajor) { flash::permute_output_fp8(tOrO); }
         ++smem_pipe_read;
         return true;

@@ -52,7 +52,7 @@ __device__ __forceinline__ void port_reduce_group_(Tensor<Engine0, Layout0> cons
     }
 }
 
-template <int kNRows, int kGroups, int kRowcol, int kBasis, int kDescale, int kPhatFloorB = 12>
+template <int kNRows, int kGroups, int kRowcol, int kBasis, int kDescale, int kPhatFloorB = 12, int kLazy = 0>
 struct SoftmaxPort {
     static_assert(kBasis == 0 || kBasis == 1);
     static_assert(kDescale >= 0 && kDescale <= 2);
@@ -65,6 +65,7 @@ struct SoftmaxPort {
     static constexpr int kGS = kGroups > 0 ? kGroups : 1;
 
     TensorT row_max, row_sum;
+    TensorT ref_max;           // kLazy: the per-row reference max tOrO is kept in (lags row_max by <= 2^8)
     TensorT ms_[kGS];          // kBasis 1: the per-group log2 basis of the codes in tOrP
     float gsc_[kGS];           // kDescale 2: per-group descale q8sc * k8sc_g (natural units)
     float const softmax_scale_log2;
@@ -185,12 +186,44 @@ struct SoftmaxPort {
         }
     }
 
+    __forceinline__ __device__ float ref_l2(int mi) const { return ref_max(mi) == -INFINITY ? 0.f : ref_max(mi) * softmax_scale_log2; }
+
+    // The cross-tile alpha: upstream's tOrO *= alpha, or (kLazy) a warp-uniform rebase of tOrO onto the running max only
+    // when some row of the warp has drifted more than 2^8 above its reference (or the reference is still -inf).
+    template <bool Is_first, typename Tensor1>
+    __forceinline__ __device__ void alpha_o(Tensor1& acc_o, TensorT const& scores_scale) {
+        if constexpr (!kLazy) {
+            if constexpr (!Is_first) { rescale_o(acc_o, scores_scale); }
+        } else {
+            if constexpr (Is_first) {
+                #pragma unroll
+                for (int mi = 0; mi < kNRows; ++mi) { ref_max(mi) = row_max(mi); }
+            } else {
+                bool need = false;
+                #pragma unroll
+                for (int mi = 0; mi < kNRows; ++mi) {
+                    float const d = (row_max(mi) - ref_max(mi)) * softmax_scale_log2;
+                    need |= (d > 8.f) || (ref_max(mi) == -INFINITY && row_max(mi) != -INFINITY);
+                }
+                if (__any_sync(0xffffffff, need)) {
+                    TensorT f;
+                    #pragma unroll
+                    for (int mi = 0; mi < kNRows; ++mi) {
+                        f(mi) = ref_max(mi) == row_max(mi) ? 1.f : exp2f((ref_max(mi) - row_max(mi)) * softmax_scale_log2);
+                        ref_max(mi) = row_max(mi);
+                    }
+                    rescale_o(acc_o, f);
+                }
+            }
+        }
+    }
+
     template <int G>
     __forceinline__ __device__ TensorT basis(float v8sc_g) const {
         TensorT c;
         #pragma unroll
         for (int mi = 0; mi < kNRows; ++mi) {
-            if constexpr (kBasis == 1) { c(mi) = v8sc_g * exp2f(ms_[G](mi) - max_l2</*Check_inf=*/true>(mi)); }
+            if constexpr (kBasis == 1) { c(mi) = v8sc_g * exp2f(ms_[G](mi) - (kLazy ? ref_l2(mi) : max_l2</*Check_inf=*/true>(mi))); }
             else { c(mi) = v8sc_g; }
         }
         return c;
@@ -206,6 +239,9 @@ struct SoftmaxPort {
             float sum = row_sum(mi);
             float inv_sum = (sum == 0.f || sum != sum) ? 0.f : 1.f / sum;
             scores_scale(mi) = inv_sum * final_scale;
+            if constexpr (kLazy) {
+                if (ref_max(mi) != row_max(mi)) { scores_scale(mi) *= exp2f((ref_max(mi) - row_max(mi)) * softmax_scale_log2); }
+            }
             if constexpr (kBasis == 0) { sum *= 1.f / 256.f; }
             row_sum(mi) = (sum == 0.f || sum != sum) ? -INFINITY
                                                      : row_max(mi) * (softmax_scale_log2 * float(M_LN2)) + __logf(sum);

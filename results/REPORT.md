@@ -1,7 +1,7 @@
 # kda-sm90: delta-matching fp8 attention on H100 — interim report
 
-Status: interim (round 17; updated after every accepted round). Branch `kda-sm90`; accepted build `r17_pk` (kda-sm90
-7a06674 + tooling). Every number below is traced to a committed file; per-round detail and every screened variant are in
+Status: interim (round 18; updated after every accepted round). Branch `kda-sm90`; accepted build `r18_c4` (kda-sm90
+65d4424 + tooling). Every number below is traced to a committed file; per-round detail and every screened variant are in
 `results/rounds.md`, `results/screens/` and the helpers' `CANDIDATES.md` branches; rules in
 `docs/kda-sm90/rule-change-r10.md`.
 
@@ -106,3 +106,21 @@ Source: `results/r17/accepted_pk/sol4c.md` (`benchmarks/sol4.py`).
 2. Cheaper forms of the exp clamp and the fp32 dK fold as named numerics changes under residual-v4.
 3. Completing the held stacks (forward -2.4%, pass 1 -1.1%) to >= 3%.
 4. FA3 fp8 forward parity (now 1.155x).
+
+## Update: round 18 (accepted build r18_c4, job 21191934)
+
+| kernel | sol4-v2 % (fixed ref.) | sol4c % (fixed ref.) | sol4c % (same-job 1454.9 TFLOP/s) | target 90% |
+|---|---:|---:|---:|---|
+| pass 1 | 42.6% | 68.8% | 70.0% | not met |
+| forward | 55.0% | 78.6% | 80.1% | not met |
+| pass 0 | 73.3% | 98.4% | 100.2% | met |
+| pass 2 | 94.3% | 94.3% | 94.3% | met |
+
+- Original -> now (four shapes, same job): e2e forward -14.0%, e2e fwd+bwd -13.1% (`results/progress/ab.md`).
+- Forward / FA3 fp8 forward: 1.162x (calibration and clock spread between jobs ~1%).
+- Paper protocol 16/4 (B2 N8192): 568.9 / 505.3 / 521.9 TFLOP/s fwd / bwd / fwd+bwd (cuDNN BF16 582.7 / 486.2 / 510.2;
+  FA3 BF16 691.0 / 498.9 / 541.9); 32/4: 628.0 / 522.3 / 548.6.
+- Round-18 work without a candidate: structural pass 0 / pass 1 reuse (pass 1 computing the delta needs a cross-CTA
+  exchange costing ~+100% on pass 1 and cannot run at 64K; handing pass 0's products to pass 1 costs more bytes than
+  the backward); cheaper dK fold (neutral or fails residual-v4); forward shared-basis P codes (fails residual-v4 by
+  100-400x). Every helper (forward, pass 0, pass 1) reports DONE.

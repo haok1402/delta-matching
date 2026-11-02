@@ -821,3 +821,6 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   neutral on r18_c4 (-0.4 / +0.1%) and fails residual-v4 (dQ / dK errors +2e-5..1.2e-3); no cheaper exact fold on sm90.
   With every helper DONE, pass 1 (66% of sol4c) and the forward (78.5%) have no remaining lever within the numerics
   contract that the campaign could find.
+- Accepted build r18_c4 (job 21191934, same-job calibration 1454.9 TFLOP/s): sol4c pass1 70.0% (68.8% at the fixed
+  1481.2 reference), forward 80.1% (78.6%), pass0 100.2% (98.4%), pass2 94.3%; forward / FA3 fp8 1.162; original ->
+  now e2e fwd -14.0%, fwd+bwd -13.1%; paper C.2 16/4 fwd+bwd 521.9 TFLOP/s (cuDNN BF16 510.2), 32/4 548.6.

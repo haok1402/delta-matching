@@ -127,6 +127,13 @@ constexpr int kBK = 128;     // contraction depth per tile (= pass-1 kBlockN at 
 // per SM (the 116736 B half-SM budget), i.e. depth 3 is free occupancy-wise here where at d256 it cost half the CTAs.
 // Depth changes no arithmetic (the barrier phase/slot math is depth-generic), so the outputs must be bitwise.
 constexpr int kStages = FA3FP11_HD128_P2ST;
+// ## kda-p1redesign KDA_R_DSNAT: pass 1 stores each dS' tile in its dK A-fragment's native layout ([128 keys][64 row
+// slots], 16-byte segments XOR-swizzled by (key >> 1) & 3; see mainloop_bwd_sm90_fp8r.hpp).  Pass 2 loads the 8-KB tile
+// with one bulk copy and builds its RS A operand with ldmatrix.trans + prmt (the transpose pass 1 no longer does); its
+// accumulator rows are a fixed permutation of the tile's query rows, undone at the dQ store.  Same values, same k order.
+#ifndef KDA_R_DSNAT
+#define KDA_R_DSNAT 0
+#endif
 
 // ## FP11-M3: promotion window length in tiles (C).  PINNED at 8 (512 keys):
 // ONE realization class per the design notes (no build knob).  the derivation notes: the
@@ -148,10 +155,17 @@ static_assert(kPromoteTiles >= kStages,
 constexpr int kDqPitch = kBD + 8;
 
 using TileShapeMNK = Shape<Int<kBM>, Int<kBD>, Int<kBK>>;
+#if KDA_R_DSNAT
+using TiledMmaP2 = decltype(cute::make_tiled_mma(
+    cute::GMMA::rs_op_selector<Element, Element, float, TileShapeMNK,
+                               GMMA::Major::K, GMMA::Major::K>(),
+    Layout<Shape<_1, _1, _1>>{}));
+#else
 using TiledMmaP2 = decltype(cute::make_tiled_mma(
     cute::GMMA::ss_op_selector<Element, Element, float, TileShapeMNK,
                                GMMA::Major::K, GMMA::Major::K>(),
     Layout<Shape<_1, _1, _1>>{}));
+#endif
 
 using SmemLayoutAtomA = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
     GMMA::Major::K, Element, Int<kBM>, Int<kBK>>());
@@ -199,6 +213,7 @@ struct P2Params {
     // ## FP11-M16 (native GQA, READ side): the Kt twin is per KV head
     // [b, h_k, d, s]; h_k == h reproduces the M10 index arithmetic exactly.
     int h_k;
+    Element const* ds8_ptr;   // KDA_R_DSNAT: the tile-contiguous workspace, read by bulk copies
 };
 
 template <bool Is_causal>
@@ -239,7 +254,37 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
 
     TiledMmaP2 tiled_mma;
     auto wg_mma = tiled_mma.get_thread_slice(tid);
+#if KDA_R_DSNAT
+    Tensor tCrA = wg_mma.partition_fragment_A(sA(_, _, 0));   // register A (MMA, M, K) e4m3
+    static_assert(decltype(size(tCrA))::value == 64, "KDA_R_DSNAT: 64 A codes per thread per tile");
+    int const kd_lane = tid & 31, kd_warp = tid >> 5;
+    // ldmatrix.x4.trans row address of this lane (matrix q = lane / 8 holds keys 8 q .. 8 q + 7 of a 32-key block).
+    int const kd_key0 = 8 * (kd_lane >> 3) + (kd_lane & 7);
+    uint32_t const kd_ld_off = kd_key0 * 64 + 16 * (kd_warp ^ ((kd_key0 >> 1) & 3));
+    auto load_a = [&](int s) {
+        Tensor r32 = recast<uint32_t>(tCrA);
+        uint32_t const base = cute::cast_smem_ptr_to_uint(shared.smem_a.data() + s * (kBM * kBK)) + kd_ld_off;
+        #pragma unroll
+        for (int kk = 0; kk < 4; ++kk) {
+            uint32_t x0, y0, x1, y1;   // keys 32kk + {0-7, 8-15, 16-23, 24-31}
+            // (keys 32 kk + 8 q + r): ((32kk + 8q + r) >> 1) & 3 == ((8q + r) >> 1) & 3 since 32kk >> 1 is a multiple of 4
+            asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                         : "=r"(x0), "=r"(y0), "=r"(x1), "=r"(y1) : "r"(base + kk * 32 * 64));
+            uint32_t const w[2][2] = {{__byte_perm(x0, y0, 0x6420), __byte_perm(x0, y0, 0x7531)},
+                                      {__byte_perm(x1, y1, 0x6420), __byte_perm(x1, y1, 0x7531)}};
+            #pragma unroll
+            for (int v1 = 0; v1 < 2; ++v1) {
+                #pragma unroll
+                for (int v2 = 0; v2 < 2; ++v2) {
+                    int const off = tCrA.layout()(make_coord(make_coord(0, v1, v2), 0, kk));
+                    r32(off / 4) = w[v2][v1];
+                }
+            }
+        }
+    };
+#else
     Tensor tCrA = wg_mma.partition_fragment_A(sA);   // GMMA descriptors (MMA, M, K, stages)
+#endif
     Tensor tCrB = wg_mma.partition_fragment_B(sB);
     Tensor acc = partition_fragment_C(tiled_mma, select<0, 1>(TileShapeMNK{}));
     clear(acc);
@@ -267,7 +312,16 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
             int const s = tile % kStages;
             shared.full_bar[s].arrive_and_expect_tx(kTxBytes);
             auto& bar = reinterpret_cast<uint64_t&>(shared.full_bar[s]);
+#if KDA_R_DSNAT
+            {
+                Element const* src = params.ds8_ptr + ((int64_t(bh) * params.nbm + mb) * params.nbn + tile) * (kBM * kBK);
+                uint32_t const dst = cute::cast_smem_ptr_to_uint(shared.smem_a.data() + s * (kBM * kBK));
+                asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
+                             :: "r"(dst), "l"(src), "n"(kBM * kBK), "r"(cute::cast_smem_ptr_to_uint(&bar)) : "memory");
+            }
+#else
             copy(params.tma_a.with(bar, 0 /*mcast*/), tAgA(_, tile), tAsA(_, s));
+#endif
             copy(params.tma_b.with(bar, 0 /*mcast*/), tBgB(_, tile), tBsB(_, s));
         }
     };
@@ -310,8 +364,14 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
                 ratio = fminf(fmaxf(ratio, 1e-8f), 1e8f);
                 #pragma unroll
                 for (int i = 0; i < size(acc); ++i) { acc(i) *= ratio; }
+#if KDA_R_DSNAT
+                load_a(s);
+                flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(
+                    tiled_mma, tCrA, tCrB(_, _, _, s), acc);
+#else
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(
                     tiled_mma, tCrA(_, _, _, s), tCrB(_, _, _, s), acc);
+#endif
             } else {
                 // Window's first taken tile: acc's logical value is zero, so
                 // start the window's wgmma chain with scale_d = 0 (D = A*B,
@@ -319,8 +379,14 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
                 // fragment; the promote below then need not re-zero acc.
                 // The predicate is warpgroup-uniform (all threads read the
                 // same psi_row), so the wgmma stays converged.
+#if KDA_R_DSNAT
+                load_a(s);
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(
+                    tiled_mma, tCrA, tCrB(_, _, _, s), acc);
+#else
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(
                     tiled_mma, tCrA(_, _, _, s), tCrB(_, _, _, s), acc);
+#endif
             }
             psi_w = psi_cur;
             psi_max = fmaxf(psi_max, psi_cur);
@@ -396,7 +462,17 @@ fq8_dq_pass2_kernel_hd128(CUTE_GRID_CONSTANT P2Params const params) {
         cutlass::bfloat16_t lo(v2.x * fin), hi(v2.y * fin);
         uint32_t const pack = (uint32_t(reinterpret_cast<uint16_t const&>(hi)) << 16)
                             | uint32_t(reinterpret_cast<uint16_t const&>(lo));
+#if KDA_R_DSNAT
+        // accumulator row m <-> tile column 16 w + 2 g + hi (w = m / 16, g = m % 8, hi = (m % 16) / 8) <-> row slot
+        // 16 c + 4 w + b (c = column bits 2-3, b = bits 0-1) <-> query row 16 c + SIGMA[4 w + b],
+        // SIGMA[4 t + j] = 8 (j >> 1) + 2 t + (j & 1) (the twins' pi order).
+        int const kd_col = 2 * (m & 7) + ((m >> 3) & 1);
+        int const kd_c = kd_col >> 2, kd_b = kd_col & 3, kd_t = m >> 4;
+        int const kd_row = 16 * kd_c + 8 * (kd_b >> 1) + 2 * kd_t + (kd_b & 1);
+        *reinterpret_cast<uint32_t*>(dq_base + int64_t(kd_row) * params.dq_row_stride + d) = pack;
+#else
         *reinterpret_cast<uint32_t*>(dq_base + int64_t(m) * params.dq_row_stride + d) = pack;
+#endif
     }
 }
 
@@ -428,7 +504,8 @@ void run_fq8_dq_pass2_fp11_d128(Flash_bwd_fp8_params &params, cudaStream_t strea
     P2Params p2{tma_a, tma_b, shape_a, shape_b, params.psi_ptr,
                 params.dq_ptr, params.dq_row_stride, params.dq_head_stride,
                 params.dq_batch_stride,
-                params.scale_softmax / 256.0f, nbm, nbn, params.h, params.h_k};
+                params.scale_softmax / 256.0f, nbm, nbn, params.h, params.h_k,
+                static_cast<Element const*>(params.ds8_ptr)};
     auto* kernel = &fq8p2h128::fq8_dq_pass2_kernel_hd128<Is_causal>;
     constexpr int kSmem = int(sizeof(SharedStorage));
     if (kSmem >= 48 * 1024) {

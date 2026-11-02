@@ -98,6 +98,18 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #define FA3FP11_P1R_SAGEDP 0
 #endif
 
+// ## kda-p1redesign prototypes (default off):
+//   KDA_R_DSNAT: the dS' codes are stored in the dK A-fragment's NATIVE layout ([64 keys][64 row slots] per warpgroup
+//     half, 16-byte segment XOR swizzle seg ^ ((key >> 1) & 3)) with two STS.128 per thread and a 4-KB bulk copy; no
+//     shuffles / prmt / stmatrix.trans.  Pass 2 does the transpose (ldmatrix.trans + prmt) at its A-operand load.
+//   KDA_R_ABLDV (TIMING ONLY, dV garbage): no dV rescale / gemm / promote in the consumer warpgroups; the P codes are
+//     written to smem instead (the hand-off a dedicated dV warpgroup would need): upper bound of the dV-warpgroup design.
+#ifndef KDA_R_DSNAT
+#define KDA_R_DSNAT 0
+#endif
+#ifndef KDA_R_ABLDV
+#define KDA_R_ABLDV 0
+#endif
 #include "kda_prof.h"
 
 namespace flash {
@@ -384,6 +396,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
         float* const ptr_dbg_rows;
         float* const ptr_dbg_rowsabs;
         unsigned int* const ptr_dbg_cks;
+        Element* const ptr_dS8;
     };
 
     static Params
@@ -416,7 +429,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 args.softmax_scale, args.window_size_left, args.window_size_right, attention_chunk_divmod,
                 args.num_batch, args.cu_seqlens_q, args.cu_seqlens_k, args.seqused_q, args.seqused_k,
                 tma_store_dS8, args.ptr_psi, args.nbm, args.nbn,
-                args.ptr_dbg_rows, args.ptr_dbg_rowsabs, args.ptr_dbg_cks};
+                args.ptr_dbg_rows, args.ptr_dbg_rowsabs, args.ptr_dbg_cks, args.ptr_dS8};
     }
 
     CUTLASS_DEVICE
@@ -715,6 +728,16 @@ struct CollectiveMainloopBwdSm90Fp8R {
         int const fq8_m_first = m_block;
         auto fq8_issue_ds_cta = [&](int m) {
             Tensor gdS8 = mdS8(_, _, n_block, m, fq8_bh);
+#if KDA_R_DSNAT
+            {   // native layout: the half tile is 4 KB contiguous in smem and in the tile-contiguous workspace
+                int const w = warp_group_idx;
+                Element const* sbuf = shared_storage.tensors.mainloop.smem_ds.data() + (w * 2 + (m & 1)) * kDsHalfElems;
+                Element* gdst = params.ptr_dS8 + ((int64_t(fq8_bh) * params.nbm + m) * params.nbn + n_block) * (kBlockM * kBlockN) + w * kDsHalfElems;
+                asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;\n"
+                             :: "l"(gdst), "r"(cute::cast_smem_ptr_to_uint(sbuf)), "n"(kDsHalfElems) : "memory");
+            }
+            if constexpr (false)
+#endif
             {   // S17 DSDEFER-SPLIT: this warpgroup's half only
                 int const w = warp_group_idx;
                 Tensor sbuf = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_ds.data() + (w * 2 + (m & 1)) * kDsHalfElems), SmemLayoutDS{});
@@ -722,6 +745,25 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 cute::copy(params.tma_store_dS8, blk_tma_dS8.partition_S(sbuf), blk_tma_dS8.partition_D(gdS8h));
             }
             cute::tma_store_arrive();
+        };
+        // Native-layout store of a [64 keys][64 slots] fp8 A fragment (rdS or rP) into a 4-KB smem half tile:
+        // word (v1, v2, kk) holds key 16 warp + g + 8 v1, slots 16 (v2 + 2 kk) + 4 t .. + 3; a key's four words sit
+        // in one 16-byte segment (column 16 t + 4 c, c = v2 + 2 kk), segment swizzled t ^ ((key >> 1) & 3).
+        auto kda_store_native = [&](auto const& rfrag, uint32_t sbase) {
+            Tensor r32 = recast<uint32_t>(rfrag);
+            int const g = lane >> 2, t = lane & 3;
+            #pragma unroll
+            for (int v1 = 0; v1 < 2; ++v1) {
+                uint32_t wv[4];
+                #pragma unroll
+                for (int c = 0; c < 4; ++c) {
+                    int const off = rfrag.layout()(make_coord(make_coord(0, v1, c & 1), 0, c >> 1));
+                    wv[c] = r32(off / 4);
+                }
+                int const key = 16 * warp_in_wg + g + 8 * v1;
+                uint32_t const a = sbase + key * 64 + 16 * (t ^ ((key >> 1) & 3));
+                asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" :: "r"(a), "r"(wv[0]), "r"(wv[1]), "r"(wv[2]), "r"(wv[3]) : "memory");
+            }
         };
         auto bwd_step = [&](int m_block, auto mask_fn, auto stage_c) {
             constexpr int kSt = decltype(stage_c)::value;   // compile-time Q / Qt stage under UNROLL2 (-1 = runtime)
@@ -771,7 +813,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // S17 RESCALE-EARLY: the dV window rescale fills the S-retire bubble (the previous dV retired last step).
             float const fq8_f_cur = kFq8MoInv * fq8_do8sc;
             float const fq8_rf = fq8_clamp_ratio(fq8_f_prev / fq8_f_cur);
-            if (fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
+            if (!KDA_R_ABLDV && fq8_rf != 1.0f) {   // WG-uniform: the ratio is exactly 1.0f on the second m-block of every 128-row dO scale block
             #pragma unroll
             for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) *= fq8_rf; }
             }
@@ -884,6 +926,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
             KT(23);
             consumer_wait(pipeline_dot, smem_pipe_read_dot);
             KT(24);
+#if KDA_R_ABLDV
+            kda_store_native(rP, cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_dvacc.data())
+                                 + (warp_group_idx * 2 + (m_block & 1)) * 4096);
+            if constexpr (false)
+#endif
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, Int<0>{}), tdVrdV);
             } else {
@@ -924,6 +971,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // dK gemm; the shuffles, stmatrix and TMA store below run from these copies while dK is outstanding.
             // A-register word 2i = (h0: g 2i, g 2i+1), word 2i+1 = (h1: g 2i, g 2i+1); W[g] = (h0 pair(g) | h1 pair(g) << 16).
             // One 8-word array: the deferred block overwrites each packed word in place with its final stmatrix word.
+#if KDA_R_DSNAT
+            kda_store_native(rdS, cute::cast_smem_ptr_to_uint(shared_storage.tensors.mainloop.smem_ds.data())
+                                  + (warp_group_idx * 2 + (m_block & 1)) * kDsHalfElems);
+            cutlass::arch::fence_view_async_shared();
+#else
             uint32_t fq8_pk[8];
             {
                 Tensor rdS32 = recast<uint32_t>(rdS);
@@ -933,6 +985,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
                     fq8_pk[2 * i + 1] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), 0x7632);   // g = 2i + 1
                 }
             }
+#endif
             KP(12);
             // The dK fold basis and the F2b anchor (the dV window rescale moved above, H1a).
             fq8_g_fold = 0.0f;
@@ -955,6 +1008,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // ## M25 (H1b): dS' natural (rows x keys) for pass 2, the ONE transpose, from the pre-packed words while the dV
             // and dK gemms are outstanding (sdS is not an operand of either: they read the dOt / Qt stages).  The key pair
             // this lane stores comes from lanes srcA / srcB (slot h = ip / 4); stmatrix.trans writes 16 keys x 8 rows.
+#if !KDA_R_DSNAT
             {
                 #pragma unroll
                 for (int w = 0; w < 8; ++w) {   // one word at a time: two shuffles, then overwrite it with its output
@@ -971,6 +1025,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
                              :: "r"(fq8_a1), "r"(fq8_pk[4]), "r"(fq8_pk[5]), "r"(fq8_pk[6]), "r"(fq8_pk[7]));
                 cutlass::arch::fence_view_async_shared();
             }
+#endif
             KP(13);
             warpgroup_wait<1>();
             pipeline_dot.consumer_release(smem_pipe_read_dot);
@@ -986,7 +1041,7 @@ struct CollectiveMainloopBwdSm90Fp8R {
             #pragma unroll
             for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) = fmaf(fq8_tmpK(i), fq8_g_fold, tdKrdK(i)); }
             // dV window boundary (geometry-fixed): promote in TRUE units into the overlay, re-zero the window.
-            if ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1) {
+            if (!KDA_R_ABLDV && ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1)) {
                 #pragma unroll
                 for (int i = 0; i < size(tdVrdV); ++i) {
                     float* const slot = fq8_smem_dv + i * NumMmaThreads;

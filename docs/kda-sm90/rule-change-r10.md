@@ -221,3 +221,16 @@ pass 0 94.0% and pass 2 94.1% meet it; forward 78.5% and pass 1 66.3% do not (so
 registers for a pipelined S / dP was 3.5-4% slower); pass-1 work removes instructions from the per-element path
 (sensitivity ~0.05 sol4 points per instruction per warp-step); forward work targets the gap to FA3 fp8; helpers with
 exhausted levers report DONE; pass-0 work stops (it meets the target).
+
+## Round 17: structural + numerics direction (Hao's decision, no further consultation)
+
+1. Structural: pass-1 variants that reuse pass 0's work (pass 0 stores what pass 1 needs, or pass 1 computes the
+   matched delta itself in a two-phase schedule so pass 0 disappears), starting from kda-fuse's measured structure
+   (origin/kda-sm90-fuse); prototype first, continue if a prototype gains on the whole backward. Gated as usual
+   (bitwise full gate, or the residual-v4 numerics gate if the delta's rounding changes).
+2. Numerics: the exp clamp and the fp32 dK fold may change as a NAMED numerics change (the certified flag set
+   updated in the same commit) when the candidate passes residual-v4 on all four routes; cheaper forms are tried and
+   residual-v4 decides.
+3. Held stacks are combined across helpers (forward PRETURN + k/v-scale staging with any further forward piece;
+   pass-1 SHFL8 with the new pass-1 work) and gated when a combination clears 3% in two jobs.
+4. results/REPORT.md is written now as an interim report and updated after every accepted round.

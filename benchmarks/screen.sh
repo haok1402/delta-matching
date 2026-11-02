@@ -5,7 +5,7 @@
 # baseline dump; SHAPES: "H:B:N,..." (default 16:2:8192,32:2:8192).  A = the accepted root (ACCEPTED, default r14_h3).
 set -u
 TAG=$1; WT=$2; BITWISE=${3:-1}; SHAPES=${4:-16:2:8192,32:2:8192}
-R=$PWD; L=$R/.local; OUT=$L/screens/$TAG; ACC=${ACCEPTED:-$L/frozen/r14_h3}
+R=$PWD; L=$R/.local; OUT=$L/screens/$TAG; ACC=${ACCEPTED:-$L/frozen/r17_pk}
 rm -rf $OUT; mkdir -p $OUT
 if [ ! -f $L/jit/$TAG/_C.so ]; then
   ( cd $WT && DM_FA_SRC=$R/third_party/flash-attention MAX_JOBS=${MAX_JOBS:-32} DM_JIT_DIR=$L/jit/$TAG python -m delta_matching.jit ) > $OUT/build.log 2>&1
@@ -15,9 +15,13 @@ touch $OUT/diag.txt; grep -iE "spill|C7510|serializ" $OUT/build.log | grep -v " 
 ln -sfn $(realpath $L/jit/$TAG/_C.so) $WT/delta_matching/_C.so
 [ -f $L/jit/$TAG/_build_info.py ] && cp $L/jit/$TAG/_build_info.py $WT/delta_matching/_build_info.py
 cuobjdump -res-usage $L/jit/$TAG/_C.so 2>/dev/null | grep -A1 -E "Fq8F|Fp8R|DeltaV6|pass2_kernel_hd128" | grep -o "REG:[0-9]* STACK:[0-9]*" | sort | uniq -c > $OUT/res.txt
+REF=$L/equiv4/r17pk_default.pt   # byte reference: the latest accepted build (v4 dump), made once
+if [ "$BITWISE" = 1 ] && [ ! -f $REF ]; then
+  PYTHONPATH=$L/frozen/r17_pk python benchmarks/equivalence.py dump --route default --expect-root $L/frozen/r17_pk --out $REF.tmp.$$ > /dev/null 2>&1 && mv -n $REF.tmp.$$ $REF; rm -f $REF.tmp.$$
+fi
 if [ "$BITWISE" = 1 ]; then
   PYTHONPATH=$WT python benchmarks/equivalence.py dump --route default --expect-root $WT --out $OUT/default.pt > $OUT/dump.log 2>&1 \
-    && python benchmarks/equivalence.py compare $L/equiv/base3_default.pt $OUT/default.pt > $OUT/compare.log 2>&1
+    && python benchmarks/equivalence.py compare $REF $OUT/default.pt > $OUT/compare.log 2>&1
   echo "bitwise default route rc $? ($(tail -1 $OUT/compare.log))"
   rm -f $OUT/default.pt   # ~3.4 GB: the compare log is the record (lustre quota)
 fi

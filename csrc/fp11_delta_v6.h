@@ -362,10 +362,14 @@ struct DeltaV6 {
                 #pragma unroll
                 for (int mi = 0; mi < 2; ++mi) {
                     float const lse_scaled = mi == 0 ? lse0 : lse1;
+                    float const arg_c = kFq8MoE - lse_scaled;   // ## P0FOLD: 8 - lse once per row
                     #pragma unroll
                     for (int ni = 0; ni < 16; ++ni) {
                         float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
-                        scores(mi, ni) = exp2f(fminf(scores(mi, ni) * dsc - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+                        // ## P0FOLD (named numerics change): the exp argument as ONE fmaf(s, dsc, 8 - lse) (one rounding instead of
+                        // the two of (s * dsc - lse) + 8); the F1 clamp at 12 and the exp2 unchanged.  pass 0's P may differ
+                        // from pass 1's by one rounding of the argument; the matched residual is checked by residual-v4.
+                        scores(mi, ni) = exp2f(fminf(fmaf(scores(mi, ni), dsc, arg_c), kFq8MoE + 4.0f));
                     }
                 }
             };

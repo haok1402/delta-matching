@@ -64,7 +64,7 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 //     denormal window value either way.
 // ## p1packed per-element arithmetic switches (default 0 = the certified line).
 #ifndef KDA_PK_EXPB
-#define KDA_PK_EXPB 0
+#define KDA_PK_EXPB 6
 #endif
 // TIMING PROBES ONLY (wrong outputs, never shipped): bit 0 = no dV window rescale, bit 1 = no psi multiply before the
 // dS' e4m3 conversion.  They bound what removing one instruction per element in those phases can save.

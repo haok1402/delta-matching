@@ -86,6 +86,9 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 | S48 | b3pre | turn | lazy rebase, rho and promote weight computed before the ring turn | bitwise (O = b3ld) | -1.71% geo vs r17_fwd (job 21178684 / s22) -> C4 |
 | S49 | b3ktok | turn | + K try-wait token before the turn | bitwise | -1.85% screen; as C4b in A/B -0.58% / -0.75% (below C4): rejected |
 
+| S50 | c4v | scale loads | C4 + this tile's v-scales loaded into temporaries at the step start (VPF) | bitwise | +0.08% geo vs r17_fwd (C4 -1.04%, job s25): cancels C4's gain; rejected |
+| S51 | c4s4 | stages | C4 with 4 K/V stages | bitwise | -0.98% geo (C4 -1.25%, job s26): no gain |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below

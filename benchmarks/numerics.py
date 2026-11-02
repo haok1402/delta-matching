@@ -35,6 +35,13 @@ ROUTES4 = ("default", "kv", "head", "streams2")
 OUTPUTS = ("O", "dQ", "dK", "dV")
 RESIDUAL_ULP_PER_KEY = 2.0 ** -23
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+# residual-v2 (Hao's decision, round 16; docs/kda-sm90/rule-change-r10.md): per matched row r with k_r visible keys,
+# num_r = |sum_j t_rj|, den_r = sum_j |t_rj| (fp64 over the kernel's fp32 partials).  Exempt (degenerate) rows: k_r <= 1
+# or den_r < RESIDUAL_FLOOR (all-zero dS; the kernels' own 1e-30 psi floor).  Every other row: num_r <= k_r 2^-23 den_r,
+# and num_r / den_r <= its own accepted value + k_r 2^-23.  den_r == 0 requires num_r == 0.  The exempt set may not grow
+# or move vs the accepted build.  Bounds are derived here from the case geometry, never taken from a capture.
+RESIDUAL_VERSION = "residual-v2"
+RESIDUAL_FLOOR = 1e-30
 
 
 def _hash_tensor(t):
@@ -81,6 +88,26 @@ def row_residual(rows, rowsabs, delta=None):
     i = int(ratio.argmax())
     bh, row = divmod(i, ratio.shape[1])
     return float(ratio.max()), bad_zero, {"bh": bh, "row": row, "num": float(num[bh, row]), "den": float(den[bh, row])}
+
+
+def row_table(rows, rowsabs, causal, sk):
+    """Per row (bh, r): num = |sum t| and den = sum |t| (fp64, n-tile ascending then warpgroup), visible keys k_r."""
+    import torch
+    r = rows.double().permute(0, 3, 1, 2).reshape(rows.shape[0], rows.shape[3], -1)
+    a = rowsabs.double().permute(0, 3, 1, 2).reshape(rows.shape[0], rows.shape[3], -1)
+    sq = rows.shape[3]
+    keys = (torch.arange(sq) + 1).clamp(max=sk) if causal else torch.full((sq,), sk)
+    return r.sum(-1).abs(), a.sum(-1), keys.to(torch.int64).view(1, -1).expand(rows.shape[0], sq).contiguous()
+
+
+def residual_v2(num, den, keys):
+    """The checker's derivation: (exempt mask, ratio, per-row bound, bound violations, zero-den rows with a nonzero sum)."""
+    import torch
+    exempt = (keys <= 1) | (den < RESIDUAL_FLOOR)
+    ratio = torch.where(den > 0, num / torch.where(den > 0, den, torch.ones_like(den)), torch.zeros_like(num))
+    bound = keys.double() * RESIDUAL_ULP_PER_KEY
+    viol = (~exempt) & (ratio > bound)
+    return exempt, ratio, bound, viol, (den == 0) & (num != 0)
 
 
 def visited_mask(nbm, nbn, kbn, causal):
@@ -218,7 +245,8 @@ def capture(a):
     out = {"schema": SCHEMA, "route": a.route, "dbg": a.dbg, "identity": ident,
            "resolved_route": {"groups": dm_split._BWD_GROUPS, "streams": dm_split._BWD_STREAMS},
            "descriptors_sha256": hashlib.sha256(json.dumps(cases, sort_keys=True).encode()).hexdigest(),
-           "residual_versions": {"plan": "plan-v1", "centered": "centered-v1"}, "cases": {}}
+           "residual_versions": {"plan": "plan-v1", "centered": "centered-v1", "rows": RESIDUAL_VERSION}, "cases": {}}
+    sidecar = {}
     for key, desc in cases:
         rec = {"groups": []}
         if a.dbg:
@@ -249,11 +277,22 @@ def capture(a):
                         wp["keys"] = min(g["sk"], wp["row"] + 1) if g["causal"] else g["sk"]
                     ent.update(residual_plan=rp, residual_plan_worst=wp, zero_den_nonzero_num=zp + zc,
                                residual_centered=rc)
+                    num, den, keys = row_table(g["rows"].cpu(), g["rowsabs"].cpu(), g["causal"], g["sk"])
+                    ex, ratio, bound, viol, zbad = residual_v2(num, den, keys)
+                    sidecar[f"{key}|{len(groups)}"] = {"num": num, "den": den, "keys": keys,
+                                                       "absdelta": g["delta"].cpu().double().abs().reshape(num.shape)}
+                    ent["rows_v2"] = {"n": int(num.numel()), "exempt": int(ex.sum()), "violations": int(viol.sum()),
+                                      "zero_den_nonzero_num": int(zbad.sum()),
+                                      "max_ratio_nonexempt": float(ratio[~ex].max()) if bool((~ex).any()) else 0.0}
                 groups.append(ent)
             c["groups"] = groups
         out["cases"][key] = c
         print(f"{key:40s} " + " ".join(f"{n_} {e:.3e}" for n_, e in c["errors"].items())
               + (f" groups {len(c.get('groups', []))}" if a.dbg else ""), flush=True)
+    if a.dbg:
+        side = a.out + ".rows.pt"
+        torch.save(sidecar, side)
+        out["rows_sidecar"] = {"file": os.path.basename(side), "sha256": EQ.sha256(side), "version": RESIDUAL_VERSION}
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
     print(f"wrote {a.out}: {len(out['cases'])} cases, route {a.route}, dbg {a.dbg}, library {so}")
@@ -282,6 +321,20 @@ def _load(path, route, label, dbg, probs, manifest):
         probs.append(f"{label}: missing library / Python-source identity")
     if dbg and ident.get("dbg_build") is not True:
         probs.append(f"{label}: a DBG capture from a library whose stamp is not a DBG build")
+    if not ident.get("code_sha") or not isinstance(ident.get("flags"), dict) or not ident["flags"]:
+        probs.append(f"{label}: missing build stamp identity (code_sha / numerical flags)")
+    if ident.get("prof") or ident.get("trace"):
+        probs.append(f"{label}: an instrumented (prof / trace) build")
+    if dbg:
+        sc = d.get("rows_sidecar") or {}
+        side = os.path.join(os.path.dirname(os.path.abspath(path)), str(sc.get("file", "")))
+        if sc.get("version") != RESIDUAL_VERSION or not sc.get("file") or not os.path.isfile(side):
+            probs.append(f"{label}: no {RESIDUAL_VERSION} row sidecar")
+        elif EQ.sha256(side) != sc.get("sha256"):
+            probs.append(f"{label}: the row sidecar does not match its recorded sha256")
+        else:
+            import torch
+            d["_rows"] = torch.load(side)
     cases = EQ.selected_cases(route)
     if d.get("descriptors_sha256") != hashlib.sha256(json.dumps(cases, sort_keys=True).encode()).hexdigest():
         probs.append(f"{label}: case descriptors differ from the independently selected set")
@@ -297,6 +350,8 @@ def _load(path, route, label, dbg, probs, manifest):
             continue
         if not c.get("reference_finite"):
             probs.append(f"{label} {k}: non-finite fp32 reference")
+        if not HEX64.match(str(c.get("input_id", ""))) or not HEX64.match(str(c.get("ref_id", ""))):
+            probs.append(f"{label} {k}: missing input / reference identity")
         errs, outs = c.get("errors", {}), c.get("outputs", {})
         if set(errs) != set(OUTPUTS) or set(outs) != set(OUTPUTS):
             probs.append(f"{label} {k}: missing errors / output signatures")
@@ -305,6 +360,8 @@ def _load(path, route, label, dbg, probs, manifest):
             kd = known.get(k, {}).get("outputs", {}).get(o)
             sig = {x: outs[o].get(x) for x in ("nan_mask", "inf_mask", "finite")}
             clean = _fin(errs[o]) and errs[o] >= 0 and not outs[o].get("n_nan") and not outs[o].get("n_inf")
+            if not all(HEX64.match(str(outs[o].get(x, ""))) for x in ("bytes", "nan_mask", "inf_mask", "finite")):
+                probs.append(f"{label} {k} {o}: missing output hashes")
             if kd is not None:   # a frozen known defect: the exact element-level signature, or repaired if allowed
                 if sig != {x: kd[x] for x in ("nan_mask", "inf_mask", "finite")} and not (manifest.get("allow_repair") and clean):
                     probs.append(f"{label} {k} {o}: differs from the frozen defect signature")
@@ -330,10 +387,55 @@ def _load(path, route, label, dbg, probs, manifest):
                         probs.append(f"{label} {k}: residual record missing / out of range ({rp}, {rc})")
                     elif g["zero_den_nonzero_num"]:
                         probs.append(f"{label} {k}: {g['zero_den_nonzero_num']} zero-denominator rows with a nonzero sum")
-                    elif rc > residual_bound(desc["N"]) and k not in known:
-                        probs.append(f"{label} {k}: centered residual diagnostic {rc:.3e} > derived bound "
-                                     f"{residual_bound(desc['N']):.3e}")
+                    # the centered ratio is a reported diagnostic only (residual-v2 is the predicate, check())
     return d
+
+
+def residual_rows_check(k, desc, ncg, npg, C, R, P, probs):
+    """residual-v2 on every row of every matched group of case k: candidate DBG (C), its repeat (R), previous DBG (P)."""
+    import torch
+    out = {"rows": 0, "exempt": 0, "prev_exempt": 0, "violations": 0, "regressions": 0}
+    if ncg != npg or C is None or R is None or P is None:
+        probs.append(f"{k}: matched group rows unavailable / group counts differ ({ncg} vs {npg})")
+        return out
+    for i in range(ncg):
+        g = f"{k}|{i}"
+        if g not in C or g not in R or g not in P:
+            probs.append(f"{k} group {i}: row records missing")
+            continue
+        c, r, p = C[g], R[g], P[g]
+        if any(not torch.equal(c[x], r[x]) for x in ("num", "den", "keys")):
+            probs.append(f"{k} group {i}: row partials differ between the candidate's DBG runs (nondeterministic)")
+        if c["num"].shape != p["num"].shape:
+            probs.append(f"{k} group {i}: row shapes differ from the previous revision")
+            continue
+        sq = c["num"].shape[1]
+        keys = ((torch.arange(sq) + 1).clamp(max=desc["N"]) if desc["attn"] == "causal" else torch.full((sq,), desc["N"]))
+        keys = keys.to(torch.int64).view(1, -1).expand_as(c["keys"])
+        if not torch.equal(c["keys"], keys) or not torch.equal(p["keys"], keys):
+            probs.append(f"{k} group {i}: recorded visible-key counts differ from the case geometry")
+        exc, rc, bound, viol, zc = residual_v2(c["num"], c["den"], keys)
+        exp, rp, _, _, zp = residual_v2(p["num"], p["den"], keys)
+        reg = (~exc) & (rc > rp + bound)
+        grow = exc & ~exp
+        out["rows"] += int(rc.numel()); out["exempt"] += int(exc.sum()); out["prev_exempt"] += int(exp.sum())
+        out["violations"] += int(viol.sum()); out["regressions"] += int(reg.sum())
+        vp = (~exp) & (rp > bound)
+        out["violations_new"] = out.get("violations_new", 0) + int((viol & ~vp).sum())   # not violating in the accepted build
+        if "absdelta" in c:   # DIAGNOSTIC (proposal "residual-v2c", not authorized): num <= k 2^-23 (den + |delta|)
+            vc = (~exc) & (c["num"] > bound * (c["den"] + c["absdelta"]))
+            out["violations_v2c"] = out.get("violations_v2c", 0) + int(vc.sum())
+        if bool(zc.any()):
+            probs.append(f"{k} group {i}: {int(zc.sum())} zero-denominator rows with a nonzero sum")
+        if bool(viol.any()):
+            j = int(torch.where(viol.flatten(), rc.flatten() / bound.flatten(), torch.zeros(1, dtype=torch.float64)).argmax())
+            probs.append(f"{k} group {i}: {int(viol.sum())} rows above the round-off bound (worst ratio "
+                         f"{float(rc.flatten()[j]):.3e} vs {float(bound.flatten()[j]):.3e}, keys {int(keys.flatten()[j])})")
+        if bool(grow.any()):
+            probs.append(f"{k} group {i}: the exemption set grows / moves ({int(grow.sum())} rows not exempt before)")
+        if bool(reg.any()):
+            probs.append(f"{k} group {i}: {int(reg.sum())} rows above their accepted residual by more than round-off")
+    return out
 
 
 def check(a):
@@ -375,6 +477,13 @@ def check(a):
             probs.append("candidate DBG build is not from the candidate's source (code_sha missing or different)")
         if ci.get("flags") != di.get("flags"):
             probs.append("candidate DBG build has different numerical flags")
+        pi, pdi = prev["identity"], pd["identity"]
+        if not pi.get("code_sha") or pi.get("code_sha") != pdi.get("code_sha") or pi.get("flags") != pdi.get("flags"):
+            probs.append("the previous DBG capture is not a DBG build of the previous accepted revision (code_sha / flags)")
+        for x in (base, prev, rep, cd, cd2, pd):
+            if x["resolved_route"] != cand["resolved_route"]:
+                probs.append("captures resolved different backward routes")
+                break
         for k, desc in EQ.selected_cases(a.route):
             if any(k not in x.get("cases", {}) for x in caps.values()):
                 continue   # already reported as a missing case by _load
@@ -402,14 +511,10 @@ def check(a):
                 probs.append(f"{k}: workspaces declared unchanged differ from the previous revision")
             if desc["mode"] == "matched":
                 cg, pg = cd["cases"][k].get("groups", []), pd["cases"][k].get("groups", [])
-                if len(cg) == len(pg):
-                    for i, (x, y) in enumerate(zip(cg, pg)):
-                        if _fin(x.get("residual_plan")) and _fin(y.get("residual_plan")) and \
-                                x["residual_plan"] > y["residual_plan"] * (1 + a.rel_tol):
-                            probs.append(f"{k} group {i}: plan residual {x['residual_plan']:.3e} above the previous "
-                                         f"revision's {y['residual_plan']:.3e}")
-                    row["residual_plan_max"] = max((x.get("residual_plan", 0) for x in cg), default=0.0)
-                    row["residual_centered_max"] = max((x.get("residual_centered", 0) for x in cg), default=0.0)
+                row["residual_plan_max"] = max((x.get("residual_plan", 0) for x in cg), default=0.0)
+                row["residual_centered_max"] = max((x.get("residual_centered", 0) for x in cg), default=0.0)
+                row.update(residual_rows_check(k, desc, len(cg), len(pg), cd.get("_rows"), cd2.get("_rows"),
+                                               pd.get("_rows"), probs))
             report["cases"][k] = row
     report["ws_declaration"] = a.ws
     report["problems"] = probs
@@ -417,8 +522,10 @@ def check(a):
                                                if report["known_defects"] else "PASS"))
     # The residual acceptance contract is not settled (the plan's ratio is ill-conditioned on short rows; no replacement
     # is authorized): a PASS here validates capture / identity / schema plumbing and is NOT an AC-2.3 certificate.
-    report["ac23_eligible"] = False
-    report["ac23_note"] = "residual contract pending the user's authorization; not a numerical acceptance"
+    report["residual_versions"]["rows"] = RESIDUAL_VERSION + " (the AC-2.3 predicate)"
+    report["ac23_eligible"] = not probs and all(caps.values())
+    report["ac23_note"] = ("residual-v2 per-row contract (Hao, round 16) enforced with determinism, identities, error "
+                           "non-increase and workspace checks" if report["ac23_eligible"] else "not eligible: problems")
     if a.report:
         with open(a.report, "w") as f:
             json.dump(report, f, indent=1)

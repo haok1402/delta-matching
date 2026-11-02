@@ -89,3 +89,40 @@ Extends the D128-only, all-shapes rule above:
 - Report: `results/paper_c2.md`, the paper's Appendix C.2 protocol at B2 N8192 for 16/4 and 32/4, after every accepted
   round (first: the accepted build and the original baseline).
 - `kernels.py --grid paper` = the four shapes; `ab.py decision()` gates them (no separate guard); gate.py A/Bs on it.
+
+## Round 16/17: residual contract decided by Hao (AC-2.3) -> "residual-v2"
+
+Hao's decision: per row, the matched-mode residual |sum_j dS_ij| / sum_j |dS_ij| must stay at fp32 round-off (the
+existing bound sk * 2^-23 scale), except degenerate rows whose sum_j |dS_ij| is below a tiny floor (one visible key,
+all-zero dS), which are exempt; the number of exempt rows is reported per case and the exemption set must not grow vs
+the accepted build; no non-exempt row may exceed its own residual in the accepted build by more than round-off
+(per-row, not group maxima); the other AC-2.3 conditions stay (deterministic, error vs fp32 not larger on any case,
+named numerics change in the commit).
+
+Implementation (benchmarks/numerics.py, version "residual-v2"; the checker derives every bound from the case geometry,
+captures never supply tolerances):
+- per matched row r (case, backward group, bh, query row) with k_r visible keys (causal: min(N, r + 1)): t_rj are the
+  kernel's dS' terms P^_rj (dP_rj - delta_r), reduced from its fp32 partials in fp64 (n-tile ascending, warpgroup);
+  num_r = |sum_j t_rj|, den_r = sum_j |t_rj|, ratio_r = num_r / den_r (0 when den_r = 0).
+- exempt (degenerate): k_r <= 1, or den_r < 1e-30 (all-zero dS; the kernels' own psi floor).
+- predicates: den_r == 0 implies num_r == 0; every non-exempt row ratio_r <= k_r * 2^-23; per-row non-regression
+  ratio_r(candidate) <= ratio_r(accepted) + k_r * 2^-23 on non-exempt rows; the candidate's exempt set is a subset of the
+  accepted build's (no growth, no relocation); exempt counts reported per case; the candidate's two DBG runs give
+  identical row records; recorded visible-key counts equal the geometry.
+- the rows (num, den, keys) are stored per capture in a sidecar (`<capture>.rows.pt`) whose sha256 is in the capture;
+  `gate.py --mode numerics` accepts only when the check of every one of the four routes reports `ac23_eligible`.
+- the plan ratio's group maxima and the centered ratio stay in the report as diagnostics.
+
+## Round 17: the goal and stop rule (Hao, replacing the old stop rule)
+
+Every main kernel of the matched path (forward, pass 0, pass 1, pass 2) must reach at least 90% of its calibrated
+four-floor limit (sol4, calibrated on this H100) on the acceptance shapes (B2 N8192 and B1 N65536 at 16/4 and 32/4,
+D128, causal, matched). First milestone: the forward at least as fast as FA3's fp8 forward on the same shapes. Two
+failed rounds on a lever mean moving to another lever or a structural redesign, not stopping. If a floor looks wrong
+(work the method needs that the model does not count), show the evidence and propose a corrected floor instead of
+declaring it unreachable. Every accepted round reports percent of the calibrated limit per kernel.
+
+Breadth (Hao, round 17): compute is not rationed: many candidates and many variants per lever, built in parallel
+worktrees and screened with short 1-GPU sbatch --wait jobs (`.local/jobs/screen.sh`: build, default-route bitwise
+check, 2-rep A/B on B2 N8192 16/4 and 32/4); screen winners go to the full gate + confirmation; every screened variant
+is logged with its number (results/screens.md).

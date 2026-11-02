@@ -1,0 +1,21 @@
+{
+ "per_call_ms": 1.9702880382537842,
+ "batched_ms": 1.659169578552246,
+ "kernels_ms": {
+  "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array": 0.0009924999999993815,
+  "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90Fq8F<flash::Collecti": 1.5256569999999998
+ },
+ "fwdbwd_ms": 7.731536149978638,
+ "clock": "1980 MHz, 1980 MHz, 139.98 W",
+ "identity": {
+  "package": "/lustre/fsw/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/delta-matching/.local/frozen/r14_h3/delta_matching",
+  "library_sha256": "756158cb1226f4cf49462e3f9b6c853e1f0404ac430f277f2b0913abe884f318"
+ },
+ "shape": {
+  "B": 2,
+  "N": 8192,
+  "H": 32,
+  "Hk": 4,
+  "D": 128
+ }
+}

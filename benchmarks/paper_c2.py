@@ -114,9 +114,11 @@ def arm_fa3():
     def first(r):
         return r[0] if isinstance(r, tuple) else r
 
-    def fwd():
-        with torch.no_grad():
-            return first(fa3(q, k, v, causal=True))
+    def fwd():   # training forward (paper C.2): gradients enabled, softmax statistics saved for the backward
+        with torch.enable_grad():
+            o = first(fa3(q, k, v, causal=True))
+        assert o.requires_grad and o.grad_fn is not None
+        return o
 
     def fwdbwd():
         q.grad = k.grad = v.grad = None
@@ -137,14 +139,48 @@ def arm_cudnn():
         with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
             return F.scaled_dot_product_attention(qt, kt, vt, is_causal=True, enable_gqa=True)
 
-    def fwd():
-        with torch.no_grad():
-            return call()
+    def fwd():   # training forward (paper C.2): gradients enabled, softmax statistics saved for the backward
+        with torch.enable_grad():
+            o = call()
+        assert o.requires_grad and o.grad_fn is not None
+        return o
 
     def fwdbwd():
         qt.grad = kt.grad = vt.grad = None
         call().backward(dot)
     return fwd, fwdbwd, {"torch": torch.__version__, "cudnn": torch.backends.cudnn.version()}
+
+
+def diag(root):
+    """Hao's forward reconciliation (round 17): the DM forward at the C.2 shape timed several ways in one process --
+    per-call events (the protocol), one event pair around 20 back-to-back calls, the profiler's kernel time -- with SM
+    clocks sampled, and the forward inside fwd+bwd (fwd+bwd minus the backward ops alone)."""
+    import torch, subprocess
+    fwd, fwdbwd, ident = arm_dm(root)
+    _clock_warm()
+    per_call, _ = _median_events(fwd)
+    a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    a.record()
+    for _ in range(20):
+        fwd()
+    b.record(); b.synchronize()
+    batched = a.elapsed_time(b) / 20
+    from torch.profiler import profile, ProfilerActivity
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(10):
+            fwd()
+        torch.cuda.synchronize()
+    ks = {}
+    for e in prof.events():
+        if e.device_type.name == "CUDA":
+            ks.setdefault(e.name, []).append(e.device_time_total / 1e3 if hasattr(e, "device_time_total") else e.cuda_time_total / 1e3)
+    kern = {n[:90]: statistics.median(v) for n, v in ks.items()}
+    clk = subprocess.run(["nvidia-smi", "--query-gpu=clocks.sm,clocks.max.sm,power.draw", "--format=csv,noheader"],
+                         capture_output=True, text=True).stdout.strip()
+    _clock_warm()
+    fb, _ = _median_events(fwdbwd)
+    return {"per_call_ms": per_call, "batched_ms": batched, "kernels_ms": kern, "fwdbwd_ms": fb, "clock": clk,
+            "identity": ident, "shape": dict(SHAPE)}
 
 
 def arm_te_fp8():
@@ -204,6 +240,19 @@ def run(a):
 
 def summarize(raw):
     arms = list(raw["rounds"][0])
+    nr = raw["protocol"]["rounds"]
+    if len(raw["rounds"]) != nr or any(sorted(r) != sorted(arms) for r in raw["rounds"]):
+        raise SystemExit(f"raw coverage: {len(raw['rounds'])} rounds of {nr}, or arms differ between rounds")
+    for name in arms:
+        ok = [r[name] for r in raw["rounds"] if "error" not in r[name]]
+        if ok and len(ok) != nr:
+            raise SystemExit(f"{name}: failed in some rounds only")
+        if len({json.dumps(x.get("identity"), sort_keys=True) for x in ok}) > 1:
+            raise SystemExit(f"{name}: build / module identity differs between rounds")
+        for x in ok:
+            if not (x["fwd_ms"] > 0 and x["fwdbwd_ms"] > x["fwd_ms"] and len(x["fwd_events"]) == ITERS
+                    and abs(statistics.median(x["fwd_events"]) - x["fwd_ms"]) < 1e-9):
+                raise SystemExit(f"{name}: malformed timings")
     res = {}
     for name in arms:
         W = work(**dict(raw["protocol"]["shape"], H=int(name.split("/")[0][1:])))
@@ -260,11 +309,15 @@ def main():
     o = sp.add_parser("one"); o.add_argument("--arm", required=True); o.add_argument("--root", default=None)
     o.add_argument("--H", type=int, choices=HEADS, default=16)
     p = sp.add_parser("report"); p.add_argument("--raw", required=True); p.add_argument("--md", default=None)
+    g = sp.add_parser("diag"); g.add_argument("--root", required=True); g.add_argument("--H", type=int, default=16)
     a = ap.parse_args()
     if a.cmd == "run":
         run(a)
     elif a.cmd == "one":
         print(json.dumps(one(a.arm, a.root, a.H)))
+    elif a.cmd == "diag":
+        SHAPE["H"] = a.H
+        print(json.dumps(diag(a.root), indent=1))
     else:
         report(a)
 

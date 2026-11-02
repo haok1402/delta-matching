@@ -650,7 +650,8 @@ def _cap(dbg=False, route="default", err=1e-3, code_sha="c0de", lib="L"):
     out = {"schema": NUM.SCHEMA, "route": route, "dbg": dbg,
            "identity": {"library_sha256": _H(lib + str(dbg)), "python_sha256": _H("py"), "code_sha": code_sha,
                         "flags": {"F": 1}, "dbg_build": dbg, "prof": False, "trace": False},
-           "descriptors_sha256": _hl.sha256(json.dumps(cases, sort_keys=True).encode()).hexdigest(), "cases": {}}
+           "descriptors_sha256": _hl.sha256(json.dumps(cases, sort_keys=True).encode()).hexdigest(), "cases": {},
+           "resolved_route": {"groups": "auto", "streams": 1}}
     for key, desc in cases:
         c = {"errors": {o: err for o in NUM.OUTPUTS}, "outputs": {o: _sig(key + o) for o in NUM.OUTPUTS},
              "reference_finite": True, "input_id": _H("in" + key), "ref_id": _H("ref" + key)}
@@ -668,9 +669,34 @@ def _cap(dbg=False, route="default", err=1e-3, code_sha="c0de", lib="L"):
     return out
 
 
-def _numcheck(tmp_path, mutate=None, ws="same", manifest=None, extra=()):
+def _rows(route="default"):
+    """residual-v2 sidecar: every matched group's rows at half the derived bound; row 0 (one key) exempt."""
+    import torch
+    side = {}
+    for key, desc in EQ.selected_cases(route):
+        if desc["mode"] != "matched":
+            continue
+        sch = NUM.expected_group_schema(desc, route)
+        n = desc["N"]
+        keys = (torch.arange(n) + 1).clamp(max=n).to(torch.int64).view(1, -1).expand(desc["B"] * sch["heads"], n).contiguous()
+        for gi in range(sch["groups"]):
+            den = torch.ones(keys.shape, dtype=torch.float64)
+            num = keys.double() * 2.0 ** -24
+            num[:, 0] = 1.0                       # one visible key: ratio 1, exempt (degenerate)
+            side[f"{key}|{gi}"] = {"num": num, "den": den, "keys": keys.clone()}
+    return side
+
+
+def _numcheck(tmp_path, mutate=None, ws="same", manifest=None, extra=(), rows_mutate=None):
+    import torch
     files = {"base": _cap(lib="base"), "prev": _cap(lib="prev"), "cand": _cap(), "cand-repeat": _cap(),
              "cand-dbg": _cap(True), "cand-dbg-repeat": _cap(True), "prev-dbg": _cap(True, lib="prev")}
+    sides = {t: _rows() for t in ("cand-dbg", "cand-dbg-repeat", "prev-dbg")}
+    if rows_mutate:
+        rows_mutate(sides)
+    for t, sd in sides.items():
+        sp = tmp_path / f"{t}.json.rows.pt"; torch.save(sd, sp)
+        files[t]["rows_sidecar"] = {"file": sp.name, "sha256": EQ.sha256(str(sp)), "version": NUM.RESIDUAL_VERSION}
     man = manifest if manifest is not None else {"route": "default", "base_library_sha256": files["base"]["identity"]["library_sha256"],
                                                   "allow_repair": False, "cases": {}}
     if mutate:
@@ -689,8 +715,12 @@ def _c(f, tag, key="d128_gqa4/causal/matched"):
 
 
 def test_numerics_check_passes_a_self_certificate(tmp_path):
-    r = _numcheck(tmp_path)
+    r = _numcheck(tmp_path, extra=("--report", str(tmp_path / "rep.json")))
     assert r.returncode == 0 and "PASS" in r.stdout, r.stdout[-800:]
+    rep = json.load(open(tmp_path / "rep.json"))
+    assert rep["ac23_eligible"] is True and "residual-v2" in rep["residual_versions"]["rows"]
+    k = rep["cases"]["d128_gqa4/causal/matched"]
+    assert k["exempt"] > 0 and k["exempt"] == k["prev_exempt"] and k["violations"] == 0
 
 
 @pytest.mark.parametrize("why,mutate", [
@@ -708,8 +738,14 @@ def test_numerics_check_passes_a_self_certificate(tmp_path):
     ("declared unchanged", lambda f, m: [_c(f, t)["groups"][0].update(region_hashes=[_H("p"), _H("q")]) for t in ("cand-dbg", "cand-dbg-repeat")]),
     ("out of range", lambda f, m: [_c(f, t)["groups"][0].update(residual_plan=1.5) for t in ("cand-dbg", "cand-dbg-repeat")]),
     ("out of range", lambda f, m: [_c(f, t)["groups"][0].update(residual_centered=float("nan")) for t in ("cand-dbg", "cand-dbg-repeat")]),
-    ("centered residual diagnostic", lambda f, m: [_c(f, t)["groups"][0].update(residual_centered=1.0) for t in ("cand-dbg", "cand-dbg-repeat")]),
-    ("above the previous", lambda f, m: [_c(f, t)["groups"][0].update(residual_plan=0.9) for t in ("cand-dbg", "cand-dbg-repeat")]),
+    ("missing input / reference identity", lambda f, m: _c(f, "cand").update(input_id=None)),
+    ("missing output hashes", lambda f, m: _c(f, "cand")["outputs"]["dQ"].update(bytes=None)),
+    ("missing build stamp identity", lambda f, m: [f[t]["identity"].update(flags=None) for t in f]),
+    ("instrumented", lambda f, m: f["cand"]["identity"].update(trace=True)),
+    ("not a DBG build of the previous", lambda f, m: f["prev-dbg"]["identity"].update(code_sha="older")),
+    ("different backward routes", lambda f, m: f["cand"].update(resolved_route={"groups": "kv", "streams": 1})),
+    ("row sidecar", lambda f, m: f["cand-dbg"]["rows_sidecar"].update(sha256=_H("tampered"))),
+    ("row sidecar", lambda f, m: f["prev-dbg"].pop("rows_sidecar")),
     ("zero-denominator", lambda f, m: [_c(f, t)["groups"][0].update(zero_den_nonzero_num=2) for t in ("cand-dbg", "cand-dbg-repeat")]),
     ("missing library", lambda f, m: [f[t]["identity"].update(library_sha256=None) for t in f]),
     ("not from the candidate's source", lambda f, m: [f[t]["identity"].update(code_sha="other") for t in ("cand-dbg", "cand-dbg-repeat")]),
@@ -722,6 +758,42 @@ def test_numerics_check_passes_a_self_certificate(tmp_path):
 def test_numerics_check_rejects(tmp_path, why, mutate):
     r = _numcheck(tmp_path, mutate)
     assert r.returncode == 1 and why in r.stdout, (why, r.stdout[-800:])
+
+
+_G = "d128_gqa4/causal/matched|0"
+
+
+def _both(fn):
+    return lambda s: [fn(s[t]) for t in ("cand-dbg", "cand-dbg-repeat")]
+
+
+@pytest.mark.parametrize("why,rows_mutate", [
+    # one row worsens past round-off while the group's plan maximum stays 1 (row 0, exempt): per row, not group maxima
+    ("above the round-off bound", _both(lambda s: s[_G]["num"].__setitem__((0, 7), 8 * 2.0 ** -22))),
+    ("exemption set grows", _both(lambda s: (s[_G]["num"].__setitem__((0, 9), 0.0), s[_G]["den"].__setitem__((0, 9), 0.0)))),
+    ("zero-denominator rows with a nonzero sum", _both(lambda s: s[_G]["den"].__setitem__((0, 9), 0.0))),
+    ("nondeterministic", lambda s: s["cand-dbg-repeat"][_G]["num"].__setitem__((0, 5), 0.0)),
+    ("visible-key counts differ", _both(lambda s: s[_G]["keys"].__setitem__((0, 5), 99))),
+    ("row records missing", _both(lambda s: s.pop(_G))),
+])
+def test_numerics_residual_v2_rejects(tmp_path, why, rows_mutate):
+    r = _numcheck(tmp_path, rows_mutate=rows_mutate)
+    assert r.returncode == 1 and why in r.stdout, (why, r.stdout[-800:])
+
+
+def test_numerics_residual_v2_regression_vs_the_accepted_row(tmp_path):
+    import torch
+    def prev_better(s):                       # the accepted build had row 7 at 0; the candidate's is still in bound
+        s["prev-dbg"][_G]["num"][0, 7] = 0.0
+    r = _numcheck(tmp_path, rows_mutate=prev_better)
+    assert r.returncode == 0, r.stdout[-600:]  # +k 2^-24 <= round-off: not a regression
+    d = tmp_path / "x"; d.mkdir()
+    def exempt_shrinks(s):                    # an exempt accepted row becoming non-exempt (in bound) is allowed
+        for t in ("cand-dbg", "cand-dbg-repeat"):
+            s[t][_G]["num"][0, 0] = 0.0
+    assert _numcheck(d, rows_mutate=exempt_shrinks).returncode == 0
+    assert torch.equal(NUM.residual_v2(torch.tensor([[1.0]], dtype=torch.float64), torch.tensor([[1.0]], dtype=torch.float64),
+                                       torch.tensor([[1]]))[0], torch.tensor([[True]]))
 
 
 def _nan_case(f, m, key="d128_zeros/causal/matched", sigs=("base", "prev", "cand", "cand-repeat", "cand-dbg",
@@ -973,7 +1045,7 @@ def test_gate_lib_stamp_handling(tmp_path):
     assert r.returncode == 0 and not (wt2 / "delta_matching" / "_build_info.py").exists(), r.stdout[-600:]
 
 
-def test_numerics_gate_never_accepts_until_the_residual_contract_is_settled(tmp_path):
+def test_numerics_gate_accepts_only_residual_v2_eligible_reports(tmp_path):
     (tmp_path / "delta_matching").mkdir(); (tmp_path / "delta_matching" / "_C.so").write_bytes(b"prev")   # --prev-root
     for n in ("base", "cdbg", "pdbg"):
         (tmp_path / n / "delta_matching").mkdir(parents=True)
@@ -981,4 +1053,4 @@ def test_numerics_gate_never_accepts_until_the_residual_contract_is_settled(tmp_
     r = run_gate(tmp_path, "numerics", "", args=["--base-root", str(tmp_path / "base"), "--cand-dbg-root",
                                                  str(tmp_path / "cdbg"), "--prev-dbg-root", str(tmp_path / "pdbg"),
                                                  "--defects", str(tmp_path / "m.json")])
-    assert r.returncode == 1 and "residual contract" in r.stdout, r.stdout[-600:]
+    assert r.returncode == 1 and "not AC-2.3 eligible under residual-v2" in r.stdout, r.stdout[-600:]

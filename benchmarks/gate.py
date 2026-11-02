@@ -334,10 +334,15 @@ def main():
                 gate.run(f"numcheck_{r}", [gate.py, N, "check", "--route", r, "--ws", a.ws, "--defects", defects,
                                            "--report", os.path.join(run_dir, f"num_{r}_report.json")]
                          + [x for tag, f in files.items() for x in (f"--{tag}", f)])
-            # The residual acceptance contract (AC-2.3) is not settled: the plan's ratio is ill-conditioned on short
-            # rows and no replacement is authorized.  A numerics PASS validates the plumbing only and never accepts.
-            raise GateFailure("numerical acceptance is unavailable until the residual contract is authorized "
-                              "(numerics checks ran; see num_*_report.json)")
+            # residual-v2 (Hao's per-row contract, round 16): every route's check must report AC-2.3 eligibility
+            for r in routes:
+                try:
+                    rep_ = json.load(open(os.path.join(run_dir, f"num_{r}_report.json")))
+                except (OSError, ValueError):
+                    rep_ = {}
+                if rep_.get("ac23_eligible") is not True or "residual-v2" not in str(rep_.get("residual_versions", {}).get("rows")):
+                    raise GateFailure(f"numerics route {r}: not AC-2.3 eligible under residual-v2")
+            gate.save(numerics={r: json.load(open(os.path.join(run_dir, f"num_{r}_report.json")))["result"] for r in routes})
         if a.mode == "full":
             base = a.base_dumps.split(","); prev = a.prev_dumps.split(",")
             if len(base) != 4 or len(prev) != 4:

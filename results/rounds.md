@@ -771,3 +771,7 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   -1.4%; confirmation 21181901 (library 5bbf85214faa) -4.04%: ACCEPTED (accepted root r17_pk).
 - Pass-1 stack (kda-pass1-c3: SHFL8 + QST 3 / DOST 3, bitwise): full gate 21181578 bitwise on all four routes, pass 1
   -2.26% (< 3%) -> not accepted alone; held for stacking.
+- Accepted build r17_pk (job 21181967, calibration 1481.2 TFLOPS = the fixed reference): % of calibrated limit pass1
+  41.1%, forward 54.9%, pass0 70.0%, pass2 94.1%; forward / FA3 fp8 1.155; original -> now e2e fwd -13.1%, fwd+bwd
+  -11.2%; paper C.2 16/4 fwd+bwd 510.5 (cuDNN BF16 509.6), 32/4 533.3 TFLOP/s. (On the previous job's 1409 TFLOPS
+  calibration the same build would read ~5% higher; see the calibration-stability decision.)

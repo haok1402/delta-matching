@@ -195,3 +195,8 @@ of its calibrated sol4 limit on the four acceptance shapes; first milestone FA3 
   references of the full gate are the latest numerics-certified accepted build (r17_fwd dumps, equivalence manifest
   v4, .local/equiv4/r17fwd_*.pt). The original baseline stays the reference of the numerics gate (errors vs fp32) and
   of the progress A/B.
+- Decided (round 17), calibration stability: the same-job fp8 GEMM calibration varies ~5% between jobs (1409 vs 1481
+  TFLOPS with identical clocks / copy bandwidth), which moves every "% of floor" by the same amount. Each accepted
+  round now reports the % against its same-job calibration AND against a fixed reference = the highest fp8 peak
+  observed so far (1481.15 TFLOPS, job 21181967; the most demanding floor). Goal attainment is judged on the fixed
+  reference.

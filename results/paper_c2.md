@@ -113,3 +113,9 @@ GPU, which a per-call event pair (the paper's protocol, followed here unchanged)
 timing window, not of the op: there is no host-path lever in `fwd_fp8`, and the earlier "candidate (forward host
 path)" is withdrawn. The conclusion stands: the forward KERNEL runs at the measured kernel rate (704 TFLOP/s at
 r14_h3), and the paper's 661 reflects a smaller idle-start latency on its machine.
+
+## After round 17's accepted EXPBX64 (`results/paper_c2/r17_pk_table.md`, job 21181967)
+
+16/4: accepted 582.8 / 486.4 / 510.5 TFLOP/s fwd / bwd / fwd+bwd (cuDNN BF16 590.3 / 483.5 / 509.6: our fwd+bwd now above
+cuDNN BF16 at the paper's shape; FA3 BF16 697.0 / 499.7 / 543.6). 32/4: accepted 639.0 / 500.3 / 533.3 (FA3 BF16 723.1 /
+519.0 / 564.5).

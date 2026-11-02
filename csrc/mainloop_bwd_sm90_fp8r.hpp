@@ -129,6 +129,14 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_P1_PCONVEARLY
 #define KDA_P1_PCONVEARLY 0
 #endif
+//   KDA_P1_SHFL8 (bitwise): the dS' natural transpose with 8 shuffles instead of 16.  Every target lane needs WHOLE
+//     A-operand words: rdS words 2j + h (h = lane >= 16) from lanes srcA and srcB.  Phase 0: low lanes read srcA, high
+//     lanes srcB; phase 1 the other way; a provider picks rdS word 2j or 2j + 1 by (lane bit 2) ^ phase (one PRMT with a
+//     per-lane selector, before the dK issue as in H1b); a receiver interleaves its two words with a per-lane selector.
+//     8 PRMT + 8 SHFL + 8 PRMT instead of 8 + 16 + 8 (simulated byte-exact for all 32 lanes: pass1-aux/p1x/xpose_sim.py).
+#ifndef KDA_P1_SHFL8
+#define KDA_P1_SHFL8 0
+#endif
 #define KDA_DSBUF (KDA_P1_FENCE2 ? 4 : 2)
 
 #include "kda_prof.h"
@@ -722,6 +730,16 @@ struct CollectiveMainloopBwdSm90Fp8R {
         int const fq8_srcA = 8 * (fq8_ip & 3) + (lane & 3);
         int const fq8_srcB = fq8_srcA + 4;
         uint32_t const fq8_sel = fq8_ip < 4 ? 0x5140u : 0x7362u;
+#if KDA_P1_SHFL8
+        int const fq8_h = lane >= 16;
+        int const fq8_b2 = (lane >> 2) & 1;
+        uint32_t const fq8_psel0 = fq8_b2 ? 0x7654u : 0x3210u;     // phase 0 provider: word 2j + bit2
+        uint32_t const fq8_psel1 = fq8_b2 ? 0x3210u : 0x7654u;     // phase 1 provider: word 2j + !bit2
+        int const fq8_src0 = fq8_h ? fq8_srcB : fq8_srcA;
+        int const fq8_src1 = fq8_h ? fq8_srcA : fq8_srcB;
+        uint32_t const fq8_osel0 = fq8_h ? 0x1504u : 0x5140u;
+        uint32_t const fq8_osel1 = fq8_h ? 0x3726u : 0x7362u;
+#endif
         // stmatrix.x4.trans row addresses: instruction s covers rows 32 s + lane of this warp's 16-key chunk.
         uint32_t const fq8_st_addr0 = cute::cast_smem_ptr_to_uint(&sdS(lane, 16 * warp_in_wg));
         uint32_t const fq8_st_addr1 = cute::cast_smem_ptr_to_uint(&sdS(32 + lane, 16 * warp_in_wg));
@@ -1023,8 +1041,13 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 Tensor rdS32 = recast<uint32_t>(rdS);
                 #pragma unroll
                 for (int i = 0; i < 4; ++i) {
+#if KDA_P1_SHFL8
+                    fq8_pk[i] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), fq8_psel0);        // phase 0, j = i
+                    fq8_pk[4 + i] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), fq8_psel1);    // phase 1, j = i
+#else
                     fq8_pk[2 * i] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), 0x5410);       // g = 2i
                     fq8_pk[2 * i + 1] = __byte_perm(rdS32(2 * i), rdS32(2 * i + 1), 0x7632);   // g = 2i + 1
+#endif
                 }
             }
             KP(12);
@@ -1051,11 +1074,27 @@ struct CollectiveMainloopBwdSm90Fp8R {
             // this lane stores comes from lanes srcA / srcB (slot h = ip / 4); stmatrix.trans writes 16 keys x 8 rows.
             {
                 #pragma unroll
+#if KDA_P1_SHFL8
+                {
+                    uint32_t r0[4], r1[4];
+                    #pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        r0[j] = __shfl_sync(0xffffffff, fq8_pk[j], fq8_src0);
+                        r1[j] = __shfl_sync(0xffffffff, fq8_pk[4 + j], fq8_src1);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        fq8_pk[2 * j] = __byte_perm(r0[j], r1[j], fq8_osel0);
+                        fq8_pk[2 * j + 1] = __byte_perm(r0[j], r1[j], fq8_osel1);
+                    }
+                }
+#else
                 for (int w = 0; w < 8; ++w) {   // one word at a time: two shuffles, then overwrite it with its output
                     uint32_t const a = __shfl_sync(0xffffffff, fq8_pk[w], fq8_srcA);
                     uint32_t const b = __shfl_sync(0xffffffff, fq8_pk[w], fq8_srcB);
                     fq8_pk[w] = __byte_perm(a, b, fq8_sel);
                 }
+#endif
                 // The previous tile's TMA box store of this WG must have drained before the tile is overwritten.
 #if KDA_P1_FENCE2
                 int const fq8_r = m_block - fq8_m_first;

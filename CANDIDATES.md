@@ -198,3 +198,20 @@ Reading: the regressing rows have a small accepted residual by chance. A row's r
 sum_j P_j != 1 (delta = sum P dP satisfies sum_j P_j (dP_j - delta) = 0 only when sum_j P_j = 1), so any rounding change
 of delta moves them. Most defensible next step, protecting the zero-sum identity: P0NORM, delta = sum P dP / sum P,
 which makes the identity exact up to the rounding of the sums. Its numerics and timing are in flight.
+
+### FOLD and NORM (residual-v4, default route; stamped builds vs frozen r17_p1)
+
+| commit | pass 0 geomean vs r17_p1 (ab.py, 1 job) | v4 well-cond. regressions | degenerate growth | mean dQ / dK error | rows better / worse vs accepted | v4 |
+|---|---:|---|---|---|---|---|
+| 4dc4268 FOLD (on LAZY + DEFER) | **-13.12%** ACCEPT | 78 (gqa4 5, gqa3 6, mqa 2, heldout 11, bhnd 3, min 1, packed 1, stress 49) | 0 | +7.5e-9 / +7.6e-9 | 62707 / 93453 | FAIL |
+| e881f20 NORM on FOLD | -4.12% | 9 | 2 (scale10) | +3.0e-8 / -9.2e-8 | | FAIL |
+| a23f011 NORM on DEFER | +5.74% | 6 | 2 (scale10) | +2.3e-8 / -9.6e-8 | 135722 / 32937 (mean residual 1.56e-2 -> 1.29e-2; ill rows 2444 better / 321 worse) | FAIL |
+| e3275a3 DEFER | -3.04% | 28 | 0 | +1.4e-9 / | 49284 / 46267 | FAIL |
+| c49c0d6 LAZY + DEFER | -7.50% | 57 | 0 | +3.4e-9 / | 67368 / 64696 | FAIL (also kda-sm90 job 21177096) |
+
+Decision (most defensible under Hao's residual-v4 as written; recorded here, not a rule change): every change to the
+rounding of delta moves roughly half the rows either way. Even delta = sum P dP / sum P, which makes the zero-sum
+identity exact and improves 4x more rows than it worsens, regresses a handful of well-conditioned rows beyond
+k 2^-23 and raises the mean dQ error by ~2e-8. Strict per-row non-regression therefore rejects all pass-0 numerics
+changes. The numerics path for pass 0 is closed under v4; FOLD's -13% (the largest single pass-0 gain found) and NORM
+(the identity-exact delta) stay documented for a future rule. Pass-0 work continues on bitwise levers only.

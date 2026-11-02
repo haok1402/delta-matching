@@ -83,6 +83,9 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
 | S46 | b3kw | ping-pong | C3b with the K pipeline wait moved ahead of the ring turn | = C3 | +30.1% geo (job 21178438 build: STACK up to 384 B, also on d256): rejected |
 | S47 | b3n64 / b3n64o / b2n64o | tile | 64-key tiles (one P-hat group: no rho), 3 WGs PV-first / 3 WGs FA3 order / 2 WGs FA3 order, 4 stages | order class | -3.44% / +62.2% (spills) / +16.8% geo vs C3b -12.64% (job 21178606): per-tile overhead dominates; 128-key tiles with 3 WGs are the sweet spot |
 
+| S48 | b3pre | turn | lazy rebase, rho and promote weight computed before the ring turn | bitwise (O = b3ld) | -1.71% geo vs r17_fwd (job 21178684 / s22) -> C4 |
+| S49 | b3ktok | turn | + K try-wait token before the turn | bitwise | -1.85% screen; as C4b in A/B -0.58% / -0.75% (below C4): rejected |
+
 ## Candidates
 
 ### C1 FWDLD + RHOPRE (current commit c3df077 on kda-sm90-fwd, on a371616; flags FA3FP11_HD128_FWDLAZY=1, FA3FP11_HD128_FWDDFOLD=1; builds `kda-work/frozen/c1e`, `c1e_dbg`) : READY (timing); numerics under residual-v3: see below
@@ -221,3 +224,14 @@ SASS of the steady-state (unmasked) D128 causal loop of A: 1288 instructions per
   without scale loads, so FA3 parity under this numerics contract needs latency hiding beyond FA3's own.
 - kda-fwdport owns the k / v scale staging (smem) lever (the descale cost is mostly k-scale load latency); it stacks
   on C3g.
+
+### C4 PRETURN (kda-sm90-fwd-c4 b7d70a0 on c1ceece) : READY (bitwise stack, >= 1% in two jobs)
+
+- Change: with 128-key tiles and the lazy O rescale, the lazy rebase, rho_1 and the promote weight depend only on the
+  consumed tile's state; they are computed before the ring sync, so the turn holds only the two PV sub-gemms, the
+  rescale, the promote and the QK issue. Same values, no flag.
+- Outputs: O identical to r17_fwd on all four shapes (screen 21178840). Resources unchanged (D128 STACK 16 / 16 B).
+- A/B vs r17_fwd: fwd geo-mean -1.10% (21178841), -1.12% (21178842); no shape slower beyond spread.
+- C4b = C4 + KTOK: -0.58% (21178996), -0.75% (21178997): rejected.
+- Reference after C3g (job 21178656): FA3 fp8 is 13.9% faster (geo-mean; 11.4% by sum) than r17_fwd on the four shapes
+  (r17_fwd ~1.16 x FA3 geo-mean).

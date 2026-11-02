@@ -110,6 +110,41 @@ static_assert(FA3FP11_M17_LSEK == 1, "Delta-Matching-128 v2 (P1-R) is written fo
 #ifndef KDA_R_ABLDV
 #define KDA_R_ABLDV 0
 #endif
+//   KDA_R_SPLITN: the S^T / dP^T gemms of a step are issued as two m64n32 halves (query rows 0-31, 32-63) in separate
+//     wgmma groups; on unmasked steps the exp line of the first half runs while the second half and dP are still on the
+//     tensor pipe, and the dS line of the first half while dP's second half is.  Same atoms per element (k order
+//     unchanged), same per-element arithmetic: expected bitwise.
+#ifndef KDA_R_SPLITN
+#define KDA_R_SPLITN 0
+#endif
+//   KDA_R_EARLY (NAMED NUMERICS CHANGE, dK only): RIP = the dK accumulator is kept in the current tile's basis g_m and
+//     rescaled in place by g_{m-1} / g_m before the dK gemm accumulates into it (no 64-register per-tile temp, no fold;
+//     the k8s unfold at the exit multiplies by the last basis).  With the freed registers the NEXT step's S^T gemm is
+//     issued right after this step's dV gemm, into P's (then dead) registers (EARLY=3), and also the next dP^T right
+//     after the dK gemm, into dS's registers (EARLY=4); every wgmma retires before the step ends (no wgmma in flight
+//     across the loop back-edge: ptxas serializes that, C7511).  P, dS', psi and dV are unchanged (bitwise).
+#ifndef KDA_R_EARLY
+#define KDA_R_EARLY 0
+#endif
+// KDA_R_RIP: the in-place dK accumulation alone (implied by KDA_R_EARLY).
+#ifndef KDA_R_SCOPY
+#define KDA_R_SCOPY 0
+#endif
+// KDA_R_SINTO_DS (with EARLY=7, SCOPY): the next S^T is accumulated into this step's dS fp32 registers (last written
+// before the dK gemm's arrive), so no accumulator register of the open dK stage is defined by a non-wgmma instruction
+// inside it (C7515); copied into the carry fragment once retired.
+#ifndef KDA_R_SINTO_DS
+#define KDA_R_SINTO_DS 0
+#endif
+#ifndef KDA_R_RIP
+#define KDA_R_RIP (KDA_R_EARLY != 0)
+#endif
+// EARLY=5 / 6: the next S^T (5) or S^T and dP^T (6) issued after this step's dK gemm instead (dS already converted).
+// EARLY=7 / 8: issued once this step's dV has retired (dK still in flight; the dV promote runs under dK / S / dP).
+// EARLY=9 (diagnostic): the next S^T issued only after every gemm of this step has retired, then waited at once.
+static_assert(KDA_R_EARLY == 0 || (KDA_R_EARLY >= 3 && KDA_R_EARLY <= 9), "KDA_R_EARLY: 3 .. 9");
+#define KDA_R_EARLY_DP (KDA_R_EARLY == 4 || KDA_R_EARLY == 6 || KDA_R_EARLY == 8)
+static_assert(!(KDA_R_EARLY && KDA_R_SPLITN), "KDA_R_EARLY and KDA_R_SPLITN are separate prototypes");
 #include "kda_prof.h"
 
 namespace flash {
@@ -180,6 +215,14 @@ struct CollectiveMainloopBwdSm90Fp8R {
     // dP^T = V dO^T: same tile shape and atom layout, ElementDp operands (== TiledMmaSdP at SAGEDP=0).
     using TiledMmadP = decltype(cute::make_tiled_mma(
         cute::GMMA::ss_op_selector<ElementDp, ElementDp, ElementAccum, TileShapeAtomSdP, GMMA::Major::K, GMMA::Major::K>(),
+        AtomLayoutSdP{}));
+    // KDA_R_SPLITN: the half-width (32 query rows) S^T / dP^T atoms.
+    using TileShapeAtomSdPh = Shape<Int<kBlockN>, Int<kBlockM / 2>, Int<kHeadDim>>;
+    using TiledMmaSdPh = decltype(cute::make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShapeAtomSdPh, GMMA::Major::K, GMMA::Major::K>(),
+        AtomLayoutSdP{}));
+    using TiledMmadPh = decltype(cute::make_tiled_mma(
+        cute::GMMA::ss_op_selector<ElementDp, ElementDp, ElementAccum, TileShapeAtomSdPh, GMMA::Major::K, GMMA::Major::K>(),
         AtomLayoutSdP{}));
     // dV / dK: (M = kBlockN keys, N = d, K = kBlockM rows), RS (A from registers), the two warpgroups tile M.
     using TileShapeAtomdKV = Shape<Int<kBlockN>, Int<kHeadDim>, Int<kBlockM>>;
@@ -765,15 +808,78 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n" :: "r"(a), "r"(wv[0]), "r"(wv[1]), "r"(wv[2]), "r"(wv[3]) : "memory");
             }
         };
-        auto bwd_step = [&](int m_block, auto mask_fn, auto stage_c) {
+        TiledMmaSdPh tiled_mma_Sh;
+        TiledMmadPh tiled_mma_dPh;
+        auto wg_mma_Sh = tiled_mma_Sh.get_slice(warp_group_thread_layout(warp_group_idx));
+        auto wg_mma_dPh = tiled_mma_dPh.get_slice(warp_group_thread_layout(warp_group_idx));
+        // the first / second 32-row half of a (64 rows x d) stage, as SS B-operand descriptors
+        auto kda_half_B = [&](auto& wgm, auto const& sX, int stage, auto h) {
+            return wgm.partition_fragment_B(local_tile(sX(_, _, stage), Shape<Int<kBlockM / 2>, Int<kHeadDim>>{}, make_coord(h, _0{})));
+        };
+#if KDA_R_RIP
+        float kda_g_acc = 0.0f;   // RIP: the dK accumulator's basis (0 = nothing accumulated yet)
+#endif
+#if KDA_R_EARLY
+        Tensor kda_tSrS = partition_fragment_C(tiled_mma_SdP, select<1, 0>(TileShape_MNK{}));
+        Tensor kda_tdPrdP = partition_fragment_C(tiled_mma_dP, select<1, 0>(TileShape_MNK{}));
+        // KDA_R_SCOPY: the gemm writes a step-local accumulator that is copied into the plain carry fragment once retired
+        // (a wgmma accumulator consumed in the next iteration serializes every wgmma of the function, C7511).
+        auto kda_issue_S_into = [&](PipelineState st, auto& acc) {
+            consumer_wait(pipeline_q, st);
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, st.index()), acc);
+        };
+        auto kda_issue_S = [&](PipelineState st) { kda_issue_S_into(st, kda_tSrS); };
+        auto kda_issue_dP_into = [&](PipelineState_dO st, auto& acc) {
+            consumer_wait(pipeline_do, st);
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, st.index()), acc);
+        };
+        auto kda_issue_dP = [&](PipelineState_dO st) { kda_issue_dP_into(st, kda_tdPrdP); };
+#endif
+        auto bwd_step = [&](int m_block, auto mask_fn, auto stage_c, auto masked_c) {
+            constexpr bool kSplit = KDA_R_SPLITN != 0;          // S^T in two 32-row halves
+            constexpr bool kSplitP = KDA_R_SPLITN == 1;         // dP^T too (SPLITN=2: dP stays one gemm)
+            constexpr int kNdP = kSplitP ? 2 : 1;
+            constexpr bool kMasked = decltype(masked_c)::value != 0;
             constexpr int kSt = decltype(stage_c)::value;   // compile-time Q / Qt stage under UNROLL2 (-1 = runtime)
+#if !KDA_R_RIP
             Tensor fq8_tmpK = make_fragment_like(tdKrdK);
+#endif
             float fq8_g_fold = 0.0f;
             // (kBlockN, kBlockM) = the swapAB fragment: rows = keys, columns = query rows.
+#if KDA_R_EARLY
+            auto& tSrS = kda_tSrS;   // issued at the end of the previous step (or before the loop)
+#if KDA_R_SCOPY
+            Tensor kda_Snext = partition_fragment_C(tiled_mma_SdP, select<1, 0>(TileShape_MNK{}));
+            auto kda_issue_S = [&](PipelineState st) { kda_issue_S_into(st, kda_Snext); };
+            Tensor kda_Pnext = partition_fragment_C(tiled_mma_dP, select<1, 0>(TileShape_MNK{}));
+            auto kda_issue_dP = [&](PipelineState_dO st) { kda_issue_dP_into(st, kda_Pnext); };
+            auto kda_copy_S = [&]() {
+                #pragma unroll
+                for (int i = 0; i < size(kda_Snext); ++i) { kda_tSrS(i) = kda_Snext(i); }
+                if constexpr (KDA_R_EARLY_DP) {
+                    #pragma unroll
+                    for (int i = 0; i < size(kda_Pnext); ++i) { kda_tdPrdP(i) = kda_Pnext(i); }
+                }
+            };
+#else
+            auto kda_copy_S = [&]() {};
+#endif
+#else
             Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<1, 0>(TileShape_MNK{}));
             KT_VAL(30, smem_pipe_read.index()); KT_VAL(31, smem_pipe_read.phase()); KT(0);
             consumer_wait(pipeline_q, smem_pipe_read);
+#endif
             KP(3);
+            // KDA_R_SPLITN accumulator halves: storage 0-15 = columns (query rows) 0-31, 16-31 = rows 32-63.
+            using HalfC = decltype(partition_fragment_C(TiledMmaSdPh{}, Shape<Int<kBlockN>, Int<kBlockM / 2>>{}));
+            static_assert(decltype(size(HalfC{}))::value == 16, "SPLITN: 16 accumulators per half");
+            if constexpr (KDA_R_EARLY != 0) {
+            } else if constexpr (kSplit) {
+                Tensor h0 = make_tensor(tSrS.data(), HalfC{}.layout());
+                Tensor h1 = make_tensor(tSrS.data() + 16, HalfC{}.layout());
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_Sh, tSrK, kda_half_B(wg_mma_Sh, sQ, smem_pipe_read.index(), _0{}), h0);
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_Sh, tSrK, kda_half_B(wg_mma_Sh, sQ, smem_pipe_read.index(), _1{}), h1);
+            } else
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_SdP, tSrK, tSrQ(_, _, _, Int<kSt>{}), tSrS);
             } else {
@@ -795,15 +901,26 @@ struct CollectiveMainloopBwdSm90Fp8R {
             float const fq8_dp_descale = fq8_do8sc * fq8_v8s_wg;
 #endif
             float const fq8_dp_descale_f = fq8_dp_descale * fq8_k8s_wg;
+#if KDA_R_EARLY
+            auto& tdPrdP = kda_tdPrdP;
+#else
             Tensor tdPrdP = partition_fragment_C(tiled_mma_dP, select<1, 0>(TileShape_MNK{}));
+#endif
             // dS rides on tdPrdP under tSrS's rowcol layout below, so the two accumulators must agree.
             static_assert(cute::is_same_v<decltype(partition_fragment_C(TiledMmadP{}, select<1, 0>(TileShape_MNK{}))),
                                           decltype(partition_fragment_C(TiledMmaSdP{}, select<1, 0>(TileShape_MNK{})))>,
                           "bf16-dP: the bf16 dP accumulator fragment must match the fp8 S one");
             PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read, smem_pipe_read_do);
             KT(21);
-            consumer_wait(pipeline_do, smem_pipe_read_do_cur);
+            if constexpr (!KDA_R_EARLY_DP) { consumer_wait(pipeline_do, smem_pipe_read_do_cur); }
             KT(22);
+            if constexpr (KDA_R_EARLY_DP) {
+            } else if constexpr (kSplitP) {
+                Tensor h0 = make_tensor(tdPrdP.data(), HalfC{}.layout());
+                Tensor h1 = make_tensor(tdPrdP.data() + 16, HalfC{}.layout());
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dPh, tdPrV, kda_half_B(wg_mma_dPh, sdO, smem_pipe_read_do_cur.index(), _0{}), h0);
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dPh, tdPrV, kda_half_B(wg_mma_dPh, sdO, smem_pipe_read_do_cur.index(), _1{}), h1);
+            } else
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, Int<0>{}), tdPrdP);
             } else {
@@ -818,25 +935,41 @@ struct CollectiveMainloopBwdSm90Fp8R {
             for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) *= fq8_rf; }
             }
             fq8_f_prev = fq8_f_cur;
-            warpgroup_wait<1>();   // S retired
-            KP(5);
             auto const stage_q = [&] { if constexpr (kSt >= 0) { return Int<kSt>{}; } else { return smem_pipe_read.index(); } }();
             // rowcol view: (16 query rows, 2 keys) per thread.
             Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
-            mask_fn(tSrS, m_block);
-            #pragma unroll
-            for (int mi = 0; mi < size<0>(scores); ++mi) {
-                float const lse_scaled = __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));   // LSEK: the host prep's exact multiply
+            auto exp_rows = [&](auto lo, auto hi) {
                 #pragma unroll
-                for (int ni = 0; ni < size<1>(scores); ++ni) {
-                    // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
-                    scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+                for (int mi = decltype(lo)::value; mi < decltype(hi)::value; ++mi) {
+                    float const lse_scaled = __fmul_rn(tLSEsLSE(mi, stage_q), float(M_LOG2E));   // LSEK: the host prep's exact multiply
+                    #pragma unroll
+                    for (int ni = 0; ni < size<1>(scores); ++ni) {
+                        // P-hat = 2^8 * exp(S - lse) with the F1 cliff clamp (P1-A's line, verbatim).
+                        scores(mi, ni) = exp2f(fminf(scores(mi, ni) * fq8_s_descale_log2 - lse_scaled + kFq8MoE, kFq8MoE + 4.0f));
+                    }
                 }
+            };
+            static_assert(decltype(size<0>(scores))::value == 16, "16 query rows per thread");
+            if constexpr (kSplit && !kMasked) {
+                warpgroup_wait<kNdP + 1>();   // S rows 0-31 retired
+                exp_rows(Int<0>{}, Int<8>{});
+                warpgroup_wait<kNdP>();   // S rows 32-63 retired
+                exp_rows(Int<8>{}, Int<16>{});
+            } else {
+                warpgroup_wait<kNdP>();   // S retired
+                KP(5);
+                mask_fn(tSrS, m_block);
+                exp_rows(Int<0>{}, Int<16>{});
             }
             // The stage's LSE rows were read by the loop above and the S gemm has retired: raw Q's readers are done.
             pipeline_q.consumer_release(smem_pipe_read);
             KP(6);
-            warpgroup_wait<0>();   // dP retired
+#ifndef FA3FP11_DBG
+            constexpr bool kSplitDs = kSplitP;
+#else
+            constexpr bool kSplitDs = false;
+#endif
+            if constexpr (kSplitDs) { warpgroup_wait<1>(); } else { warpgroup_wait<0>(); }   // dP (rows 0-31 under SPLITN) retired
             KP(7);
             auto const stage_do = [&] { if constexpr (kSt >= 0) { return Int<0>{}; } else { return smem_pipe_read_do_cur.index(); } }();
             Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
@@ -900,14 +1033,23 @@ struct CollectiveMainloopBwdSm90Fp8R {
                 cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, wg_barrier_id);
             }
 #endif
-            #pragma unroll
-            for (int mi = 0; mi < size<0>(dS); ++mi) {
-                float const dP_sum_cur_f = tLSEsdPsum(mi, stage_do) * fq8_k8s_wg;
+            auto ds_rows = [&](auto lo, auto hi) {
                 #pragma unroll
-                for (int ni = 0; ni < size<1>(dS); ++ni) {
-                    // dS' = 2^8 * P * (dP_true - delta) * k8s_wg (the k8s fold; P1-A's line, verbatim).
-                    dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) * fq8_dp_descale_f - dP_sum_cur_f);
+                for (int mi = decltype(lo)::value; mi < decltype(hi)::value; ++mi) {
+                    float const dP_sum_cur_f = tLSEsdPsum(mi, stage_do) * fq8_k8s_wg;
+                    #pragma unroll
+                    for (int ni = 0; ni < size<1>(dS); ++ni) {
+                        // dS' = 2^8 * P * (dP_true - delta) * k8s_wg (the k8s fold; P1-A's line, verbatim).
+                        dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) * fq8_dp_descale_f - dP_sum_cur_f);
+                    }
                 }
+            };
+            if constexpr (kSplitDs) {
+                ds_rows(Int<0>{}, Int<8>{});
+                warpgroup_wait<0>();   // dP rows 32-63 retired
+                ds_rows(Int<8>{}, Int<16>{});
+            } else {
+                ds_rows(Int<0>{}, Int<16>{});
             }
             // The stage's dPsum rows were read above and the dP gemm has retired: raw dO's readers are done.
             pipeline_do.consumer_release(smem_pipe_read_do_cur);
@@ -936,6 +1078,10 @@ struct CollectiveMainloopBwdSm90Fp8R {
             } else {
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rP, tdVrdOt(_, _, _, smem_pipe_read_dot.index()), tdVrdV);
             }
+#if KDA_R_EARLY
+            bool const kda_next = m_block + 1 < m_block_max;   // CTA-uniform
+            if (KDA_R_EARLY <= 4 && kda_next) { PipelineState kda_nq = smem_pipe_read; ++kda_nq; kda_issue_S(kda_nq); }   // P's registers are dead
+#endif
             // psi = amax(|dS_tile|) / 448 across BOTH warpgroups (the tile is column-split per WG); parity-buffered slots.
             float fq8_amax = 0.f;
             #pragma unroll
@@ -999,11 +1145,25 @@ struct CollectiveMainloopBwdSm90Fp8R {
             KT(25);
             consumer_wait(pipeline_qt, smem_pipe_read_qt);
             KT(26);
+#if KDA_R_RIP
+            // RIP: bring the accumulator into this tile's basis, then accumulate dS'^T Q into it (zero tiles: codes are 0,
+            // the basis is kept and the gemm adds exact zeros).
+            if (fq8_g_fold != 0.0f) {
+                if (kda_g_acc != 0.0f) {
+                    float const kda_r = kda_g_acc / fq8_g_fold;
+                    #pragma unroll
+                    for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) *= kda_r; }
+                }
+                kda_g_acc = fq8_g_fold;
+            }
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, smem_pipe_read_qt.index()), tdKrdK);
+#else
             if constexpr (kSt >= 0) {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, Int<kSt>{}), fq8_tmpK);
             } else {
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dKV, rdS, tdKrQt(_, _, _, smem_pipe_read_qt.index()), fq8_tmpK);
             }
+#endif
             KP(15);
             // ## M25 (H1b): dS' natural (rows x keys) for pass 2, the ONE transpose, from the pre-packed words while the dV
             // and dK gemms are outstanding (sdS is not an operand of either: they read the dOt / Qt stages).  The key pair
@@ -1027,6 +1187,50 @@ struct CollectiveMainloopBwdSm90Fp8R {
             }
 #endif
             KP(13);
+#if KDA_R_EARLY
+            bool const kda_promote = (m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1;
+            if constexpr (KDA_R_EARLY == 7 || KDA_R_EARLY == 8) {
+                warpgroup_wait<1>();   // dV retired (dK in flight)
+                pipeline_dot.consumer_release(smem_pipe_read_dot);
+                if (kda_promote) {
+                    #pragma unroll
+                    for (int i = 0; i < size(tdVrdV); ++i) {
+                        float* const slot = fq8_smem_dv + i * NumMmaThreads;
+                        *slot = fmaf(tdVrdV(i), fq8_f_prev, *slot);
+                        tdVrdV(i) = 0.0f;
+                    }
+                }
+            }
+            if constexpr (KDA_R_EARLY >= 5 && KDA_R_EARLY <= 8) {
+#if KDA_R_SINTO_DS
+                if (kda_next) { PipelineState kda_nq = smem_pipe_read; ++kda_nq; kda_issue_S_into(kda_nq, tdPrdP); }
+#else
+                if (kda_next) { PipelineState kda_nq = smem_pipe_read; ++kda_nq; kda_issue_S(kda_nq); }
+#endif
+            }
+            if constexpr (KDA_R_EARLY_DP) {   // dS's fp32 registers are dead (converted to rdS / the packed words)
+                if (kda_next) {
+                    PipelineState_dO kda_nd = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read, smem_pipe_read_do); ++kda_nd;
+                    kda_issue_dP(kda_nd);
+                }
+            }
+            warpgroup_wait<0>();   // dV, S(m+1), dK, [dP(m+1)]: nothing in flight across the back-edge
+#if KDA_R_SINTO_DS
+            if (kda_next) {
+                #pragma unroll
+                for (int i = 0; i < size(tdPrdP); ++i) { kda_tSrS(i) = tdPrdP(i); }
+            }
+#else
+            if (KDA_R_EARLY != 9 && kda_next) { kda_copy_S(); }
+#endif
+            if constexpr (KDA_R_EARLY < 7 || KDA_R_EARLY == 9) { pipeline_dot.consumer_release(smem_pipe_read_dot); }
+            if constexpr (KDA_R_EARLY == 9) {
+                if (kda_next) { PipelineState kda_nq = smem_pipe_read; ++kda_nq; kda_issue_S(kda_nq); warpgroup_wait<0>(); kda_copy_S(); }
+            }
+            ++smem_pipe_read_dot;
+            pipeline_qt.consumer_release(smem_pipe_read_qt);
+            ++smem_pipe_read_qt;
+#else
             warpgroup_wait<1>();
             pipeline_dot.consumer_release(smem_pipe_read_dot);
             ++smem_pipe_read_dot;
@@ -1034,14 +1238,19 @@ struct CollectiveMainloopBwdSm90Fp8R {
             warpgroup_wait<0>();
             pipeline_qt.consumer_release(smem_pipe_read_qt);
             ++smem_pipe_read_qt;
+#endif
             KP(17);
             ++smem_pipe_read;
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
             // plan-A dK fold: one fp32 FMA per element per tile in the tile's own g basis.
             #pragma unroll
-            for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) = fmaf(fq8_tmpK(i), fq8_g_fold, tdKrdK(i)); }
+            for (int i = 0; i < size(tdKrdK); ++i) {
+#if !KDA_R_RIP
+                tdKrdK(i) = fmaf(fq8_tmpK(i), fq8_g_fold, tdKrdK(i));
+#endif
+            }
             // dV window boundary (geometry-fixed): promote in TRUE units into the overlay, re-zero the window.
-            if (!KDA_R_ABLDV && ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1)) {
+            if (!KDA_R_ABLDV && (KDA_R_EARLY < 7 || KDA_R_EARLY == 9) && ((m_block & (kFq8PromoteTiles - 1)) == kFq8PromoteTiles - 1 || m_block == m_block_max - 1)) {
                 #pragma unroll
                 for (int i = 0; i < size(tdVrdV); ++i) {
                     float* const slot = fq8_smem_dv + i * NumMmaThreads;
@@ -1062,10 +1271,27 @@ struct CollectiveMainloopBwdSm90Fp8R {
                                    : ((n_block + 1) * kbn_ - (seqlen_k - seqlen_q) + kbm_ - 1) / kbm_;
         KT_HEADER(n_block, get<1>(block_coord), bidb, m_block_min);
         KP(2);
+#if KDA_R_EARLY
+        if (m_block < m_block_max) {
+            kda_issue_S(smem_pipe_read);
+            if constexpr (KDA_R_EARLY_DP) {
+                kda_issue_dP(cute::conditional_return<Q_dO_same_stages>(smem_pipe_read, smem_pipe_read_do));
+            }
+            warpgroup_wait<0>();
+        }
+#endif
+#if KDA_R_EARLY
+        // one loop (the mask as a runtime predicate): the S^T fragment produced in one step and consumed in the next
+        // must not flow between two loops (cross-loop phis of a wgmma accumulator).
+        auto pred_mask_fn = [&](auto& tSrS, int m_block) { if (m_block < fq8_mask_m_end) { mask_fn(tSrS, m_block); } };
         CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block < m_block_max && m_block < fq8_mask_m_end; ++m_block) { bwd_step(m_block, mask_fn, Int<-1>{}); }
+        for (; m_block < m_block_max; ++m_block) { bwd_step(m_block, pred_mask_fn, Int<-1>{}, Int<1>{}); }
+#else
         CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block < m_block_max; ++m_block) { bwd_step(m_block, no_mask_fn, Int<-1>{}); }
+        for (; m_block < m_block_max && m_block < fq8_mask_m_end; ++m_block) { bwd_step(m_block, mask_fn, Int<-1>{}, Int<1>{}); }
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (; m_block < m_block_max; ++m_block) { bwd_step(m_block, no_mask_fn, Int<-1>{}, Int<0>{}); }
+#endif
 
         // S17 DSDEFER-CTA: the last tile's halves, after a CTA-wide rendezvous (every stmatrix + fence of it done).
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG3) /*id 4*/);
@@ -1075,7 +1301,11 @@ struct CollectiveMainloopBwdSm90Fp8R {
         // Exit: the k8s unfold of dK (this WG's keys are one scale group) and the dV read-back from the overlay.
         float const fq8_ik = params.softmax_scale / fq8_k8s_wg;
         #pragma unroll
+#if KDA_R_RIP
+        for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) = (tdKrdK(i) * kda_g_acc) * fq8_ik; }
+#else
         for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) *= fq8_ik; }
+#endif
         #pragma unroll
         for (int i = 0; i < size(tdVrdV); ++i) { tdVrdV(i) = fq8_smem_dv[i * NumMmaThreads]; }
         if constexpr (Q_dO_same_stages) { smem_pipe_read_do = smem_pipe_read; }

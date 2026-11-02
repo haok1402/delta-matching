@@ -373,8 +373,8 @@ struct DeltaV6 {
             float const lse0 = __fmul_rn(sLSE(row0, wg), float(M_LOG2E));   // the host prep's exact multiply
             float const lse1 = __fmul_rn(sLSE(row1, wg), float(M_LOG2E));
 #endif
-#if KDA_PK_EXPB == 3 || KDA_PK_EXPB == 4
-            // ## KDA_PK_EXPB=3 / 4 (EXPBX, named numerics arm, pass 0 + pass 1 identically): the folded-bias line
+#if KDA_PK_EXPB >= 3
+            // ## KDA_PK_EXPB=3 / 4 / 5 (EXPBX, named numerics arm, pass 0 + pass 1 identically): the folded-bias line
             // P-hat = exp2(min(fma(s, dsc, -b), 12)), b = fma(lse, log2e, -8), on every (64-row m-block, 128-key block)
             // tile OUTSIDE pass 1's masked range (m_block < kda_expbx_mask_end(n128)); the certified line on the diagonal
             // 128 x 128 block (and the seqlen_k tail), where the rows with the fewest visible keys (smallest per-row
@@ -387,6 +387,7 @@ struct DeltaV6 {
             // ## M21 diet: the mask is a no-op on every n-block whose keys all lie at or below the row block's diagonal and
             // inside seqlen_k; skipping it there is bitwise (no element would have been set to -inf).  Warpgroup-uniform.
             int const fq8_diag_off = seqlen_k - seqlen_q;
+            [[maybe_unused]] bool kda_x_orig = true;   // EXPB=5: set per stage by the loops below
             auto exp_step = [&](auto& tSrS, int n_block, float dsc_g0, float dsc_g1, auto xc) {
                 Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol(tSrS.layout()));
                 static_assert(decltype(size<0>(scores))::value == 2 && decltype(size<1>(scores))::value == 16,
@@ -396,6 +397,30 @@ struct DeltaV6 {
                 if (need_mask) {
                     mask.template apply<true /*Seqlenk_mask*/, Is_causal, false /*Is_local*/>(tSrS, m_block, n_block);
                 }
+#if KDA_PK_EXPB == 5
+                // EXPB=5: ONE line for both: y = fma(s, dsc, -B) with the per-row bias B = b (EXPB) or fl(lse log2e)
+                // (certified), then a warp-uniform branch adds the 2^8 offset only on the certified (diagonal) stages:
+                // fl(fl(s dsc - L) + 8) there (the FFMA + FADD the certified code compiles to), fl(s dsc - b) elsewhere.
+                {
+                    bool const orig = !bool(decltype(xc)::value) && kda_x_orig;
+                    float const B0 = orig ? lse0 : bx0, B1 = orig ? lse1 : bx1;
+                    #pragma unroll
+                    for (int mi = 0; mi < 2; ++mi) {
+                        #pragma unroll
+                        for (int ni = 0; ni < 16; ++ni) {
+                            float const dsc = (ni >> 3) == 0 ? dsc_g0 : dsc_g1;
+                            scores(mi, ni) = __fmaf_rn(scores(mi, ni), dsc, -(mi == 0 ? B0 : B1));
+                        }
+                    }
+                    if (orig) {
+                        #pragma unroll
+                        for (int i = 0; i < size(scores); ++i) { scores(i) = __fadd_rn(scores(i), kFq8MoE); }
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < size(scores); ++i) { scores(i) = exp2f(fminf(scores(i), kFq8MoE + 4.0f)); }
+                    return;
+                }
+#endif
 #if KDA_PK_EXPB == 3 || KDA_PK_EXPB == 4
                 // EXPB=3: per-n-block runtime branch; EXPB=4: the caller's stage split decides at compile time (xc)
                 if (KDA_PK_EXPB == 4 ? bool(decltype(xc)::value) : m_block >= kda_expbx_mask_end(n_block >> 1, seqlen_q, seqlen_k)) {
@@ -489,7 +514,11 @@ struct DeltaV6 {
                     pipeline_kv.consumer_release(smem_pipe_read);
                     ++smem_pipe_read;
                 };
-#if KDA_PK_EXPB == 4
+#if KDA_PK_EXPB == 5
+                int const s_x = kda_expbx_first_stage(m_block, seqlen_q, seqlen_k);
+                CUTLASS_PRAGMA_NO_UNROLL
+                for (int s = 0; s < nstages; ++s) { kda_x_orig = s >= s_x; w4_stage(s, cute::false_type{}); }
+#elif KDA_PK_EXPB == 4
                 int const s_x = min(nstages, kda_expbx_first_stage(m_block, seqlen_q, seqlen_k));
                 int s = 0;
                 CUTLASS_PRAGMA_NO_UNROLL
@@ -582,7 +611,13 @@ struct DeltaV6 {
                 warpgroup_fence_operand(tSrS0);
                 warpgroup_fence_operand(tdPrdP0);
             };
-#if KDA_PK_EXPB == 4
+#if KDA_PK_EXPB == 5
+            int const s_x = kda_expbx_first_stage(m_block, seqlen_q, seqlen_k);
+            CUTLASS_PRAGMA_NO_UNROLL
+            for (int s = 0; s < nstages - 1; ++s) { kda_x_orig = s >= s_x; step(s, cute::true_type{}, cute::Int<-1>{}, cute::false_type{}); }
+            kda_x_orig = nstages - 1 >= s_x;
+            step(nstages - 1, cute::false_type{}, cute::Int<-1>{}, cute::false_type{});
+#elif KDA_PK_EXPB == 4
             int const s_x = kda_expbx_first_stage(m_block, seqlen_q, seqlen_k);
             int s = 0;
             CUTLASS_PRAGMA_NO_UNROLL

@@ -980,3 +980,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   is checked against the ORIGINAL with the residual-v5 rows (c = 1) and the error clause (errors may go down; per case
   <= +1e-5, means not rising) on all cases / routes, acceptance shapes (3 seeds) and stress. If none passes after a fair
   round, REPORT.md states convergence with the evidence.
+- kda-fwd DONE (kda-sm90-fwd c7848b1). SASS diff of r21_clean's unmasked step vs FA3 fp8: 1277 vs 771 instructions per
+  256-key step per warp (9.98 vs 6.03 per score per thread); turn 367, softmax 887 (each warpgroup's serial chain
+  limits the step); the gap: rho rescales 192 FMUL, descale 128 FMUL, promote 64 FFMA, group maxima +35 FMNMX / +11
+  SHFL, rho / weight exps +19 MUFU, MOV +20; bitwise-removable ~3% of instructions (< ~1% time). No-worse descale folds:
+  FOLDC (shared rounded factor per 64-key group) -3.87%, v5 rows PASS, but full / stale scale10 dQ +4.7e-5 / dK +3.1e-5
+  per case: rejected; FOLDK (FOLDC + exact compensation) all cases within bound, but O / dV means rise (+1.4e-8 /
+  +1.5e-8) and +0.90% slower: rejected. Reason: the original rounds s * d per element (random, averages out); a shared
+  per-group factor gives every score of a group the same bias, which reaches LSE and the stale backward.

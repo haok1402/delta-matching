@@ -1,7 +1,7 @@
 # kda-sm90: delta-matching fp8 attention on H100 — interim report
 
 Status: interim (round 24; the round-23 convergence was under the absolute error clause, superseded by Hao's relative
-clause). Branch `kda-sm90`; accepted build `r24_stack` (kda-sm90 6f4d314 + tooling). Latest status in the last section. Every number below is traced to a committed file; per-round detail and every screened variant are in
+clause). Branch `kda-sm90`; accepted build `r24_s17` (kda-sm90 5d016f2 + tooling). Latest status in the last section. Every number below is traced to a committed file; per-round detail and every screened variant are in
 `results/rounds.md`, `results/screens/` and the helpers' `CANDIDATES.md` branches; rules in
 `docs/kda-sm90/rule-change-r10.md`.
 JSON results (raw A/B runs, medians, calibrations, sol4 / numerics reports) live outside the repo in
@@ -232,3 +232,22 @@ r21_clean: forward -12.8 / -12.9%, pass 0 -6.6 / -6.5%, e2e fwd+bwd -5.2 / -5.0%
 - Original -> now (four shapes, same job): e2e forward -16.1%, e2e fwd+bwd -13.4% (`results/progress/ab.md`).
 - Paper protocol 16/4: 613.5 / 498.1 / 526.3 TFLOP/s fwd / bwd / fwd+bwd (`results/paper_c2/r24_stack_table.md`).
 - Reopened levers under the relative clause are being re-screened (round 24 onward).
+
+## Update: round 24, pass-0 DEFER + LAZY and pass-1 PW32 (r24_s17, job 21213177, calibration 1376.5 TFLOP/s)
+
+Re-screened under the relative clause (S24 worker): pass-0 DEFER + LAZY and pass-1 PW32 pass residual-v5 rows and the
+relative error clause on all four routes; accepted stacked (pass 0 -8.0..-8.2%, pass 1 -3.0..-3.7%, e2e -2.4..-2.7%
+in three jobs; bench -2.6%).
+
+| kernel | measured ms | sol4-v2 % (fixed ref.) | sol4c % (fixed ref.) | target 90% |
+|---|---:|---:|---:|---|
+| pass 1 | 167.82 | 43.9% | 70.8% | not met |
+| forward | 64.74 | 56.9% | 81.4% | not met |
+| pass 0 | 46.74 | 79.0% | 106.0% | met (*) |
+| pass 2 | 38.00 | 93.7% | 93.7% | met |
+
+(*) Above 100%: DEFER / LAZY changed pass 0's instruction mix, so kda-solcheck's ideal-mix fraction (0.745, measured on
+the old mix) no longer applies; sol4-v2 (79.0%) is the meaningful figure for pass 0 now.
+- Forward / FA3 fp8 forward: 1.117x (same-job spread ~1%).
+- Original -> now (four shapes, same job): e2e forward -15.4%, e2e fwd+bwd -15.7%.
+- Paper protocol 16/4: 601.1 / 516.2 / 537.9 TFLOP/s fwd / bwd / fwd+bwd (`results/paper_c2/r24_s17_table.md`).

@@ -1026,3 +1026,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   time-neutral; DKACC dK +1.12% at N32K (> 1%); the forward per-group promote on BM192 is +1.3..7% slower.
 - ACCEPTED S24-17 = DEFER + LAZY + PW32 (5d016f2): worker jobs 21212874 / 21212881 pass 0 + pass 1 summed -4.23 / -4.24%,
   e2e -2.71 / -2.40%; confirm gate 21213042 pass 0 -8.18%, pass 1 -2.96%, e2e -2.65%, bench -2.55%. Root r24_s17.
+
+## Round 25 (started): full re-screen under residual-v5 + the relative clause (Hao)
+
+- Two workers on r24_s17: forward (S25-fw-*: FOLDC / FOLDK / BN256-DFOLD remnants, PVIL on BM192, FLOORPREV, FWDSHB,
+  a forward MUFU-poly v2, other levers rejected only by the absolute clause) and backward (S25-bw-*: EXPB variants,
+  bounded DKACC, power-of-two psi, PW48 / PW64 under the relative clause, MUFU-poly v2 for pass 1, cheaper per-warpgroup
+  psi, pass-0 NORM, others). Gains >= 1% stacked; anything clearing 3% gated; a pass yielding nothing ends with the final
+  REPORT.md and DONE.

@@ -505,3 +505,43 @@ Reading:
   rounding: fl(d * c) is shared by every score of a 64-key group, while the original rounds s * d per element (random).
   At scale10 the exp argument is about 1e2, so the shared relative error of 6e-8 in the argument biases a whole group's
   P. Only that case's dQ (+1.2e-5) and the dQ mean (+4e-7) move.
+
+### No-worse-rounding descale reformulations (Hao: fewer FMUL / FFMA with provably no-worse rounding, v5 + error clause)
+
+All on r21_clean (kda-sm90 eabba10), 8-rep timing vs r21_clean, errors vs the ORIGINAL on 66 finite cases x 4 routes
+(identical on every route), v5-abs rows at c = 1.
+
+| variant | change | fwd geo vs r21_clean | v5 rows | worst per-case rise (abs) | means vs original | verdict |
+|---|---|---:|---|---|---|---|
+| FOLDC `kda-sm90-fwd-foldc` | fold with factor RN(RN(q l2) k_g); the group basis from the same factor | **-3.87%** | PASS (max c 0.71) | dQ +4.7e-5, dK +3.1e-5 (full/stale scale10) | dV / O full/stale up | REJECTED |
+| FOLDK `kda-sm90-fwd-foldk` | FOLDC + compensation: weights use ms_g + raw_max_g (D_g - gl2_g) | +0.90% | PASS (max c 0.83) | dQ +8.9e-6, all <= 1e-5 | O +1.4e-8, dV +1.5e-8 (dQ / dK down) | REJECTED (means rise, slower) |
+
+Why the fold cannot be no-worse: the original rounds s * d per element (random error, averaged out in the row sum).
+Any fold multiplies the raw score by one rounded factor per 64-key group, so the reconstructed P carries a shared
+per-group bias s * D * delta. That bias goes into l and the stored LSE, and the stale-mode backward amplifies it
+(FOLDC: dQ +4.7e-5 at scale10). Compensating it in the weights (FOLDK) brings every case under the bound. But the
+residual is noise of the same size as the original's, so the four means move at random (two rose), and the extra
+scalar work removed the gain. With one operation per score, nothing removes the bias.
+
+## DONE (kda-fwd, round 21)
+
+Final state:
+- Accepted from this helper: the BN256 bitwise pieces (RHOPRE, SMSC4, PRETURN4 generalized to the non-lazy path),
+  merged as the clean baseline r21_clean (kda-sm90 e80de8f). It is bitwise to the original and forward -2.3 .. -3.7%
+  vs the original. The integrator measures it at 1.285x FA3 fp8 and 71.5% of sol4c.
+- Reverted under the TASK.md error clause: C3g (BM192 / FWDLAZY / FWDDFOLD).
+- Screened since the merge and rejected:
+  - ST3: does not fit in shared memory.
+  - PREW4: slower, and not bitwise as built.
+  - A1SKIP: spills.
+  - A1DEF: bitwise but neutral.
+  - Lazy (e256nf) and fold (e256): fail the mean / per-case clause.
+  - FOLDC and FOLDK (above).
+- Where the gap to FA3 is (SASS diff above): rho 192 FMUL + promote 64 FFMA (the method's per-64-key P basis) and the
+  descale 128 FMUL per 256-key step. The bitwise rest is about 3% of instructions, under ~1% of time. The descale is
+  removable only by a fold, and a fold cannot be no-worse at one operation per score.
+- Gap to FA3 parity, and the limits:
+  - Closing it needs a contract change: either a mean clause that tolerates round-off noise (e256nf: per case
+    <= 5.7e-6, means within 1e-7), or a relaxed contract on the per-group basis (rho / promote).
+  - Under the current contract (bitwise, or no-worse in every case and in every mean), this helper's levers are
+    exhausted.

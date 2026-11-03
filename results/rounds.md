@@ -971,3 +971,12 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   needs 256-288 registers. The k-scale prefetch is obsolete (scales come from shared memory). Turn scheduling does
   not set the step time; each warpgroup's own chain does. No candidate; the remaining forward room is the softmax /
   convert instruction count (kda-fwd's SASS-diff work).
+
+## Round 23 (started): accuracy-preserving reformulations (Hao), before declaring convergence
+
+- Two workers: forward (S23-fr-*: exact power-of-two scale factors, folds into an existing FFMA where the fused form is
+  more accurate, per-group products when exact, for the rho / descale / promote basis work) and pass 1 (S23-pr-*: the
+  psi / dS' handoff, dV / dK promotes). Each idea gets a written rounding argument and several variants; every variant
+  is checked against the ORIGINAL with the residual-v5 rows (c = 1) and the error clause (errors may go down; per case
+  <= +1e-5, means not rising) on all cases / routes, acceptance shapes (3 seeds) and stress. If none passes after a fair
+  round, REPORT.md states convergence with the evidence.

@@ -1,7 +1,7 @@
 # kda-sm90: delta-matching fp8 attention on H100 — interim report
 
-Status: FINAL (round 23): converged under the TASK.md contract. Branch `kda-sm90`; accepted build `r21_clean` (kda-sm90
-e80de8f + tooling): the clean baseline after the residual-v5 re-audit. Final summary in the last section. Every number below is traced to a committed file; per-round detail and every screened variant are in
+Status: interim (round 24; the round-23 convergence was under the absolute error clause, superseded by Hao's relative
+clause). Branch `kda-sm90`; accepted build `r24_stack` (kda-sm90 6f4d314 + tooling). Latest status in the last section. Every number below is traced to a committed file; per-round detail and every screened variant are in
 `results/rounds.md`, `results/screens/` and the helpers' `CANDIDATES.md` branches; rules in
 `docs/kda-sm90/rule-change-r10.md`.
 JSON results (raw A/B runs, medians, calibrations, sol4 / numerics reports) live outside the repo in
@@ -213,3 +213,22 @@ Why the forward and pass 1 stop here (evidence: results/rounds.md rounds 16-23, 
 Campaign totals: 11 changes accepted over rounds 3-19 (two later reverted under residual-v5), several hundred variants
 screened and logged (results/screens/, helpers' CANDIDATES.md), the four-floor model sol4-v2 / sol4c, the numerics
 contract evolved from bitwise-only to residual-v5 with the original as the fixed reference.
+
+## Update: round 24, relative error clause; C3g + EXPBX64 re-accepted (r24_stack, job 21211208, calibration 1371.6 TFLOP/s)
+
+Hao kept residual-v5's zero-sum rows as the hard requirement and replaced the absolute error clause by a relative one
+(per case <= 1.01 x the original's error in matched mode, <= 1.10 x in stale / full; mean <= 1.01 x). Under it the
+reverted changes pass (C3g worst +0.32% of the original's error, EXPBX64 +0.011%) and were re-gated stacked on
+r21_clean: forward -12.8 / -12.9%, pass 0 -6.6 / -6.5%, e2e fwd+bwd -5.2 / -5.0% in two jobs.
+
+| kernel | measured ms | sol4-v2 % (fixed ref.) | sol4c % (fixed ref.) | target 90% |
+|---|---:|---:|---:|---|
+| pass 1 | 172.54 | 42.7% | 68.9% | not met |
+| forward | 64.05 | 57.5% | 82.2% | not met |
+| pass 0 | 50.81 | 72.7% | 97.5% | met |
+| pass 2 | 37.82 | 94.4% | 94.4% | met |
+
+- Forward / FA3 fp8 forward: 1.108x.
+- Original -> now (four shapes, same job): e2e forward -16.1%, e2e fwd+bwd -13.4% (`results/progress/ab.md`).
+- Paper protocol 16/4: 613.5 / 498.1 / 526.3 TFLOP/s fwd / bwd / fwd+bwd (`results/paper_c2/r24_stack_table.md`).
+- Reopened levers under the relative clause are being re-screened (round 24 onward).

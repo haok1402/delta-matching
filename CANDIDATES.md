@@ -479,3 +479,29 @@ the backward numerics changes already accepted on the head (pass 0 / pass 1), so
     when the consumed tile is the last masked tile (rows with no visible key at seqlen_k < seqlen_q). Not ported: under
     0.1% at best.
   - PREW2: the 4-group form is PREW4 above (slower, and not bitwise as built).
+
+### SASS opcode diff: r21_clean (2 WG x 128 x 256) vs FA3 fp8 (2 WG x 128 x 224), unmasked step loop
+
+Ours: `kda-work/sass/r21_clean.sass`, loop [0xc4e0, 0x114a0], 1277 instructions per warp per 256-key step
+(listing `sass/r21_unmasked.txt`). FA3: the integrator's `rounds/r19-fwd/fa3_unmasked.txt`, 675 per 224 keys
+= 771 per 256 keys. Ours per score per thread: 9.98, FA3: 6.03 (1.66x); measured time is 1.285x FA3.
+
+| phase | instr | content |
+|---|---:|---|
+| pre-turn | 23 | scalars |
+| turn (BAR.SYNC .. BAR.ARV) | 367 | 4 serial PV sub-gemms (DEPBAR after each), 192 FMUL rho, 64 FFMA promote, 13 FMUL scalars, QK issue |
+| softmax | 887 | 128 FMUL descale, 64 FMUL alpha (O), 128 FMNMX + 28 group finish, 128 FFMA + 128 MUFU exp, 128 FADD sums, 64 F2FP, 16 SHFL |
+
+Diff per 256 keys (ours - FA3): FMUL +336 (rho 192, descale 128, scalars 16), FFMA +79 (promote 64), FMNMX +35 and
+SHFL +11 (four 64-key group maxima), MUFU +19 (rho / weight exps), MOV +20, FADD +10.
+
+Reading:
+- The turn is 367 instructions and the softmax 887, so with 2 WGs the step is the WG's own serial chain (turn +
+  softmax), not the turn. That is why turn moves (PRETURN4, PREW4, A1DEF) do not pay at this tile.
+- The bitwise-removable part is small: loop-carried MOV 20 and some scalars, about 3% of the instructions and under
+  ~1% time by the A1DEF calibration (64 FMUL skipped on most long-row steps gave about -1% at N65536).
+- The two large items are the method's (rho 192 + promote 64, ledger S1-S54) and the descale FMUL (128). The descale
+  fold removes those 128 FMUL and measured -4.0% (e256 vs e256nf). It fails the error clause through a systematic
+  rounding: fl(d * c) is shared by every score of a 64-key group, while the original rounds s * d per element (random).
+  At scale10 the exp argument is about 1e2, so the shared relative error of 6e-8 in the argument biases a whole group's
+  P. Only that case's dQ (+1.2e-5) and the dQ mean (+4e-7) move.

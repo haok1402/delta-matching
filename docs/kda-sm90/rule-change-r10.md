@@ -298,3 +298,14 @@ Added as given; where it disagrees with plan.md or older notes, TASK.md wins. Fa
   (vs fp32) of each case / output may exceed the original's by at most 1e-5 in those relative-error units (the reading
   used since residual-v4; the alternative x(1 + 1e-5) reading is reported alongside). C3g and EXPBX64 fail under
   either reading, so the revert does not depend on this choice. The per-output mean over cases must not rise.
+
+## Round 24: the error clause becomes relative (Hao's correction)
+
+Hao's hard requirement is the zero-sum identity: residual-v5 (every row within the original row's summation
+round-off, fp32 dS row sums before quantization, no exemptions) stays exactly as it is. The error clause against the
+original was added on top and is stricter than needed: an error rise of ~1e-5..1e-4 on cases whose fp8 error vs fp32 is
+~4e-2 is a fraction of a percent of that error. New clause: per case and output, err_cand <= 1.01 * err_orig in matched
+mode and <= 1.10 * err_orig in stale / full modes (the stale delta rowsum(dO * O) amplifies changes; those modes are only
+kept correct); the per-output mean over cases <= 1.01 * the original's mean. Replaces the absolute 1e-5 per-case limit
+and the "mean does not rise" rule. The two reverted changes (forward C3g with its pieces, EXPBX64) are re-gated on top
+of r21_clean under residual-v5 + this clause, separately and stacked.

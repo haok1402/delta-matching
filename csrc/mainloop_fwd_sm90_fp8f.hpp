@@ -1444,10 +1444,12 @@ struct CollectiveMainloopFwdSm90Fp8F {
         };
         // ## kda-fwd FOLDC: the folded exp factor RN(RN(q8sc * l2) * k8sc_g): one per-group rounding (as the original's
         // RN(q8sc * k8sc_g)) plus a row-uniform one (a temperature change of <= 2^-24, the same for every key of the row).
-        auto fq8_gl2 = [&](int n_blk, float (&g_)[kGroups]) {
+        auto fq8_gl2 = [&](int n_blk, float (&g_)[kGroups], float const (&gsc_)[kGroups], float (&e_)[kGroups]) {
             float const ql2_ = fq8_q8sc * softmax.softmax_scale_log2;
             #pragma unroll
             for (int g = 0; g < kGroups; ++g) { g_[g] = fmaxf(ql2_ * (kSmemSc ? fq8_ksc[g] : params.ptr_k8s[fq8_bh_k + kGroups * n_blk + g]), 1.17549435e-38f); }
+            #pragma unroll
+            for (int g = 0; g < kGroups; ++g) { e_[g] = fmaf(gsc_[g], softmax.softmax_scale_log2, -g_[g]); }   // ## FOLDK: D_g - gl2_g
         };
         auto fq8_load_v = [&](int n_blk) {
             if constexpr (kGroups == 4 && kSmemSc) {
@@ -1862,10 +1864,10 @@ struct CollectiveMainloopFwdSm90Fp8F {
                     scoremod_premask_fn(tSrS);
                     mask_fn(tSrS, n_block);
                     float fq8_g_[kGroups];
-                    float fq8_gl2_[kGroups];
-                    if constexpr (kFwdDfold && !Check_inf) { fq8_gsc(n_block, fq8_g_); fq8_gl2(n_block, fq8_gl2_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
+                    float fq8_gl2_[kGroups], fq8_ge_[kGroups];
+                    if constexpr (kFwdDfold && !Check_inf) { fq8_gsc(n_block, fq8_g_); fq8_gl2(n_block, fq8_gl2_, fq8_g_, fq8_ge_); } else { fq8_descale(tSrS, n_block); }   // ## FQ8
                     KF(9);
-                    if constexpr (kFwdDfold && !Check_inf) { cute::copy(softmax.template max_get_scale_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_, fq8_gl2_), scores_scale); }
+                    if constexpr (kFwdDfold && !Check_inf) { cute::copy(softmax.template max_get_scale_grouped_raw</*Is_first=*/false, Check_inf>(tSrS, fq8_g_, fq8_gl2_, fq8_ge_), scores_scale); }
                     else { cute::copy(softmax.template max_get_scale_grouped</*Is_first=*/false, Check_inf>(tSrS), scores_scale); }
                     if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
                     KF(10);

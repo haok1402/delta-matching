@@ -162,6 +162,7 @@ struct SoftmaxFq8F {
     // between max_get_scale_grouped's reduction and its own in-place transform,
     // so the kernel never holds grp_max and ms simultaneously.
     TensorT ms_[kGroups];
+    TensorT corr_[kGroups];   // ## kda-fwd FOLDK
     float const softmax_scale_log2;
 
     CUTLASS_DEVICE SoftmaxFq8F(float const softmax_scale_log2_) : softmax_scale_log2(softmax_scale_log2_) {};
@@ -295,7 +296,7 @@ struct SoftmaxFq8F {
     // shipped ones.  The code argument becomes fma(x, RN(g * l2), -ms_g) instead of fma(RN(x * g), l2, -ms_g): one
     // rounding fewer (output-changing at fp32 round-off of the exp argument).
     template <bool Is_first, bool Check_inf = false, typename Tensor0>
-    __forceinline__ __device__ TensorT max_get_scale_grouped_raw(Tensor0& acc_s, float const (&gsc)[kGroups], float const (&gl2)[kGroups]) {
+    __forceinline__ __device__ TensorT max_get_scale_grouped_raw(Tensor0& acc_s, float const (&gsc)[kGroups], float const (&gl2)[kGroups], float const (&gerr)[kGroups]) {
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
         MaxOp<float> max_op;
@@ -318,7 +319,7 @@ struct SoftmaxFq8F {
         #pragma unroll
         for (int g = 0; g < kGroups; ++g) {
             #pragma unroll
-            for (int mi = 0; mi < kNRows; ++mi) { msd_[g](mi) = ms_[g](mi) * gsc[g]; ms_[g](mi) = ms_[g](mi) * gl2[g]; }
+            for (int mi = 0; mi < kNRows; ++mi) { msd_[g](mi) = ms_[g](mi) * gsc[g]; corr_[g](mi) = ms_[g](mi) * gerr[g]; ms_[g](mi) = ms_[g](mi) * gl2[g]; }
         }
         TensorT scores_scale;
         #pragma unroll
@@ -359,6 +360,15 @@ struct SoftmaxFq8F {
             for (int ni = 0; ni < size<1>(scores); ++ni) {
                 scores(mi, ni) = exp2f(fmaf(scores(mi, ni), gl2[ni / kColsPerGroup], -ms_[ni / kColsPerGroup](mi)));
             }
+        }
+        // ## kda-fwd FOLDK: the codes carry 2^(s gl2_g - ms_g); the true logit is s D_g (D_g = gsc_g l2, the original's
+        // descale times l2 before its per-element rounding) and gl2_g = D_g - gerr_g.  The weights (row-sum fold, rho,
+        // promote) use ms_g + raw_max_g gerr_g, so a code reconstructs 2^(s D_g - m - (s - raw_max_g) gerr_g): the residual
+        // is (s - raw_max_g) gerr_g, tiny for every key whose code survives e4m3.
+        #pragma unroll
+        for (int g = 0; g < kGroups; ++g) {
+            #pragma unroll
+            for (int mi = 0; mi < kNRows; ++mi) { ms_[g](mi) += corr_[g](mi); }
         }
         SumOp<float> sum_op;
         TensorT part, acc;

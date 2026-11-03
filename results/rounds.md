@@ -1006,3 +1006,15 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
 - CONVERGENCE: after a fair round of accuracy-preserving reformulations on both kernels (16 variants plus kda-fwd's
   FOLDC / FOLDK), none passes residual-v5 + the error clause vs the original with a speed gain. Final REPORT.md written;
   kda-sm90 DONE under the current contract.
+
+## Round 24: relative error clause (Hao); C3g + EXPBX64 RE-ACCEPTED on r21_clean (r24_stack)
+
+- Rule (TASK.md, rule-change-r10.md): residual-v5 rows unchanged; error clause relative: per case and output <= 1.01 x
+  the original's error (matched), <= 1.10 x (stale / full), per-output mean <= 1.01 x.
+- Under it, from the round-21 captures: C3g passes (0 failing case-outputs; worst +0.32% of the original's error on
+  stale mqa dK), EXPBX64 passes (worst +0.011%); both already passed the v5 rows (max 0.954 of the bound).
+- Stacked re-gate (flags back to the r19 configuration; build byte-identical to r19_fwd on 72 cases x 4 routes, job
+  21210857; pytest 49 passed): vs r21_clean, two jobs (21210857 / 21211110): forward -12.83 / -12.89% (geomean -12.29 /
+  -12.28%), pass 0 -6.58 / -6.54%, pass 1 -2.77 / -2.41%, e2e fwd+bwd -5.21 / -5.01%: ACCEPTED (6f4d314; root r24_stack).
+- Reopened levers re-screened under the new clause (S24 worker): pass-0 FOLD / LAZY / DEFER, pass-1 PW16 / PW32 /
+  DKACC / KFOLDSCALE, forward per-group promote; kda-fwd takes other forward numerics ideas on BM192.

@@ -1018,3 +1018,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   -12.28%), pass 0 -6.58 / -6.54%, pass 1 -2.77 / -2.41%, e2e fwd+bwd -5.21 / -5.01%: ACCEPTED (6f4d314; root r24_stack).
 - Reopened levers re-screened under the new clause (S24 worker): pass-0 FOLD / LAZY / DEFER, pass-1 PW16 / PW32 /
   DKACC / KFOLDSCALE, forward per-group promote; kda-fwd takes other forward numerics ideas on BM192.
+- Reopened levers (S24 worker, results/screens/reopen_r24_log.md; vs the ORIGINAL with v5 rows + the relative clause):
+  pass-0 DEFER + LAZY (S24-02) pass, pass 0 -7.95 / -8.08% (DEFER alone -3.5%, LAZY alone -4.3%); pass-1 PW32
+  (S24-06) passes (only dV changes; worst matched +0.066%, dV mean falls), pass 1 -3.74 / -3.01%; PW64 faster
+  (-4.0 / -4.5%) but long-sequence dV +0.18% (N16K) consistently above the original: not taken; PW128 dV +0.57% at
+  N16K; FOLD's gain already ships in EXPBX64 and folding the masked diagonal fails v5 rows; KFOLDSCALE passes but is
+  time-neutral; DKACC dK +1.12% at N32K (> 1%); the forward per-group promote on BM192 is +1.3..7% slower.
+- ACCEPTED S24-17 = DEFER + LAZY + PW32 (5d016f2): worker jobs 21212874 / 21212881 pass 0 + pass 1 summed -4.23 / -4.24%,
+  e2e -2.71 / -2.40%; confirm gate 21213042 pass 0 -8.18%, pass 1 -2.96%, e2e -2.65%, bench -2.55%. Root r24_s17.

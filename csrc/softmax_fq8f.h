@@ -295,7 +295,7 @@ struct SoftmaxFq8F {
     // shipped ones.  The code argument becomes fma(x, RN(g * l2), -ms_g) instead of fma(RN(x * g), l2, -ms_g): one
     // rounding fewer (output-changing at fp32 round-off of the exp argument).
     template <bool Is_first, bool Check_inf = false, typename Tensor0>
-    __forceinline__ __device__ TensorT max_get_scale_grouped_raw(Tensor0& acc_s, float const (&gsc)[kGroups]) {
+    __forceinline__ __device__ TensorT max_get_scale_grouped_raw(Tensor0& acc_s, float const (&gsc)[kGroups], float const (&gl2)[kGroups]) {
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
         MaxOp<float> max_op;
@@ -311,15 +311,21 @@ struct SoftmaxFq8F {
         #pragma unroll
         for (int g = 0; g < kGroups; ++g) {
             flash::quad_allreduce_(ms_[g], ms_[g], max_op);
+        }
+        // ## kda-fwd FOLDC: the group basis in log2 units from the SAME factor the codes use (RN(raw max * gl2_g)), the row
+        // max (LSE, alpha, floor) from the original descale RN(raw max * gsc_g) (RN monotonic: bitwise the original's).
+        TensorT msd_[kGroups];
+        #pragma unroll
+        for (int g = 0; g < kGroups; ++g) {
             #pragma unroll
-            for (int mi = 0; mi < kNRows; ++mi) { ms_[g](mi) *= gsc[g]; }
+            for (int mi = 0; mi < kNRows; ++mi) { msd_[g](mi) = ms_[g](mi) * gsc[g]; ms_[g](mi) = ms_[g](mi) * gl2[g]; }
         }
         TensorT scores_scale;
         #pragma unroll
         for (int mi = 0; mi < kNRows; ++mi) {
             float const tile_max = [&] {
-                if constexpr (kGroups == 4) { return fmaxf(fmaxf(ms_[0](mi), ms_[1](mi)), fmaxf(ms_[2](mi), ms_[3](mi))); }
-                else { return fmaxf(ms_[0](mi), ms_[1](mi)); }
+                if constexpr (kGroups == 4) { return fmaxf(fmaxf(msd_[0](mi), msd_[1](mi)), fmaxf(msd_[2](mi), msd_[3](mi))); }
+                else { return fmaxf(msd_[0](mi), msd_[1](mi)); }
             }();
             if constexpr (Is_first) {
                 row_max(mi) = tile_max;
@@ -336,20 +342,17 @@ struct SoftmaxFq8F {
             float const floor_l2 = max_l2<Check_inf>(mi) - kFloorB;
             #pragma unroll
             for (int g = 0; g < kGroups; ++g) {
-                ms_[g](mi) = fmaxf(ms_[g](mi) * softmax_scale_log2, floor_l2) - kLog2_448;
+                ms_[g](mi) = fmaxf(ms_[g](mi), floor_l2) - kLog2_448;
             }
         }
         return scores_scale;
     };
 
     template <bool Is_first, bool Check_inf = false, typename Tensor0>
-    __forceinline__ __device__ void online_softmax_grouped_raw(Tensor0& acc_s, float const (&gsc)[kGroups]) {
+    __forceinline__ __device__ void online_softmax_grouped_raw(Tensor0& acc_s, float const (&gl2)[kGroups]) {
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
         static_assert(decltype(size<1>(scores))::value == kRowcol, "FQ8F: the rowcol fragment width must match kRowcol");
-        float gl2[kGroups];
-        #pragma unroll
-        for (int g = 0; g < kGroups; ++g) { gl2[g] = gsc[g] * softmax_scale_log2; }
         #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
             #pragma unroll

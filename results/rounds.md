@@ -988,3 +988,13 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   per case: rejected; FOLDK (FOLDC + exact compensation) all cases within bound, but O / dV means rise (+1.4e-8 /
   +1.5e-8) and +0.90% slower: rejected. Reason: the original rounds s * d per element (random, averages out); a shared
   per-group factor gives every score of a group the same bias, which reaches LSE and the stale backward.
+- Forward reformulation worker (S23-fr-01..07, results/screens/fwd_reform_log.md; each idea with a written rounding
+  argument; checked vs the ORIGINAL): descale fold with the backward's own folded factor on unmasked steps (01) -2.8 /
+  -3.0%, v5 rows pass, but scale10 full / stale dQ +1.06e-5 and the dQ mean +3.4e-7: fails; with each group's basis
+  from the same folded product (02) -3.8 / -4.4%, lowers the O mean, but 2 cases +4.3e-5 and the dV mean +1.1e-8:
+  fails; folding the masked steps too (03 / 04) fails v5 rows on short causal rows; per-group promote into O (05,
+  no rho chain) -1.7%, more tensor-core-exact in argument but the O / dQ / dK means rise and 11 stale cases exceed;
+  reusing the row-sum's exp as the promote weight (07) not bitwise at D256, no gain at D128. Not built (rejected by
+  argument): power-of-two O basis (denominator error no longer cancels), power-of-two rho / group basis (non-dyadic
+  e4m3 code changes). Reading: the 3 x 64 rho FMUL + 64 promote FFMA per 256 keys are the floor for four group bases;
+  every fold flips a few e4m3 codes and moves stale-mode gradients both ways, a lottery under "the mean does not rise".

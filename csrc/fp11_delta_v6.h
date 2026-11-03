@@ -453,14 +453,20 @@ struct DeltaV6 {
             auto exp_step = [&](auto& tSrS, int n_block, float dsc_g0, float dsc_g1) {
                 exp_step_t(cute::true_type{}, tSrS, n_block, dsc_g0, dsc_g1);
             };
-            // ## P0RTR: the quad reduction as a transposed reduce.  Allreduce<4> gives every lane l of a quad
-            // (x_l + x_{l^2}) + (x_{l^1} + x_{l^3}), the same value on all four lanes (fp32 add is commutative).  Here lane l
-            // keeps row (l >> 1) & 1 of the two rows, adds the partner l^2's partial of that row (step 1, xor 2), then the
-            // neighbour l^1's step-1 sum of the same row (step 2, xor 1): the same two additions in the same pairing, so each
-            // kept value is bitwise the Allreduce<4> result; 4 shuffles + 4 adds instead of 8 + 8, and the 2^-8 scale and
-            // the fp64 fold (half 0 then half 1, n-block ascending) run once per lane for its one row (acc_r).
-            double acc_r = 0.0;
-            bool const quad_hi = (wtid & 2) != 0;   // this lane keeps row1 (else row0)
+            // ## P0DEFER (named numerics change, residual-v4): the row sum's REDUCTION realized in fp64 per lane.  Per tile each
+            // lane forms its own fixed-order fp32 half partials (unchanged: fmaf chains over 8 keys with the per-element dP
+            // descale), adds half 0 + half 1 in fp32, scales by 2^-8 (exact) and adds the result into a per-lane fp64
+            // accumulator per row (n-block ascending); the quad's four lanes are reduced ONCE, in fp64, at the end
+            // ((x_l + x_{l^1}) + (x_{l^2} + x_{l^3}), the same value on all four lanes).  Replaces the per-tile fp32 quad
+            // reduce (P0RTR) + per-tile fp64 fold: fewer fp32 roundings per row (no per-tile cross-lane fp32 sums), no
+            // shuffles / fp64 adds inside the n-block loop.  The exp line (P, shared bit for bit with pass 1) and every
+            // per-element product are unchanged.  Deterministic (fixed order, one writer per row).
+            // ## P0LAZY (named numerics change on top of P0DEFER): the dP descale (dp_g = dO scale x V scale of the
+            // n-block's 64-key group) is applied once to each 8-key half partial instead of to every element: one rounding
+            // per half instead of one per element, one FMUL per element less.
+            double acc_q0 = 0.0, acc_q1 = 0.0;   // this lane's partial of row0 / row1
+            double acc_r = 0.0;                  // the quad-reduced row value this lane stores (quad_hi: row1)
+            bool const quad_hi = (wtid & 2) != 0;
             auto rowsum_step = [&](auto& tSrS, auto& tdPrdP, float dp_g0, float dp_g1) {
                 Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol(tSrS.layout()));
                 Tensor dPv = make_tensor(tdPrdP.data(), scores.layout());
@@ -469,21 +475,13 @@ struct DeltaV6 {
                 for (int mi = 0; mi < 2; ++mi) {
                     float a0 = 0.f, a1 = 0.f;
                     #pragma unroll
-                    for (int ni = 0; ni < 8; ++ni) { a0 = fmaf(scores(mi, ni), dPv(mi, ni) * dp_g0, a0); }
+                    for (int ni = 0; ni < 8; ++ni) { a0 = fmaf(scores(mi, ni), dPv(mi, ni), a0); }
                     #pragma unroll
-                    for (int ni = 8; ni < 16; ++ni) { a1 = fmaf(scores(mi, ni), dPv(mi, ni) * dp_g1, a1); }
-                    a[mi][0] = a0; a[mi][1] = a1;
+                    for (int ni = 8; ni < 16; ++ni) { a1 = fmaf(scores(mi, ni), dPv(mi, ni), a1); }
+                    a[mi][0] = a0 * dp_g0; a[mi][1] = a1 * dp_g1;   // ## P0LAZY: the dP descale once per 8-key half partial
                 }
-                float k0 = quad_hi ? a[1][0] : a[0][0], k1 = quad_hi ? a[1][1] : a[0][1];
-                float const s0 = quad_hi ? a[0][0] : a[1][0], s1 = quad_hi ? a[0][1] : a[1][1];
-                k0 = k0 + __shfl_xor_sync(uint32_t(-1), s0, 2);
-                k1 = k1 + __shfl_xor_sync(uint32_t(-1), s1, 2);
-                k0 = k0 + __shfl_xor_sync(uint32_t(-1), k0, 1);
-                k1 = k1 + __shfl_xor_sync(uint32_t(-1), k1, 1);
-                // the pass-0.5 fold: part(j, half 0) then part(j, half 1), each a fp32 value added into fp64
-                float const p0 = k0 * kFq8MoInv;
-                float const p1 = k1 * kFq8MoInv;
-                acc_r += double(p0); acc_r += double(p1);
+                acc_q0 += double((a[0][0] + a[0][1]) * kFq8MoInv);
+                acc_q1 += double((a[1][0] + a[1][1]) * kFq8MoInv);
             };
 
             if constexpr (kNWG == 4) {
@@ -636,6 +634,13 @@ struct DeltaV6 {
             CUTLASS_PRAGMA_NO_UNROLL
             for (int s = 0; s < nstages - 1; ++s) { step(s, cute::true_type{}, cute::Int<-1>{}); }
             step(nstages - 1, cute::false_type{}, cute::Int<-1>{});
+            }
+            {
+                double r0 = acc_q0 + __shfl_xor_sync(uint32_t(-1), acc_q0, 1);
+                double r1 = acc_q1 + __shfl_xor_sync(uint32_t(-1), acc_q1, 1);
+                r0 = r0 + __shfl_xor_sync(uint32_t(-1), r0, 2);
+                r1 = r1 + __shfl_xor_sync(uint32_t(-1), r1, 2);
+                acc_r = quad_hi ? r1 : r0;
             }
             // One writer per row: quad lane 0 stores row0's fp64 fold rounded once to fp32, quad lane 2 row1's.
             if ((wtid & 1) == 0) {

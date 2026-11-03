@@ -998,3 +998,11 @@ The stress-case rows already sit near residual 1 in the accepted build. A rule w
   argument): power-of-two O basis (denominator error no longer cancels), power-of-two rho / group basis (non-dyadic
   e4m3 code changes). Reading: the 3 x 64 rho FMUL + 64 promote FFMA per 256 keys are the floor for four group bases;
   every fold flips a few e4m3 codes and moves stale-mode gradients both ways, a lottery under "the mean does not rise".
+- Pass-1 reformulation worker (S23-pr-01..10, results/screens/pass1_reform_log.md): probes show the psi multiply is
+  worth nothing in time (the hand-off runs under in-flight gemms) and a pre-scaled LSE buffer cannot pay; PSITREE and
+  DVFRESH bitwise but neutral; power-of-two psi provably coarser in the subnormal band (52 failing case-outputs, worst
+  outliers stale dK +6.5e-3); KFOLDSCALE (k8s out of the dS line: strictly better bound, all cases pass, v5 rows pass)
+  raises the dK mean by 5e-9 and gains no time. No candidate.
+- CONVERGENCE: after a fair round of accuracy-preserving reformulations on both kernels (16 variants plus kda-fwd's
+  FOLDC / FOLDK), none passes residual-v5 + the error clause vs the original with a speed gain. Final REPORT.md written;
+  kda-sm90 DONE under the current contract.

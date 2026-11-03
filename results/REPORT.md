@@ -1,7 +1,7 @@
 # kda-sm90: delta-matching fp8 attention on H100 — interim report
 
-Status: interim (round 21; updated after every accepted round). Branch `kda-sm90`; accepted build `r21_clean` (kda-sm90
-e80de8f + tooling): the clean baseline after the residual-v5 re-audit. Every number below is traced to a committed file; per-round detail and every screened variant are in
+Status: FINAL (round 23): converged under the TASK.md contract. Branch `kda-sm90`; accepted build `r21_clean` (kda-sm90
+e80de8f + tooling): the clean baseline after the residual-v5 re-audit. Final summary in the last section. Every number below is traced to a committed file; per-round detail and every screened variant are in
 `results/rounds.md`, `results/screens/` and the helpers' `CANDIDATES.md` branches; rules in
 `docs/kda-sm90/rule-change-r10.md`.
 JSON results (raw A/B runs, medians, calibrations, sol4 / numerics reports) live outside the repo in
@@ -176,3 +176,40 @@ x 4 routes except the repaired all-zero-input defect.
   -13.3% overstated the speedup that survives the stricter numerics.
 - Paper protocol 16/4: 534.7 / 490.6 / 502.4 TFLOP/s fwd / bwd / fwd+bwd (`results/paper_c2/r21_clean_table.md`).
 - The accepted-changes table above keeps C3g and EXPBX64 for the record; both are reverted as of round 21.
+
+## Final: convergence under the TASK.md contract (round 23)
+
+Accepted build r21_clean (kda-sm90 e80de8f): the ORIGINAL arithmetic in every kernel (byte-identical to main 3d4cd5b on
+all 72 cases x 4 routes except the repaired all-zero-input NaN defect), plus every bitwise speedup accepted in the
+campaign. On the four acceptance shapes vs the original (same job, 21206028): e2e forward -4.7%, e2e fwd+bwd -8.3%;
+pass 0 -12.6%, pass 1 -9.6% (revert-tree timing), glue -36%, pass 2 -10%.
+
+| kernel | % of sol4c (fixed ref.) | target 90% | status |
+|---|---:|---|---|
+| pass 0 | 91.2% | met | converged (bitwise levers exhausted; numerics cuts fail v5 / the error clause) |
+| pass 2 | 94.5% | met | at its bytes floor |
+| forward | 71.5% | not met | converged under the contract (1.285x FA3 fp8) |
+| pass 1 | 67.3% | not met | converged under the contract |
+
+Why the forward and pass 1 stop here (evidence: results/rounds.md rounds 16-23, results/screens/*, helpers' CANDIDATES.md):
+- Forward: per 256-key step and warp it executes 1277 instructions vs FA3 fp8's 771; the gap is the faithful
+  per-64-key P basis (192 FMUL rho rescales, 128 FMUL descale, 64 FFMA promote, group maxima, rho / weight exps). Every
+  layout the 65536-register file allows was screened (the 2-WG x 128 x 256 tile is optimal; BM192 is faster but its
+  128-key tiling raises O / stale-mode errors above the original and was reverted); turn scheduling does not set the
+  step time; bitwise-removable instructions are ~3% (< 1% time). Accuracy-preserving reformulations (descale folds
+  with shared or backward-matched factors, per-group promotes, power-of-two bases): the folds pass the v5 rows but
+  move stale-mode gradients by up to ~1e-4 per case and shift the per-output means randomly (a shared per-group
+  factor biases every score of a group), so none passes "per case <= +1e-5 and the mean does not rise".
+- Pass 1: scheduling, layout (64 x 128 tiles, 2 WGs at 240 registers is the only workable point), persistent
+  scheduling, per-warpgroup psi, structural reuse of pass 0's work (cross-CTA exchange ~+100% of pass 1; product
+  handoff costs more bytes than the backward) and in-kernel dQ were measured slower or neutral; the per-element path
+  (exp 3, dS 2, amax 1, scale 1, e4m3 1) has no cheaper exact form on sm90; power-of-two psi is provably coarser in the
+  subnormal band (52 failing case-outputs); the one strictly-better-bound form (KFOLDSCALE) raises the dK mean by
+  5e-9 and gains no time.
+- What would move them: a contract change only Hao can make: a mean clause that tolerates round-off-level noise
+  (e.g. the lazy rescale e256nf: per case <= 5.7e-6, means < 1e-7, -1%; the backward-matched descale fold -3..-4%), or a
+  shared per-tile P basis / psi convention (FWDSHB -4.4% forward but O error +1e-3: a real accuracy loss, not advised).
+
+Campaign totals: 11 changes accepted over rounds 3-19 (two later reverted under residual-v5), several hundred variants
+screened and logged (results/screens/, helpers' CANDIDATES.md), the four-floor model sol4-v2 / sol4c, the numerics
+contract evolved from bitwise-only to residual-v5 with the original as the fixed reference.

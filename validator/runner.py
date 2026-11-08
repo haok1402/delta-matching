@@ -6,6 +6,12 @@ candidate, and the candidate never sees the reference or which outputs are expec
   candidate spec: /path/file.py[:func] (default func `attn`) or pkg.module[:func]
 """
 from __future__ import annotations
+try:                    # gpupool: hand the GPU to the filler before this process even creates a CUDA context
+    from gpupool_hook import gpupool_done as _gp_done
+    _gp_done()
+except ImportError:
+    pass
+
 
 import importlib
 import importlib.util

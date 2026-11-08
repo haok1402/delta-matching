@@ -1,6 +1,12 @@
 """Run by validator/sanitize.py under compute-sanitizer: small shapes that stress tails and partial tiles, forward +
 backward in both modes plus the debug hook.  Never imports the reference.  Shares the GPU with the gpupool filler
 (sanitized runs are CPU-bound and untimed)."""
+try:                    # gpupool: hand the GPU to the filler before this process even creates a CUDA context
+    from gpupool_hook import gpupool_done as _gp_done
+    _gp_done()
+except ImportError:
+    pass
+
 import importlib.util
 import os
 import sys

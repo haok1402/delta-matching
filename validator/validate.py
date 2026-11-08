@@ -15,6 +15,12 @@ here at run time.  Every check is relative to what an fp8 kernel of the declared
 and no more.  See validator/README.md for the checks and why each tolerance is what it is.
 """
 from __future__ import annotations
+try:                    # gpupool: hand the GPU to the filler before this process even creates a CUDA context
+    from gpupool_hook import gpupool_done as _gp_done
+    _gp_done()
+except ImportError:
+    pass
+
 
 import argparse
 import importlib.util

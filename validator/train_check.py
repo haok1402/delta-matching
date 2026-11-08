@@ -14,6 +14,12 @@ PASS when no arm has a non-finite loss and the matched arm's mean loss over the 
 max(2%, 0.03 nats) of bf16's (the fp8 noise budget of a correct fp8 attention at this scale; a wrong delta or a broken
 gradient drifts well past that within a few hundred steps).  The stale - matched gap is reported, not judged.
 """
+try:                    # gpupool: hand the GPU to the filler before this process even creates a CUDA context
+    from gpupool_hook import gpupool_done as _gp_done
+    _gp_done()
+except ImportError:
+    pass
+
 import argparse
 import glob
 import importlib.util

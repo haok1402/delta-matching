@@ -4,10 +4,12 @@
 # usage: run_suite4.sh TAG OUT "ATTNBENCH ARGS"   e.g. run_suite4.sh cand1 results/cand1.jsonl "--arms fa4 --cand c1=/abs/c.py:attn"
 TAG=$1; OUT=$2; ARGS=$3
 cd /lustre/fs1/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/sm100/bench
-GPUPOOL_WHO=fa4-bench exec ../gpupool/bin/gpupool run --gpus ${NG:-4} --warmup ${WARMUP:-5m} --timeout 2h --retry 5 --shell -- "
+# NG default = GPUs free right now (on filler), so the request starts at once and blocks nobody (min 1)
+NG=${NG:-$(../gpupool/bin/gpupool status 2>/dev/null | grep -c "filler util")}; [ "$NG" -ge 1 ] 2>/dev/null || NG=1
+GPUPOOL_WHO=fa4-bench exec ../gpupool/bin/gpupool run --gpus $NG --warmup ${WARMUP:-5m} --timeout 2h --retry 5 --shell -- "
 source ../env/activate.sh
 IFS=, read -ra G <<< \"\$CUDA_VISIBLE_DEVICES\"
-for ((i=0; i<${#G[@]}; i++)); do
+for ((i=0; i<\${#G[@]}; i++)); do
   CUDA_VISIBLE_DEVICES=\${G[\$i]} python attnbench.py $ARGS --suite \${SUITE:-main} --shard \$i/\${#G[@]} --tag $TAG --out ${OUT%.jsonl}.s\$i.jsonl --resume > ${OUT%.jsonl}.s\$i.log 2>&1 &
 done
 wait"

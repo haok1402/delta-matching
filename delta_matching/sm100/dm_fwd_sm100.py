@@ -399,7 +399,12 @@ class DMForwardSm100:
 
         # DM sm100-mx: SFA (4 cols) + SFB (4 cols) right after the fp8 P columns of each S stage
         self.dm_sf_col = self.tmem_s_to_p_offset + self.n_block_size // 4
-        self.dm_rescale_T = 32.0
+        # variant knobs: DM_FWD_OPTS="k=v,k=v" (hashed into the compile-cache fingerprint by fwd.py)
+        import os as _os
+        self.dm_opts = dict(kv.split("=") for kv in _os.environ.get("DM_FWD_OPTS", "").split(",") if "=" in kv)
+        self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
+        if "split" in self.dm_opts:
+            self.split_P_arrive = int(self.dm_opts["split"])
         # vec buffer for row_max & row_sum
         self.tmem_vec_offset = self.tmem_s_offset
 
@@ -2356,7 +2361,7 @@ class DMForwardSm100:
                 mask_fn_none = None
 
             # DM sm100-mx: row max kept in log2 units (integer valued); scales applied per 32-key block in softmax_step.
-            dm_row = self._q_block(work_m, stage) * self.m_block_size + tidx
+            dm_row = self._q_block(work_m, stage, thr_mma_qk.thr_idx) * self.m_block_size + tidx
             dm_qsc = Float32(descale_tensors.q_descale[batch_idx, head_idx, dm_row // 32]) * Float32(math.log2(math.e))
             softmax = SoftmaxSm100.create(
                 Float32(1.0),
@@ -2640,6 +2645,16 @@ class DMForwardSm100:
         tScS_shape = cta_qk_tiler  # (128, 128)
         tScP_shape = (tScS_shape[0], tilePlikeFP32)  # (128, 64)
 
+        # DM: issue this tile's K/V block-scale loads before waiting for S (hides the L2 latency behind the QK MMA)
+        nb4 = n_block * 4
+        if const_expr(self.dm_opts.get("kvpack", "1") == "1"):
+            # packed UE8M0 bytes: k_descale[b, hk, 2*n_block] = K scale bytes, [.., 2*n_block+1] = V scale bytes (= SFB word)
+            dm_kw = Int32(dm_scales.k_descale[batch_idx, kv_head_idx, 2 * n_block])
+            dm_vw = Int32(dm_scales.k_descale[batch_idx, kv_head_idx, 2 * n_block + 1])
+            dm_ks = [dm_utils.byte_pow2_f32(dm_kw, j) for j in range(4)]
+        else:
+            dm_ks = [Float32(dm_scales.k_descale[batch_idx, kv_head_idx, nb4 + j]) for j in range(4)]
+            dm_vs = [Float32(dm_scales.v_descale[batch_idx, kv_head_idx, nb4 + j]) for j in range(4)]
         # Wait for Si
         if const_expr(self.use_s_ping_pong):
             s_p_o_index = s_p_o_consumer_count & 1
@@ -2683,13 +2698,21 @@ class DMForwardSm100:
         # ---------------- DM sm100-mx softmax step ----------------
         # x = S * c_b (log2 units), c_b = qs_row * log2e * ks_b; per 32-key block b: kb = floor(max_b x),
         # p~ = exp2(x - kb + 7) in [0, 256) -> e4m3 code; SFA_b = 2^(kb - 7 - m), SFB_b = vs_b; m = integer running max.
-        nb4 = n_block * 4
-        dm_c = [dm_qsc * Float32(dm_scales.k_descale[batch_idx, kv_head_idx, nb4 + j]) for j in range(4)]
+        dm_c = [dm_qsc * dm_ks[j] for j in range(4)]
         dm_bmax = [None] * 4
         for j in cutlass.range_constexpr(4):
-            v = tSrS_t2r[32 * j]
-            for i in cutlass.range_constexpr(1, 32):
-                v = cute.arch.fmax(v, tSrS_t2r[32 * j + i])
+            if const_expr(self.dm_opts.get("max3", "1") == "1"):
+                b0 = 32 * j
+                lm = [utils.fmax(tSrS_t2r[b0], tSrS_t2r[b0 + 1]), utils.fmax(tSrS_t2r[b0 + 2], tSrS_t2r[b0 + 3]),
+                      utils.fmax(tSrS_t2r[b0 + 4], tSrS_t2r[b0 + 5]), utils.fmax(tSrS_t2r[b0 + 6], tSrS_t2r[b0 + 7])]
+                for i in cutlass.range_constexpr(8, 32, 8):
+                    for t in cutlass.range_constexpr(4):
+                        lm[t] = utils.fmax(lm[t], tSrS_t2r[b0 + i + 2 * t], tSrS_t2r[b0 + i + 2 * t + 1])
+                v = utils.fmax(utils.fmax(lm[0], lm[1]), lm[2], lm[3])
+            else:
+                v = tSrS_t2r[32 * j]
+                for i in cutlass.range_constexpr(1, 32):
+                    v = cute.arch.fmax(v, tSrS_t2r[32 * j + i])
             dm_bmax[j] = v * dm_c[j]
         dm_xmax = cute.arch.fmax(cute.arch.fmax(dm_bmax[0], dm_bmax[1]), cute.arch.fmax(dm_bmax[2], dm_bmax[3]))
         dm_mcand = dm_utils.ceil_f32(dm_xmax)
@@ -2717,8 +2740,10 @@ class DMForwardSm100:
             dm_w[j] = dm_utils.exp2i_f32(e)
             dm_sfa[j] = dm_utils.ue8m0_byte(e)
         sfa_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3]))
-        sfb_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(
-            *[dm_utils.pow2_exponent_byte(Float32(dm_scales.v_descale[batch_idx, kv_head_idx, nb4 + j])) for j in range(4)]))
+        if const_expr(self.dm_opts.get("kvpack", "1") == "1"):
+            sfb_word = dm_utils.bitcast_i32_f32(dm_vw)
+        else:
+            sfb_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(*[dm_utils.pow2_exponent_byte(dm_vs[j]) for j in range(4)]))
         tSrSF = cute.make_rmem_tensor(thr_tmem_store_sf.partition_S(cute.make_identity_tensor((self.m_block_size, 8))).shape, Float32)
         for j in cutlass.range_constexpr(4):
             tSrSF[j] = sfa_word
@@ -2751,12 +2776,25 @@ class DMForwardSm100:
         tSrP_r2t = cute.make_tensor(
             cute.recast_ptr(tSrP_r2t_f32.iterator, dtype=self.q_dtype), tSrS_t2r.layout
         )
-        softmax.apply_exp2_convert(
-            tSrS_t2r,
-            tSrP_r2t,
-            ex2_emu_freq=self.ex2_emu_freq,
-            ex2_emu_start_frg=self.ex2_emu_start_frg,
-        )
+        dm_bsum = [None] * 4
+        if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
+            # f16x2 MUFU exp (2 exps / instruction) + direct f16x2 -> e4m3x2 convert; block sums in f16x2 (tree) -> f32
+            for j in cutlass.range_constexpr(4):
+                hs = []
+                for w in cutlass.range_constexpr(8):
+                    i0 = 32 * j + 4 * w
+                    word, e0, e1 = dm_utils.exp2_h2_e4m3x4(tSrS_t2r[i0], tSrS_t2r[i0 + 1], tSrS_t2r[i0 + 2], tSrS_t2r[i0 + 3])
+                    tSrP_r2t_f32[8 * j + w] = dm_utils.bitcast_i32_f32(word)
+                    hs.append(e0)
+                    hs.append(e1)
+                dm_bsum[j] = dm_utils.h2_sum_f32(dm_utils.hadd2_tree(hs))
+        else:
+            softmax.apply_exp2_convert(
+                tSrS_t2r,
+                tSrP_r2t,
+                ex2_emu_freq=self.ex2_emu_freq,
+                ex2_emu_start_frg=self.ex2_emu_start_frg,
+            )
         if const_expr(self.s0_s1_barrier):
             pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
         for i in cutlass.range_constexpr(cute.size(tStP_r2t.shape[2])):
@@ -2782,10 +2820,13 @@ class DMForwardSm100:
         # l = l * acc_scale + sum_b w_b * sum_{j in b} p~_j   (fp32 pre-rounding values)
         dm_l = Float32(0.0) if const_expr(is_first) else softmax.row_sum[0] * acc_scale
         for j in cutlass.range_constexpr(4):
-            ps = (tSrS_t2r[32 * j], tSrS_t2r[32 * j + 1])
-            for i in cutlass.range_constexpr(2, 32, 2):
-                ps = cute.arch.add_packed_f32x2(ps, (tSrS_t2r[32 * j + i], tSrS_t2r[32 * j + i + 1]))
-            dm_l = dm_l + (ps[0] + ps[1]) * dm_w[j]
+            if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
+                dm_l = dm_l + dm_bsum[j] * dm_w[j]
+            else:
+                ps = (tSrS_t2r[32 * j], tSrS_t2r[32 * j + 1])
+                for i in cutlass.range_constexpr(2, 32, 2):
+                    ps = cute.arch.add_packed_f32x2(ps, (tSrS_t2r[32 * j + i], tSrS_t2r[32 * j + i + 1]))
+                dm_l = dm_l + (ps[0] + ps[1]) * dm_w[j]
         softmax.row_sum[0] = dm_l
         # acc_scale = cute.math.exp2(acc_scale_, fastmath=True)
         if const_expr(self.use_s_ping_pong):

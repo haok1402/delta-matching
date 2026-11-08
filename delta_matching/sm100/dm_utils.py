@@ -334,3 +334,54 @@ def st_shared_b32(addr: Int32, val: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
                     "st.volatile.shared.b32 [$0], $1;", "r,r",
                     has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+def exp2_h2_e4m3x4(x0: Float32, x1: Float32, x2: Float32, x3: Float32, *, loc=None, ip=None):
+    """4 x (fp32 -> f16, ex2.approx.f16x2, -> e4m3).  Returns (word of 4 e4m3 codes [x0 in byte 0],
+    f16x2 exp of (x0, x1), f16x2 exp of (x2, x3)) as Int32 bit patterns."""
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32(), T.i32(), T.i32()]),
+        [Float32(v).ir_value(loc=loc, ip=ip) for v in (x0, x1, x2, x3)],
+        "{\n\t.reg .b32 h0, h1, e0, e1;\n\t.reg .b16 c0, c1;\n\t"
+        "cvt.rn.f16x2.f32 h0, $4, $3;\n\t"
+        "cvt.rn.f16x2.f32 h1, $6, $5;\n\t"
+        "ex2.approx.f16x2 e0, h0;\n\t"
+        "ex2.approx.f16x2 e1, h1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f16x2 c0, e0;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f16x2 c1, e1;\n\t"
+        "mov.b32 $0, {c0, c1};\n\t"
+        "mov.b32 $1, e0;\n\tmov.b32 $2, e1;\n\t}",
+        "=r,=r,=r,f,f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+    return (Int32(llvm.extractvalue(T.i32(), res, [0])), Int32(llvm.extractvalue(T.i32(), res, [1])),
+            Int32(llvm.extractvalue(T.i32(), res, [2])))
+
+
+@dsl_user_op
+def hadd2(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [Int32(a).ir_value(loc=loc, ip=ip), Int32(b).ir_value(loc=loc, ip=ip)],
+                                 "add.rn.f16x2 $0, $1, $2;", "=r,r,r", has_side_effects=False, is_align_stack=False,
+                                 asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def h2_sum_f32(a: Int32, *, loc=None, ip=None) -> Float32:
+    """f32(lo) + f32(hi) of an f16x2."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [Int32(a).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b16 l, h;\n\t.reg .f32 fl, fh;\n\tmov.b32 {l, h}, $1;\n\t"
+        "cvt.f32.f16 fl, l;\n\tcvt.f32.f16 fh, h;\n\tadd.f32 $0, fl, fh;\n\t}",
+        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+def hadd2_tree(hs):
+    """Pairwise f16x2 tree sum of a Python list (plain Python, unrolled at trace time)."""
+    while len(hs) > 1:
+        hs = [hadd2(hs[2 * t], hs[2 * t + 1]) for t in range(len(hs) // 2)]
+    return hs[0]
+
+
+@dsl_user_op
+def byte_pow2_f32(word: Int32, j: int, *, loc=None, ip=None) -> Float32:
+    """2^(byte_j(word) - 127) as fp32 (byte j of a packed UE8M0 word)."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [Int32(word).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 t;\n\t" f"bfe.u32 t, $1, {8 * j}, 8;\n\t" "shl.b32 $0, t, 23;\n\t}",
+        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))

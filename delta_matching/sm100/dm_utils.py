@@ -385,3 +385,29 @@ def byte_pow2_f32(word: Int32, j: int, *, loc=None, ip=None) -> Float32:
         T.f32(), [Int32(word).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .b32 t;\n\t" f"bfe.u32 t, $1, {8 * j}, 8;\n\t" "shl.b32 $0, t, 23;\n\t}",
         "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def absf(x: Float32, *, loc=None, ip=None) -> Float32:
+    """abs.f32 (ptxas folds it into the consuming FMNMX as an operand modifier)."""
+    return _f32_unary("abs.f32 $0, $1;", x, loc, ip)
+
+
+@dsl_user_op
+def clock64(*, loc=None, ip=None) -> cutlass.Int64:
+    return cutlass.Int64(llvm.inline_asm(T.i64(), [], "mov.u64 $0, %clock64;", "=l",
+                                         has_side_effects=True, is_align_stack=False,
+                                         asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), cutlass.Int64(val).ir_value(loc=loc, ip=ip)],
+                    "red.global.add.u64 [$0], $1;", "l,l", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def clock32(*, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %clock;", "=r",
+                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))

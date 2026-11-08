@@ -7,7 +7,7 @@ q (B, N, H, 128) bf16, k / v (B, N, Hk, 128) bf16 -> o (B, N, H, 128) bf16.  N %
 """
 import torch
 
-from .quant import quant_qkv2, quant_rows
+from .quant import quant_qkv2, quant_do_delta
 from .fwd import dm_fwd
 from .bwd import dm_bwd_main
 from .pass0 import dm_delta
@@ -30,11 +30,9 @@ class _DMAttnSm100(torch.autograd.Function):
     def backward(ctx, do):
         q8, qs, k8, ks, v8, vs, o, lse = ctx.saved_tensors
         do = do.contiguous()
-        do8, dos = quant_rows(do)
+        do8, dos, delta = quant_do_delta(do, o if ctx.mode == "stale" else None)   # stale delta fused
         if ctx.mode == "matched":
             delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, ctx.causal)
-        else:
-            delta = (do.float() * o.float()).sum(-1).permute(0, 2, 1).contiguous()
         dq, dk, dv = dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal, D ** -0.5)
         return dq, dk, dv, None, None
 

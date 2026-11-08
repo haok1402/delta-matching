@@ -90,9 +90,17 @@ def dm_bwd_p_pair_poly5(s0: Float32, s1: Float32, c: Float32, l2: Float32):
 
 
 def p5_uses_poly(variant: str, v: int) -> bool:
-    """Static pair schedule for variants 'p5_<freq>_<res>': pair v uses the polynomial iff v % freq < res."""
-    _, f, r = variant.split("_")
-    return v % int(f) < int(r)
+    """Static pair schedule for 'p5_<f>_<r>' (deg-5) / 'p3_<f>_<r>' (FA4 deg-3): pair v (of 16 per 32-col chunk) uses the
+    polynomial iff v % f < r (contiguous); 'p3b_<f>_<r>': iff (v * r) % f < r (spread, Bresenham)."""
+    kind, f, r = variant.split("_")
+    f, r = int(f), int(r)
+    if kind == "p3b":
+        return (v * r) % f < r
+    return v % f < r
+
+
+def is_static_mix(variant: str) -> bool:
+    return variant.split("_")[0] in ("p5", "p3", "p3b")
 
 
 P_PAIR_VARIANTS["mix"] = None  # needs the row parity: dispatched explicitly by the kernels

@@ -258,7 +258,8 @@ class DMPass0Sm100:
         # FwdConfig carries the exp2 emulation choice; see config.select_ex2_emu.
         self.ex2_emu_freq = config.ex2_emu_freq
         self.ex2_emu_start_frg = config.ex2_emu_start_frg
-        self.s0_s1_barrier = False
+        # P0 '+sq': sequence the two softmax WGs' exp phases (WG0 exps while WG1 does its dP phase and vice versa)
+        self.s0_s1_barrier = "sq" in self.dm_exp_variant.split("+")[1:]
 
         assert self.use_tma_KV or not (self.check_hdim_oob or self.check_hdim_v_oob), (
             "Paged KV does not support irregular head dim"
@@ -2130,6 +2131,7 @@ class DMPass0Sm100:
         tScS_t2r = thr_tmem_load.partition_D(tScS)
         n_chunks = cute.size(tStS_t2r.shape[2])
         s_full_phase = Int32(0)
+        s0s1_phase = Int32(1 if stage == 0 else 0)
 
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
@@ -2217,9 +2219,12 @@ class DMPass0Sm100:
                                     p = (tSrS[i0], tSrS[i0 + 1])
                                 elif const_expr(self.dm_exp_variant.split("+")[0] == "mix"):
                                     p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
-                                elif const_expr(self.dm_exp_variant.split("+")[0].startswith("p5_")):
+                                elif const_expr(dm_common.is_static_mix(self.dm_exp_variant.split("+")[0])):
                                     if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
-                                        p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        if const_expr(self.dm_exp_variant.startswith("p5_")):
+                                            p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        else:
+                                            p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                     else:
                                         p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                 else:
@@ -2233,6 +2238,8 @@ class DMPass0Sm100:
                             acc0 = cute.arch.add_packed_f32x2(acc0, acc1)
                             num = cute.arch.fma_packed_f32x2(acc0, (as_[j], as_[j]), num)
                     else:
+                        if const_expr(self.s0_s1_barrier):
+                            pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0s1_phase)
                         # P in place
                         for j in cutlass.range_constexpr(n_chunks):
                             if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
@@ -2257,15 +2264,21 @@ class DMPass0Sm100:
                                         p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                 elif const_expr(self.dm_exp_variant.split("+")[0] == "mix"):
                                     p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
-                                elif const_expr(self.dm_exp_variant.split("+")[0].startswith("p5_")):
+                                elif const_expr(dm_common.is_static_mix(self.dm_exp_variant.split("+")[0])):
                                     if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
-                                        p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        if const_expr(self.dm_exp_variant.startswith("p5_")):
+                                            p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        else:
+                                            p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                     else:
                                         p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                 else:
                                     p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant.split("+")[0]](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                 tSrS[i0], tSrS[i0 + 1] = p
                                 den = cute.arch.add_packed_f32x2(den, p)
+                        if const_expr(self.s0_s1_barrier):
+                            pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
+                            s0s1_phase ^= 1
                         # dP streamed in 32-column chunks; the slot is released after the last load
                         pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
                         for j in cutlass.range_constexpr(n_chunks):

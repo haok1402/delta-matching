@@ -138,6 +138,7 @@ from flash_attn.cute.flash_fwd_sm100 import DescaleTensors  # same class as inte
 
 
 class DMPass0Sm100:
+    dm_exp_variant = "mufu"  # dm_common contract (proposal variants: "f16x2", "poly")
     """Matched-delta pass 0 (kda-sm100-p0), forked from DMForwardSm100: per KV tile S = Q8 K8^T and dP = dO8 V8^T
     (both kind::f8f6f4, V loaded K-major like K, dP in the forward's O TMEM slots); softmax warps form
     P = exp2(fma(S, c, -lse*log2e)), num += P*(dP*a), den += P; delta = num / den written to mLSE (B, H, N).
@@ -1075,11 +1076,13 @@ class DMPass0Sm100:
         )
         # MMA warp uses this to signal to the correction warps that O is ready.
         # Ping-pong commits it after every PV (slot pv_count & 1); otherwise once per tile per stage.
-        pipeline_o_acc = pipeline_custom.PipelineUmmaAsync.create(
+        pipeline_o_acc = pipeline_custom.PipelineUmmaAsync.create(  # P0: dP slot pipeline (MMA -> softmax)
             barrier_storage=storage.mbar_O_full.data_ptr(),
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
-            consumer_group=correction_threads_cluster,
+            consumer_group=ThreadCooperativeGroup(
+                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size
+            ),
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
         )
@@ -1412,6 +1415,7 @@ class DMPass0Sm100:
                 sm_stats_barrier=sm_stats_barrier,
                 pipeline_s0_s1_sequence=pipeline_s0_s1_sequence,
                 learnable_sink=learnable_sink,
+                pipeline_dp=pipeline_o_acc,
                 block_info=block_info,
                 num_splits=num_splits,
                 SeqlenInfoCls=SeqlenInfoCls,
@@ -1965,15 +1969,17 @@ class DMPass0Sm100:
                         gemm_Si[stage](
                             smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
                         )
+                        pipeline_s_p_o.producer_commit_w_index(stage)
                     pipeline_kv.consumer_release(mma_kv_consumer_state)
                     mma_kv_consumer_state.advance()
                     pipeline_kv.consumer_wait(mma_kv_consumer_state)
                     sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
                     for stage in cutlass.range_constexpr(self.q_stage):
+                        pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
                         gemm_dPi[stage](
                             smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator)
                         )
-                        pipeline_s_p_o.producer_commit_w_index(stage)
+                        pipeline_o_acc.producer_commit_w_index(stage)
                     pipeline_kv.consumer_release(mma_kv_consumer_state)
                     mma_kv_consumer_state.advance()
                     dm_slot_empty_phase ^= 1
@@ -2098,6 +2104,7 @@ class DMPass0Sm100:
         head_divmod=None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         tile_scheduler=None,
+        pipeline_dp=None,
     ):
         """P0: per query row delta = sum_j P dP / sum_j P over all visible keys; written to mLSE (s, h, b)."""
         tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * len(self.softmax0_warp_ids))
@@ -2129,6 +2136,7 @@ class DMPass0Sm100:
             has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
             m_block = self._q_block(work_m, stage)
             row = m_block * self.m_block_size + tidx
+            row_odd = (row & 1) == 1
             qsv = Float32(aux[0][batch_idx, head_idx, row // 32])
             dosv = Float32(aux[3][batch_idx, head_idx, row // 32])
             l2 = Float32(aux[5][batch_idx, head_idx, row]) * Float32(dm_common.LOG2E)
@@ -2137,29 +2145,45 @@ class DMPass0Sm100:
             if has_work:
                 for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
                     n_block = n_block_max - 1 - n_tile
+                    # per-chunk scales first (gmem/L2 latency overlaps the S wait)
+                    cs = [None] * n_chunks
+                    as_ = [None] * n_chunks
+                    for j in cutlass.range_constexpr(n_chunks):
+                        kb = n_block * (self.n_block_size // 32) + j
+                        cs[j] = dm_common.dm_bwd_c(Float32(aux[1][batch_idx, kv_head_idx, kb]), qsv)
+                        as_[j] = dm_common.dm_bwd_dp_scale(Float32(aux[2][batch_idx, kv_head_idx, kb]), dosv)
                     pipeline_s_p_o.consumer_wait_w_index_phase(stage, s_full_phase)
                     tSrS = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS).shape, self.qk_acc_dtype)
                     cute.copy(thr_tmem_load, tStS_t2r, tSrS)
-                    tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS).shape, self.qk_acc_dtype)
-                    cute.copy(thr_tmem_load, tdPt_t2r, tdPr)
                     cute.arch.fence_view_async_tmem_load()
-                    pipeline_s_p_o.consumer_release_w_index(stage)
+                    pipeline_s_p_o.consumer_release_w_index(stage)  # next S can be issued now
                     if const_expr(self.is_causal):
                         # keys past this row: S = -inf -> P = 0 (same as the main backward's mask)
                         if (n_block + 1) * self.n_block_size > m_block * self.m_block_size:
                             kbase = n_block * self.n_block_size
                             for i in cutlass.range_constexpr(cute.size(tSrS)):
                                 tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
+                    # P in place
                     for j in cutlass.range_constexpr(n_chunks):
-                        kb = n_block * (self.n_block_size // 32) + j
-                        c = dm_common.dm_bwd_c(Float32(aux[1][batch_idx, kv_head_idx, kb]), qsv)
-                        a = dm_common.dm_bwd_dp_scale(Float32(aux[2][batch_idx, kv_head_idx, kb]), dosv)
                         for v in cutlass.range_constexpr(16):
                             i0 = 32 * j + 2 * v
-                            p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], c, l2)
-                            dpv = cute.arch.mul_packed_f32x2((tdPr[i0], tdPr[i0 + 1]), (a, a))
-                            num = cute.arch.fma_packed_f32x2(p, dpv, num)
+                            if const_expr(self.dm_exp_variant == "mix"):
+                                p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
+                            else:
+                                p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                            tSrS[i0], tSrS[i0 + 1] = p
                             den = cute.arch.add_packed_f32x2(den, p)
+                    # dP streamed in 32-column chunks; the slot is released after the last load
+                    pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                    for j in cutlass.range_constexpr(n_chunks):
+                        tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, j].shape, self.qk_acc_dtype)
+                        cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], tdPr)
+                        if const_expr(j == n_chunks - 1):
+                            cute.arch.fence_view_async_tmem_load()
+                            pipeline_dp.consumer_release_w_index(stage)
+                        for v in cutlass.range_constexpr(16):
+                            dpv = cute.arch.mul_packed_f32x2((tdPr[2 * v], tdPr[2 * v + 1]), (as_[j], as_[j]))
+                            num = cute.arch.fma_packed_f32x2((tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), dpv, num)
                     s_full_phase ^= 1
             num_t = num[0] + num[1]
             den_t = den[0] + den[1]

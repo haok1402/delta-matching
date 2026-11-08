@@ -17,6 +17,7 @@ from .fwd import _fingerprint
 _LOCK = threading.Lock()
 FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, use_tma_o=False,
              overlap_sO_sQ=False, kv_stage=4)
+REGS = dict(softmax=208, correction=32, other=64)  # P0: correction warps idle -> registers to softmax
 
 
 def _make_cache():
@@ -25,7 +26,18 @@ def _make_cache():
     return cache_utils.JITCache()
 
 
-_CACHE = _make_cache()
+_CACHES = {}
+_CLASSES = {}
+
+
+def _variant(exp_variant: str):
+    if exp_variant not in _CLASSES:
+        _CLASSES[exp_variant] = type(f"DMPass0Sm100_{exp_variant}", (DMPass0Sm100,), {"dm_exp_variant": exp_variant})
+        c = _make_cache()
+        if cache_utils.CUTE_DSL_CACHE_ENABLED:
+            c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / f"pass0_{exp_variant}")
+        _CACHES[exp_variant] = c
+    return _CLASSES[exp_variant], _CACHES[exp_variant]
 
 
 def _aux(t: torch.Tensor, leading_dim: int):
@@ -34,7 +46,8 @@ def _aux(t: torch.Tensor, leading_dim: int):
     return t
 
 
-def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None):
+def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
+             exp_variant: str = "mufu"):
     over = dict(FORCE)
     if config_override:
         over.update(config_override)
@@ -44,11 +57,16 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
 
     def select(inputs):
         cfg = orig[2](inputs)
-        return dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k)})
+        cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "registers"})
+        regs = over.get("registers", REGS)
+        if regs is not None:
+            cfg = dataclasses.replace(cfg, registers=dataclasses.replace(cfg.registers, **regs))
+        return cfg
 
     with _LOCK:
-        fi.FlashAttentionForwardSm100 = DMPass0Sm100
-        fi._flash_attn_fwd.compile_cache = _CACHE
+        cls, cache = _variant(exp_variant)
+        fi.FlashAttentionForwardSm100 = cls
+        fi._flash_attn_fwd.compile_cache = cache
         fi.select_fwd_config = select
         try:
             _, delta, *_ = fi._flash_attn_fwd(q8, k8, v8, softmax_scale=1.0, causal=causal, return_lse=True,

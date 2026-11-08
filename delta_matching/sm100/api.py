@@ -42,3 +42,17 @@ def dm_attn_func(q, k, v, causal=True, mode="matched"):
     assert mode in ("matched", "stale")
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
     return _DMAttnSm100.apply(q, k, v, causal, mode)
+
+
+@torch.no_grad()
+def dm_attn_debug(q, k, v, do, causal=True, mode="matched"):
+    """Validator hook: the exact delta the backward consumes and the LSE it recomputes P from, for these inputs
+    (same producers, forward kernel and delta path as dm_attn_func's autograd backward).  (B,H,N) fp32 each, LSE natural."""
+    sm = D ** -0.5
+    q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
+    q8, qs, k8, ks, v8, vs, kvw, _ = quant_qkv2(q, k, v, sm)
+    o, lse = dm_fwd(q8, qs, k8, kvw, v8, None, causal)
+    do8, dos, delta = quant_do_delta(do.contiguous(), o if mode == "stale" else None)
+    if mode == "matched":
+        delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
+    return {"delta": delta.float().contiguous(), "lse": lse.float().contiguous()}

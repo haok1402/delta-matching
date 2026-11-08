@@ -129,6 +129,9 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     return [x.to(BF) for x in (q, k, v, do)]
 
 
+FWD_ONLY = False
+
+
 def build_cases(tier, supports, seed):
     m = int(supports.get("seqlen_multiple", 128))
     nc = bool(supports.get("noncausal", True))
@@ -162,6 +165,8 @@ def build_cases(tier, supports, seed):
         for kind in kinds:
             name = f"B{B}_H{H}_Hk{Hk}_N{N}_{'c' if causal else 'nc'}_{kind}"
             modes = ["matched", "stale"] if causal or supports.get("matched_noncausal") else ["stale"]
+            if FWD_ONLY:
+                modes = modes[:1]
             runs = [(md, "plain") for md in modes]
             big = B * H * N * N > 2 ** 33
             if kind == "randn" and not big:
@@ -197,8 +202,9 @@ def check_case(case, cr, preset, dev, verbose):
     runs = {k_: [t.to(dev) if t is not None else None for t in v_] for k_, v_ in cr["runs"].items()}
     modes = sorted({k_.split("/")[0] for k_ in runs})
     shapes = (q.shape, q.shape, k.shape, k.shape)
+    names = ("O",) if FWD_ONLY else NAMES
     for key, out in runs.items():
-        for nm, t, shp in zip(NAMES, out, shapes):
+        for nm, t, shp in zip(names, out, shapes):
             ok = t is not None and tuple(t.shape) == tuple(shp) and t.dtype == BF
             if not ok:
                 chk(f"{key}:{nm}:shape_dtype", False, f"got {None if t is None else (tuple(t.shape), t.dtype)}, "
@@ -214,7 +220,7 @@ def check_case(case, cr, preset, dev, verbose):
         em = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, o_for_stale=cand[0])
         eb = R.dm_reference(q, k, v, do, causal, mode, "bf16", o_for_stale=cand[0])
         emul_bf16[mode] = eb
-        for nm, c in zip(NAMES, cand):
+        for nm, c in zip(names, cand):
             e_c, e_e = rel(c, ex[nm]), rel(em[nm], ex[nm])
             d_ce, d_cb = rel(c, em[nm]), rel(c, eb[nm])
             b_c, b_e = block_rel(c, ex[nm]), block_rel(em[nm], ex[nm])
@@ -237,7 +243,7 @@ def check_case(case, cr, preset, dev, verbose):
                     f"kernel does not implement the declared numerics (declare the right preset)")
                 chk(f"{mode}:{nm}:fingerprint", d_ce < d_cb,
                     f"closer to the bf16 emulation ({d_cb:.4f}) than to the declared {preset} ({d_ce:.4f})")
-        if mode == "matched":
+        if mode == "matched" and not FWD_ONLY:
             cs_c, cs_e = colsum_metric(cand[2], causal), colsum_metric(em["dK"], causal)
             cs_s = colsum_metric(runs["stale/plain"][2], causal) if "stale/plain" in runs else float("nan")
             rec["metrics"]["matched:colsum_dK"] = dict(cand=cs_c, emul=cs_e, cand_stale=cs_s,
@@ -266,14 +272,14 @@ def check_case(case, cr, preset, dev, verbose):
         mode, kind = key.split("/")
         base = runs[f"{mode}/plain"]
         if kind in ("repeat", "views"):
-            for nm, x, y in zip(NAMES, out, base):
+            for nm, x, y in zip(names, out, base):
                 chk(f"{key}:{nm}:bitwise", torch.equal(x, y),
                     f"max |diff| {(x.float() - y.float()).abs().max().item():.3e} vs the plain run")
         if kind == "mutate":
             q2, k2, v2 = (case[n].to(dev) for n in ("q2", "k2", "v2"))
             em2 = R.dm_reference(q2, k2, v2, do, causal, mode, preset, o_for_stale=out[0])
             ex2 = R.attention_fp32(q2, k2, v2, do, causal, dtype=exact_dtype)
-            for nm, x in zip(NAMES, out):
+            for nm, x in zip(names, out):
                 e_c, e_e = rel(x, ex2[nm]), rel(em2[nm], ex2[nm])
                 chk(f"{key}:{nm}:no_stale_cache", e_c <= TOL_RATIO * e_e + TOL_ABS,
                     f"after overwriting the inputs in place: err {e_c:.4f} vs emulation {e_e:.4f}")
@@ -291,7 +297,10 @@ def main():
     ap.add_argument("--json", default=None)
     ap.add_argument("--only", default=None, help="substring filter on case names")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--fwd-only", action="store_true", help="validate the forward (O) only; never a promotion PASS")
     a = ap.parse_args()
+    global FWD_ONLY
+    FWD_ONLY = a.fwd_only
     tgt, sep, fn_ = a.candidate.partition(":")
     if tgt.endswith(".py"):
         a.candidate = os.path.abspath(tgt) + sep + fn_
@@ -335,7 +344,7 @@ def main():
         for kk in ("q", "k", "v", "do", "q2", "k2", "v2"):
             case.pop(kk, None)
     jp, op = os.path.join(tmp, "job.pt"), os.path.join(tmp, "out.pt")
-    torch.save({"device": a.device, "case_files": files}, jp)
+    torch.save({"device": a.device, "case_files": files, "fwd_only": FWD_ONLY}, jp)
     out = _run_runner(a.candidate, jp, op)
     if "fatal" in out:
         print("FAIL: " + out["fatal"]); sys.exit(1)
@@ -362,7 +371,7 @@ def main():
     if leaked and not os.environ.get("DMVAL_SELFTEST"):
         all_ok = False
         print(f"FAIL: the candidate imported the reference / validator: {sorted(leaked)}")
-    summary = {"candidate": a.candidate, "preset": preset, "tier": a.tier, "seed": seed, "pass": all_ok,
+    summary = {"candidate": a.candidate, "preset": preset, "tier": a.tier + ("-fwd" if FWD_ONLY else ""), "seed": seed, "pass": all_ok,
                "n_cases": len(results), "n_failed": sum(bool(r["fails"]) for r in results),
                "seconds": round(time.time() - t0, 1), "device": torch.cuda.get_device_name(dev),
                "tolerances": dict(TOL_RATIO=TOL_RATIO, TOL_ABS=TOL_ABS, BLK_RATIO=BLK_RATIO, BLK_ABS=BLK_ABS,
@@ -441,7 +450,7 @@ def _print_case(rec, ok):
     for key in ("matched", "stale"):
         if f"{key}:O" in ms:
             parts.append(key[0] + " " + " ".join(f"{nm}={ms[f'{key}:{nm}']['err']:.3f}/{ms[f'{key}:{nm}']['emul_err']:.3f}"
-                                                 for nm in NAMES))
+                                                 for nm in NAMES if f"{key}:{nm}" in ms))
     if "matched:colsum_dK" in ms:
         c = ms["matched:colsum_dK"]
         parts.append(f"colsum {c['cand']:.1e}/{c['emul']:.1e} (stale {c['cand_stale']:.1e})")

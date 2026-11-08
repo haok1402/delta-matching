@@ -47,7 +47,15 @@ def call(fn, q, k, v, causal, mode):
     return o[0] if isinstance(o, (tuple, list)) else o
 
 
+FWD_ONLY = False
+
+
 def fwd_bwd(fn, q, k, v, do, causal, mode):
+    if FWD_ONLY:
+        with torch.no_grad():
+            o = call(fn, q.detach().clone(), k.detach().clone(), v.detach().clone(), causal, mode)
+        torch.cuda.synchronize()
+        return [o.detach().clone(), None, None, None]
     leaves = [x.detach().clone().requires_grad_(True) for x in (q, k, v)]
     o = call(fn, *leaves, causal, mode)
     o.backward(do)
@@ -58,6 +66,12 @@ def fwd_bwd(fn, q, k, v, do, causal, mode):
 def fwd_bwd_views(fn, q, k, v, do, causal, mode):
     """q / k / v as strided views of one packed (B, N, H + 2Hk, D) buffer (flash-attention's usual call)."""
     H, Hk = q.shape[2], k.shape[2]
+    if FWD_ONLY:
+        qkv = torch.cat([q, k, v], dim=2)
+        with torch.no_grad():
+            o = call(fn, *qkv.split([H, Hk, Hk], dim=2), causal, mode)
+        torch.cuda.synchronize()
+        return [o.detach().clone(), None, None, None]
     qkv = torch.cat([q, k, v], dim=2).detach().requires_grad_(True)
     qv, kv, vv = qkv.split([H, Hk, Hk], dim=2)
     o = call(fn, qv, kv, vv, causal, mode)
@@ -70,6 +84,8 @@ def fwd_bwd_views(fn, q, k, v, do, causal, mode):
 def main():
     spec, job_path, out_path = sys.argv[1:4]
     job = torch.load(job_path, weights_only=False)
+    global FWD_ONLY
+    FWD_ONLY = bool(job.get("fwd_only", False))
     dev = torch.device(job.get("device", "cuda"))
     torch.cuda.set_device(dev)
     res = {"meta": {}, "cases": []}

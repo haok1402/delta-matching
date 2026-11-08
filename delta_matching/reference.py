@@ -497,3 +497,8 @@ def sm90_ds(dS, ctx, p):
 SITE_FNS["sm90_pfwd"] = sm90_pfwd
 SITE_FNS["sm90_pbwd"] = lambda P, ctx, p: e4m3_round(P.clamp(max=16.0) * 256.0) / 256.0     # P' = 2^8 P, fixed scale
 SITE_FNS["sm90_ds"] = sm90_ds
+
+
+# kda-sm100's final sm100-mx rules (inbox 2026-11-08 17:40): kda-v1 with dS scaled per (128-query tile x 32 keys)
+make_kda_preset("sm100-mx", ds_block=(128, 32), delta_norm=True)
+make_kda_preset("sm100-mx-nonorm", ds_block=(128, 32), delta_norm=False)

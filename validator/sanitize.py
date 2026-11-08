@@ -23,6 +23,7 @@ def main():
     ap.add_argument("candidate")
     ap.add_argument("--tool", default="memcheck")
     ap.add_argument("--log", default=None)
+    ap.add_argument("--timeout", type=float, default=600.0, help="seconds; a hang under the sanitizer is a FAIL")
     a = ap.parse_args()
     tgt, sep, fn = a.candidate.partition(":")
     cand = os.path.abspath(tgt) + sep + fn
@@ -31,20 +32,30 @@ def main():
     # CUDA_ERROR_INVALID_VALUE) during arch detection; those are not memory errors.  Memory errors are counted below.
     cmd = [CS, "--tool", a.tool, "--report-api-errors", "no", "--print-limit", "50", "--error-exitcode", "9", sys.executable,
            os.path.join(HERE, "sanitize_child.py"), cand]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    out = p.stdout + p.stderr
-    if a.log:
-        open(a.log, "w").write(out)
+    import tempfile
+    log = a.log or tempfile.mktemp(prefix="dmval_san_", suffix=".txt")
+    with open(log, "w") as lf:                      # streamed: a hang still leaves the evidence on disk
+        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        try:
+            p.wait(timeout=a.timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            import signal
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+            timed_out = True
+    out = open(log, errors="replace").read()
     m = re.search(r"ERROR SUMMARY: (\d+) error", out)
     nerr = int(m.group(1)) if m else -1
     done = "SANITIZE_CHILD_DONE" in out
     ninv = len(re.findall(r"Invalid __(?:global|shared|local)__ (?:read|write)", out))
-    ok = p.returncode == 0 and nerr == 0 and ninv == 0 and done
+    ok = (not timed_out) and p.returncode == 0 and nerr == 0 and ninv == 0 and done
     first = next((ln for ln in out.splitlines() if "Invalid" in ln or "Error" in ln or "Traceback" in ln), None)
     frames = sorted(set(re.findall(r"Host Frame: (\w+) in ([\w./]+:\d+)", out)))[:8]
-    print("SUMMARY_JSON " + json.dumps({"pass": ok, "tool": a.tool, "errors": nerr, "invalid_accesses": ninv, "child_done": done,
+    print("SUMMARY_JSON " + json.dumps({"pass": ok, "tool": a.tool, "errors": nerr, "invalid_accesses": ninv, "child_done": done, "timed_out": timed_out, "log": log,
                                         "rc": p.returncode, "first": first, "frames": frames}))
-    print(("PASS" if ok else "FAIL") + f": sanitizer {a.tool} errors={nerr} child_done={done}")
+    print(("PASS" if ok else "FAIL") + f": sanitizer {a.tool} errors={nerr} invalid_accesses={ninv} child_done={done}"
+          + (f" TIMEOUT after {a.timeout:.0f} s (hang under the sanitizer)" if timed_out else ""))
     sys.exit(0 if ok else 1)
 
 

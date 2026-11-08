@@ -83,3 +83,6 @@ S and exact exp). Perturbing the emulation's FORWARD S by 1e-4 relative (the siz
 difference between a forward and a backward kernel) makes emulated stale diverge too (3.95; 1e-3: 3.26), while emulated
 matched stays at bf16 level (0.598 / 0.599). So stale mode's divergence is generic to any real fp8 kernel at sm100-mx
 precision - the effect Delta-Matching's matched delta removes - not a kernel bug. Data: sm100/validate/runs/{seeds,v5a9,noise}.
+Random backward-P error (P_bwd *= 1 + U(-a, a), emulation, 2000 steps): matched trains at bf16 level for a up to 2e-3
+under both sm100-mx and sm100-mx-x (validate/runs/bwdp/). Under sm100-mx-x such noise reads 1e-3..4e-2 on the direct
+identity check, i.e. that check is stricter than training needs for random (non-systematic) error; kept strict by design.

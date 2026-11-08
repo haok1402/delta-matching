@@ -172,11 +172,16 @@ def main():
                 @staticmethod
                 def backward(ctx, do):
                     q, k, v = ctx.saved_tensors
-                    r = R.dm_reference(q, k, v, do.contiguous(), True, mode, preset)
+                    if mode == "nodelta":       # a broken backward: delta = 0 (the stale route reading O = 0)
+                        r = R.dm_reference(q, k, v, do.contiguous(), True, "stale", preset,
+                                           o_for_stale=torch.zeros_like(do))
+                    else:
+                        r = R.dm_reference(q, k, v, do.contiguous(), True, mode, preset)
                     return r["dQ"].to(q.dtype), r["dK"].to(k.dtype), r["dV"].to(v.dtype)
             return _E.apply
         arms["emul"] = make("matched")
         arms["emul_stale"] = make("stale")
+        arms["emul_nodelta"] = make("nodelta")       # negative control: the tier must FAIL this arm
     res = {}
     for name in a.arms.split(","):
         if name not in arms:

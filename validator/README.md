@@ -57,3 +57,14 @@ mean, Q pre-scaled by D**-0.5), forward P coded per (row, 64-key group) under a 
 P as e4m3(2^8 P), dS per 64x128 tile on 2^8 ks_j dS, matched delta = sum_j P_ij dP_ij with the unquantized P (which is
 why rowsum(dS) = delta (1 - sum P) ~ fp32 round-off). Not modelled: MMA accumulation order, ex2/rcp approximations, the
 F2b 1e-8 dominance floor; they move a correct kernel ~1e-3 away from the emulation.
+
+## Training tier calibration (GB200, 2026-11-08; `validator/train_check.py none --arms bf16,emul,emul_stale,emul_nodelta`)
+Final-20% mean loss, same seed (same init and batches), sm90 emulation:
+| steps | bf16 | fp8 matched (emul) | fp8 stale | delta = 0 (broken control) | bf16, other seed |
+|---|---|---|---|---|---|
+| 400 | 1.2871 | 1.2893 | 1.2888 | (4.0 avg over steps 0-200 of the 2000 run) | |
+| 2000 | 0.6038 | 0.6004 | 0.5971 | 8.4513 (diverges) | 0.6511 |
+Same-seed fp8 arms sit within 0.007 nats of bf16; a broken backward is off by > 2 nats within 200 steps. The budget
+max(2%, 0.03 nats) of the same-seed bf16 loss therefore separates them with wide margins (seed-to-seed noise, 0.05, is
+why every arm uses the same seed). matched vs stale is NOT separable at this scale: stale's drift shows over long
+training runs, so this tier judges breakage, not the matched-vs-stale benefit (reported, not judged).

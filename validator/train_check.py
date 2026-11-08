@@ -183,11 +183,21 @@ def main():
         arms["emul_stale"] = make("stale")
         arms["emul_nodelta"] = make("nodelta")       # negative control: the tier must FAIL this arm
     res = {}
+    if a.json and os.path.exists(a.json):           # resume: arms already finished with the same settings are kept
+        prev = json.load(open(a.json))
+        if prev.get("steps") == a.steps and prev.get("seed", 0) == a.seed:
+            res = {k: v for k, v in prev.get("losses", {}).items() if len(v) == a.steps}
     for name in a.arms.split(","):
         if name not in arms:
             continue
+        if name in res:
+            print(f"{name:8s} (resumed from {a.json})")
+            continue
         t = time.time()
         res[name] = train(arms[name], data, a, dev)
+        if a.json:
+            json.dump({"pass": None, "steps": a.steps, "seed": a.seed, "losses": res}, open(a.json + ".tmp", "w"))
+            os.replace(a.json + ".tmp", a.json)
         tail = res[name][-max(1, a.steps // 5):]
         print(f"{name:8s} final-20% mean loss {sum(tail) / len(tail):.4f}  ({time.time() - t:.0f} s)", flush=True)
     tailm = {n: sum(l[-max(1, a.steps // 5):]) / max(1, len(l[-max(1, a.steps // 5):])) for n, l in res.items()}
@@ -199,7 +209,7 @@ def main():
         print(f"matched - bf16 = {tailm['matched'] - tailm['bf16']:+.4f} (budget {budget:.4f})")
     if "stale" in tailm and "matched" in tailm:
         print(f"stale - matched = {tailm['stale'] - tailm['matched']:+.4f} (reported, not judged)")
-    out = {"pass": ok, "tail_mean": tailm, "steps": a.steps, "losses": res}
+    out = {"pass": ok, "tail_mean": tailm, "steps": a.steps, "seed": a.seed, "losses": res}
     if a.json:
         json.dump(out, open(a.json, "w"))
     print("SUMMARY_JSON " + json.dumps({"pass": ok, "tail_mean": tailm, "steps": a.steps}))

@@ -488,3 +488,28 @@ def e4m3_roundtrip2(x0: Float32, x1: Float32, *, loc=None, ip=None):
         "=f,=f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
     return (Float32(llvm.extractvalue(T.f32(), r, [0], loc=loc, ip=ip)),
             Float32(llvm.extractvalue(T.f32(), r, [1], loc=loc, ip=ip)))
+
+
+@dsl_user_op
+def ld_global_nc_v4_b32(addr: cutlass.Int64, *, loc=None, ip=None):
+    """4 x b32 non-coherent global vector load (16-byte aligned address)"""
+    from cutlass._mlir.dialects import llvm as _llvm
+    st = _llvm.StructType.get_literal([T.i32(), T.i32(), T.i32(), T.i32()])
+    r = llvm.inline_asm(st, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)],
+                        "ld.global.nc.v4.b32 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,l",
+                        has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+    return tuple(Int32(llvm.extractvalue(T.i32(), r, [i], loc=loc, ip=ip)) for i in range(4))
+
+
+@dsl_user_op
+def kb_pair_m7(w: Int32, *, loc=None, ip=None):
+    """word of two s16 kb (low = lower address) -> (f32(kb_lo - 7), f32(kb_hi - 7))"""
+    from cutlass._mlir.dialects import llvm as _llvm
+    st = _llvm.StructType.get_literal([T.f32(), T.f32()])
+    r = llvm.inline_asm(st, [Int32(w).ir_value(loc=loc, ip=ip)],
+                        "{\n\t.reg .b16 lo, hi;\n\t.reg .s32 a, b;\n\tmov.b32 {lo, hi}, $2;\n\t"
+                        "cvt.s32.s16 a, lo;\n\tcvt.s32.s16 b, hi;\n\tsub.s32 a, a, 7;\n\tsub.s32 b, b, 7;\n\t"
+                        "cvt.rn.f32.s32 $0, a;\n\tcvt.rn.f32.s32 $1, b;\n\t}",
+                        "=f,=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+    return (Float32(llvm.extractvalue(T.f32(), r, [0], loc=loc, ip=ip)),
+            Float32(llvm.extractvalue(T.f32(), r, [1], loc=loc, ip=ip)))

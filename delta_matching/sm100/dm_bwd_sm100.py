@@ -3940,6 +3940,18 @@ class DMBackwardSm100:
                     dm_now = dm_utils.clock32()
                     dm_s0 = dm_s0 + (dm_now - dm_tprev)
                     dm_tprev = dm_now
+                # cp: kb words for both stages issued before the LSE / S waits (latency overlap); 32 queries per
+                # stage are contiguous -> 4 x 16-byte loads per stage
+                dm_kbw = None
+                if const_expr(self.dm_cp and "cpscalar" not in self.dm_opts):
+                    dm_kbw = []
+                    for st_ in cutlass.range_constexpr(cute.size(tScS_t2r, mode=[1])):
+                        qb_ = m_block * self.tile_m + dm_idx0[0, st_, 0, 0][1]
+                        a_ = (aux_data.tensors[5][batch_idx, head_idx, dm_kv_blk, None].iterator + qb_).toint()
+                        ws_ = []
+                        for u_ in cutlass.range_constexpr(4):
+                            ws_ = ws_ + list(dm_utils.ld_global_nc_v4_b32(a_ + 16 * u_))
+                        dm_kbw.append(ws_)
                 # Prefetch 1 stage of LSE
                 pipeline_LSE.consumer_wait(consumer_state_LSE)
                 if const_expr(dm_tr is not None):
@@ -4087,8 +4099,11 @@ class DMBackwardSm100:
                         for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
                             q0 = m_block * self.tile_m + dm_idx0[2 * v, stage, 0, 0][1]
                             q1 = m_block * self.tile_m + dm_idx0[2 * v + 1, stage, 0, 0][1]
-                            kbm0 = Float32(Int32(dm_kbt[batch_idx, head_idx, dm_kv_blk, q0]) - 7)
-                            kbm1 = Float32(Int32(dm_kbt[batch_idx, head_idx, dm_kv_blk, q1]) - 7)
+                            if const_expr(dm_kbw is not None):
+                                kbm0, kbm1 = dm_utils.kb_pair_m7(dm_kbw[stage][v])
+                            else:
+                                kbm0 = Float32(Int32(dm_kbt[batch_idx, head_idx, dm_kv_blk, q0]) - 7)
+                                kbm1 = Float32(Int32(dm_kbt[batch_idx, head_idx, dm_kv_blk, q1]) - 7)
                             x0, x1 = cute.arch.fma_packed_f32x2(
                                 (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]), (dm_c[stage], dm_c[stage]), (-kbm0, -kbm1))
                             e0 = cute.math.exp2(x0, fastmath=True)

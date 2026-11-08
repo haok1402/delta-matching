@@ -69,3 +69,12 @@ Same-seed fp8 arms sit within 0.007 nats of bf16; a broken backward is off by > 
 max(2%, 0.03 nats) of the same-seed bf16 loss therefore separates them with wide margins (seed-to-seed noise, 0.05, is
 why every arm uses the same seed). matched vs stale is NOT separable at this scale: stale's drift shows over long
 training runs, so this tier judges breakage, not the matched-vs-stale benefit (reported, not judged).
+
+### Stale vs matched in training (sm100-mx, GB200, 2026-11-08) — why the training tier judges matched only
+Kernel 6a31419 / 5a912b2: matched healthy on seeds 0-3 (0.59-0.64, at or below bf16); stale diverges on every seed
+(3.1-3.3, onset steps 400-600) and under every forward variant (MUFU exps, eager rescale). The emulation's stale is
+healthy (seeds 0-3) only because the emulation is exactly self-consistent (forward and backward use bitwise the same fp32
+S and exact exp). Perturbing the emulation's FORWARD S by 1e-4 relative (the size of an MMA accumulation-order
+difference between a forward and a backward kernel) makes emulated stale diverge too (3.95; 1e-3: 3.26), while emulated
+matched stays at bf16 level (0.598 / 0.599). So stale mode's divergence is generic to any real fp8 kernel at sm100-mx
+precision - the effect Delta-Matching's matched delta removes - not a kernel bug. Data: sm100/validate/runs/{seeds,v5a9,noise}.

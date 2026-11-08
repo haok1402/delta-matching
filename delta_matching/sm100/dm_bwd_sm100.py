@@ -1967,7 +1967,7 @@ class DMBackwardSm100:
                 TileSchedulerCls,
                 is_leader_cta,
                 blocksparse_tensors,
-                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4) else None,
+                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts) else None,
             )
             # Dealloc the tensor memory buffer
             tmem.relinquish_alloc_permit()
@@ -2026,7 +2026,7 @@ class DMBackwardSm100:
                 fastdiv_mods,
                 blocksparse_tensors,
                 sDm=sDm,
-                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4) else None,
+                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts) else None,
                 dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.use_2cta_instrs) else None,
             )
             tmem_alloc_barrier.arrive()
@@ -2049,6 +2049,7 @@ class DMBackwardSm100:
                 TileSchedulerCls,
                 mdQ_semaphore,
                 blocksparse_tensors,
+                dm_dq=aux_data.tensors[4] if const_expr("lwc" in self.dm_opts) else None,
             )
             tmem_alloc_barrier.arrive()
 
@@ -4629,6 +4630,7 @@ class DMBackwardSm100:
         TileSchedulerCls: Callable,
         mdQ_semaphore: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
+        dm_dq: Optional[cute.Tensor] = None,
     ):
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
@@ -4797,6 +4799,7 @@ class DMBackwardSm100:
                 # the poll; now the poll overlaps the current dQ MMA instead, which measured
                 # faster. This m_block's adds are only issued below, after the acquire.
                 dm_first = cutlass.Boolean(False)
+                dm_last = cutlass.Boolean(False)
                 if const_expr(self.deterministic):
                     if not m_block_oob_upper:
                         lock_value = self._dq_semaphore_lock_value(
@@ -4820,6 +4823,10 @@ class DMBackwardSm100:
                             # DM fws: the first writer in the deterministic order stores instead of adding, so
                             # dq_accum needs no zero-fill (dense causal / non-causal: lock 0 always exists per m_block)
                             dm_first = lock_value == 0
+                        if const_expr(dm_dq is not None):
+                            # DM lwc: the last writer in the deterministic order converts (accum + own partial) * sm
+                            # to bf16 dQ itself (no postprocess kernel)
+                            dm_last = lock_value == block_info.get_n_block_max_for_m_block(seqlen, m_block) - 1
                 pipeline_dQ.consumer_wait(dQ_consumer_state)
                 # TMEM -> RMEM
                 tdQrdQ_t2r = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
@@ -4849,7 +4856,20 @@ class DMBackwardSm100:
                     cute.arch.fence_view_async_shared()
                     self.reduce_sync_barrier.arrive_and_wait()
                     # Copy from shared memory to global memory
-                    if is_tma_warp and not m_block_oob_upper:
+                    if const_expr(dm_dq is not None):
+                        if dm_last and not m_block_oob_upper:
+                            dm_row = m_block * self.tile_m + tidx % 64 + 64 * cta_rank_in_cluster
+                            dm_col0 = stage * self.dQ_reduce_ncol + (self.tile_hdim // 2) * (tidx // 64)
+                            if dm_row < seqlen.seqlen_q:
+                                for dm_k in cutlass.range_constexpr(self.dQ_reduce_ncol // 4):
+                                    for dm_i in cutlass.range_constexpr(4):
+                                        dm_j = 4 * dm_k + dm_i
+                                        dm_v = tdQrdQ[dm_j, stage]
+                                        if not dm_first:
+                                            dm_v = gdQaccum_cur[4 * tidx + dm_i + 512 * dm_k, stage + stage_offset] + dm_v
+                                        dm_dq[batch_idx, dm_row, head_idx, dm_col0 + dm_j] = dm_dq.element_type(
+                                            dm_v * Float32(self.tile_hdim ** -0.5))
+                    if is_tma_warp and not m_block_oob_upper and not dm_last:
                         with cute.arch.elect_one():
                             if dm_first:
                                 dm_utils.cpasync_bulk_store_s2g(

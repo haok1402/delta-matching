@@ -131,7 +131,7 @@ def _patched_source():
          'assert q.dtype == torch.float8_e4m3fn, "dm: fp8 codes expected"'),
         ("assert q.dtype == k.dtype == v.dtype == out.dtype == dout.dtype, (", "assert True, ("),
         ("out_torch_dtype = q.dtype", "out_torch_dtype = torch.bfloat16"),
-        ("dq = torch.empty_like(q)", "dq = torch.empty_like(q, dtype=torch.bfloat16)"),
+        ("dq = torch.empty_like(q)", "dq = _CTX['dq'] if _CTX.get('dq') is not None else torch.empty_like(q, dtype=torch.bfloat16)"),
         ("dk = torch.empty_like(k)", "dk = torch.empty_like(k, dtype=torch.bfloat16)"),
         ("dv = torch.empty_like(v)", "dv = torch.empty_like(v, dtype=torch.bfloat16)"),
         ("    _bwd_preprocess(\n        out, dout,", "    _dm_bwd_preprocess(\n        out, dout,"),
@@ -171,6 +171,15 @@ def _dm_cfg(config):
 
 
 _ns = dict(vars(fi))
+def _dm_post_convert(acc, out, *a, **k):
+    """FA4 postprocess wrapper: skipped for dQ when the kernel's last writer already wrote bf16 dQ (DM lwc)."""
+    if _CTX.get("dq") is not None and out is _CTX["dq"]:
+        return
+    return _ORIG_POST(acc, out, *a, **k)
+
+
+_ORIG_POST = fi._bwd_postprocess_convert
+_ns.update(_bwd_postprocess_convert=_dm_post_convert, _CTX=_CTX)
 _ns.update(_dm_zeros=_dm_zeros, _dm_empty=_dm_empty, _DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _dm_bwd_cache=_dm_bwd_cache, _dm_cfg=_dm_cfg)
 exec(compile(_patched_source(), fi.__file__ + ":dm_patched_bwd", "exec"), _ns)
 _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
@@ -182,6 +191,10 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
+    if "lwc" in os.environ.get("DM_BWD_OPTS", "").split(","):
+        assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
+        _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
+        aux.append(_CTX["dq"])
     if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
         aux.append(trace)
     _CTX["delta"] = delta
@@ -202,6 +215,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
                 _REC[key] = r
         assert not _CTX.get("pool"), "prestaged scratch not fully consumed"
     finally:
+        _CTX.pop("dq", None)
         _CTX.pop("rec", None)
         _CTX.pop("pool", None)
         _CTX.pop("prestaged", None)

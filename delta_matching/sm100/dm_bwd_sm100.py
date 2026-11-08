@@ -36,6 +36,77 @@ from flash_attn.cute.tile_scheduler import (
     SingleTileVarlenScheduler,
 )
 
+from flash_attn.cute.tile_scheduler import WorkTileInfo as _DMWorkTileInfo
+
+_DM_HSWZ_CLS = {}
+
+
+def dm_hswz_scheduler(qh: int):
+    """DM hswz (GQA, deterministic): the LPT bwd scheduler with the query head permuted so that consecutive
+    scheduler heads h map to DIFFERENT KV heads at the same group position: head(h) = (h % Hk) * qh + h // Hk.
+    The deterministic dK/dV lock order is the group position (head % qh), so the 4 (qh) CTAs of one KV tile no longer
+    run concurrently and serialize on the dK/dV semaphores; accumulation order (bits) is unchanged."""
+    if qh in _DM_HSWZ_CLS:
+        return _DM_HSWZ_CLS[qh]
+
+    class DMHswzLPTBwdScheduler(SingleTileLPTBwdScheduler):
+        @staticmethod
+        @cute.jit
+        def create(params, *, loc=None, ip=None):
+            return DMHswzLPTBwdScheduler(params, cute.arch.block_idx()[0], loc=loc, ip=ip)
+
+        @cute.jit
+        def get_current_work(self, *, loc=None, ip=None):
+            w = SingleTileLPTBwdScheduler.get_current_work(self, loc=loc, ip=ip)
+            blk, h, b, sp = w.tile_idx
+            hk = self.params.num_head_divmod.divisor // qh
+            hn = (h % hk) * qh + h // hk
+            return _DMWorkTileInfo((blk, Int32(hn), b, sp), w.is_valid_tile)
+
+    _DM_HSWZ_CLS[qh] = DMHswzLPTBwdScheduler
+    return DMHswzLPTBwdScheduler
+
+
+_DM_PERS_CLS = {}
+
+
+def dm_persistent_scheduler(qh: int, hswz: bool, max_ctas: int):
+    """DM pers: grid-stride persistent version of the LPT bwd scheduler (optionally with the hswz head permutation).
+    CTA b handles linear work tiles b, b + G, b + 2G, ... (G = min(total, max_ctas) physical CTAs, a cluster multiple), in
+    increasing order, so every deterministic predecessor (smaller linear index) is earlier in some CTA's queue: no
+    deadlock. Saves the per-tile CTA teardown/launch/prologue; the work and its order are unchanged (bitwise)."""
+    key = (qh, hswz, max_ctas)
+    if key in _DM_PERS_CLS:
+        return _DM_PERS_CLS[key]
+
+    class DMPersLPTBwdScheduler(SingleTileLPTBwdScheduler):
+        @staticmethod
+        @cute.jit
+        def create(params, *, loc=None, ip=None):
+            return DMPersLPTBwdScheduler(params, cute.arch.block_idx()[0], loc=loc, ip=ip)
+
+        @staticmethod
+        def get_grid_shape(params, *, loc=None, ip=None):
+            return (cutlass.min(params.total_blocks, Int32(max_ctas)), Int32(1), Int32(1))
+
+        @cute.jit
+        def get_current_work(self, *, loc=None, ip=None):
+            w = SingleTileLPTBwdScheduler.get_current_work(self, loc=loc, ip=ip)
+            blk, h, b, sp = w.tile_idx
+            hn = h
+            if const_expr(hswz and qh > 1):
+                hk = self.params.num_head_divmod.divisor // qh
+                hn = (h % hk) * qh + h // hk
+            return _DMWorkTileInfo((blk, Int32(hn), b, sp), w.is_valid_tile)
+
+        def advance_to_next_work(self, *, loc=None, ip=None):
+            self._tile_idx = self._tile_idx + cute.arch.grid_dim()[0]
+            return self.get_current_work()
+
+    _DM_PERS_CLS[key] = DMPersLPTBwdScheduler
+    return DMPersLPTBwdScheduler
+
+
 from flash_attn.cute import barrier
 from flash_attn.cute.named_barrier import NamedBarrierBwdSm100
 from flash_attn.cute.softmax import apply_score_mod_inner, apply_score_mod_bwd_inner
@@ -420,6 +491,8 @@ class DMBackwardSm100:
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
         self.dm_fws = "nofws" not in self.dm_opts
+        # pers=<CTAs>: persistent grid of that many CTAs (= SM count, a cluster multiple), 0 = single-tile CTAs
+        self.dm_pers = int(next((x[5:] for x in self.dm_opts if x.startswith("pers=")), "0"))
         _p3 = next((x[3:] for x in self.dm_opts if x.startswith("p3=")), None)   # p3=freq:res (deg-3)
         self.dm_p3 = tuple(int(t) for t in _p3.split(":")) if _p3 else None
         self.dm_sfa_dv_col = self.tmem_P_offset + self.tmem_cols_P            # 4 groups x 4 cols
@@ -1058,6 +1131,11 @@ class DMBackwardSm100:
         # TileScheduler = SingleTileScheduler
         if const_expr(self.is_varlen_k):
             TileScheduler = SingleTileVarlenScheduler
+        elif const_expr(self.deterministic and self.dm_pers > 0 and not self.pack_gqa):
+            TileScheduler = dm_persistent_scheduler(self.qhead_per_kvhead, "nohswz" not in self.dm_opts, self.dm_pers)
+        elif const_expr(self.deterministic and "nohswz" not in self.dm_opts and self.qhead_per_kvhead > 1
+                        and not self.pack_gqa):
+            TileScheduler = dm_hswz_scheduler(self.qhead_per_kvhead)
         elif const_expr(self.deterministic):
             TileScheduler = SingleTileLPTBwdScheduler
         else:
@@ -2929,6 +3007,9 @@ class DMBackwardSm100:
         )
         producer_phase_dKV = Int32(1)
         cta_group = pipeline_S_P.cta_group
+        # DM pers: the shared producer_phase_acc is only valid within one tile; each tile's S/P, dP and dQ empty
+        # barriers complete M = #m_blocks times, so the next tile starts at base ^ (M & 1)
+        dm_ph_base = Int32(1)
 
         cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         dS_cluster_phase = Int32(0)
@@ -3198,6 +3279,8 @@ class DMBackwardSm100:
                     producer_phase_acc ^= 1
             else:
                 if is_leader_cta and process_tile:
+                    if const_expr(self.dm_pers > 0):
+                        producer_phase_acc = dm_ph_base
                     accumulate_dK = False
                     accumulate_dV = False
                     # -----------------------------------------------------------
@@ -3312,7 +3395,9 @@ class DMBackwardSm100:
                         consumer_state_P.advance()
                         pipeline_dO.consumer_release(consumer_state_dO)
                         consumer_state_dO.advance()
-                    else:
+                    elif const_expr(self.dm_pers == 0):
+                        # (an extra S_P full arrival nobody waits for: with persistent tiles it would shift the
+                        # next tile's S_P phase, so DM pers drops it)
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
                         )
@@ -3344,6 +3429,8 @@ class DMBackwardSm100:
                     consumer_state_dS.advance()
 
                     producer_phase_acc ^= 1
+                    if const_expr(self.dm_pers > 0):
+                        dm_ph_base = dm_ph_base ^ ((m_block_max - m_block_min) & 1)
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
         # Currently it hangs if we have this S_P.producer_tail, will need to understand why
@@ -3828,6 +3915,7 @@ class DMBackwardSm100:
             dm_s5, dm_s6, dm_s7, dm_s8, dm_s9 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
             dm_s10, dm_s11, dm_s12, dm_s13 = Int32(0), Int32(0), Int32(0), Int32(0)
             dm_tprev = dm_utils.clock32()
+            dm_tl0 = dm_utils.globaltimer()
         while work_tile.is_valid_tile:
             (
                 work_n,
@@ -4515,6 +4603,15 @@ class DMBackwardSm100:
                         pipeline_dS.producer_commit(producer_state_dS)
                     producer_state_dS.advance()
 
+            if const_expr(dm_tr is not None and "tl" in self.dm_opts):
+                # DM tl: per-CTA timeline (start/end globaltimer ns of the compute mainloop, SM id) at [64 + 4 * bid]
+                if dm_tid == 0:
+                    dm_bid = cute.arch.block_idx()[0]
+                    dm_tb = dm_tr.iterator.toint() + 8 * (64 + 4 * dm_bid)
+                    dm_utils.red_add_u64(dm_tb, dm_tl0)
+                    dm_utils.red_add_u64(dm_tb + 8, dm_utils.globaltimer())
+                    dm_utils.red_add_u64(dm_tb + 16, Int64(dm_utils.smid()))
+                    dm_utils.red_add_u64(dm_tb + 24, Int64(m_block_max - m_block_min))
             if const_expr(dm_tr is not None):
                 for wg_ in range(2 if const_expr("noflush" not in self.dm_opts) else 0):
                     if dm_tid == 128 * wg_:
@@ -4895,6 +4992,7 @@ class DMBackwardSm100:
                 # faster. This m_block's adds are only issued below, after the acquire.
                 dm_first = cutlass.Boolean(False)
                 dm_last = cutlass.Boolean(False)
+                lock_value = Int32(0)
                 if const_expr(self.deterministic):
                     if not m_block_oob_upper:
                         lock_value = self._dq_semaphore_lock_value(
@@ -4908,12 +5006,13 @@ class DMBackwardSm100:
                             m_block,
                             work_n,
                         )
-                        barrier.wait_eq(
-                            mdQ_semaphore_cur[(m_block, None)].iterator,
-                            tidx,
-                            cta_rank_in_cluster,
-                            lock_value,
-                        )
+                        if const_expr("dqearly" not in self.dm_opts):
+                            barrier.wait_eq(
+                                mdQ_semaphore_cur[(m_block, None)].iterator,
+                                tidx,
+                                cta_rank_in_cluster,
+                                lock_value,
+                            )
                         if const_expr(self.dm_fws):
                             # DM fws: the first writer in the deterministic order stores instead of adding, so
                             # dq_accum needs no zero-fill (dense causal / non-causal: lock 0 always exists per m_block)
@@ -4931,6 +5030,16 @@ class DMBackwardSm100:
                 with cute.arch.elect_one():
                     pipeline_dQ.consumer_release(dQ_consumer_state)
                 dQ_consumer_state.advance()
+                if const_expr(self.deterministic and "dqearly" in self.dm_opts):
+                    # DM dqearly: the dQ tile is already in registers and its TMEM (= the S columns) handed back to
+                    # the MMA warp; only now poll the deterministic order (same adds, same order: bitwise)
+                    if not m_block_oob_upper:
+                        barrier.wait_eq(
+                            mdQ_semaphore_cur[(m_block, None)].iterator,
+                            tidx,
+                            cta_rank_in_cluster,
+                            lock_value,
+                        )
 
                 if m_block_max > 0:
                     m_block = cutlass.min(m_block, m_block_max - 1)

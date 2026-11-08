@@ -91,6 +91,11 @@ def _dm_cfg(config):
         over["spt"] = False
     if "spt1" in opts:
         over["spt"] = True
+    for o in opts:
+        if o.startswith("regs="):           # regs=reduce:compute:load_mma (setmaxnreg split, 2-CTA)
+            r, c, l = (int(x) for x in o[5:].split(":"))
+            from flash_attn.cute.config import Sm100BwdRegisters
+            over["registers"] = Sm100BwdRegisters(reduce=r, compute=c, load=l, mma=l, empty=24)
     return dataclasses.replace(config, **over)
 
 

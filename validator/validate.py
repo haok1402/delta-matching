@@ -389,6 +389,11 @@ def main():
         if os.path.exists(files[i] + ".out"):
             os.remove(files[i] + ".out")
         torch.cuda.empty_cache()
+    try:                                    # GPU part done: let the gpupool filler resume while the report is written
+        from gpupool_hook import gpupool_done
+        gpupool_done()
+    except ImportError:
+        pass
     if leaked and not os.environ.get("DMVAL_SELFTEST"):
         all_ok = False
         print(f"FAIL: the candidate imported the reference / validator: {sorted(leaked)}")

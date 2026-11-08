@@ -100,6 +100,11 @@ def main():
     leaked = [m for m in sys.modules if any(m == f or m.startswith(f + ".") for f in FORBIDDEN)]
     res["meta"]["leaked_modules"] = leaked
     case_files = job.get("case_files", [])
+    try:                                    # gpupool late stop: make sure the filler is gone before the candidate runs
+        from gpupool_hook import gpupool_ready
+        gpupool_ready()
+    except ImportError:
+        pass
     for cf in case_files:
         case = torch.load(cf, weights_only=False)
         r = run_case(mod, fn, case, dev)

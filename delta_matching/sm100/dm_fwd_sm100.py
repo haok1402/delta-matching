@@ -2362,7 +2362,9 @@ class DMForwardSm100:
 
             # DM sm100-mx: row max kept in log2 units (integer valued); scales applied per 32-key block in softmax_step.
             dm_row = self._q_block(work_m, stage, thr_mma_qk.thr_idx) * self.m_block_size + tidx
-            dm_qsc = Float32(descale_tensors.q_descale[batch_idx, head_idx, dm_row // 32]) * Float32(math.log2(math.e))
+            # rows past seqlen_q (second q stage of the last tile) are never stored: clamp the scale index (no OOB read)
+            dm_qblk = cutlass.min(dm_row // 32, (seqlen.seqlen_q + 31) // 32 - 1)
+            dm_qsc = Float32(descale_tensors.q_descale[batch_idx, head_idx, dm_qblk]) * Float32(math.log2(math.e))
             softmax = SoftmaxSm100.create(
                 Float32(1.0),
                 rescale_threshold=0.0,

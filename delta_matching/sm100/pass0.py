@@ -1,0 +1,76 @@
+"""Host entry of the matched-delta pass 0 (DMPass0Sm100): FA4's _flash_attn_fwd plumbing with the kernel class swapped.
+
+dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal) -> delta (B, H, N) fp32 =
+    sum_j P dP / sum_j P with P = exp2(fma(S, (ks*qs)*log2e, -lse*log2e)), dP = (dO8 V8^T) * (vs*dos)   (dm_common contract)
+Scales, dO codes and lse travel as aux tensors; delta comes back in the LSE output slot.
+"""
+import dataclasses
+import threading
+
+import torch
+import flash_attn.cute.interface as fi
+from flash_attn.cute import cache_utils
+
+from .dm_pass0_sm100 import DMPass0Sm100
+from .fwd import _fingerprint
+
+_LOCK = threading.Lock()
+FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, use_tma_o=False,
+             overlap_sO_sQ=False, kv_stage=4)
+REGS = dict(softmax=208, correction=32, other=64)  # P0: correction warps idle -> registers to softmax
+
+
+def _make_cache():
+    if cache_utils.CUTE_DSL_CACHE_ENABLED:
+        return cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / "pass0")
+    return cache_utils.JITCache()
+
+
+_CACHES = {}
+_CLASSES = {}
+
+
+def _variant(exp_variant: str):
+    if exp_variant not in _CLASSES:
+        _CLASSES[exp_variant] = type(f"DMPass0Sm100_{exp_variant}", (DMPass0Sm100,), {"dm_exp_variant": exp_variant})
+        c = _make_cache()
+        if cache_utils.CUTE_DSL_CACHE_ENABLED:
+            c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / f"pass0_{exp_variant}")
+        _CACHES[exp_variant] = c
+    return _CLASSES[exp_variant], _CACHES[exp_variant]
+
+
+def _aux(t: torch.Tensor, leading_dim: int):
+    t.__leading_dim__ = leading_dim
+    t.__assumed_align__ = 16 if t.dtype == torch.uint8 else 4
+    return t
+
+
+def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
+             exp_variant: str = "mufu"):
+    over = dict(FORCE)
+    if config_override:
+        over.update(config_override)
+    aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
+           _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2)]
+    orig = (fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config)
+
+    def select(inputs):
+        cfg = orig[2](inputs)
+        cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "registers"})
+        regs = over.get("registers", REGS)
+        if regs is not None:
+            cfg = dataclasses.replace(cfg, registers=dataclasses.replace(cfg.registers, **regs))
+        return cfg
+
+    with _LOCK:
+        cls, cache = _variant(exp_variant)
+        fi.FlashAttentionForwardSm100 = cls
+        fi._flash_attn_fwd.compile_cache = cache
+        fi.select_fwd_config = select
+        try:
+            _, delta, *_ = fi._flash_attn_fwd(q8, k8, v8, softmax_scale=1.0, causal=causal, return_lse=True,
+                                              pack_gqa=False, aux_tensors=aux)
+        finally:
+            fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config = orig
+    return delta

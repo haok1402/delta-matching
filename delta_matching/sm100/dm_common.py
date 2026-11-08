@@ -80,4 +80,27 @@ def dm_bwd_p_pair_mix(s0: Float32, s1: Float32, c: Float32, l2: Float32, odd):
     return Float32(cutlass.select_(odd, pp, pm)), Float32(cutlass.select_(odd, pm, pp))
 
 
+def dm_bwd_p_pair_poly5(s0: Float32, s1: Float32, c: Float32, l2: Float32):
+    """Same fp32 FFMA, exp2 via an accurate degree-5 FMA polynomial (max rel err 1.7e-7 = MUFU ex2.approx accuracy).
+    Mixing it with MUFU in any static pattern keeps P within ~1e-7 between passes, so the delta_norm identity
+    rowsum(dS) = 0 still holds to fp32 round-off (not bitwise)."""
+    from . import dm_utils
+    x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (c, c), (-l2, -l2))
+    return dm_utils.ex2_poly5_2(x0, x1)
+
+
+def p5_uses_poly(variant: str, v: int) -> bool:
+    """Static pair schedule for 'p5_<f>_<r>' (deg-5) / 'p3_<f>_<r>' (FA4 deg-3): pair v (of 16 per 32-col chunk) uses the
+    polynomial iff v % f < r (contiguous); 'p3b_<f>_<r>': iff (v * r) % f < r (spread, Bresenham)."""
+    kind, f, r = variant.split("_")
+    f, r = int(f), int(r)
+    if kind == "p3b":
+        return (v * r) % f < r
+    return v % f < r
+
+
+def is_static_mix(variant: str) -> bool:
+    return variant.split("_")[0] in ("p5", "p3", "p3b")
+
+
 P_PAIR_VARIANTS["mix"] = None  # needs the row parity: dispatched explicitly by the kernels

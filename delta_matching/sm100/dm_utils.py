@@ -385,3 +385,49 @@ def byte_pow2_f32(word: Int32, j: int, *, loc=None, ip=None) -> Float32:
         T.f32(), [Int32(word).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .b32 t;\n\t" f"bfe.u32 t, $1, {8 * j}, 8;\n\t" "shl.b32 $0, t, 23;\n\t}",
         "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def absf(x: Float32, *, loc=None, ip=None) -> Float32:
+    """abs.f32 (ptxas folds it into the consuming FMNMX as an operand modifier)."""
+    return _f32_unary("abs.f32 $0, $1;", x, loc, ip)
+
+
+@dsl_user_op
+def clock64(*, loc=None, ip=None) -> cutlass.Int64:
+    return cutlass.Int64(llvm.inline_asm(T.i64(), [], "mov.u64 $0, %clock64;", "=l",
+                                         has_side_effects=True, is_align_stack=False,
+                                         asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), cutlass.Int64(val).ir_value(loc=loc, ip=ip)],
+                    "red.global.add.u64 [$0], $1;", "l,l", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def clock32(*, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %clock;", "=r",
+                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+# 2^f on [0, 1), fp32 Horner, degree 5: max rel error 1.7e-7 (= MUFU ex2.approx accuracy); fitted IRLS minimax
+POLY5_EX2 = (0.9999999403953552, 0.6931530833244324, 0.24015361070632935, 0.05582635849714279,
+             0.008989292196929455, 0.001877596601843834)
+
+
+@dsl_user_op
+def ex2_poly5_2(x: Float32, y: Float32, *, loc=None, ip=None):
+    """Accurate (1.7e-7 rel) 2^x for a pair on the FMA pipe (FA4's ex2_emulation_2 with a degree-5 polynomial).
+    Inputs are clamped at -126 (results ~2^-126 instead of 0 below that; negligible vs any row sum)."""
+    from flash_attn.cute import utils as fu
+    fp32_round_int = float(2**23 + 2**22)
+    # clamp at -126: c0 < 1 means 2^frac can be < 1, and floor(x) = -127 would wrap the exponent field
+    xy = (cute.arch.fmax(x, -126.0), cute.arch.fmax(y, -126.0))
+    r = cute.arch.add_packed_f32x2(xy, (fp32_round_int, fp32_round_int), rnd="rm")
+    rb = cute.arch.sub_packed_f32x2(r, (fp32_round_int, fp32_round_int))
+    fr = cute.arch.sub_packed_f32x2(xy, rb)
+    pe = fu.evaluate_polynomial_2(*fr, POLY5_EX2, loc=loc, ip=ip)
+    return fu.combine_int_frac_ex2(r[0], pe[0], loc=loc, ip=ip), fu.combine_int_frac_ex2(r[1], pe[1], loc=loc, ip=ip)

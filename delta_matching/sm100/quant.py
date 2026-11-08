@@ -273,3 +273,62 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 4, warps_b: 
     _prod_b_kernel[(NT, B * Hk)](k, k8, ks, kvw, part, mean, N, Hk, k.stride(0), k.stride(1), k.stride(2),
                                  ROWS=ROWS, D=D, num_warps=warps_b)
     return q8, qs, k8, ks, v8, vs, kvw, mean
+
+
+@triton.jit
+def _quant_do_delta_kernel(X, O, Y, S, DL, N, H, sxb, sxn, sxh, sob, son, soh,
+                           WANT_DELTA: tl.constexpr, D: tl.constexpr, BLK: tl.constexpr, DEQ_DELTA: tl.constexpr = False):
+    """dO codes + pow2 scale per 32 tokens (as quant_rows) and, optionally, the stale delta rowsum(dO_bf16 * O_bf16)."""
+    pid_n = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+    b = pid_bh // H
+    h = pid_bh % H
+    rows = pid_n * BLK + tl.arange(0, BLK)
+    cols = tl.arange(0, D)
+    x = tl.load(X + b * sxb + h * sxh + rows[:, None] * sxn + cols[None, :]).to(tl.float32)
+    if WANT_DELTA:
+        o = tl.load(O + b * sob + h * soh + rows[:, None] * son + cols[None, :]).to(tl.float32)
+        if not DEQ_DELTA:
+            tl.store(DL + pid_bh * N + rows, tl.sum(x * o, axis=1))
+    amax = tl.max(tl.max(tl.abs(x), axis=1), axis=0)
+    ab = amax.to(tl.int32, bitcast=True)
+    eb = ((ab >> 23) & 0xFF) - 8 + ((ab & 0x7FFFFF) > 0x600000).to(tl.int32)
+    eb = tl.minimum(tl.maximum(eb, 1), 254)
+    eb = tl.where(amax > 0, eb, 127)
+    scale = (eb << 23).to(tl.float32, bitcast=True)
+    inv = ((254 - eb) << 23).to(tl.float32, bitcast=True)
+    y = (x * inv).to(tl.float8e4nv)
+    tl.store(Y + (b * N * H + rows[:, None] * H + h) * D + cols[None, :], y)
+    tl.store(S + pid_bh * (N // BLK) + pid_n, scale)
+    if WANT_DELTA:
+        if DEQ_DELTA:
+            # matched delta from the forward's exact-P output: dequant(dO8) . Obar (fp32), as the fp8 dP MMA sees dO
+            tl.store(DL + pid_bh * N + rows, tl.sum((y.to(tl.float32) * scale) * o, axis=1))
+
+
+def quant_do_delta(do: torch.Tensor, o: torch.Tensor | None, obar: torch.Tensor | None = None):
+    """obar (B, N, H, D) fp32 given -> delta = dequant(dO8) . obar (pass-0-free matched delta); else as below."""
+    if obar is not None:
+        B, N, H, D = do.shape
+        y = torch.empty(B, N, H, D, device=do.device, dtype=torch.float8_e4m3fn)
+        s = torch.empty(B, H, N // BLK, device=do.device, dtype=torch.float32)
+        dl = torch.empty(B, H, N, device=do.device, dtype=torch.float32)
+        _quant_do_delta_kernel[(N // BLK, B * H)](do, obar, y, s, dl, N, H, do.stride(0), do.stride(1), do.stride(2),
+                                                  obar.stride(0), obar.stride(1), obar.stride(2),
+                                                  WANT_DELTA=True, DEQ_DELTA=True, D=D, BLK=BLK, num_warps=2)
+        return y, s, dl
+    return _quant_do_delta_stale(do, o)
+
+
+def _quant_do_delta_stale(do: torch.Tensor, o: torch.Tensor | None):
+    """(dO codes, scales, delta or None) in one pass; delta = rowsum(dO * O) fp32 (B, H, N) when o is given."""
+    B, N, H, D = do.shape
+    assert do.stride(-1) == 1 and (o is None or o.stride(-1) == 1)
+    y = torch.empty(B, N, H, D, device=do.device, dtype=torch.float8_e4m3fn)
+    s = torch.empty(B, H, N // BLK, device=do.device, dtype=torch.float32)
+    dl = torch.empty(B, H, N, device=do.device, dtype=torch.float32) if o is not None else s
+    oo = o if o is not None else do
+    _quant_do_delta_kernel[(N // BLK, B * H)](do, oo, y, s, dl, N, H, do.stride(0), do.stride(1), do.stride(2),
+                                              oo.stride(0), oo.stride(1), oo.stride(2),
+                                              WANT_DELTA=o is not None, D=D, BLK=BLK, num_warps=2)
+    return y, s, (dl if o is not None else None)

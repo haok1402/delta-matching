@@ -4260,6 +4260,10 @@ class DMBackwardSm100:
                 # ---------------------------------------------
                 # dS.T = P.T * (dP.T - D)
                 # ---------------------------------------------
+                if const_expr(dm_tr is not None):
+                    dm_now = dm_utils.clock32()
+                    dm_s4 = dm_s4 + (dm_now - dm_tprev)
+                    dm_tprev = dm_now
                 pipeline_dPsum.consumer_wait(consumer_state_dPsum)
                 pipeline_dP.consumer_wait(consumer_state_S_P_dP)
                 if const_expr(dm_tr is not None):
@@ -4285,6 +4289,11 @@ class DMBackwardSm100:
                     cute.copy(thr_copy_t2r, tdPtdP_t2r[None, stage, None, None], tdPrdP_t2r)
                     tdPrdP_all[stage] = tdPrdP_t2r
                 cute.arch.fence_view_async_tmem_load()
+                if const_expr("earlydp" in self.dm_abl and self.use_2cta_instrs):
+                    # ABLATION (numerically WRONG): signal "dP read" right after the dP load, so dK(t) / dP(t+1)
+                    # issue before dS(t) exists - timing upper bound for a dS slot independent of dP
+                    with cute.arch.elect_one():
+                        pipeline_dP.consumer_release(consumer_state_S_P_dP)
                 dm_dsm = [Float32(0.0), Float32(0.0), Float32(0.0), Float32(0.0)]   # amaxt: 4 independent chains
                 for stage in cutlass.range_constexpr(num_stages):
                     tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
@@ -4427,7 +4436,7 @@ class DMBackwardSm100:
                     dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dk_col, dm_one, dm_one, dm_one, dm_one)
                     cute.arch.fence_view_async_tmem_store()
 
-                if const_expr(self.use_2cta_instrs):
+                if const_expr(self.use_2cta_instrs and "earlydp" not in self.dm_abl):
                     # use pipeline_dP to signal the dS store (TMEM, or SMEM with acc_m64)
                     with cute.arch.elect_one():
                         pipeline_dP.consumer_release(consumer_state_S_P_dP)

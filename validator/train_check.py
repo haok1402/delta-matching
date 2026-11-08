@@ -213,17 +213,19 @@ def main():
             class _E(torch.autograd.Function):
                 @staticmethod
                 def forward(ctx, q, k, v):
-                    ctx.save_for_backward(q, k, v)
-                    return R.dm_reference(q, k, v, torch.zeros_like(q), True, "stale", preset)["O"].contiguous()
+                    o = R.dm_reference(q, k, v, torch.zeros_like(q), True, "stale", preset,
+                                       fwd_s_noise=float(os.environ.get("DMVAL_FWD_S_NOISE", "0")))["O"].contiguous()
+                    ctx.save_for_backward(q, k, v, o)
+                    return o
 
                 @staticmethod
                 def backward(ctx, do):
-                    q, k, v = ctx.saved_tensors
+                    q, k, v, o = ctx.saved_tensors
                     if mode == "nodelta":       # a broken backward: delta = 0 (the stale route reading O = 0)
                         r = R.dm_reference(q, k, v, do.contiguous(), True, "stale", preset,
                                            o_for_stale=torch.zeros_like(do))
-                    else:
-                        r = R.dm_reference(q, k, v, do.contiguous(), True, mode, preset)
+                    else:          # the stale delta reads the O the forward actually returned
+                        r = R.dm_reference(q, k, v, do.contiguous(), True, mode, preset, o_for_stale=o)
                     return r["dQ"].to(q.dtype), r["dK"].to(k.dtype), r["dV"].to(v.dtype)
             return _E.apply
         arms["emul"] = make("matched")

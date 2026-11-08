@@ -326,7 +326,7 @@ def attention_exact_blocked(q, k, v, do, causal=True, q_block=1024):
 
 # ----------------------------------------------------------------------------------------------------------------- engine
 def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_block=1024, aux=False,
-                 o_for_stale=None, round_o=True):
+                 o_for_stale=None, round_o=True, fwd_s_noise=0.0):
     """Emulate an fp8 Delta-Matching kernel in torch.
 
     q (B, N, H, D), k / v (B, N, Hk, D), do (B, N, H, D); mode "matched" | "stale"; preset a PRESETS name or Preset.
@@ -378,6 +378,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             i1 = min(i0 + qb, N)
             nk = i1 if causal else N
             S = Qa[:, :, i0:i1] @ Ka[:, :, :nk].repeat_interleave(rep, 1).transpose(-1, -2)
+            if fwd_s_noise:      # diagnostic: forward-only relative perturbation of S (fwd / bwd recompute mismatch)
+                S = S * (1 + fwd_s_noise * torch.randn_like(S))
             if causal:
                 S = S.masked_fill(kidx[None, :nk] > kidx[i0:i1, None], float("-inf"))
             m = S.amax(-1, keepdim=True)

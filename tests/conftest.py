@@ -9,6 +9,12 @@
 import pytest
 import torch
 
+try:                    # gpupool: tests are untimed; share the GPU with the filler for the whole session
+    from gpupool_hook import gpupool_done as _gp_done
+    _gp_done()
+except ImportError:
+    pass
+
 SM90_MODULES = ("test_dm_attn.py", "test_api.py")
 
 

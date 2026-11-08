@@ -90,6 +90,15 @@ def colsum_metric(dk, causal):
 
 
 # ------------------------------------------------------------------------------------------------------------ inputs
+def _hook(name):
+    """gpupool late-stop hooks (no-ops outside gpupool)."""
+    try:
+        import gpupool_hook
+        getattr(gpupool_hook, name)()
+    except ImportError:
+        pass
+
+
 def make_inputs(kind, B, N, H, Hk, gen, dev):
     def rn(*s):
         return torch.randn(*s, generator=gen, device=dev, dtype=torch.float32)
@@ -361,13 +370,15 @@ def main():
     # 1) inputs for every case (GPU generator, then to disk), 2) ONE candidate process runs all cases back to back (no
     # per-case process start / CUDA init while the GPU is reserved), 3) the checks (GPU reference math) case by case.
     files = []
+    _hook("gpupool_done")                  # input generation and file writes are CPU work: let the filler run
+    cpu = torch.device("cpu")
     for i, case in enumerate(cases):
-        gen = torch.Generator(device=dev).manual_seed(case["seed"])
+        gen = torch.Generator(device=cpu).manual_seed(case["seed"])
         case["q"], case["k"], case["v"], case["do"] = make_inputs(case["kind"], case["B"], case["N"], case["H"],
-                                                                  case["Hk"], gen, dev)
+                                                                  case["Hk"], gen, cpu)
         if any(r[1] == "mutate" for r in case["runs"]):
             case["q2"], case["k2"], case["v2"], _ = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"],
-                                                                gen, dev)
+                                                                gen, cpu)
         cf = os.path.join(tmp, f"case{i:03d}.pt")
         torch.save({kk: (vv.cpu() if torch.is_tensor(vv) else vv) for kk, vv in case.items()}, cf)
         files.append(cf)
@@ -382,14 +393,15 @@ def main():
     for i, case in enumerate(cases):
         full = torch.load(files[i] + ".out", weights_only=False) if os.path.exists(files[i] + ".out") else \
             {"name": case["name"], "error": "the runner produced no output for this case"}
-        cin = None
-        gen = torch.Generator(device=dev).manual_seed(case["seed"])
-        case["q"], case["k"], case["v"], case["do"] = make_inputs(case["kind"], case["B"], case["N"], case["H"],
-                                                                  case["Hk"], gen, dev)
+        gen = torch.Generator(device=cpu).manual_seed(case["seed"])
+        ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
+        case["q"], case["k"], case["v"], case["do"] = (x.to(dev) for x in ins)
         if any(r[1] == "mutate" for r in case["runs"]):
-            case["q2"], case["k2"], case["v2"], _ = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"],
-                                                                gen, dev)
+            ins2 = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
+            case["q2"], case["k2"], case["v2"] = (x.to(dev) for x in ins2[:3])
+        _hook("gpupool_ready")             # reference emulation + checks run on the GPU
         ok, rec = check_case(case, full, preset, dev, a.verbose)
+        _hook("gpupool_done")              # loading the next case's outputs is CPU / file work
         all_ok &= ok
         results.append(rec)
         _print_case(rec, ok)

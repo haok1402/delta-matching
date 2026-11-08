@@ -108,6 +108,50 @@ def sdpa(q, k, v):
                                           is_causal=True).transpose(1, 2)
 
 
+class Shadow:
+    """Wraps the candidate's attention during training: every `every` steps, each call's (q, k, v, dO) is re-run
+    through the emulation of the candidate's preset and compared (rel L2 of O, dQ, dK, dV); the worst call's inputs are
+    saved for a reproducer."""
+
+    def __init__(self, fn, mode, R, preset, every, dump):
+        self.fn, self.mode, self.R, self.preset, self.every, self.dump = fn, mode, R, preset, every, dump
+        self.step, self.records, self.worst = 0, [], -1.0
+
+    def __call__(self, q, k, v):
+        if self.every <= 0 or self.step % self.every:
+            return self.fn(q, k, v, causal=True, mode=self.mode)
+        sh = self
+
+        class _S(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, q, k, v):
+                with torch.enable_grad():
+                    lv = [x.detach().clone().requires_grad_(True) for x in (q, k, v)]
+                    o = sh.fn(*lv, causal=True, mode=sh.mode)
+                ctx.save_for_backward(q, k, v)
+                ctx.lv, ctx.o = lv, o
+                return o.detach().clone()
+
+            @staticmethod
+            def backward(ctx, do):
+                q, k, v = ctx.saved_tensors
+                ctx.o.backward(do)
+                g = [x.grad for x in ctx.lv]
+                em = sh.R.dm_reference(q, k, v, do.contiguous(), True, sh.mode, sh.preset, o_for_stale=ctx.o.detach())
+                rel = lambda a, b: ((a.double() - b.double()).norm() / b.double().norm().clamp_min(1e-30)).item()  # noqa
+                r = {"step": sh.step, "O": rel(ctx.o, em["O"]), "dQ": rel(g[0], em["dQ"]), "dK": rel(g[1], em["dK"]),
+                     "dV": rel(g[2], em["dV"]), "finite": all(bool(torch.isfinite(t).all()) for t in g),
+                     "q_absmax": q.abs().max().item(), "k_absmax": k.abs().max().item()}
+                sh.records.append(r)
+                w = max(r["dQ"], r["dK"], r["dV"], r["O"]) if r["finite"] else float("inf")
+                if w > sh.worst and sh.dump:
+                    sh.worst = w
+                    torch.save({"q": q.cpu(), "k": k.cpu(), "v": v.cpu(), "do": do.cpu(), "rec": r, "mode": sh.mode},
+                               sh.dump)
+                return g[0], g[1], g[2]
+        return _S.apply(q, k, v)
+
+
 def train(attn, data, a, dev):
     torch.manual_seed(a.seed)
     model = GPT(attn).to(dev)
@@ -127,6 +171,8 @@ def train(attn, data, a, dev):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
+        if isinstance(attn, Shadow):
+            attn.step = step + 1
         losses.append(loss.item())
         if not math.isfinite(losses[-1]):
             break
@@ -144,6 +190,7 @@ def main():
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--arms", default="bf16,matched,stale")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--shadow", type=int, default=0, help="every N steps compare each candidate call with the emulation")
     ap.add_argument("--build-corpus", action="store_true", help="only build the corpus cache (no GPU) and exit")
     a = ap.parse_args()
     if a.build_corpus:
@@ -182,6 +229,15 @@ def main():
         arms["emul"] = make("matched")
         arms["emul_stale"] = make("stale")
         arms["emul_nodelta"] = make("nodelta")       # negative control: the tier must FAIL this arm
+    shadows = {}
+    if a.shadow and fn is not None:
+        ms = importlib.util.spec_from_file_location("dm_ref_shadow", os.path.join(os.path.dirname(HERE), "delta_matching",
+                                                                                  "reference.py"))
+        RS = importlib.util.module_from_spec(ms); sys.modules[ms.name] = RS; ms.loader.exec_module(RS)
+        pr = getattr(mod, "NUMERICS", "sm90")
+        for md in ("matched", "stale"):
+            dump = (a.json or "train") + f".shadow_{md}_worst.pt"
+            shadows[md] = arms[md] = Shadow(fn, md, RS, pr, a.shadow, dump)
     res = {}
     if a.json and os.path.exists(a.json):           # resume: arms already finished with the same settings are kept
         prev = json.load(open(a.json))
@@ -203,13 +259,14 @@ def main():
     tailm = {n: sum(l[-max(1, a.steps // 5):]) / max(1, len(l[-max(1, a.steps // 5):])) for n, l in res.items()}
     finite = all(all(math.isfinite(x) for x in l) and len(l) == a.steps for l in res.values())
     ok = finite
-    if "matched" in tailm:
+    if "matched" in tailm and "bf16" in tailm:
         budget = max(0.02 * tailm["bf16"], 0.03)
         ok &= tailm["matched"] - tailm["bf16"] <= budget
         print(f"matched - bf16 = {tailm['matched'] - tailm['bf16']:+.4f} (budget {budget:.4f})")
     if "stale" in tailm and "matched" in tailm:
         print(f"stale - matched = {tailm['stale'] - tailm['matched']:+.4f} (reported, not judged)")
-    out = {"pass": ok, "tail_mean": tailm, "steps": a.steps, "seed": a.seed, "losses": res}
+    out = {"pass": ok, "tail_mean": tailm, "steps": a.steps, "seed": a.seed, "losses": res,
+           "shadow": {k: v.records for k, v in shadows.items()}}
     if a.json:
         json.dump(out, open(a.json, "w"))
     print("SUMMARY_JSON " + json.dumps({"pass": ok, "tail_mean": tailm, "steps": a.steps}))

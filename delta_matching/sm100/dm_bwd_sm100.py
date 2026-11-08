@@ -5437,14 +5437,18 @@ class DMBackwardSm100:
         pipeline_dKV.consumer_wait(consumer_state_dKV)
 
         # semaphore acquire
+        dm_kv_first = cutlass.Boolean(False)
         if const_expr(deterministic_KV):
+            dm_kv_pos = bwd_kv_group_pos(head_idx, qhead_per_kvhead=self.qhead_per_kvhead)
             barrier.wait_eq(
                 mdKV_semaphore_cur.iterator,
                 tidx,
                 wg_idx,
-                bwd_kv_group_pos(head_idx, qhead_per_kvhead=self.qhead_per_kvhead),
+                dm_kv_pos,
             )
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
+            if const_expr(self.dm_fws):
+                dm_kv_first = dm_kv_pos == 0   # DM fws: first q head of the group stores (no dK/dV accum zero-fill)
 
         for epi_stage in cutlass.range_constexpr(num_epi_stages):
             # TMEM -> RMEM -- setup
@@ -5492,11 +5496,18 @@ class DMBackwardSm100:
                     cute.copy(tma_atom_dKV, tdKVsdKV, tdKVgdKV[None, epi_stage])
                 else:
                     with cute.arch.elect_one():
-                        copy_utils.cpasync_reduce_bulk_add_f32(
-                            sdKV.iterator,
-                            gdKV_epi[None, epi_stage].iterator,
-                            self.tma_copy_bytes["dKacc"],
-                        )
+                        if dm_kv_first:
+                            dm_utils.cpasync_bulk_store_s2g(
+                                sdKV.iterator,
+                                gdKV_epi[None, epi_stage].iterator,
+                                self.tma_copy_bytes["dKacc"],
+                            )
+                        else:
+                            copy_utils.cpasync_reduce_bulk_add_f32(
+                                sdKV.iterator,
+                                gdKV_epi[None, epi_stage].iterator,
+                                self.tma_copy_bytes["dKacc"],
+                            )
                 if const_expr(epi_stage < num_epi_stages - 1):
                     cute.arch.cp_async_bulk_commit_group()
                     cute.arch.cp_async_bulk_wait_group(0, read=read_flag)

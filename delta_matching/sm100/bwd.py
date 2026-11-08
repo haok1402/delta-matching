@@ -50,6 +50,8 @@ def _dm_alloc(kind, *shape, dtype=None, device=None, **kw):
         assert tuple(t.shape) == tuple(shape) and t.dtype == dtype, (t.shape, shape, t.dtype, dtype)
         return t
     rec = _CTX.get("rec")
+    if kind == "z" and dtype == torch.float32 and _fws(_CTX.get("deterministic", True)):
+        kind = "e"     # dK/dV accum (GQA): the first group head stores (DM fws), no zero-fill
     if rec is not None:
         rec.append((kind, tuple(shape), dtype))
     return (torch.zeros if kind == "z" else torch.empty)(*shape, dtype=dtype, device=device, **kw)

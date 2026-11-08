@@ -418,6 +418,8 @@ class DMBackwardSm100:
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
         _p5 = next((x[3:] for x in self.dm_opts if x.startswith("p5=")), None)   # p5=freq:res
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
+        _p3 = next((x[3:] for x in self.dm_opts if x.startswith("p3=")), None)   # p3=freq:res (deg-3)
+        self.dm_p3 = tuple(int(t) for t in _p3.split(":")) if _p3 else None
         self.dm_sfa_dv_col = self.tmem_P_offset + self.tmem_cols_P            # 4 groups x 4 cols
         self.dm_sfb_dv_col = self.dm_sfa_dv_col + 16                         # 4 cols (const 1.0)
         self.dm_sfa_dq_col = self.dm_sfb_dv_col + 4                          # 2 cols (const 1.0)
@@ -4094,6 +4096,9 @@ class DMBackwardSm100:
                         elif const_expr("poly3" in self.dm_opts):
                             # FA4 degree-3 FMA polynomial for every element: bitwise = dm_common.dm_bwd_p_pair_poly in
                             # pass 0 (own-P delta keeps rowsum(dS)=0 at round-off; P error 8.8e-5 << 2e-3 tolerance)
+                            tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = utils.ex2_emulation_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
+                        elif const_expr(self.dm_p3 is not None and v % self.dm_p3[0] < self.dm_p3[1]):
+                            # FA4 degree-3 FMA polynomial (8.8e-5) for a static subset of pairs (MUFU offload)
                             tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = utils.ex2_emulation_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
                         elif const_expr(self.dm_p5 is not None and v % self.dm_p5[0] < self.dm_p5[1]):
                             # accurate (1.7e-7) degree-5 FMA polynomial for a static subset of pairs (MUFU offload)

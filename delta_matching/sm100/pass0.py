@@ -50,7 +50,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p5_4_1")   # P0-v2: 1 in 4 pairs on an accurate FMA polynomial
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1")   # P0-v3: 1 in 4 pairs on FA4 deg-3 poly (pass-0-only; identity <=1.6e-4)
     over = dict(FORCE)
     if config_override:
         over.update(config_override)

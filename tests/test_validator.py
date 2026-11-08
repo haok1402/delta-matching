@@ -36,3 +36,10 @@ def test_cheats_fail(cheat):
 def test_delta_cheats_fail(variant):
     rc, out = _run("emul.py", {"SELFTEST_VARIANT": variant})
     assert rc != 0 and "\nFAIL" in out, out[-3000:]
+
+
+def test_sanitizer_tier_passes_the_emulation():
+    env = dict(os.environ, DMVAL_SELFTEST="1")
+    p = subprocess.run([sys.executable, os.path.join(V, "sanitize.py"), os.path.join(V, "selftest", "emul.py"),
+                        "--timeout", "600"], capture_output=True, text=True, env=env, timeout=900)
+    assert p.returncode == 0 and "PASS" in p.stdout, p.stdout[-2000:] + p.stderr[-2000:]

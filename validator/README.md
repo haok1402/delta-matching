@@ -21,7 +21,9 @@ A Python file (any language underneath) defining
 - `NUMERICS = "<preset>"` (default "sm90"): the quantization scheme, a key of `reference.PRESETS`
   (`sm90`, `mxfp8` = `mxfp8-all`, `mxfp8-p`; add a preset for a new scheme - the validator judges against it).
 - optional `SUPPORTS = {"seqlen_multiple": 128, "noncausal": True, "matched_noncausal": False}`.
-- optional `debug(q, k, v, do, causal, mode) -> dict` with any of `delta` (B, H, N), `lse` (B, H, N), `rowsum_dS`.
+- `debug(q, k, v, do, causal, mode) -> {"delta": (B, H, N) fp32, "lse": (B, H, N) fp32 natural log}`: REQUIRED for a PASS in
+  matched mode. `delta` must be the delta the backward actually consumes (in dP units) and `lse` the one it recomputes P
+  from, for these exact inputs (the validator binds both to the gradients, so a hook that reports something else fails).
 
 ## What is checked, per case (shape x input family x causal)
 Each case runs the candidate in a separate process (`runner.py`, which never imports the reference; a candidate that
@@ -34,6 +36,9 @@ imports it fails) on inputs drawn from a seed chosen at run time. Then, per outp
 | faithful | dist(cand, emulation) <= 0.5 x err(emulation, exact) | the candidate implements the numerics it declares (honest kernels sit ~1e-3 away) |
 | not_too_accurate | err(cand, exact) >= 0.5 x err(emulation, exact) | a kernel doing bf16 math while claiming fp8 speed fails here |
 | fingerprint | dist(cand, emulation) < dist(cand, bf16 emulation) | same, independently of tolerances |
+| debug_lse (matched) | candidate LSE vs the emulation: max abs diff <= 1e-3 + 1e-5 x |LSE| | the backward's P comes from it |
+| rowsum_dS_direct (matched) | max over rows of |delta sum_j P - sum_j P dP| / sum_j |P dP| <= 1e-3, with P = exp(S - LSE_candidate) over the bitwise-reproducible quantized operands | THE Delta-Matching identity, measured directly: pass-0 style deltas sit at 1e-7..3e-5, a 1% delta error at 1e-2, stale at 1e-2..1. The dK-sum check below cannot see P mismatches of 1e-3 (dS quantization noise dominates it) |
+| debug_binds_grads (matched) | candidate dQ / dK vs the emulated backward driven by the candidate's reported delta and LSE: <= 3e-3 + 0.05 x fp8 error | the hook cannot report a delta the gradients do not use (a 3% lie reads 0.02-0.08) |
 | rowsum_dS_identity (matched) | sum_j dK_j metric <= 2 x the emulation's + 1e-4 | matched delta makes rowsum(dS) = 0, so sum over keys of dK = Q^T rowsum(dS) ~ 0; stale shows ~2-40x more |
 | modes_share_O / dV | bitwise equal between matched and stale | the modes differ only in delta |
 | modes_differ_dQ | matched != stale | a matched mode that silently runs stale fails |

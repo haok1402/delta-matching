@@ -207,7 +207,7 @@ def main():
         ms = importlib.util.spec_from_file_location("dm_ref_train", os.path.join(os.path.dirname(HERE), "delta_matching",
                                                                                   "reference.py"))
         R = importlib.util.module_from_spec(ms); ms.loader.exec_module(R)
-        preset = getattr(mod, "NUMERICS", "sm90") if mod else "sm90"
+        preset = os.environ.get("DMVAL_EMUL_PRESET") or (getattr(mod, "NUMERICS", "sm90") if mod else "sm90")
 
         def make(mode):
             class _E(torch.autograd.Function):
@@ -225,7 +225,8 @@ def main():
                         r = R.dm_reference(q, k, v, do.contiguous(), True, "stale", preset,
                                            o_for_stale=torch.zeros_like(do))
                     else:          # the stale delta reads the O the forward actually returned
-                        r = R.dm_reference(q, k, v, do.contiguous(), True, mode, preset, o_for_stale=o)
+                        r = R.dm_reference(q, k, v, do.contiguous(), True, mode, preset, o_for_stale=o,
+                                           bwd_p_noise=float(os.environ.get("DMVAL_BWD_P_NOISE", "0")))
                     return r["dQ"].to(q.dtype), r["dK"].to(k.dtype), r["dV"].to(v.dtype)
             return _E.apply
         arms["emul"] = make("matched")

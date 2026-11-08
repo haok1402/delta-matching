@@ -67,3 +67,6 @@ def attn(q, k, v, softmax_scale=None, causal=True, mode="matched"):
     if CHEAT == "modes" and mode == "stale":
         o = o * (1 + 2 ** -6)
     return o
+
+
+debug = E.debug     # the cheats fail on their cheat, not on a missing hook

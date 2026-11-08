@@ -59,6 +59,11 @@ FAITH_RATIO = 0.5
 # matched-mode identity: sum over keys of dK (= Q^T rowsum(dS)) relative to sqrt(N) * |dK| rows, at most this much above
 # the emulation's own level
 COLSUM_RATIO, COLSUM_ABS = 2.0, 1e-4
+# direct identity (debug hook): max over rows of |delta sum_j P - sum_j P dP| / sum_j |P dP| (pass-0 style kernels ~1e-6,
+# a delta from the forward's O with a perturbed backward P ~1e-3..1e-2, stale 1e-2..1); binding: candidate dQ / dK vs the
+# emulated backward driven by the candidate's own reported delta
+ID_TOL = 1e-3
+BIND_ABS, BIND_REL = 3e-3, 0.05
 
 
 def rel(a, b):
@@ -287,18 +292,36 @@ def check_case(case, cr, preset, dev, verbose):
             cs_s = colsum_metric(runs["stale/plain"][2], causal) if "stale/plain" in runs else float("nan")
             rec["metrics"]["matched:colsum_dK"] = dict(cand=cs_c, emul=cs_e, cand_stale=cs_s,
                                                        emul_rowsum_dS=em["rowsum_dS"].abs().max().item())
-            if cr.get("debug"):
-                dbg = {kk: vv.to(dev) for kk, vv in cr["debug"].items()}
-                m = {}
-                if "delta" in dbg:
-                    m["delta_rel"] = rel(dbg["delta"].reshape(em["delta"].shape), em["delta"])
-                    chk("matched:debug_delta", m["delta_rel"] <= 0.5 * max(rel(em["dQ"], ex["dQ"]), 1e-3),
-                        f"candidate delta vs the {preset} matched delta: rel {m['delta_rel']:.3e}")
-                if "rowsum_dS" in dbg:
-                    m["rowsum_dS_max"] = dbg["rowsum_dS"].abs().max().item()
-                if "lse" in dbg:
-                    m["lse_maxabs_vs_emul"] = (dbg["lse"].reshape(em["LSE"].shape).double() - em["LSE"].double()).abs().max().item()
+            dbg = {kk: vv.to(dev) for kk, vv in (cr.get("debug") or {}).items()}
+            if "delta" in dbg and "lse" in dbg:
+                # the identity, directly: the backward's P comes from the candidate's own LSE over the bitwise-reproducible
+                # quantized operands; rowsum(dS) = delta * sum_j P - sum_j P dP must vanish relative to sum_j |P dP|
+                lse_c = dbg["lse"].reshape(B, H, N).float()
+                dl_c = dbg["delta"].reshape(B, H, N).float()
+                lse_err = (lse_c.double() - em["LSE"].double()).abs()
+                lse_tol = 1e-3 + 1e-5 * em["LSE"].double().abs()
+                emc = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, lse_override=lse_c,
+                                     delta_override=dl_c, q_block=qbk)
+                den = emc["sum_absPdP"]
+                live = den > 0
+                r = ((dl_c.double() * emc["sum_P"] - emc["sum_PdP"]).abs() / den.clamp_min(1e-300))[live]
+                bind = max(rel(cand[1], emc["dQ"]), rel(cand[2], emc["dK"]))
+                bind_tol = BIND_ABS + BIND_REL * max(rel(em["dQ"], ex["dQ"]), rel(em["dK"], ex["dK"]))
+                m = {"lse_maxabs": lse_err.max().item(), "rowsum_rel_max": r.max().item() if r.numel() else 0.0,
+                     "rowsum_rel_mean": r.mean().item() if r.numel() else 0.0, "bind_dist": bind}
                 rec["metrics"]["matched:debug_delta"] = m
+                chk("matched:debug_lse", bool((lse_err <= lse_tol).all()),
+                    f"candidate LSE vs the {preset} emulation: max |diff| {m['lse_maxabs']:.3e}")
+                chk("matched:rowsum_dS_direct", m["rowsum_rel_max"] <= ID_TOL,
+                    f"|delta sum P - sum P dP| / sum |P dP| = {m['rowsum_rel_max']:.2e} (mean {m['rowsum_rel_mean']:.1e}), "
+                    f"allowed {ID_TOL:.0e}; stale-mode deltas sit at 1e-2..1")
+                chk("matched:debug_binds_grads", bind <= bind_tol,
+                    f"candidate dQ/dK vs the emulated backward driven by the candidate's reported delta: {bind:.4f} "
+                    f"(allowed {bind_tol:.4f}): the reported delta is not the one the gradients use")
+            elif not FWD_ONLY and not os.environ.get("DMVAL_NO_DEBUG_OK"):
+                chk("matched:debug_hook_required", False,
+                    "matched mode needs the candidate's debug(q, k, v, do, causal, mode) -> {'delta', 'lse'} for the direct "
+                    "rowsum(dS) identity check (README); without it a matched candidate cannot PASS")
             chk("matched:rowsum_dS_identity", cs_c <= COLSUM_RATIO * cs_e + COLSUM_ABS,
                 f"|sum_j dK_j| metric {cs_c:.2e} vs emulation {cs_e:.2e} (stale run {cs_s:.2e})")
     if "matched/plain" in runs and "stale/plain" in runs:
@@ -422,7 +445,8 @@ def main():
                "n_cases": len(results), "n_failed": sum(bool(r["fails"]) for r in results),
                "seconds": round(time.time() - t0, 1), "device": torch.cuda.get_device_name(dev),
                "tolerances": dict(TOL_RATIO=TOL_RATIO, TOL_ABS=TOL_ABS, BLK_RATIO=BLK_RATIO, BLK_ABS=BLK_ABS,
-                                  FLOOR_RATIO=FLOOR_RATIO, FAITH_RATIO=FAITH_RATIO, COLSUM_RATIO=COLSUM_RATIO, COLSUM_ABS=COLSUM_ABS),
+                                  FLOOR_RATIO=FLOOR_RATIO, FAITH_RATIO=FAITH_RATIO, COLSUM_RATIO=COLSUM_RATIO, COLSUM_ABS=COLSUM_ABS,
+                                  ID_TOL=ID_TOL, BIND_ABS=BIND_ABS, BIND_REL=BIND_REL),
                "cases": results}
     if a.json:
         with open(a.json, "w") as f:
@@ -478,7 +502,7 @@ def _one_line(summary):
                 w = worst.setdefault(key, {"cand": 0, "emul": 0})
                 w["cand"] = max(w["cand"], m["cand"]); w["emul"] = max(w["emul"], m["emul"])
             elif key == "matched:debug_delta":
-                w = worst.setdefault(key, {"delta_rel": 0, "rowsum_dS_max": 0})
+                w = worst.setdefault(key, {"lse_maxabs": 0, "rowsum_rel_max": 0, "bind_dist": 0})
                 for kk in w:
                     w[kk] = max(w[kk], m.get(kk, 0))
     for w in worst.values():

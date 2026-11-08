@@ -30,3 +30,9 @@ def test_honest_emulation_passes(preset):
 def test_cheats_fail(cheat):
     rc, out = _run("cheats.py", {"CHEAT": cheat})
     assert rc != 0 and "\nFAIL" in out, out[-3000:]
+
+
+@pytest.mark.parametrize("variant", ["delta_off", "debug_lies"])
+def test_delta_cheats_fail(variant):
+    rc, out = _run("emul.py", {"SELFTEST_VARIANT": variant})
+    assert rc != 0 and "\nFAIL" in out, out[-3000:]

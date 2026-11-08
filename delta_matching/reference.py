@@ -328,7 +328,8 @@ def attention_exact_blocked(q, k, v, do, causal=True, q_block=1024):
 
 # ----------------------------------------------------------------------------------------------------------------- engine
 def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_block=1024, aux=False,
-                 o_for_stale=None, round_o=True, fwd_s_noise=0.0):
+                 o_for_stale=None, round_o=True, fwd_s_noise=0.0, bwd_p_noise=0.0, lse_override=None,
+                 delta_override=None):
     """Emulate an fp8 Delta-Matching kernel in torch.
 
     q (B, N, H, D), k / v (B, N, Hk, D), do (B, N, H, D); mode "matched" | "stale"; preset a PRESETS name or Preset.
@@ -372,6 +373,9 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
         delta = torch.empty(B, H, N, device=dev, dtype=f32)
         rs = torch.empty(B, H, N, device=dev, dtype=f32) if aux else None
         rsq = torch.empty(B, H, N, device=dev, dtype=f32) if aux else None
+        pdp = torch.empty(B, H, N, device=dev, dtype=torch.float64) if aux else None     # sum_j P dP
+        psum = torch.empty(B, H, N, device=dev, dtype=torch.float64) if aux else None    # sum_j P
+        pdpa = torch.empty(B, H, N, device=dev, dtype=torch.float64) if aux else None    # sum_j |P dP|
         qb = min(q_block, N)
         assert qb % 128 == 0 or qb == N
         kidx = torch.arange(N, device=dev)
@@ -393,6 +397,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
                 l = Pq.sum(-1, keepdim=True)
             O[:, :, i0:i1] = (Pq @ Va[:, :, :nk].repeat_interleave(rep, 1)) / l
             LSE[:, :, i0:i1] = (m + torch.log(l)).squeeze(-1)
+        if lse_override is not None:   # the backward recomputes P from this LSE (e.g. a candidate's own) instead
+            LSE = lse_override.to(f32).reshape(B, H, N).clone()
         Ob = O.to(torch.bfloat16)
         Ost = (o_for_stale.to(f32).transpose(1, 2) if o_for_stale is not None else Ob.to(f32))
         for i0 in range(0, N, qb):
@@ -403,12 +409,20 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             if causal:
                 S = S.masked_fill(kidx[None, :nk] > kidx[i0:i1, None], float("-inf"))
             P = torch.exp(S - LSE[:, :, i0:i1, None])
+            if bwd_p_noise:      # diagnostic: elementwise P_bwd * (1 + U(-a, a)) (a cheaper backward exp)
+                P = P * (1 + bwd_p_noise * (2 * torch.rand_like(P) - 1))
             ctx = _Ctx(role="p_bwd", lse=LSE[:, :, i0:i1, None], rows=(i0, i1), causal=causal, S=S)
             Pq = _site(p.p_bwd, P, ctx, p)
             dVp = Pq.transpose(-1, -2) @ dOb[:, :, i0:i1]                         # (B, H, nk, D)
             dV[:, :, :nk] += dVp.reshape(B, Hk, rep, nk, D).sum(2)
             dP = dOa[:, :, i0:i1] @ Vd[:, :, :nk].repeat_interleave(rep, 1).transpose(-1, -2)
-            if mode == "stale":
+            if aux:
+                pdp[:, :, i0:i1] = (P.double() * dP.double()).sum(-1)
+                psum[:, :, i0:i1] = P.double().sum(-1)
+                pdpa[:, :, i0:i1] = (P.double() * dP.double()).abs().sum(-1)
+            if delta_override is not None:
+                dl = delta_override.to(f32).reshape(B, H, N)[:, :, i0:i1, None]
+            elif mode == "stale":
                 dl = (doh[:, :, i0:i1] * Ost[:, :, i0:i1]).sum(-1, keepdim=True)
             elif p.delta_from_o:
                 dl = (dOa[:, :, i0:i1].double() * O[:, :, i0:i1].double()).sum(-1, keepdim=True).float()
@@ -429,7 +443,7 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
     out = {"O": (Ob if round_o else O).transpose(1, 2), "LSE": LSE, "dQ": dQ.transpose(1, 2), "dK": dK.transpose(1, 2),
            "dV": dV.transpose(1, 2), "delta": delta}
     if aux:
-        out.update(rowsum_dS=rs, rowsum_dSq=rsq, colsum_dK=dK.sum(2))
+        out.update(rowsum_dS=rs, rowsum_dSq=rsq, colsum_dK=dK.sum(2), sum_PdP=pdp, sum_P=psum, sum_absPdP=pdpa)
     return out
 
 

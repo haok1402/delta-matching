@@ -305,8 +305,8 @@ class DMBackwardSm100:
         self.qk_acc_dtype = Float32
 
         # Speed optimizations, does not affect correctness
-        self.shuffle_LSE = False
-        self.shuffle_dPsum = False
+        self.shuffle_LSE = "shlse" in tuple(os.environ.get("DM_BWD_OPTS", "").split(","))
+        self.shuffle_dPsum = "shdps" in tuple(os.environ.get("DM_BWD_OPTS", "").split(","))
         # Generally slower to use store dS in smem for dK, and doesn't work for 2cta
         self.use_smem_dS_for_mma_dK = False
 
@@ -3871,7 +3871,7 @@ class DMBackwardSm100:
             )
 
             # prefetch_LSE = not self.is_causal
-            prefetch_LSE = False
+            prefetch_LSE = "pflse" in self.dm_opts
 
             curr_q_cnt = Int32(0)
             curr_q_idx = None
@@ -4178,6 +4178,12 @@ class DMBackwardSm100:
                 # consumer_phase_S_P_dP ^= 1
 
                 ##### DM: dS.T = P.T * (dP.T * (vs*dos) - delta), all stages first (tile-wide dS scale)
+                # delta (dPsum) smem loads for all stages issued before the TMEM dP loads (latency overlap)
+                dm_dps_all = [None] * num_stages
+                for stage in cutlass.range_constexpr(num_stages):
+                    tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
+                    dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
+                    cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
                 tdPrdP_all = [None] * num_stages
                 ds_amax = Float32(0.0)
                 for stage in cutlass.range_constexpr(num_stages):
@@ -4188,9 +4194,7 @@ class DMBackwardSm100:
                 for stage in cutlass.range_constexpr(num_stages):
                     tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
                     tSrS_cur = tSrS_t2r[None, stage, 0, 0]
-                    tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
-                    tSrdPsum = cute.make_fragment_like(tSsdPsum_cur, Float32)
-                    cute.autovec_copy(tSsdPsum_cur, tSrdPsum)
+                    tSrdPsum = dm_dps_all[stage]
                     for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
                         tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
                             (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),

@@ -241,16 +241,25 @@ def check_case(case, cr, preset, dev, verbose):
         em = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, o_for_stale=cand[0], q_block=qbk)
         eb = R.dm_reference(q, k, v, do, causal, mode, "bf16", o_for_stale=cand[0], q_block=qbk)
         emul_bf16[mode] = eb
+        degenerate = False
         for nm, c in zip(names, cand):
             e_c, e_e = rel(c, ex[nm]), rel(em[nm], ex[nm])
             d_ce, d_cb = rel(c, em[nm]), rel(c, eb[nm])
             b_c, b_e = block_rel(c, ex[nm]), block_rel(em[nm], ex[nm])
             rec["metrics"][f"{mode}:{nm}"] = dict(err=e_c, emul_err=e_e, to_emul=d_ce, to_bf16_emul=d_cb,
                                                   blk=b_c, emul_blk=b_e)
-            if ex[nm].norm() == 0:                    # e.g. dQ / dK with constant V: compare absolute size instead
-                scale = max(do.float().norm().item(), 1.0)
-                chk(f"{mode}:{nm}:zero_ref", c.float().norm().item() <= 1e-2 * scale + 1e-3,
-                    f"|cand| {c.float().norm().item():.3e} where exact is 0")
+            ref_scale = ex["dV"].double().norm().item() if nm != "O" else ex["O"].double().norm().item()
+            if nm in ("dQ", "dK") and ex[nm].double().norm().item() <= 1e-4 * ref_scale:
+                # degenerate reference (e.g. constant V: exact dQ = dK = 0 up to round-off): relative errors are
+                # meaningless.  The fp8 kernel's own value is then pure quantization residue (0 in matched mode, the
+                # stale-delta bias in stale mode), so compare with the emulation in absolute terms, at the scale of a
+                # non-degenerate gradient (dV's norm)
+                d = (c.double() - em[nm].double()).norm().item()
+                rec["metrics"][f"{mode}:{nm}"]["degenerate_dist_over_dV"] = d / max(ref_scale, 1e-300)
+                chk(f"{mode}:{nm}:degenerate_ref", d <= 0.25 * em[nm].double().norm().item() + 1e-3 * ref_scale,
+                    f"exact ~0: |cand - emulation| {d:.3e} vs |emulation| {em[nm].double().norm().item():.3e}, "
+                    f"|dV| {ref_scale:.3e}")
+                degenerate = True
                 continue
             chk(f"{mode}:{nm}:accuracy", e_c <= TOL_RATIO * e_e + TOL_ABS,
                 f"rel err {e_c:.4f} vs fp8 emulation {e_e:.4f} (allowed {TOL_RATIO}x + {TOL_ABS})")
@@ -264,7 +273,7 @@ def check_case(case, cr, preset, dev, verbose):
                     f"kernel does not implement the declared numerics (declare the right preset)")
                 chk(f"{mode}:{nm}:fingerprint", d_ce < d_cb,
                     f"closer to the bf16 emulation ({d_cb:.4f}) than to the declared {preset} ({d_ce:.4f})")
-        if mode == "matched" and not FWD_ONLY:
+        if mode == "matched" and not FWD_ONLY and not degenerate:
             cs_c, cs_e = colsum_metric(cand[2], causal), colsum_metric(em["dK"], causal)
             cs_s = colsum_metric(runs["stale/plain"][2], causal) if "stale/plain" in runs else float("nan")
             rec["metrics"]["matched:colsum_dK"] = dict(cand=cs_c, emul=cs_e, cand_stale=cs_s,
@@ -287,7 +296,7 @@ def check_case(case, cr, preset, dev, verbose):
         a, b = runs["matched/plain"], runs["stale/plain"]
         chk("modes_share_O", torch.equal(a[0], b[0]), "O differs between matched and stale")
         chk("modes_share_dV", torch.equal(a[3], b[3]), "dV differs between matched and stale")
-        if do.float().abs().max() > 0 and ex["dQ"].norm() > 0:
+        if do.float().abs().max() > 0 and ex["dQ"].double().norm() > 1e-4 * ex["dV"].double().norm():
             chk("modes_differ_dQ", not torch.equal(a[1], b[1]), "matched and stale dQ are bitwise equal")
     for key, out in runs.items():
         mode, kind = key.split("/")

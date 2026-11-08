@@ -198,7 +198,9 @@ def check_case(case, cr, preset, dev, verbose):
     Hk = k.shape[2]
     causal = case["causal"]
     exact_dtype = torch.float64 if B * H * N * N <= 2 ** 28 else torch.float32
-    ex = R.attention_fp32(q, k, v, do, causal, dtype=exact_dtype)
+    exact = (lambda *a: R.attention_fp32(*a, dtype=exact_dtype)) if B * H * N * N <= 2 ** 31 else \
+        (lambda *a: R.attention_exact_blocked(*a, q_block=max(128, min(1024, 2 ** 31 // (B * H * N) // 128 * 128))))
+    ex = exact(q, k, v, do, causal)
     runs = {k_: [t.to(dev) if t is not None else None for t in v_] for k_, v_ in cr["runs"].items()}
     modes = sorted({k_.split("/")[0] for k_ in runs})
     shapes = (q.shape, q.shape, k.shape, k.shape)
@@ -217,8 +219,9 @@ def check_case(case, cr, preset, dev, verbose):
     emul_bf16 = {}
     for mode in modes:
         cand = runs[f"{mode}/plain"]
-        em = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, o_for_stale=cand[0])
-        eb = R.dm_reference(q, k, v, do, causal, mode, "bf16", o_for_stale=cand[0])
+        qbk = max(128, min(1024, 2 ** 31 // (B * H * N) // 128 * 128))
+        em = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, o_for_stale=cand[0], q_block=qbk)
+        eb = R.dm_reference(q, k, v, do, causal, mode, "bf16", o_for_stale=cand[0], q_block=qbk)
         emul_bf16[mode] = eb
         for nm, c in zip(names, cand):
             e_c, e_e = rel(c, ex[nm]), rel(em[nm], ex[nm])
@@ -278,7 +281,7 @@ def check_case(case, cr, preset, dev, verbose):
         if kind == "mutate":
             q2, k2, v2 = (case[n].to(dev) for n in ("q2", "k2", "v2"))
             em2 = R.dm_reference(q2, k2, v2, do, causal, mode, preset, o_for_stale=out[0])
-            ex2 = R.attention_fp32(q2, k2, v2, do, causal, dtype=exact_dtype)
+            ex2 = exact(q2, k2, v2, do, causal)
             for nm, x in zip(names, out):
                 e_c, e_e = rel(x, ex2[nm]), rel(em2[nm], ex2[nm])
                 chk(f"{key}:{nm}:no_stale_cache", e_c <= TOL_RATIO * e_e + TOL_ABS,

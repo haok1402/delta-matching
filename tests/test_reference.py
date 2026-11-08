@@ -249,3 +249,12 @@ def test_sm90_kernel_matches_emulation(shape, mode):
         d, floor = rel(kern[n], em[n]), rel(em[n], ex[n])
         print(f"{n}: kernel-emulation {d:.2e}, emulation-exact {floor:.2e}")
         assert d < 0.2 * floor, (n, d, floor)
+
+
+@pytest.mark.parametrize("causal", [True, False])
+def test_blocked_exact_equals_dense_exact(causal):
+    q, k, v, do = inputs(1, 512, 4, 2, seed=12)
+    a = R.attention_fp32(q, k, v, do, causal, torch.float64)
+    b = R.attention_exact_blocked(q, k, v, do, causal, q_block=128)
+    for n in NAMES:
+        assert rel(b[n], a[n]) < 1e-5, n

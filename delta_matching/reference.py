@@ -316,9 +316,16 @@ def attention_fp32(q, k, v, do, causal=True, dtype=torch.float32):
             "dK": kf.grad.transpose(1, 2), "dV": vf.grad.transpose(1, 2)}
 
 
+def attention_exact_blocked(q, k, v, do, causal=True, q_block=1024):
+    """Exact fp32 attention with O(q_block * N) memory per head (long sequences): the engine with no rounding anywhere
+    and the matched delta (= rowsum(dO * O) exactly when nothing is rounded).  Same dict as attention_fp32."""
+    r = dm_reference(q, k, v, do, causal, "matched", "fp32", q_block=q_block, round_o=False)
+    return {n: r[n] for n in ("O", "LSE", "dQ", "dK", "dV")}
+
+
 # ----------------------------------------------------------------------------------------------------------------- engine
 def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_block=1024, aux=False,
-                 o_for_stale=None):
+                 o_for_stale=None, round_o=True):
     """Emulate an fp8 Delta-Matching kernel in torch.
 
     q (B, N, H, D), k / v (B, N, Hk, D), do (B, N, H, D); mode "matched" | "stale"; preset a PRESETS name or Preset.
@@ -410,7 +417,7 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             dKp = dSq.transpose(-1, -2) @ Qb[:, :, i0:i1]
             dK[:, :, :nk] += dKp.reshape(B, Hk, rep, nk, D).sum(2)
             dQ[:, :, i0:i1] = (dSq2 @ Kb[:, :, :nk].repeat_interleave(rep, 1)) * sm
-    out = {"O": Ob.transpose(1, 2), "LSE": LSE, "dQ": dQ.transpose(1, 2), "dK": dK.transpose(1, 2),
+    out = {"O": (Ob if round_o else O).transpose(1, 2), "LSE": LSE, "dQ": dQ.transpose(1, 2), "dK": dK.transpose(1, 2),
            "dV": dV.transpose(1, 2), "delta": delta}
     if aux:
         out.update(rowsum_dS=rs, rowsum_dSq=rsq, colsum_dK=dK.sum(2))

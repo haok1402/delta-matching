@@ -2,9 +2,9 @@
 
 quant_rows(x, prescale, mean)  x (B, N, H, D) bf16/fp32 (any strides, unit stride on D)
     y = (x - mean[b, h]) * prescale            (fp32; mean optional, (B, H, D) fp32)
-    per (b, h, 32-token block):  amax = max |y|;  t = fp32(amax / 448)
-        e = ceil(log2 t) computed exactly on the fp32 bits of t (t a power of 2 -> its exponent, else exponent + 1);
-        scale = 2^e (amax == 0 -> scale = 1);  code = rn_satfinite_e4m3(y * 2^-e)   (the multiply is exact)
+    per (b, h, 32-token block):  amax = max |y| = m * 2^E (m in [1, 2), fp32 bits);
+        scale = the smallest power of 2 with amax <= 448 * scale  = 2^(E-8) if m <= 1.75 else 2^(E-7)
+        (amax == 0 -> scale = 1);  code = rn_e4m3(y / scale)  (exact multiply by 2^-e; never exceeds 448)
     returns codes (B, N, H, D) float8_e4m3fn contiguous, scales (B, H, N // 32) fp32 (exact powers of 2)
 
 The scale exponent biased by 127 is the UE8M0 byte used by the tcgen05 block-scaled MMAs.
@@ -31,12 +31,9 @@ def _quant_rows_kernel(X, MEAN, Y, S, N, H, sxb, sxn, sxh, prescale,
         x = x - mu[None, :]
     x = x * prescale
     amax = tl.max(tl.max(tl.abs(x), axis=1), axis=0)
-    t = amax / 448.0
-    tb = t.to(tl.int32, bitcast=True)
-    ex = (tb >> 23) & 0xFF
-    mant = tb & 0x7FFFFF
-    eb = ex + (mant != 0).to(tl.int32)          # biased exponent of 2^ceil(log2 t)
-    eb = tl.maximum(eb, 1)
+    ab = amax.to(tl.int32, bitcast=True)
+    eb = ((ab >> 23) & 0xFF) - 8 + ((ab & 0x7FFFFF) > 0x600000).to(tl.int32)   # smallest pow2 s: amax <= 448 s
+    eb = tl.minimum(tl.maximum(eb, 1), 254)
     eb = tl.where(amax > 0, eb, 127)
     scale = (eb << 23).to(tl.float32, bitcast=True)
     inv = ((254 - eb) << 23).to(tl.float32, bitcast=True)
@@ -70,10 +67,9 @@ def quant_rows_ref(x: torch.Tensor, prescale: float = 1.0, mean: torch.Tensor | 
     y = y * prescale
     yb = y.view(B, N // BLK, BLK, H, D)
     amax = yb.abs().amax(dim=(2, 4))                              # (B, N/32, H)
-    t = amax / 448.0
-    tb = t.view(torch.int32)
-    eb = ((tb >> 23) & 0xFF) + ((tb & 0x7FFFFF) != 0).to(torch.int32)
-    eb = eb.clamp(min=1)
+    ab = amax.contiguous().view(torch.int32)
+    eb = ((ab >> 23) & 0xFF) - 8 + ((ab & 0x7FFFFF) > 0x600000).to(torch.int32)
+    eb = eb.clamp(min=1, max=254)
     eb = torch.where(amax > 0, eb, torch.full_like(eb, 127))
     scale = (eb << 23).view(torch.float32)
     inv = ((254 - eb) << 23).view(torch.float32)

@@ -431,3 +431,18 @@ def ex2_poly5_2(x: Float32, y: Float32, *, loc=None, ip=None):
     fr = cute.arch.sub_packed_f32x2(xy, rb)
     pe = fu.evaluate_polynomial_2(*fr, POLY5_EX2, loc=loc, ip=ip)
     return fu.combine_int_frac_ex2(r[0], pe[0], loc=loc, ip=ip), fu.combine_int_frac_ex2(r[1], pe[1], loc=loc, ip=ip)
+
+
+@dsl_user_op
+def cpasync_bulk_store_s2g(smem_ptr, gmem_ptr, store_bytes, *, loc=None, ip=None):
+    """cp.async.bulk smem -> gmem plain store (bulk_group), same grouping/wait semantics as the reduce-add variant."""
+    smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
+    llvm.inline_asm(
+        None,
+        [gmem_ptr.llvm_ptr, smem_ptr_i32, Int32(store_bytes).ir_value()],
+        "cp.async.bulk.global.shared::cta.bulk_group [$0], [$1], $2;",
+        "l,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )

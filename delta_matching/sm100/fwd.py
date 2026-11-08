@@ -54,7 +54,11 @@ def _select(orig_select, over):
             use_clc_scheduler=cfg.use_clc_scheduler)
         if "kv_stage" in over:
             kv_stage = min(kv_stage, over["kv_stage"])
-        return dataclasses.replace(cfg, overlap_sO_sQ=overlap, kv_stage=kv_stage)
+        cfg = dataclasses.replace(cfg, overlap_sO_sQ=overlap, kv_stage=kv_stage)
+        if "reg_sm" in over:     # setmaxnreg split: 2*softmax + correction + other = 512
+            sm_, co_ = over["reg_sm"], over["reg_corr"]
+            cfg = dataclasses.replace(cfg, registers=type(cfg.registers)(softmax=sm_, correction=co_, other=512 - 2 * sm_ - co_))
+        return cfg
     return select
 
 
@@ -73,8 +77,10 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
     """q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D) e4m3; qs (B,H,N/32), ks/vs (B,Hk,N/32) fp32 powers of 2.
     Returns O (B,N,H,D) bf16, LSE (B,H,N) fp32 natural log."""
     over = dict(FORCE)
+    if "2cta=1" in os.environ.get("DM_FWD_OPTS", ""):
+        over.pop("use_2cta_instrs")          # let FA4's config pick 2-CTA (non-causal hd128)
     for kv in os.environ.get("DM_FWD_OPTS", "").split(","):     # config-level knobs, e.g. ex2_emu_freq=0,kv_stage=6
-        if "=" in kv and kv.split("=")[0] in ("ex2_emu_freq", "ex2_emu_start_frg", "kv_stage", "q_stage"):
+        if "=" in kv and kv.split("=")[0] in ("ex2_emu_freq", "ex2_emu_start_frg", "kv_stage", "q_stage", "reg_sm", "reg_corr"):
             over[kv.split("=")[0]] = int(kv.split("=")[1])
     if config_override:
         over.update(config_override)

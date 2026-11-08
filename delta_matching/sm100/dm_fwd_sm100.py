@@ -403,6 +403,8 @@ class DMForwardSm100:
         import os as _os
         self.dm_opts = dict(kv.split("=") for kv in _os.environ.get("DM_FWD_OPTS", "").split(",") if "=" in kv)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
+        if "split" in self.dm_opts:
+            self.split_P_arrive = int(self.dm_opts["split"])
         # vec buffer for row_max & row_sum
         self.tmem_vec_offset = self.tmem_s_offset
 
@@ -2359,7 +2361,7 @@ class DMForwardSm100:
                 mask_fn_none = None
 
             # DM sm100-mx: row max kept in log2 units (integer valued); scales applied per 32-key block in softmax_step.
-            dm_row = self._q_block(work_m, stage) * self.m_block_size + tidx
+            dm_row = self._q_block(work_m, stage, thr_mma_qk.thr_idx) * self.m_block_size + tidx
             dm_qsc = Float32(descale_tensors.q_descale[batch_idx, head_idx, dm_row // 32]) * Float32(math.log2(math.e))
             softmax = SoftmaxSm100.create(
                 Float32(1.0),

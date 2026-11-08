@@ -164,6 +164,7 @@ class Preset:
     ds2: str | None = None
     center_k: bool = True        # K centered by its per-head mean before quantization (softmax-invariant)
     delta_norm: bool = False     # matched delta = sum_j P dP / sum_j P (instead of sum_j P dP)
+    l_from_codes: bool = False   # forward row sum l from the quantized P used in PV (O a convex combination of V rows)
     mx_rounding: str = "ceil"
     notes: str = ""
 
@@ -201,7 +202,7 @@ PRESETS["mxfp8-all"] = PRESETS["mxfp8"]
 
 
 def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,
-                    register=True):
+                    register=True, l_from_codes=False):
     """kda-sm100's sm100 numerics (sm100/kda/docs/draft.md "Numerics design"), with knobs:
       tok_block   Q / K / V / dO: one scale per tok_block tokens over all D (pow2: 2^ceil(log2(amax/448)), else fp32 amax/448)
       p_block     forward P: per (row, p_block keys) block exponent k = floor(max S log2e), code e4m3(2^(x-k+7))
@@ -210,7 +211,7 @@ def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_b
       delta_norm  matched delta = sum P dP / sum P (True) or sum P dP (False, sm90 style)"""
     inp = f"blockrows_pow2:{tok_block}" if pow2 else f"blockrows:{tok_block}"
     pr = Preset(name, q=inp, k=inp, v=inp, do=inp, p_fwd=f"kda_pfwd:{p_block}", p_bwd=f"mx:queries:{pt_block}",
-                ds=f"mx2d:{ds_block[0]}x{ds_block[1]}", delta_norm=delta_norm,
+                ds=f"mx2d:{ds_block[0]}x{ds_block[1]}", delta_norm=delta_norm, l_from_codes=l_from_codes,
                 notes=f"kda sm100 numerics: inputs {inp}, P fwd per row x {p_block} keys, P^T per key x {pt_block} "
                       f"queries, dS {ds_block[0]}x{ds_block[1]} blocks, delta_norm={delta_norm}")
     return _register(pr) if register else pr
@@ -384,6 +385,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             l = P.sum(-1, keepdim=True)
             ctx = _Ctx(role="p_fwd", rowmax=m, rows=(i0, i1), causal=causal, S=S)
             Pq = _site(p.p_fwd, P, ctx, p)
+            if p.l_from_codes:
+                l = Pq.sum(-1, keepdim=True)
             O[:, :, i0:i1] = (Pq @ Va[:, :, :nk].repeat_interleave(rep, 1)) / l
             LSE[:, :, i0:i1] = (m + torch.log(l)).squeeze(-1)
         Ob = O.to(torch.bfloat16)
@@ -509,3 +512,4 @@ SITE_FNS["sm90_ds"] = sm90_ds
 # kda-sm100's final sm100-mx rules (inbox 2026-11-08 17:40): kda-v1 with dS scaled per (128-query tile x 32 keys)
 make_kda_preset("sm100-mx", ds_block=(128, 32), delta_norm=True)
 make_kda_preset("sm100-mx-nonorm", ds_block=(128, 32), delta_norm=False)
+make_kda_preset("sm100-mx-lq", ds_block=(128, 32), delta_norm=True, l_from_codes=True)

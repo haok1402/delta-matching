@@ -4074,6 +4074,10 @@ class DMBackwardSm100:
                         )
                         if const_expr("noexp" in self.dm_abl):
                             pass
+                        elif const_expr("poly3" in self.dm_opts):
+                            # FA4 degree-3 FMA polynomial for every element: bitwise = dm_common.dm_bwd_p_pair_poly in
+                            # pass 0 (own-P delta keeps rowsum(dS)=0 at round-off; P error 8.8e-5 << 2e-3 tolerance)
+                            tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = utils.ex2_emulation_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
                         elif const_expr(self.dm_p5 is not None and v % self.dm_p5[0] < self.dm_p5[1]):
                             # accurate (1.7e-7) degree-5 FMA polynomial for a static subset of pairs (MUFU offload)
                             tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_utils.ex2_poly5_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])

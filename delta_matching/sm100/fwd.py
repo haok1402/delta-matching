@@ -6,6 +6,7 @@ reused by GPU runs.  The compile key does not depend on B / N, only on (causal, 
 """
 import dataclasses
 import hashlib
+import os
 import threading
 from pathlib import Path
 
@@ -21,6 +22,7 @@ FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_s
 
 def _fingerprint():
     h = hashlib.sha256(cache_utils._compute_source_fingerprint().encode())
+    h.update(os.environ.get("DM_FWD_OPTS", "").encode())   # kernel variant knobs (read in DMForwardSm100.__init__)
     for f in sorted(_HERE.glob("*.py")):
         h.update(f.name.encode())
         h.update(f.read_bytes())

@@ -399,7 +399,10 @@ class DMForwardSm100:
 
         # DM sm100-mx: SFA (4 cols) + SFB (4 cols) right after the fp8 P columns of each S stage
         self.dm_sf_col = self.tmem_s_to_p_offset + self.n_block_size // 4
-        self.dm_rescale_T = 32.0
+        # variant knobs: DM_FWD_OPTS="k=v,k=v" (hashed into the compile-cache fingerprint by fwd.py)
+        import os as _os
+        self.dm_opts = dict(kv.split("=") for kv in _os.environ.get("DM_FWD_OPTS", "").split(",") if "=" in kv)
+        self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
         # vec buffer for row_max & row_sum
         self.tmem_vec_offset = self.tmem_s_offset
 
@@ -2640,6 +2643,10 @@ class DMForwardSm100:
         tScS_shape = cta_qk_tiler  # (128, 128)
         tScP_shape = (tScS_shape[0], tilePlikeFP32)  # (128, 64)
 
+        # DM: issue this tile's K/V block-scale loads before waiting for S (hides the L2 latency behind the QK MMA)
+        nb4 = n_block * 4
+        dm_ks = [Float32(dm_scales.k_descale[batch_idx, kv_head_idx, nb4 + j]) for j in range(4)]
+        dm_vs = [Float32(dm_scales.v_descale[batch_idx, kv_head_idx, nb4 + j]) for j in range(4)]
         # Wait for Si
         if const_expr(self.use_s_ping_pong):
             s_p_o_index = s_p_o_consumer_count & 1
@@ -2683,8 +2690,7 @@ class DMForwardSm100:
         # ---------------- DM sm100-mx softmax step ----------------
         # x = S * c_b (log2 units), c_b = qs_row * log2e * ks_b; per 32-key block b: kb = floor(max_b x),
         # p~ = exp2(x - kb + 7) in [0, 256) -> e4m3 code; SFA_b = 2^(kb - 7 - m), SFB_b = vs_b; m = integer running max.
-        nb4 = n_block * 4
-        dm_c = [dm_qsc * Float32(dm_scales.k_descale[batch_idx, kv_head_idx, nb4 + j]) for j in range(4)]
+        dm_c = [dm_qsc * dm_ks[j] for j in range(4)]
         dm_bmax = [None] * 4
         for j in cutlass.range_constexpr(4):
             v = tSrS_t2r[32 * j]
@@ -2717,8 +2723,7 @@ class DMForwardSm100:
             dm_w[j] = dm_utils.exp2i_f32(e)
             dm_sfa[j] = dm_utils.ue8m0_byte(e)
         sfa_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3]))
-        sfb_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(
-            *[dm_utils.pow2_exponent_byte(Float32(dm_scales.v_descale[batch_idx, kv_head_idx, nb4 + j])) for j in range(4)]))
+        sfb_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(*[dm_utils.pow2_exponent_byte(dm_vs[j]) for j in range(4)]))
         tSrSF = cute.make_rmem_tensor(thr_tmem_store_sf.partition_S(cute.make_identity_tensor((self.m_block_size, 8))).shape, Float32)
         for j in cutlass.range_constexpr(4):
             tSrSF[j] = sfa_word

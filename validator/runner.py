@@ -105,9 +105,18 @@ def main():
         gpupool_ready()
     except ImportError:
         pass
+    def hook(name):
+        try:
+            import gpupool_hook
+            getattr(gpupool_hook, name)()
+        except ImportError:
+            pass
     for cf in case_files:
+        hook("gpupool_done")                # reading the case from disk is CPU work: let the filler run meanwhile
         case = torch.load(cf, weights_only=False)
+        hook("gpupool_ready")
         r = run_case(mod, fn, case, dev)
+        hook("gpupool_done")
         torch.save(r, cf + ".out")
         os.remove(cf)
         torch.cuda.empty_cache()

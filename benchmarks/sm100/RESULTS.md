@@ -8,6 +8,8 @@ N 1k-32k). "e2e" means the time starts from bf16 q/k/v, so the quantization prod
 |---|---|---|---|---|---|---|---|
 | 2026-11-08 17:38 | C1-v1 fwd e2e (811db9e) | fwd | 0.902 (0.624-1.170) | 0.936 (0.705-1.161) | 1.173 / 1.030 | 5.0-5.7e-2 | results/c1v1_fwd.s*.jsonl |
 | 2026-11-08 17:53 | B1 fwd+bwd, stale mode, deterministic bwd (kda/cands/b1_cur.py @ wt/kda-sm100 7ed21b0) | fwd_bwd | 0.639 (0.368-1.003) vs FA4; 0.661 vs FA4-det | 0.728 (0.438-1.089); 0.746 vs FA4-det | - | O 5e-2, dQ/dK 6.7e-2, dV 5e-2 | results/b1_stale.s*.jsonl |
+| 2026-11-08 18:23 | FULL matched (api.dm_attn_func, pinned snap 6a31419: C1-v2 fwd + P0 kernel + B1 det bwd) | fwd_bwd | **0.729** (0.537-0.891); 0.756 vs FA4-det | 0.771 (0.587-0.945); 0.793 vs FA4-det | - | O 5e-2, dQ/dK 6.5e-2, dV 5e-2 | results/full_6a31419.s*.jsonl |
+| 2026-11-08 18:23 | FULL stale (same build) | fwd_bwd | 0.686 (0.385-1.047); 0.711 vs FA4-det | 0.800 (0.462-1.169); 0.823 vs FA4-det | - | same | same |
 
 ### Notes on C1-v1 (fwd only, no bwd yet)
 - It is faster than FA4 only at long sequences: 1.05-1.17x at 16k-32k, where FA4 hits the power cap and its clock drops.
@@ -29,3 +31,13 @@ N 1k-32k). "e2e" means the time starts from bf16 q/k/v, so the quantization prod
   0.4 ms for FA4 (separate producer launches), plus the producers' GPU time.
 - The fwd inside this composite is 0.64x FA4, below C1-v1 e2e (0.90x). b1_cur.py quantizes with quant_rows x3 + kmean
   instead of the fused quant_qkv2.
+
+### Notes on FULL @6a31419 (first complete Delta-Matching sm100 build; matched causal is the headline)
+- Matched, causal, fwd+bwd vs FA4: 1k 0.71x / 0.54x (H16/16 / H32/8), 8k 0.74x / 0.74x, 32k 0.86x / 0.89x.
+  fwd 0.90x, bwd 0.68x: **the bwd is the gap.** It is 856-1000 TF against FA4's 1250-1380 TF at >= 8k.
+- The P0 matched-delta pass costs about 20% of the bwd at long shapes (32k causal bwd: matched 11.0 vs stale 9.0 ms
+  for H16/16; 22.2 vs 18.2 for H32/8). At short shapes, stale is SLOWER than matched (1k causal bwd: 1.21 vs 0.76 ms;
+  32/8: 2.77 vs 1.89), so the stale delta path has a large fixed cost (probably the unfused torch rowsum(dO*O) plus
+  extra producers).
+- Stale wins at 32k only: 1.05x causal H32/8, 1.17x non-causal H32/8.
+- The candidate was loaded from a pinned clean snapshot (bench/snap/6a31419); the live worktree had uncommitted edits.

@@ -22,6 +22,7 @@ All arms are timed by the SAME code path on the SAME inputs:
   cheap guard against fast-but-wrong numbers, NOT the validator (see sm100/STATUS-dm-validator.md).
 
 Candidates: --cand NAME=/abs/path/file.py:func  or  NAME=pkg.module:func  (optional --pythonpath DIR, repeatable);
+  '@matched' / '@stale' after the spec fixes that candidate's mode;
   ':func' defaults to ':attn' (the validator's candidate contract, sm100/validate).  The function is called as
   fn(q, k, v, causal=c[, softmax_scale=None][, mode=m]) (keywords only if it accepts them);
   per shape: causal -> mode "matched", non-causal -> mode "stale" (override with --cand-mode).
@@ -360,9 +361,12 @@ def main():
             print(f"[arm {name}] unavailable: {type(ex).__name__}: {ex}", file=sys.stderr)
     for c in a.cand:
         name, spec = c.split("=", 1)
+        cmode = a.cand_mode
+        if "@" in spec:                          # NAME=path.py:attn@stale  -> per-candidate mode
+            spec, cmode = spec.rsplit("@", 1)
         f = load_candidate(spec, a.pythonpath)
         mod = sys.modules.get(getattr(f, "__module__", ""), None)
-        arms[name] = (wrap_candidate(f, a.cand_mode), bool(getattr(mod, "FWD_ONLY", False)))   # FWD_ONLY: fwd pass only
+        arms[name] = (wrap_candidate(f, cmode), bool(getattr(mod, "FWD_ONLY", False)))   # FWD_ONLY: fwd pass only
         if getattr(mod, "CAND_INFO", None):
             meta.setdefault("cand_info", {})[name] = mod.CAND_INFO
 

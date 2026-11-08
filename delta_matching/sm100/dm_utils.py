@@ -268,3 +268,69 @@ def gemm_ptx_bs_w_idx(tiled_mma, acc, tCrA, tCrB, sA, sB, A_idx=None, B_idx=None
     sB_cur = sB if B_idx is None else sB[None, None, None, B_idx]
     op = cute.make_mma_atom(tiled_mma.op).op
     gemm_ptx_bs(op, acc.iterator.toint(), rA, rB, sA_cur, sB_cur, **kw)
+
+
+@dsl_user_op
+def tmem_st_x1(addr: Int32, w: Int32, *, loc=None, ip=None):
+    """tcgen05.st.32x32b.x1: this thread's lane, one 32-bit column at addr (lane base in bits 16+)."""
+    llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip), Int32(w).ir_value(loc=loc, ip=ip)],
+                    "tcgen05.st.sync.aligned.32x32b.x1.b32 [$0], {$1};", "r,r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def tmem_st_x4(addr: Int32, w0: Int32, w1: Int32, w2: Int32, w3: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (addr, w0, w1, w2, w3)],
+                    "tcgen05.st.sync.aligned.32x32b.x4.b32 [$0], {$1, $2, $3, $4};", "r,r,r,r,r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def bytes4_same(b: Int32, *, loc=None, ip=None) -> Int32:
+    """Replicate a byte into all 4 bytes of a word."""
+    return Int32(llvm.inline_asm(T.i32(), [Int32(b).ir_value(loc=loc, ip=ip)],
+                                 "{\n\t.reg .b32 t;\n\tand.b32 t, $1, 0xff;\n\tmul.lo.u32 $0, t, 0x01010101;\n\t}",
+                                 "=r,r", has_side_effects=False, is_align_stack=False,
+                                 asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def st_async_peer_b32(local_addr: Int32, local_mbar: Int32, peer_rank: Int32, val: Int32, *, loc=None, ip=None):
+    """Store a 32-bit value into the peer CTA's smem at the same offset as local_addr, completing 4 tx bytes on the
+    peer's mbarrier at the offset of local_mbar (st.async + mapa)."""
+    llvm.inline_asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (local_addr, local_mbar, peer_rank, val)],
+                    "{\n\t.reg .b32 ra, rm;\n\t"
+                    "mapa.shared::cluster.u32 ra, $0, $2;\n\t"
+                    "mapa.shared::cluster.u32 rm, $1, $2;\n\t"
+                    "st.async.shared::cluster.mbarrier::complete_tx::bytes.b32 [ra], $3, [rm];\n\t}",
+                    "r,r,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def mbar_arrive_expect_tx(mbar: Int32, nbytes: int, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
+                    f"mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [$0], {nbytes};", "r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def mbar_wait_parity(mbar: Int32, phase: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(phase).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .pred P1;\n\tDM_WAIT:\n\t"
+                    "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
+                    "@P1 bra DM_DONE;\n\tbra DM_WAIT;\n\tDM_DONE:\n\t}",
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def ld_shared_b32(addr: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [Int32(addr).ir_value(loc=loc, ip=ip)], "ld.volatile.shared.b32 $0, [$1];",
+                                 "=r,r", has_side_effects=True, is_align_stack=False,
+                                 asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def st_shared_b32(addr: Int32, val: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
+                    "st.volatile.shared.b32 [$0], $1;", "r,r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)

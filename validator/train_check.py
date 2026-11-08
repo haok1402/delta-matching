@@ -197,6 +197,12 @@ def main():
         corpus(None); print("corpus at", CACHE, os.path.getsize(CACHE)); return
     dev = torch.device(a.device)
     torch.cuda.set_device(dev)
+    torch.zeros(1, device=dev)
+    try:                    # untimed and small: share the GPU with the gpupool filler (no exclusive phase)
+        from gpupool_hook import gpupool_done
+        gpupool_done()
+    except ImportError:
+        pass
     data = corpus(dev)
     mod, fn = load_spec(a.candidate) if a.candidate != "none" else (None, None)
     arms = {"bf16": sdpa}

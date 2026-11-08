@@ -443,7 +443,8 @@ def main():
         a.candidate = os.path.abspath(tgt) + sep + fn_
     dev = torch.device(a.device)
     torch.cuda.set_device(dev)
-    _hook("gpupool_done")                  # everything up to the first GPU phase is CPU work
+    torch.zeros(1, device=dev)
+    _hook("gpupool_done")                  # after context creation: validation is untimed and shares the GPU with the filler
     seed = a.seed if a.seed is not None else secrets.randbits(31)
     t0 = time.time()
     # one probe run to learn NUMERICS / SUPPORTS (no inputs)

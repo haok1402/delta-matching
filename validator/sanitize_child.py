@@ -5,12 +5,14 @@ import importlib.util
 import os
 import sys
 
+import torch
+
+torch.zeros(1, device="cuda")      # create the CUDA context first: the pool's auto-stop fires on context creation
 try:
     from gpupool_hook import gpupool_done
-    gpupool_done()
+    gpupool_done()                 # then hand the GPU back to the filler for the whole (CPU-bound, untimed) sanitized run
 except ImportError:
     pass
-import torch
 
 spec = sys.argv[1]
 target, _, func = spec.partition(":")

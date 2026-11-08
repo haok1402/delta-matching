@@ -134,6 +134,8 @@ def main():
     FWD_ONLY = bool(job.get("fwd_only", False))
     dev = torch.device(job.get("device", "cuda"))
     torch.cuda.set_device(dev)
+    torch.zeros(1, device=dev)
+    _hook("gpupool_done")                   # after context creation (auto-stop fires on it): share the GPU with the filler
     res = {"meta": {}, "cases": []}
     try:
         mod, fn = load(spec)

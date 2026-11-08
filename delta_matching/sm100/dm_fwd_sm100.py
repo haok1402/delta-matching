@@ -2821,7 +2821,7 @@ class DMForwardSm100:
             pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
         # l = l * acc_scale + sum_b w_b * sum_{j in b} p~_j   (fp32 pre-rounding values)
         dm_l = Float32(0.0) if const_expr(is_first) else softmax.row_sum[0] * acc_scale
-        for j in cutlass.range_constexpr(4):
+        for j in cutlass.range_constexpr(0 if const_expr(self.dm_opts.get("nosum", "0") == "1") else 4):  # nosum: UPPER-BOUND experiment only (l wrong)
             if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
                 dm_l = dm_l + dm_bsum[j] * dm_w[j]
             else:
@@ -2829,6 +2829,8 @@ class DMForwardSm100:
                 for i in cutlass.range_constexpr(2, 32, 2):
                     ps = cute.arch.add_packed_f32x2(ps, (tSrS_t2r[32 * j + i], tSrS_t2r[32 * j + i + 1]))
                 dm_l = dm_l + (ps[0] + ps[1]) * dm_w[j]
+        if const_expr(self.dm_opts.get("nosum", "0") == "1"):
+            dm_l = dm_l + dm_w[0]
         softmax.row_sum[0] = dm_l
         # acc_scale = cute.math.exp2(acc_scale_, fastmath=True)
         if const_expr(self.use_s_ping_pong):

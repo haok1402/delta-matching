@@ -317,7 +317,7 @@ def mbar_arrive_expect_tx(mbar: Int32, nbytes: int, *, loc=None, ip=None):
 def mbar_wait_parity(mbar: Int32, phase: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(phase).ir_value(loc=loc, ip=ip)],
                     "{\n\t.reg .pred P1;\n\tDM_WAIT:\n\t"
-                    "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
+                    "mbarrier.try_wait.parity.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
                     "@P1 bra DM_DONE;\n\tbra DM_WAIT;\n\tDM_DONE:\n\t}",
                     "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
 

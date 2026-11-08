@@ -63,6 +63,10 @@ def _patched_source():
         if a not in src:
             raise RuntimeError(f"bwd host patch anchor not found: {a!r}")
         src = src.replace(a, b)
+    a = "        config = select_bwd_config(inputs)\n"
+    if a not in src:
+        raise RuntimeError("bwd host patch anchor not found: select_bwd_config")
+    src = src.replace(a, a + "        config = __import__('dataclasses').replace(config, pack_gqa=False)\n")
     # bf16 for every host-side dtype decision (config, postprocess output); the kernel reads fp8 from the tensors
     a = "dtype = torch2cute_dtype_map[q.dtype]"
     if a in src:
@@ -78,7 +82,7 @@ _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
 FORCE = dict(pack_gqa=False)
 
 
-def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=False):
+def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=True):
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]

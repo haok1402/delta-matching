@@ -19,6 +19,8 @@ _LOCK = threading.Lock()
 FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, use_tma_o=False,
              overlap_sO_sQ=False, kv_stage=4)
 REGS = dict(softmax=208, correction=32, other=64)  # P0: correction warps idle -> registers to softmax
+_c3r = os.environ.get("DM_P0_C3REGS", "168,96,64").split(",")   # +c3: correction WG computes chunk 3
+REGS_C3 = dict(softmax=int(_c3r[0]), correction=int(_c3r[1]), other=int(_c3r[2]))
 
 
 def _make_cache():
@@ -50,7 +52,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1")   # P0-v3: 1 in 4 pairs on FA4 deg-3 poly (pass-0-only; identity <=1.6e-4)
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1+ma")   # P0-v4: + 4 accumulators, dP scale per chunk (causal); keeps /sum P (rowsum(dS)=0 at fp32 round-off)
     over = dict(FORCE)
     if config_override:
         over.update(config_override)
@@ -61,7 +63,11 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
     def select(inputs):
         cfg = orig[2](inputs)
         cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "registers"})
-        regs = over.get("registers", REGS)
+        regs = over.get("registers", REGS_C3 if "c3" in exp_variant.split("+")[1:] else REGS)
+        for fl in exp_variant.split("+")[1:]:      # +r<softmax>_<correction>: register split (other = 64)
+            if fl.startswith("r") and "_" in fl and fl[1:].split("_")[0].isdigit():
+                r_ = [int(x) for x in fl[1:].split("_")]
+                regs = dict(softmax=r_[0], correction=r_[1], other=r_[2] if len(r_) > 2 else 64)
         if regs is not None:
             cfg = dataclasses.replace(cfg, registers=dataclasses.replace(cfg.registers, **regs))
         return cfg

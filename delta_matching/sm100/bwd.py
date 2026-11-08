@@ -70,8 +70,20 @@ def _fws(deterministic):
     return bool(deterministic) and "nofws" not in os.environ.get("DM_BWD_OPTS", "").split(",")
 
 
+def _auto_opts(q8, k8):
+    """Effective DM_BWD_OPTS for this shape. DM gloop (GQA, auto): short sequences spend most of a KV tile on the
+    fp32 dK/dV accumulation across the qh query-head CTAs + postprocess; loop the group inside one CTA instead (dK/dV
+    in TMEM, stored once). Long causal sequences lose (4x longer tiles -> tail), so only N <= gloopN (default 2048).
+    'nogloop' disables, 'gloop' forces."""
+    ol = [o for o in os.environ.get("DM_BWD_OPTS", "").split(",") if o]
+    gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "2048"))
+    if q8.shape[2] > k8.shape[2] and "gloop" not in ol and "nogloop" not in ol and q8.shape[1] <= gN:
+        ol = ol + ["gloop"]
+    return ",".join(ol)
+
+
 def _key(q8, k8, causal, deterministic):
-    return (tuple(q8.shape), tuple(k8.shape), bool(causal), bool(deterministic), os.environ.get("DM_BWD_OPTS", ""),
+    return (tuple(q8.shape), tuple(k8.shape), bool(causal), bool(deterministic), _auto_opts(q8, k8),
             q8.device.index)
 
 
@@ -138,6 +150,8 @@ def _patched_source():
         ("fa_bwd_obj = FlashAttentionBackwardSm100(", "fa_bwd_obj = _DMBackwardSm100("),
         ("_flash_attn_bwd.compile_cache", "_dm_bwd_cache()"),
         ("dk_accum, dk, softmax_scale,", "dk_accum, dk, 1.0,"),
+        ("dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa",
+         "dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa and not _dm_gloop()"),
         ("            q.detach(),\n            k.detach(),\n            v.detach(),\n            dout,\n",
          "            q.detach().view(torch.uint8),\n            k.detach().view(torch.uint8),\n"
          "            v.detach().view(torch.uint8),\n            dout.view(torch.uint8),\n"),
@@ -185,6 +199,12 @@ def _dm_post_convert(acc, out, *a, **k):
 
 _ORIG_POST = fi._bwd_postprocess_convert
 _ns.update(_bwd_postprocess_convert=_dm_post_convert, _CTX=_CTX)
+def _dm_gloop():
+    """DM_BWD_OPTS gloop (GQA): dK/dV kept in TMEM across the query-head group, stored directly (no dKV postprocess)."""
+    return "gloop" in os.environ.get("DM_BWD_OPTS", "").split(",")
+
+
+_ns.update(_dm_gloop=_dm_gloop)
 _ns.update(_dm_zeros=_dm_zeros, _dm_empty=_dm_empty, _DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _dm_bwd_cache=_dm_bwd_cache, _dm_cfg=_dm_cfg)
 exec(compile(_patched_source(), fi.__file__ + ":dm_patched_bwd", "exec"), _ns)
 _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
@@ -204,6 +224,8 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         aux.append(trace)
     _CTX["delta"] = delta
     _CTX["deterministic"] = deterministic
+    opts0 = os.environ.get("DM_BWD_OPTS", "")
+    os.environ["DM_BWD_OPTS"] = _auto_opts(q8, k8)     # kernel knobs + compile cache follow the effective opts
     key = _key(q8, k8, causal, deterministic)
     st = _CTX.pop("staged", None)
     if st is not None and st[0] == key and trace is None:
@@ -220,6 +242,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
                 _REC[key] = r
         assert not _CTX.get("pool"), "prestaged scratch not fully consumed"
     finally:
+        os.environ["DM_BWD_OPTS"] = opts0
         _CTX.pop("dq", None)
         _CTX.pop("rec", None)
         _CTX.pop("pool", None)

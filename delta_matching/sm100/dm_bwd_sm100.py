@@ -4082,6 +4082,10 @@ class DMBackwardSm100:
                     tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
                     if const_expr("lseall" in self.dm_opts):
                         tSrLSE = dm_lse_all[stage]
+                    elif const_expr(not self.shuffle_LSE and "lse2" in self.dm_opts and stage > 0):
+                        # lse2: a fresh register buffer per stage (no WAR on stage 0's LSE regs -> loads can hoist)
+                        tSrLSE = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
+                        cute.autovec_copy(tSsLSE_cur, tSrLSE)
                     elif const_expr(not self.shuffle_LSE):
                         if const_expr(stage > 0 or not prefetch_LSE):
                             cute.autovec_copy(tSsLSE_cur, tSrLSE_s2r)

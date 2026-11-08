@@ -3821,7 +3821,7 @@ class DMBackwardSm100:
         if const_expr(dm_tr is not None):
             dm_s0, dm_s1, dm_s2, dm_s3, dm_s4 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
             dm_s5, dm_s6, dm_s7, dm_s8, dm_s9 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
-            dm_s10, dm_s11 = Int32(0), Int32(0)
+            dm_s10, dm_s11, dm_s12, dm_s13 = Int32(0), Int32(0), Int32(0), Int32(0)
             dm_tprev = dm_utils.clock32()
         while work_tile.is_valid_tile:
             (
@@ -3899,6 +3899,9 @@ class DMBackwardSm100:
             # DM: hoisted per-key-row scales and per-stage query-block offsets; prefetch the first query-block scales
             dm_idx0 = thr_copy_t2r.partition_D(self._cluster_S_coords(thr_mma_S, work_n, 0))
             dm_kv_blk = dm_idx0[0][0] // 32
+            # keys past seqlen_k (the empty half of a partial 2-CTA cluster) are masked; clamp their scale index
+            # so the dQ SFB byte never comes from an out-of-bounds (possibly 0xFF = NaN) scale read
+            dm_kv_blk = cutlass.min(dm_kv_blk, (seqlen.seqlen_k + 31) // 32 - 1)
             dm_ks = Float32(aux_data.tensors[1][batch_idx, kv_head, dm_kv_blk])
             dm_vs = Float32(aux_data.tensors[2][batch_idx, kv_head, dm_kv_blk])
             dm_ksb = dm_utils.pow2_exponent_byte(dm_ks)
@@ -4017,12 +4020,26 @@ class DMBackwardSm100:
 
                 #### APPLY MASK (after score_mod, matching forward pass order)
                 check_m_boundary = (m_block + 1) * self.tile_m > seqlen.seqlen_q
-                mask_fn(
-                    tSrS_t2r,
-                    m_block=m_block,
-                    is_full_block=is_full_block,
-                    check_m_boundary=check_m_boundary,
-                )
+                if const_expr("nomskip" not in self.dm_opts and self.is_causal and not self.is_local
+                              and self.mask_mod is None and not mask.swap_AB):
+                    # DM mskip (default; nomskip disables): per-thread causal offset (as in apply_mask_sm100_transposed); <= 0 means no
+                    # element of this thread's rows is above the diagonal -> skip the R2P/SEL mask
+                    dm_col_lim = mask.seqlen_k - work_n * mask.tile_n - tScS_t2r[0][1]
+                    dm_row_lim = mask.seqlen_q - m_block * mask.tile_m - tScS_t2r[0][0]
+                    if dm_row_lim - dm_col_lim > 0 or dm_col_lim <= 0 or check_m_boundary:
+                        mask_fn(
+                            tSrS_t2r,
+                            m_block=m_block,
+                            is_full_block=is_full_block,
+                            check_m_boundary=check_m_boundary,
+                        )
+                else:
+                    mask_fn(
+                        tSrS_t2r,
+                        m_block=m_block,
+                        is_full_block=is_full_block,
+                        check_m_boundary=check_m_boundary,
+                    )
                 num_stages = cute.size(tScS_t2r, mode=[1])
                 # ---------------------------------------------
                 #### P = exp(S - LSE)
@@ -4258,7 +4275,15 @@ class DMBackwardSm100:
                     tdPrdS_cvt = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
                     tdPrdS_cvt.store(tdPrdSq.load().to(self.ds_dtype))
                     if const_expr(stage == 0):
+                        if const_expr(dm_tr is not None):
+                            dm_now = dm_utils.clock32()
+                            dm_s8 = dm_s8 + (dm_now - dm_tprev)
+                            dm_tprev = dm_now
                         pipeline_dS.producer_acquire(producer_state_dS)
+                        if const_expr(dm_tr is not None):
+                            dm_now = dm_utils.clock32()
+                            dm_s12 = dm_s12 + (dm_now - dm_tprev)
+                            dm_tprev = dm_now
                         if const_expr(self.use_2cta_instrs and not self.acc_m64):
                             tdPrdS_xchg = cute.make_fragment_like(tdPrdS_cvt, self.ds_dtype)
 
@@ -4323,10 +4348,14 @@ class DMBackwardSm100:
                 if const_expr(self.split_P_dS):
                     cute.arch.sync_warp()
                 else:
+                    if const_expr(dm_tr is not None):
+                        dm_now = dm_utils.clock32()
+                        dm_s8 = dm_s8 + (dm_now - dm_tprev)
+                        dm_tprev = dm_now
                     self.compute_sync_barrier.arrive_and_wait()
                 if const_expr(dm_tr is not None):
                     dm_now = dm_utils.clock32()
-                    dm_s8 = dm_s8 + (dm_now - dm_tprev)
+                    dm_s13 = dm_s13 + (dm_now - dm_tprev)
                     dm_tprev = dm_now
                 # DM: this CTA's 4 key-block dQ scale bytes -> one word, to self and to the peer CTA
                 if dm_tid == 0:
@@ -4390,13 +4419,15 @@ class DMBackwardSm100:
                         if wg_ == 0:
                             dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 40, Int64(dm_s10))
                             dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 41, Int64(dm_s11))
+                            dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 42, Int64(dm_s12))
+                            dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 43, Int64(dm_s13))
                         if const_expr("flushconst" in self.dm_opts):
                             dm_vals = tuple(Int64(1) for _ in range(10))
                         for k_, a_ in enumerate(dm_vals):
                             dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (16 + 10 * wg_ + k_), Int64(a_))
                 dm_s0, dm_s1, dm_s2, dm_s3, dm_s4 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
                 dm_s5, dm_s6, dm_s7, dm_s8, dm_s9 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
-                dm_s10, dm_s11 = Int32(0), Int32(0)
+                dm_s10, dm_s11, dm_s12, dm_s13 = Int32(0), Int32(0), Int32(0), Int32(0)
             # Epilogue
             # Run epilogue if we processed any m_blocks for this n_block
             if process_tile:

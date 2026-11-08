@@ -120,6 +120,19 @@ def run_case(mod, fn, case, dev):
                 mode, kind = run
                 if kind == "views":
                     out = fwd_bwd_views(fn, q, k, v, do, case["causal"], mode)
+                elif kind.startswith("stress"):
+                    # repeated calls on the same inputs: every call finite and bitwise equal to the first (races)
+                    n = int(kind.split(":")[1])
+                    out = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
+                    nonfin = mism = 0
+                    for _ in range(n - 1):
+                        o2 = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
+                        nonfin += any(t is not None and not torch.isfinite(t).all() for t in o2)
+                        mism += any(t is not None and not torch.equal(t, t0) for t, t0 in zip(o2, out))
+                        del o2
+                    nonfin += any(t is not None and not torch.isfinite(t).all() for t in out)
+                    r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin,
+                                                                 "mismatch_calls": mism}
                 elif kind == "mutate":
                     # caching probe: run on buffers, overwrite them in place with the case's second input set, run again
                     bufs = [x.clone() for x in (q, k, v)]

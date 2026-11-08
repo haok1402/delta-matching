@@ -38,6 +38,7 @@ imports it fails) on inputs drawn from a seed chosen at run time. Then, per outp
 | modes_share_O / dV | bitwise equal between matched and stale | the modes differ only in delta |
 | modes_differ_dQ | matched != stale | a matched mode that silently runs stale fails |
 | repeat / views bitwise | identical outputs for a repeat call and for strided-view inputs | determinism, stride handling |
+| stress (finite / bitwise every call) | 4 (quick) or 8 (full, bench) repeated calls on large MHA shapes (H16 N4096/8192, causal and full): every call finite and bitwise equal to the first | races show up intermittently (B1-v0's 2-CTA backward produced NaN rows in 1-6 of 6 calls) |
 | no_stale_cache | after overwriting the input buffers in place the result follows the new inputs | output caching keyed on pointers |
 The fingerprint/faithful/not_too_accurate checks apply where fp8 noise dominates (emulation error > 8e-3).
 Input families: randn, q/k scaled x3 / x10 (logit range), channel outliers x30 + huge tokens, huge / tiny magnitudes,

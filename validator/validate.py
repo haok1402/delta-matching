@@ -94,7 +94,7 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     def rn(*s):
         return torch.randn(*s, generator=gen, device=dev, dtype=torch.float32)
     q, k, v, do = rn(B, N, H, D), rn(B, N, Hk, D), rn(B, N, Hk, D), rn(B, N, H, D)
-    if kind == "randn":
+    if kind in ("randn", "stress"):
         pass
     elif kind.startswith("scaled"):                   # larger logit range: q, k * s
         s = float(kind[6:])
@@ -155,6 +155,13 @@ def build_cases(tier, supports, seed):
                    (1, 4, 4, up(16384), True, base_kinds), (3, 6, 3, up(2304), True, ["randn", "scaled3"])]
         if nc:
             shapes += [(1, 8, 2, up(2048), False, adv[:5]), (1, 16, 4, up(8192), False, base_kinds)]
+    # stress: repeated calls on large MHA shapes (many CTAs in flight) catch races that a single call misses
+    stress_n = 4 if tier == "quick" else 8
+    shapes += [(1, 16, 16, up(4096), True, ["stress"])]
+    if tier != "quick":
+        shapes += [(1, 16, 16, up(8192), True, ["stress"]), (1, 4, 4, up(4096), True, ["stress"])]
+        if nc:
+            shapes += [(1, 16, 16, up(8192), False, ["stress"])]
     if tier == "bench":   # exactly the shapes fa4-bench times (sm100/bench/attnbench.py SUITES "main")
         for (H, Hk) in ((16, 16), (32, 8)):
             for N in (1024, 2048, 4096, 8192, 16384, 32768):
@@ -173,6 +180,8 @@ def build_cases(tier, supports, seed):
                 runs += [(modes[0], "repeat"), (modes[0], "views")]
             if kind == "randn" and i == 1:
                 runs += [(modes[0], "mutate")]
+            if kind == "stress":
+                runs = [(md, f"stress:{stress_n}") for md in modes]
             cases.append(dict(name=name, B=B, H=H, Hk=Hk, N=N, causal=causal, kind=kind, runs=runs,
                               seed=seed * 1000003 + len(cases)))
     return cases
@@ -193,6 +202,15 @@ def check_case(case, cr, preset, dev, verbose):
         chk("runs", False, cr["error"][-1500:])
         rec["fails"] = fails
         return False, rec
+    if case["kind"] == "stress":
+        for key, st in cr.get("stress", {}).items():
+            rec["metrics"][f"{key}"] = st
+            chk(f"{key}:finite_every_call", st["nonfinite_calls"] == 0,
+                f"{st['nonfinite_calls']}/{st['calls']} calls had NaN/Inf outputs")
+            chk(f"{key}:bitwise_every_call", st["mismatch_calls"] == 0,
+                f"{st['mismatch_calls']}/{st['calls'] - 1} repeat calls differed from the first")
+        rec["fails"] = fails
+        return not fails, rec
     q, k, v, do = (case[n].to(dev) for n in ("q", "k", "v", "do"))
     B, N, H, Dd = q.shape
     Hk = k.shape[2]

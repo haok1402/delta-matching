@@ -79,6 +79,13 @@ def _auto_opts(q8, k8):
     gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "2048"))
     if q8.shape[2] > k8.shape[2] and "gloop" not in ol and "nogloop" not in ol and q8.shape[1] <= gN:
         ol = ol + ["gloop"]
+    # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA
+    # launch/prologue/epilogue is a large share of a KV tile; long sequences keep the hardware's dynamic CTA order
+    # (static striding loses 4-18% there). 'nopers' disables, explicit 'pers=N' overrides, persN= sets the cut.
+    pN = int(next((o[5:] for o in ol if o.startswith("persN=")), "1024"))
+    if (q8.shape[2] == k8.shape[2] and "nopers" not in ol and not any(o.startswith("pers=") for o in ol)
+            and q8.shape[1] <= pN):
+        ol = ol + ["pers=148"]
     return ",".join(ol)
 
 
@@ -220,8 +227,13 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
         aux.append(_CTX["dq"])
+    if "pdyn" in _auto_opts(q8, k8).split(","):
+        # DM pdyn: claim counter for the dynamic persistent scheduler (last aux tensor), zeroed per launch
+        _CTX["pdyn_ctr"] = torch.zeros(1, dtype=torch.int32, device=q8.device)
     if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
         aux.append(trace)
+    if "pdyn" in _auto_opts(q8, k8).split(","):
+        aux.append(_CTX.pop("pdyn_ctr"))
     _CTX["delta"] = delta
     _CTX["deterministic"] = deterministic
     opts0 = os.environ.get("DM_BWD_OPTS", "")

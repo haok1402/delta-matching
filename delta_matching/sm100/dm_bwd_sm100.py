@@ -120,12 +120,12 @@ def dm_posmajor_scheduler(qh: int):
 _DM_PERS_CLS = {}
 
 
-def dm_persistent_scheduler(qh: int, hswz: bool, max_ctas: int):
+def dm_persistent_scheduler(qh: int, hswz: bool, max_ctas: int, snake: bool = False):
     """DM pers: grid-stride persistent version of the LPT bwd scheduler (optionally with the hswz head permutation).
     CTA b handles linear work tiles b, b + G, b + 2G, ... (G = min(total, max_ctas) physical CTAs, a cluster multiple), in
     increasing order, so every deterministic predecessor (smaller linear index) is earlier in some CTA's queue: no
     deadlock. Saves the per-tile CTA teardown/launch/prologue; the work and its order are unchanged (bitwise)."""
-    key = (qh, hswz, max_ctas)
+    key = (qh, hswz, max_ctas, snake)
     if key in _DM_PERS_CLS:
         return _DM_PERS_CLS[key]
 
@@ -150,11 +150,81 @@ def dm_persistent_scheduler(qh: int, hswz: bool, max_ctas: int):
             return _DMWorkTileInfo((blk, Int32(hn), b, sp), w.is_valid_tile)
 
         def advance_to_next_work(self, *, loc=None, ip=None):
-            self._tile_idx = self._tile_idx + cute.arch.grid_dim()[0]
+            if const_expr(snake):
+                # boustrophedon over clusters: round r covers cluster tiles [r C, (r+1) C) (contiguous, so every
+                # deterministic predecessor is in an earlier or the same round: no deadlock); odd rounds reversed,
+                # so the LPT-sorted (longest-first) tiles pair long with short per CTA
+                cs = Int32(self.params.cluster_shape_mn[0])
+                C = cute.arch.grid_dim()[0] // cs
+                c = cute.arch.block_idx()[0] // cs
+                r = self._tile_idx // cs // C + 1
+                pos = c + (r & 1) * (C - 1 - 2 * c)
+                self._tile_idx = (r * C + pos) * cs + cute.arch.block_idx()[0] % cs
+            else:
+                self._tile_idx = self._tile_idx + cute.arch.grid_dim()[0]
             return self.get_current_work()
 
     _DM_PERS_CLS[key] = DMPersLPTBwdScheduler
     return DMPersLPTBwdScheduler
+
+
+_DM_DYN_CLS = {}
+
+
+def dm_dynamic_scheduler(qh: int, hswz: bool, max_ctas: int, n_cons: int):
+    """DM pdyn: dynamic persistent version of the LPT bwd scheduler. The leader CTA's empty warp claims cluster tiles in
+    increasing linear order with a global atomic and broadcasts them to both CTAs through a 2-slot smem ring (full /
+    empty mbarriers; every role warp of both CTAs consumes every slot). Claims are globally ordered, so the smallest
+    unfinished tile is always runnable (its deterministic predecessors are finished): no deadlock, any grid size."""
+    key = (qh, hswz, max_ctas, n_cons)
+    if key in _DM_DYN_CLS:
+        return _DM_DYN_CLS[key]
+    base_cls = dm_persistent_scheduler(qh, hswz, max_ctas)
+
+    class DMDynLPTBwdScheduler(base_cls):
+        def __init__(self, params, tile_idx, k, sbase, *, loc=None, ip=None):
+            super().__init__(params, tile_idx, loc=loc, ip=ip)
+            self._k = k
+            self._sbase = sbase
+
+        @staticmethod
+        @cute.jit
+        def create(params, sbase, *, loc=None, ip=None):
+            t = DMDynLPTBwdScheduler._fetch(params, sbase, Int32(0))
+            return DMDynLPTBwdScheduler(params, t, Int32(0), sbase, loc=loc, ip=ip)
+
+        @staticmethod
+        def _fetch(params, sbase, k):
+            s = k & 1
+            dm_utils.mbar_wait_parity_cluster(sbase + 8 * 3 + 8 * s, (k >> 1) & 1)
+            t = dm_utils.ld_shared_b32(sbase + 8 * 7 + 8 * s)
+            with cute.arch.elect_one():
+                dm_utils.mbar_arrive_rank(sbase + 8 * 5 + 8 * s, Int32(0))
+            cs = params.cluster_shape_mn[0]
+            return t * cs + cute.arch.block_idx()[0] % cs
+
+        def advance_to_next_work(self, *, loc=None, ip=None):
+            self._k = self._k + 1
+            self._tile_idx = DMDynLPTBwdScheduler._fetch(self.params, self._sbase, self._k)
+            return self.get_current_work()
+
+        def __extract_mlir_values__(self):
+            values, self._values_pos = [], []
+            for obj in [self.params, self._tile_idx, self._k, self._sbase]:
+                obj_values = cutlass.extract_mlir_values(obj)
+                values += obj_values
+                self._values_pos.append(len(obj_values))
+            return values
+
+        def __new_from_mlir_values__(self, values):
+            obj_list = []
+            for obj, n_items in zip([self.params, self._tile_idx, self._k, self._sbase], self._values_pos):
+                obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
+                values = values[n_items:]
+            return self.__class__(*(tuple(obj_list)), loc=self._loc)
+
+    _DM_DYN_CLS[key] = DMDynLPTBwdScheduler
+    return DMDynLPTBwdScheduler
 
 
 from flash_attn.cute import barrier
@@ -543,6 +613,8 @@ class DMBackwardSm100:
         self.dm_fws = "nofws" not in self.dm_opts
         # pers=<CTAs>: persistent grid of that many CTAs (= SM count, a cluster multiple), 0 = single-tile CTAs
         self.dm_pers = int(next((x[5:] for x in self.dm_opts if x.startswith("pers=")), "0"))
+        # pdyn: dynamic (atomic-counter) persistent claim order instead of static grid-stride (needs pers=N)
+        self.dm_pdyn = self.dm_pers > 0 and "pdyn" in self.dm_opts
         # DM gloop (GQA): one CTA (pair) per (KV head, KV tile) loops over the qh query heads of the group (single
         # m-block stream of qh * L blocks, head-major); dK/dV stay in TMEM across the group and are stored once
         # (no fp32 dK/dV accumulation, no dK/dV semaphores, no dKV postprocess). Order of the dK/dV fp32 sums:
@@ -1195,7 +1267,12 @@ class DMBackwardSm100:
                         and not self.pack_gqa and self.cta_group_size > 1):
             TileScheduler = dm_posmajor_scheduler(self.qhead_per_kvhead)
         elif const_expr(self.deterministic and self.dm_pers > 0 and not self.pack_gqa):
-            TileScheduler = dm_persistent_scheduler(self.qhead_per_kvhead, "nohswz" not in self.dm_opts, self.dm_pers)
+            if const_expr(self.dm_pdyn):
+                TileScheduler = dm_dynamic_scheduler(self.qhead_per_kvhead, "nohswz" not in self.dm_opts, self.dm_pers,
+                                                     2 * (len(self.reduce_warp_ids) + len(self.compute_warp_ids) + 3))
+            else:
+                TileScheduler = dm_persistent_scheduler(self.qhead_per_kvhead, "nohswz" not in self.dm_opts,
+                                                        self.dm_pers, "psnake" in self.dm_opts)
         elif const_expr(self.deterministic and "nohswz" not in self.dm_opts and self.qhead_per_kvhead > 1
                         and not self.pack_gqa):
             TileScheduler = dm_hswz_scheduler(self.qhead_per_kvhead)
@@ -1304,7 +1381,7 @@ class DMBackwardSm100:
                 dS_cluster_empty_mbar_ptr: cutlass.Int64
                 dS_cluster_full_mbar_ptr: cutlass.Int64
                 dS_cluster_leader_mbar_ptr: cutlass.Int64
-                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 3]
+                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 9]
                 dQaccum_empty_mbar_ptr: cutlass.Int64
 
                 sQ: cute.struct.Align[
@@ -1681,6 +1758,12 @@ class DMBackwardSm100:
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 1, 1)
                 # DM pers: [2] = this CTA's dK/dV epilogue has drained sK/sV (sdK/sdV alias them): next tile may load K/V
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 2, 1)
+                # DM pdyn: [3, 4] tile-slot full (1 arrival + 4 tx on the peer), [5, 6] empty (every role warp of both
+                # CTAs, arrived on the leader's copy), [7, 8] the claimed cluster tile index (low word)
+                cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 3, 1)
+                cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 4, 1)
+                cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 5, 2 * (len(self.reduce_warp_ids) + len(self.compute_warp_ids) + 3))
+                cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 6, 2 * (len(self.reduce_warp_ids) + len(self.compute_warp_ids) + 3))
 
         if const_expr(self.cluster_reduce_dQ):
             if warp_idx == 4:
@@ -1980,7 +2063,11 @@ class DMBackwardSm100:
             tile_m=self.tile_m,
             tile_n=self.cluster_tile_n,
         )
-        TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
+        if const_expr(self.dm_pdyn):
+            dm_sbase = storage.dm_xchg_mbar.data_ptr().toint()
+            TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params, dm_sbase)
+        else:
+            TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
 
         AttentionMaskCls = self._generate_attention_mask_cls(window_size_left, window_size_right)
         self.dm_kvfree_mbar = storage.dm_xchg_mbar.data_ptr() + 2
@@ -1991,6 +2078,8 @@ class DMBackwardSm100:
         # (15)
         if warp_idx == self.empty_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_empty)
+            if const_expr(self.dm_pdyn):
+                self._dm_claim_loop(tile_sched_params, dm_sbase, aux_data.tensors[-1].iterator.toint())
 
         #  RELAY
         # (14)
@@ -2116,7 +2205,7 @@ class DMBackwardSm100:
                 TileSchedulerCls,
                 is_leader_cta,
                 blocksparse_tensors,
-                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts) else None,
+                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts and ("trace" in self.dm_opts or "prog" in self.dm_opts)) else None,
             )
             # Dealloc the tensor memory buffer
             tmem.relinquish_alloc_permit()
@@ -2175,7 +2264,7 @@ class DMBackwardSm100:
                 fastdiv_mods,
                 blocksparse_tensors,
                 sDm=sDm,
-                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts) else None,
+                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts and ("trace" in self.dm_opts or "prog" in self.dm_opts)) else None,
                 dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.use_2cta_instrs) else None,
             )
             tmem_alloc_barrier.arrive()
@@ -3906,6 +3995,33 @@ class DMBackwardSm100:
             return sdS_xchg
         assert sdS_dK is not None
         return sdS_dK[None, None, (None, peer_cta_rank_in_cluster)]
+
+    @cute.jit
+    def _dm_claim_loop(self, params, sbase: Int32, counter: cutlass.Int64):
+        """DM pdyn producer (empty warp, lane 0). Leader CTA: claim cluster tiles with a global atomic, publish each to
+        both CTAs' slot k % 2; the claim that is past the end is published too (terminates every role). Peer CTA:
+        arm its own full barrier per slot (4 tx bytes come from the leader's st.async) until the end marker."""
+        n_cl = params.total_blocks // params.cluster_shape_mn[0]
+        rank = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
+        if cute.arch.lane_idx() == 0:
+            k = Int32(0)
+            go = Int32(1)
+            while go > 0:
+                s = k & 1
+                if rank == 0:
+                    if k >= 2:
+                        dm_utils.mbar_wait_parity_cluster(sbase + 8 * 5 + 8 * s, ((k >> 1) - 1) & 1)
+                    t = dm_utils.atom_add_global_u32(counter, Int32(1))
+                    dm_utils.st_shared_b32(sbase + 8 * 7 + 8 * s, t)
+                    dm_utils.mbar_arrive_local(sbase + 8 * 3 + 8 * s)
+                    dm_utils.st_async_peer_b32(sbase + 8 * 7 + 8 * s, sbase + 8 * 3 + 8 * s, Int32(1), t)
+                    go = Int32(t < n_cl)
+                else:
+                    dm_utils.mbar_arrive_expect_tx(sbase + 8 * 3 + 8 * s, 4)
+                    dm_utils.mbar_wait_parity(sbase + 8 * 3 + 8 * s, (k >> 1) & 1)
+                    t = dm_utils.ld_shared_b32(sbase + 8 * 7 + 8 * s)
+                    go = Int32(t < n_cl)
+                k = k + 1
 
     @cute.jit
     def _dm_prog(self, slot: Int32, tile: Int32, it: Int32, step: Int32):

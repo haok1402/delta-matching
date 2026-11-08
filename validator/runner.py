@@ -14,7 +14,15 @@ import os
 import sys
 import traceback
 
+import time as _time
 import torch
+
+
+def _trace(msg):
+    path = os.environ.get("DMVAL_TRACE")       # a file path: append "HH:MM:SS.mmm <file> <event>" lines
+    if path:
+        with open(path, "a") as f:
+            f.write(f"{_time.strftime('%H:%M:%S')}.{int(_time.time() * 1000) % 1000:03d} {os.path.basename(__file__)} {msg}\n")
 
 FORBIDDEN = ("delta_matching.reference", "validator", "reference")
 
@@ -51,16 +59,30 @@ FWD_ONLY = False
 POISON_BYTES = int(os.environ.get("DMVAL_POISON_GB", "8")) << 30
 
 
+POISON_MODE = ["none"]
+BIG_CASE = 2 ** 31            # B * H * N^2 above which a case takes the GPU exclusively
+
+
 def poison():
-    """Fill the caching allocator's free memory with 0xFF (e4m3 / bf16 / fp32 NaN patterns) so that an out-of-bounds read
-    in the candidate (e.g. a scale index past the end) returns NaN deterministically instead of whatever happened to be
-    there.  The block stays in the allocator cache, so the candidate's own allocations are carved from poisoned memory."""
+    """Set the caching allocator's free memory (large and small pools) to a pattern before a candidate call, so that
+    out-of-bounds reads see different garbage on different calls of a stress run: "none" (whatever is there), "ff" (0xFF:
+    e4m3 / bf16 / fp32 NaN patterns), "zero", "rand".  One fixed pattern can HIDE an OOB bug (0xFF hid one), so stress
+    runs cycle all of them and require every call finite and bitwise equal."""
+    mode = POISON_MODE[0]
+    if mode == "none":
+        return
     free, _ = torch.cuda.mem_get_info()
     n = min(POISON_BYTES, max(0, free - (8 << 30)))
-    if n > 0:
-        x = torch.empty(n, dtype=torch.uint8, device="cuda")
-        x.fill_(0xFF)
-        del x
+    bufs = [torch.empty(n, dtype=torch.uint8, device="cuda")] if n > 0 else []
+    bufs += [torch.empty(1 << 20, dtype=torch.uint8, device="cuda") for _ in range(256)]   # small-pool segments
+    for x in bufs:
+        if mode == "ff":
+            x.fill_(0xFF)
+        elif mode == "zero":
+            x.zero_()
+        else:
+            x.random_(0, 256)
+    del bufs
 
 
 def fwd_bwd(fn, q, k, v, do, causal, mode):
@@ -96,7 +118,16 @@ def fwd_bwd_views(fn, q, k, v, do, causal, mode):
     return [o.detach().clone(), g[:, :, :H].clone(), g[:, :, H:H + Hk].clone(), g[:, :, H + Hk:].clone()]
 
 
+def _hook(name):
+    try:
+        import gpupool_hook
+        getattr(gpupool_hook, name)()
+    except ImportError:
+        pass
+
+
 def main():
+    _hook("gpupool_done")                   # startup (imports, candidate import, kernel-cache loads) is CPU work
     spec, job_path, out_path = sys.argv[1:4]
     job = torch.load(job_path, weights_only=False)
     global FWD_ONLY
@@ -115,28 +146,45 @@ def main():
     leaked = [m for m in sys.modules if any(m == f or m.startswith(f + ".") for f in FORBIDDEN)]
     res["meta"]["leaked_modules"] = leaked
     case_files = job.get("case_files", [])
-    try:                                    # gpupool late stop: make sure the filler is gone before the candidate runs
-        from gpupool_hook import gpupool_ready
-        gpupool_ready()
-    except ImportError:
-        pass
     def hook(name):
+        _trace(name)
         try:
             import gpupool_hook
             getattr(gpupool_hook, name)()
         except ImportError:
             pass
-    for cf in case_files:
-        hook("gpupool_done")                # reading the case from disk is CPU work: let the filler run meanwhile
-        case = torch.load(cf, weights_only=False)
-        hook("gpupool_ready")
-        r = run_case(mod, fn, case, dev)
-        hook("gpupool_done")
+    # one GPU phase for all cases: case files are read ahead and outputs written behind in threads (/dev/shm), so the
+    # GPU never waits on file I/O and the filler is not toggled for sub-second CPU windows (it cannot restart that fast)
+    from concurrent.futures import ThreadPoolExecutor
+    io = ThreadPoolExecutor(max_workers=2)
+    loads = [io.submit(torch.load, cf, weights_only=False) for cf in case_files[:2]]
+    saves = []
+
+    def save(r, cf):
+        r["runs"] = {kk: [None if t is None else t for t in vv] for kk, vv in r["runs"].items()}
         torch.save(r, cf + ".out")
         os.remove(cf)
+    # no gpupool_ready(): validation is not timed, so the candidate shares the GPU with the gpupool filler for the whole
+    # run (the GPU is never idle while this process waits on I/O, kernel-cache loads or Python)
+    for i, cf in enumerate(case_files):
+        case = loads[i].result()
+        if i + 2 < len(case_files):
+            loads.append(io.submit(torch.load, case_files[i + 2], weights_only=False))
+        _trace("case start " + case["name"])
+        r = run_case(mod, fn, case, dev)
+        # device-to-host copies here (fast, pinned-free but ~GB/s x10); the file write happens in the I/O thread
+        r["runs"] = {kk: [None if t is None else t.cpu() for t in vv] for kk, vv in r["runs"].items()}
+        _trace("case end " + case["name"])
+        saves.append(io.submit(save, r, cf))
+        del case
         torch.cuda.empty_cache()
+    hook("gpupool_done")
+    for f in saves:
+        f.result()
+    io.shutdown()
     leaked = [m for m in sys.modules if any(m == f or m.startswith(f + ".") for f in FORBIDDEN)]
     res["meta"]["leaked_modules"] = sorted(set(res["meta"]["leaked_modules"]) | set(leaked))
+    _hook("gpupool_done")
     torch.save(res, out_path)
 
 
@@ -152,13 +200,16 @@ def run_case(mod, fn, case, dev):
                 elif kind.startswith("stress"):
                     # repeated calls on the same inputs: every call finite and bitwise equal to the first (races)
                     n = int(kind.split(":")[1])
+                    POISON_MODE[0] = "none"
                     out = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
                     nonfin = mism = 0
-                    for _ in range(n - 1):
+                    for it in range(n - 1):
+                        POISON_MODE[0] = ("ff", "zero", "rand", "none")[it % 4]
                         o2 = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
                         nonfin += any(t is not None and not torch.isfinite(t).all() for t in o2)
                         mism += any(t is not None and not torch.equal(t, t0) for t, t0 in zip(o2, out))
                         del o2
+                    POISON_MODE[0] = "none"
                     nonfin += any(t is not None and not torch.isfinite(t).all() for t in out)
                     r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin,
                                                                  "mismatch_calls": mism}
@@ -171,7 +222,7 @@ def run_case(mod, fn, case, dev):
                     out = fwd_bwd(fn, *bufs, do, case["causal"], mode)
                 else:
                     out = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
-                r["runs"]["%s/%s" % run] = [None if t is None else t.cpu() for t in out]
+                r["runs"]["%s/%s" % run] = [None if t is None else t.detach() for t in out]     # host copy after done()
             dbg = getattr(mod, "debug", None)
             if dbg is not None and ("matched", "plain") in [tuple(x) for x in case["runs"]]:
                 d = dbg(q, k, v, do, case["causal"], "matched")
@@ -183,3 +234,4 @@ def run_case(mod, fn, case, dev):
 
 if __name__ == "__main__":
     main()
+

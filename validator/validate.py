@@ -25,9 +25,19 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import zlib
 import time
+import zlib
 
+import time as _time
 import torch
+
+
+def _trace(msg):
+    path = os.environ.get("DMVAL_TRACE")       # a file path: append "HH:MM:SS.mmm <file> <event>" lines
+    if path:
+        with open(path, "a") as f:
+            f.write(f"{_time.strftime('%H:%M:%S')}.{int(_time.time() * 1000) % 1000:03d} {os.path.basename(__file__)} {msg}\n")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REF_PATH = os.path.join(os.path.dirname(HERE), "delta_matching", "reference.py")
@@ -97,6 +107,7 @@ def colsum_metric(dk, causal):
 # ------------------------------------------------------------------------------------------------------------ inputs
 def _hook(name):
     """gpupool late-stop hooks (no-ops outside gpupool)."""
+    _trace(name)
     try:
         import gpupool_hook
         getattr(gpupool_hook, name)()
@@ -144,6 +155,49 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
 
 
 FWD_ONLY = False
+CACHE = os.environ.get("DMVAL_CACHE", "1") == "1"
+CACHED_TIERS = ("full", "bench")
+CACHE_ROOT = os.environ.get("DMVAL_CACHE_DIR", os.path.expanduser("~/workspace/haok1402/sm100/validate/refcache"))
+
+
+def _ref_hash():
+    """Identity of everything that determines the cached reference outputs: reference.py, the input generator, this
+    file's case builder (shapes, kinds, seeds).  Any edit invalidates the cache."""
+    import hashlib
+    import inspect
+    h = hashlib.sha256(open(REF_PATH, "rb").read())
+    h.update(inspect.getsource(make_inputs).encode())
+    h.update(inspect.getsource(build_cases).encode())
+    return h.hexdigest()[:16]
+
+
+def _cache_path(case, preset):
+    return os.path.join(CACHE_ROOT, _ref_hash(), preset, f"{case['name']}_s{case['seed']}.pt")
+
+
+def cached_refs(case, preset, q, k, v, do, exact, qbk, dev):
+    """Candidate-independent reference outputs of one case: exact attention, the matched-mode emulation (with aux) and the
+    bf16-emulation fingerprints of both modes (their stale arm reads the emulation's own O).  Computed once per
+    (reference hash, preset, case, seed) and reused by every later candidate; the candidate-dependent ones (stale
+    emulation on the candidate's O, the debug-hook emulation) are always computed live."""
+    causal = case["causal"]
+    path = _cache_path(case, preset) if (CACHE and case.get("cached")) else None
+    if path and os.path.exists(path):
+        d = torch.load(path, weights_only=False)
+        return {kk: {n: (t.to(dev) if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in d.items()}
+    keep = ("O", "LSE", "dQ", "dK", "dV", "delta", "rowsum_dS", "colsum_dK")
+    out = {"ex": exact(q, k, v, do, causal)}
+    if causal or case.get("matched_ok"):
+        em = R.dm_reference(q, k, v, do, causal, "matched", preset, aux=True, q_block=qbk)
+        out["em_matched"] = {n: em[n] for n in keep if n in em}
+        out["eb_matched"] = R.dm_reference(q, k, v, do, causal, "matched", "bf16", q_block=qbk)
+    out["eb_stale"] = R.dm_reference(q, k, v, do, causal, "stale", "bf16", q_block=qbk)
+    if path:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmpf = path + f".tmp{os.getpid()}"
+        torch.save({kk: {n: (t.cpu() if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in out.items()}, tmpf)
+        os.replace(tmpf, path)
+    return out
 
 
 def build_cases(tier, supports, seed):
@@ -179,8 +233,12 @@ def build_cases(tier, supports, seed):
         if nc:
             shapes += [(1, 8, 2, up(2048), False, adv[:5]), (1, 16, 4, up(8192), False, base_kinds)]
     # stress: repeated calls on large MHA shapes (many CTAs in flight) catch races that a single call misses
-    stress_n = 4 if tier == "quick" else 8
-    shapes += [(1, 16, 16, up(4096), True, ["stress"])]
+    stress_n = 8
+    shapes += [(1, 16, 16, up(4096), True, ["stress"]),
+               # odd numbers of 128-row blocks, with the allocator state cycled between calls (out-of-bounds reads)
+               (1, 4, 4, up(1152), True, ["stress"]), (1, 4, 1, up(384), True, ["stress"]), (1, 8, 2, up(1408), True, ["stress"])]
+    if nc:
+        shapes += [(1, 4, 4, up(1152), False, ["stress"])]
     if tier != "quick":
         shapes += [(1, 16, 16, up(8192), True, ["stress"]), (1, 4, 4, up(4096), True, ["stress"])]
         if nc:
@@ -205,8 +263,10 @@ def build_cases(tier, supports, seed):
                 runs += [(modes[0], "mutate")]
             if kind == "stress":
                 runs = [(md, f"stress:{stress_n}") for md in modes]
-            cases.append(dict(name=name, B=B, H=H, Hk=Hk, N=N, causal=causal, kind=kind, runs=runs,
-                              seed=seed * 1000003 + len(cases)))
+            # full / bench: a fixed seed per case name, so the reference outputs can be cached and reused across candidates;
+            # quick: fresh random inputs on every run (no candidate can be tuned to fixed inputs without failing quick)
+            cseed = (zlib.crc32(name.encode()) & 0x7FFFFFFF) if (tier in CACHED_TIERS and CACHE) else seed * 1000003 + len(cases)
+            cases.append(dict(name=name, B=B, H=H, Hk=Hk, N=N, causal=causal, kind=kind, runs=runs, seed=cseed))
     return cases
 
 
@@ -241,7 +301,9 @@ def check_case(case, cr, preset, dev, verbose):
     exact_dtype = torch.float64 if B * H * N * N <= 2 ** 28 else torch.float32
     exact = (lambda *a: R.attention_fp32(*a, dtype=exact_dtype)) if B * H * N * N <= 2 ** 31 else \
         (lambda *a: R.attention_exact_blocked(*a, q_block=max(128, min(1024, 2 ** 31 // (B * H * N) // 128 * 128))))
-    ex = exact(q, k, v, do, causal)
+    qbk0 = max(128, min(1024, 2 ** 31 // (B * H * N) // 128 * 128))
+    refs = cached_refs(case, preset, q, k, v, do, exact, qbk0, dev)
+    ex = refs["ex"]
     runs = {k_: [t.to(dev) if t is not None else None for t in v_] for k_, v_ in cr["runs"].items()}
     modes = sorted({k_.split("/")[0] for k_ in runs})
     shapes = (q.shape, q.shape, k.shape, k.shape)
@@ -261,8 +323,11 @@ def check_case(case, cr, preset, dev, verbose):
     for mode in modes:
         cand = runs[f"{mode}/plain"]
         qbk = max(128, min(1024, 2 ** 31 // (B * H * N) // 128 * 128))
-        em = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, o_for_stale=cand[0], q_block=qbk)
-        eb = R.dm_reference(q, k, v, do, causal, mode, "bf16", o_for_stale=cand[0], q_block=qbk)
+        if mode == "matched" and "em_matched" in refs:
+            em = refs["em_matched"]          # matched emulation does not depend on the candidate: cached
+        else:                                # stale: the emulated delta reads the candidate's own O (live)
+            em = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, o_for_stale=cand[0], q_block=qbk)
+        eb = refs.get("eb_" + mode) or R.dm_reference(q, k, v, do, causal, mode, "bf16", q_block=qbk)
         emul_bf16[mode] = eb
         degenerate = False
         for nm, c in zip(names, cand):
@@ -368,6 +433,7 @@ def main():
     ap.add_argument("--json", default=None)
     ap.add_argument("--only", default=None, help="substring filter on case names")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--shard", default=None, help="i/n: run every n-th case starting at i (split a tier across GPUs)")
     ap.add_argument("--fwd-only", action="store_true", help="validate the forward (O) only; never a promotion PASS")
     a = ap.parse_args()
     global FWD_ONLY
@@ -377,10 +443,14 @@ def main():
         a.candidate = os.path.abspath(tgt) + sep + fn_
     dev = torch.device(a.device)
     torch.cuda.set_device(dev)
+    _hook("gpupool_done")                  # everything up to the first GPU phase is CPU work
     seed = a.seed if a.seed is not None else secrets.randbits(31)
     t0 = time.time()
     # one probe run to learn NUMERICS / SUPPORTS (no inputs)
-    tmp = tempfile.mkdtemp(prefix="dmval_", dir=os.environ.get("DMVAL_TMP", None))
+    # case files go through node-local RAM (/dev/shm): Lustre reads / writes of GB-sized outputs were the main idle gaps
+    tmpdir = os.environ.get("DMVAL_TMP") or ("/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK)
+                                             else None)
+    tmp = tempfile.mkdtemp(prefix="dmval_", dir=tmpdir)
     probe_job, probe_out = os.path.join(tmp, "probe.pt"), os.path.join(tmp, "probe_out.pt")
     meta = _static_meta(a.candidate)          # NUMERICS / SUPPORTS as literals: no extra process on the reserved GPU
     if meta is None:
@@ -395,6 +465,12 @@ def main():
     cases = build_cases(a.tier, supports, seed)
     if a.only:
         cases = [c for c in cases if a.only in c["name"]]
+    if a.shard:
+        si, sn = (int(x) for x in a.shard.split("/"))
+        cases = cases[si::sn]
+    for c in cases:
+        c["cached"] = a.tier in CACHED_TIERS and CACHE
+        c["matched_ok"] = bool(supports.get("matched_noncausal"))
     print(f"validator: candidate {a.candidate}  preset {preset}  tier {a.tier}  seed {seed}  {len(cases)} cases  "
           f"supports {supports}", flush=True)
     results, all_ok = [], True
@@ -422,18 +498,36 @@ def main():
     if "fatal" in out:
         print("FAIL: " + out["fatal"]); sys.exit(1)
     leaked |= set(out["meta"].get("leaked_modules", []))
-    for i, case in enumerate(cases):
+    # one GPU phase for all checks: the next case's outputs and inputs are prepared (file read, CPU input generation)
+    # in a thread while the current case is checked on the GPU
+    from concurrent.futures import ThreadPoolExecutor
+
+    def prep(i):
+        case = cases[i]
         full = torch.load(files[i] + ".out", weights_only=False) if os.path.exists(files[i] + ".out") else \
             {"name": case["name"], "error": "the runner produced no output for this case"}
         gen = torch.Generator(device=cpu).manual_seed(case["seed"])
         ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
+        ins2 = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"], gen, cpu)[:3] \
+            if any(r[1] == "mutate" for r in case["runs"]) else None
+        return full, ins, ins2
+    pool = ThreadPoolExecutor(max_workers=1)
+    fut = pool.submit(prep, 0) if cases else None
+    # no gpupool_ready(): the checks are not timed and share the GPU with the gpupool filler (see runner.py)
+    for i, case in enumerate(cases):
+        full, ins, ins2 = fut.result()
+        if i + 1 < len(cases):
+            fut = pool.submit(prep, i + 1)
         case["q"], case["k"], case["v"], case["do"] = (x.to(dev) for x in ins)
-        if any(r[1] == "mutate" for r in case["runs"]):
-            ins2 = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
-            case["q2"], case["k2"], case["v2"] = (x.to(dev) for x in ins2[:3])
-        _hook("gpupool_ready")             # reference emulation + checks run on the GPU
+        if ins2 is not None:
+            case["q2"], case["k2"], case["v2"] = (x.to(dev) for x in ins2)
+        if "runs" in full:
+            full["runs"] = {kk: [None if t is None else t.to(dev) for t in vv] for kk, vv in full["runs"].items()}
+        if full.get("debug"):
+            full["debug"] = {kk: vv.to(dev) for kk, vv in full["debug"].items()}
+        _trace("check start " + case["name"])
         ok, rec = check_case(case, full, preset, dev, a.verbose)
-        _hook("gpupool_done")              # loading the next case's outputs is CPU / file work
+        _trace("check end " + case["name"])
         all_ok &= ok
         results.append(rec)
         _print_case(rec, ok)
@@ -441,12 +535,16 @@ def main():
             case.pop(kk, None)
         if os.path.exists(files[i] + ".out"):
             os.remove(files[i] + ".out")
+        del full
         torch.cuda.empty_cache()
+    pool.shutdown()
     try:                                    # GPU part done: let the gpupool filler resume while the report is written
         from gpupool_hook import gpupool_done
         gpupool_done()
     except ImportError:
         pass
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
     if leaked and not os.environ.get("DMVAL_SELFTEST"):
         all_ok = False
         print(f"FAIL: the candidate imported the reference / validator: {sorted(leaked)}")
@@ -541,3 +639,4 @@ def _print_case(rec, ok):
 
 if __name__ == "__main__":
     main()
+

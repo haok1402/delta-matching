@@ -1294,7 +1294,7 @@ class DMBackwardSm100:
                 dS_cluster_empty_mbar_ptr: cutlass.Int64
                 dS_cluster_full_mbar_ptr: cutlass.Int64
                 dS_cluster_leader_mbar_ptr: cutlass.Int64
-                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 2]
+                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 3]
                 dQaccum_empty_mbar_ptr: cutlass.Int64
 
                 sQ: cute.struct.Align[
@@ -1669,6 +1669,8 @@ class DMBackwardSm100:
                 # DM: dQ scale-factor word exchange with the peer CTA (one per tile parity)
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr(), 1)
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 1, 1)
+                # DM pers: [2] = this CTA's dK/dV epilogue has drained sK/sV (sdK/sdV alias them): next tile may load K/V
+                cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 2, 1)
 
         if const_expr(self.cluster_reduce_dQ):
             if warp_idx == 4:
@@ -1971,6 +1973,10 @@ class DMBackwardSm100:
         TileSchedulerCls = partial(self.tile_scheduler_cls.create, tile_sched_params)
 
         AttentionMaskCls = self._generate_attention_mask_cls(window_size_left, window_size_right)
+        self.dm_kvfree_mbar = storage.dm_xchg_mbar.data_ptr() + 2
+        self.dm_prog_addr = None
+        if const_expr("prog" in self.dm_opts):
+            self.dm_prog_addr = aux_data.tensors[4].iterator.toint() + 2048
         #  EMPTY
         # (15)
         if warp_idx == self.empty_warp_id:
@@ -2205,7 +2211,9 @@ class DMBackwardSm100:
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
+        dm_pt = Int32(0)
         while work_tile.is_valid_tile:
+            self._dm_prog(Int32(0), dm_pt, Int32(0), Int32(1))
             _, kv_block, head_idx, _, batch_idx, _, m_block_min, m_block_max, process_tile = (
                 self._work_tile(work_tile, cta_rank_in_cluster, SeqlenInfoCls, block_info)
             )
@@ -2234,6 +2242,8 @@ class DMBackwardSm100:
                     dS_cluster_phase ^= 1
 
             tile_scheduler.prefetch_next_work()
+            self._dm_prog(Int32(0), dm_pt, Int32(0), Int32(15))
+            dm_pt = dm_pt + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
@@ -2353,7 +2363,15 @@ class DMBackwardSm100:
         kv_desc_batch_idx = Int32(-1)
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
+        dm_pt = Int32(0)
         while work_tile.is_valid_tile:
+            self._dm_prog(Int32(1), dm_pt, Int32(0), Int32(1))
+            if const_expr(self.dm_pers > 0):
+                if dm_pt > 0:
+                    # DM pers: previous tile's dK/dV epilogue (sdK/sdV alias sK/sV) has drained, and its MMAs are done
+                    # with sK/sV/sKt (the Kt release is committed after the last dQ MMA)
+                    cute.arch.mbarrier_wait(self.dm_kvfree_mbar, phase=(dm_pt - 1) & 1)
+                    pipeline_Kt.sync_object_empty.wait(producer_state_Kt.index, producer_state_Kt.phase)
             (
                 work_n,
                 kv_block,
@@ -2777,13 +2795,18 @@ class DMBackwardSm100:
                                 pipeline_Qt.producer_commit(producer_state_Qt)
                                 producer_state_Qt.advance()
 
-                            pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
-                            pipeline_LSE.producer_tail(producer_state_Q_LSE)
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_LSE.producer_tail(producer_state_Q_LSE)
                             if const_expr(load_Qt is not None):
-                                pipeline_Qt.producer_tail(producer_state_Qt)
+                                if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                    pipeline_Qt.producer_tail(producer_state_Qt)
                         if const_expr(should_load_dO):
-                            pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
-                            pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
 
             else:
                 assert blocksparse_tensors is not None
@@ -2870,6 +2893,8 @@ class DMBackwardSm100:
                         tma_copy_bytes_dO=self.tma_copy_bytes["dO"],
                     )
             tile_scheduler.prefetch_next_work()
+            self._dm_prog(Int32(1), dm_pt, Int32(0), Int32(15))
+            dm_pt = dm_pt + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
@@ -3071,7 +3096,9 @@ class DMBackwardSm100:
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
+        dm_pt = Int32(0)
         while work_tile.is_valid_tile:
+            self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(1))
             _, kv_block, head_idx, _, batch_idx, _, m_block_min, m_block_max, process_tile = (
                 self._work_tile(work_tile, cta_rank_in_cluster, SeqlenInfoCls, block_info)
             )
@@ -3168,6 +3195,10 @@ class DMBackwardSm100:
                     producer_phase_dKV ^= 1
             elif const_expr(self.use_2cta_instrs):
                 if is_leader_cta and process_tile:
+                    if const_expr(self.dm_pers > 0):
+                        # DM pers: acc parity flips M + 1 times per tile but the S/P and dP empty barriers complete
+                        # M times, so restart each tile from the running base (see dm_ph_base)
+                        producer_phase_acc = dm_ph_base
                     accumulate_dK = False
                     # -----------------------------------------------------------
                     ###### Prologue
@@ -3178,7 +3209,9 @@ class DMBackwardSm100:
 
                     # 1) S = K @ Q
                     pipeline_Q.consumer_wait(consumer_state_Q)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(3))
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(4))
                     mma_qk_fn(B_idx=consumer_state_Q.index)
                     pipeline_S_P.sync_object_full.arrive(0, pipeline_S_P.producer_mask, cta_group)
                     pipeline_Q.consumer_release(consumer_state_Q)
@@ -3186,18 +3219,22 @@ class DMBackwardSm100:
 
                     # 2) dP = V @ dOt.T
                     pipeline_dO.consumer_wait(consumer_state_dO)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(5))
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(6))
                     mma_dov_fn(B_idx=consumer_state_dO.index)
                     pipeline_dP.sync_object_full.arrive(0, pipeline_dP.producer_mask, cta_group)
 
                     # 3) dV = P.T @ dO
                     producer_phase_acc ^= 1
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(7))
                     mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
                     pipeline_dO.consumer_release(consumer_state_dO)
                     consumer_state_dO.advance()
 
                     pipeline_Kt.consumer_wait(consumer_state_Kt)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(8))
                     # -----------------------------------------------------------
                     ###### MAIN LOOP
                     # -----------------------------------------------------------
@@ -3217,7 +3254,8 @@ class DMBackwardSm100:
                         dm_acc0, dm_acc1, dm_acc2, dm_acc3 = Int64(0), Int64(0), Int64(0), Int64(0)
                         dm_acc4, dm_acc5, dm_acc6, dm_acc7 = Int64(0), Int64(0), Int64(0), Int64(0)
                         dm_tl0 = dm_utils.clock64()
-                    for _ in cutlass.range(main_loop_iters, unroll=1):
+                    for dm_mi in cutlass.range(main_loop_iters, unroll=1):
+                        self._dm_prog(Int32(2), dm_pt, dm_mi, Int32(2))
                         # (1) S.T = K @ Q.T (next)
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
@@ -3297,12 +3335,15 @@ class DMBackwardSm100:
                             dm_base = dm_trace.iterator.toint()
                             for k_, a_ in enumerate((dm_acc0, dm_acc1, dm_acc2, dm_acc3, dm_acc4, dm_acc5, dm_acc6, dm_acc7, dm_tot, Int64(main_loop_iters))):
                                 dm_utils.red_add_u64(dm_base + 8 * k_, a_)
-                    pipeline_S_P.sync_object_full.arrive(0, pipeline_S_P.producer_mask, cta_group)
+                    if const_expr(self.dm_pers == 0):
+                        pipeline_S_P.sync_object_full.arrive(0, pipeline_S_P.producer_mask, cta_group)  # unmatched by the compute warps (harmless with one tile per CTA)
 
                     # signal to the epilogue that dV is ready
                     pipeline_dKV.sync_object_empty.wait(0, producer_phase_dKV)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(9))
                     pipeline_dKV.sync_object_full.arrive(0, pipeline_dKV.producer_mask, cta_group)
                     pipeline_dKV.sync_object_empty.wait(1, producer_phase_dKV)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(14))
 
                     # -----------------------------------------------------------
                     # Tail: Remaining dK and dQ
@@ -3311,6 +3352,7 @@ class DMBackwardSm100:
                     # dK += dS.T @ Q
                     pipeline_Qt.consumer_wait(consumer_state_Qt)
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)  # dP -> dS
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(10))
                     mma_dsq_fn(B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK)
                     pipeline_Qt.consumer_release(consumer_state_Qt)
                     consumer_state_Qt.advance()
@@ -3320,8 +3362,11 @@ class DMBackwardSm100:
 
                     # dQ = dS @ K
                     pipeline_dS.consumer_wait(consumer_state_dS)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(11))
                     cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(12))
                     pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(13))
                     mma_dsk_fn()
                     pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
                     pipeline_dS.consumer_release(consumer_state_dS)
@@ -3332,6 +3377,8 @@ class DMBackwardSm100:
                     producer_phase_dQ ^= 1
 
                     producer_phase_acc ^= 1
+                    if const_expr(self.dm_pers > 0):
+                        dm_ph_base = dm_ph_base ^ (block_iter_count & 1)
             else:
                 if is_leader_cta and process_tile:
                     if const_expr(self.dm_pers > 0):
@@ -3346,11 +3393,14 @@ class DMBackwardSm100:
                     # 3. dV   = P.T @ dO   (split_P_dS: issued in the main loop, after QK_1)
 
                     # 1) S.T = K @ Q.T
+                    self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(3))
                     handle_Q = pipeline_Q_consumer.wait_and_advance()
+                    self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(4))
                     if const_expr(self.split_P_dS):
                         pipeline_S_P.sync_object_empty.wait(0, producer_phase_S)
                     else:
                         pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+                    self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(5))
                     mma_qk_fn(B_idx=handle_Q.index)
                     pipeline_S_P.sync_object_full.arrive(0, pipeline_S_P.producer_mask, cta_group)
                     if const_expr(self.split_P_dS):
@@ -3358,8 +3408,11 @@ class DMBackwardSm100:
 
                     # 2) dP.T = V @ dO.T
                     pipeline_dO.consumer_wait(consumer_state_dO)
+                    self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(6))
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
+                    self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(7))
                     pipeline_dQ.sync_object_empty.wait(0, producer_phase_acc)
+                    self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(8))
                     mma_dov_fn(B_idx=consumer_state_dO.index)
                     pipeline_dP.sync_object_full.arrive(0, pipeline_dP.producer_mask, cta_group)
 
@@ -3367,6 +3420,7 @@ class DMBackwardSm100:
                     # 3) dV = P.T @ dO
                     if const_expr(not self.split_P_dS):
                         pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+                        self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(9))
                         mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
                         pipeline_dO.consumer_release(consumer_state_dO)
                         consumer_state_dO.advance()
@@ -3391,7 +3445,8 @@ class DMBackwardSm100:
                     )
 
                     handle_Q_next = handle_Q
-                    for _ in cutlass.range(main_loop_iters, unroll=1):
+                    for dm_mi in cutlass.range(main_loop_iters, unroll=1):
+                        self._dm_prog(Int32(2), dm_pt, dm_mi, Int32(2))
                         # (1) S.T = K @ Q.T
                         handle_Q_next = pipeline_Q_consumer.wait_and_advance()
                         if const_expr(self.split_P_dS):
@@ -3486,6 +3541,8 @@ class DMBackwardSm100:
                     producer_phase_acc ^= 1
                     if const_expr(self.dm_pers > 0):
                         dm_ph_base = dm_ph_base ^ ((m_block_max - m_block_min) & 1)
+            self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(15))
+            dm_pt = dm_pt + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
         # Currently it hangs if we have this S_P.producer_tail, will need to understand why
@@ -3530,6 +3587,17 @@ class DMBackwardSm100:
             return sdS_xchg
         assert sdS_dK is not None
         return sdS_dK[None, None, (None, peer_cta_rank_in_cluster)]
+
+    @cute.jit
+    def _dm_prog(self, slot: Int32, tile: Int32, it: Int32, step: Int32):
+        # DM prog (debug): latest (tile, iter, step) per role, zero-copy to host-mapped memory (hang localization)
+        if const_expr("prog" in self.dm_opts):
+            if cute.arch.lane_idx() == 0:
+                dm_utils.st_sys_u32(self.dm_prog_addr + 4 * (cute.arch.block_idx()[0] * 32 + slot),
+                                    (tile << 24) + (it << 8) + step)
+                if slot == 2:
+                    dm_utils.st_sys_u32(self.dm_prog_addr + 4 * (cute.arch.block_idx()[0] * 32 + 8 + step),
+                                        (tile << 24) + (it << 8) + step)
 
     @cute.jit
     def kv_head_of(self, head_idx):
@@ -3971,7 +4039,9 @@ class DMBackwardSm100:
             dm_s10, dm_s11, dm_s12, dm_s13 = Int32(0), Int32(0), Int32(0), Int32(0)
             dm_tprev = dm_utils.clock32()
             dm_tl0 = dm_utils.globaltimer()
+        dm_pt = Int32(0)
         while work_tile.is_valid_tile:
+            self._dm_prog(Int32(3) + cute.arch.warp_idx() // 4 % 2, dm_pt, Int32(0), Int32(1))
             (
                 work_n,
                 kv_block,
@@ -4068,6 +4138,7 @@ class DMBackwardSm100:
             if const_expr("spf" in self.dm_opts):
                 dm_Spf = cute.make_rmem_tensor(tScS_t2r.shape, Float32)   # S(t+1) prefetched during dS(t)
             for iter_idx in cutlass.range(loop_count, unroll=1):
+                self._dm_prog(Int32(3) + cute.arch.warp_idx() // 4 % 2, dm_pt, iter_idx, Int32(2))
                 m_block = m_block_min + iter_idx
                 m_block_oob = False
                 is_full_block = False
@@ -4771,6 +4842,14 @@ class DMBackwardSm100:
                         mdK_semaphore,
                         "K",
                     )
+            if const_expr(self.dm_pers > 0):
+                # DM pers: every compute thread's bulk stores have finished READING sdK/sdV (= sK/sV), then one
+                # arrival per tile lets the load warp bring in the next tile's K/V
+                cute.arch.cp_async_bulk_commit_group()
+                cute.arch.cp_async_bulk_wait_group(0, read=True)
+                self.compute_sync_barrier.arrive_and_wait()
+                if dm_tid == 0:
+                    cute.arch.mbarrier_arrive(dm_xchg_mbar + 2)
             # Zero dK/dV for empty tiles (local attention or block sparsity)
             # When total_m_block_cnt == 0 for block sparsity, no Q tiles contribute to this KV tile
             if const_expr(not self.dKV_postprocess):
@@ -4826,6 +4905,8 @@ class DMBackwardSm100:
                                 for j in cutlass.range_constexpr(tdVgdV.shape[2]):
                                     cute.copy(gmem_tiled_copy_zero_dV, zero, tdVgdV[None, i, j])
 
+            self._dm_prog(Int32(3) + cute.arch.warp_idx() // 4 % 2, dm_pt, Int32(0), Int32(15))
+            dm_pt = dm_pt + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 
@@ -4940,7 +5021,9 @@ class DMBackwardSm100:
         dQ_tma_store_producer_state = pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, self.sdQaccum_stage
         )
+        dm_pt = Int32(0)
         while work_tile.is_valid_tile:
+            self._dm_prog(Int32(5), dm_pt, Int32(0), Int32(1))
             (
                 work_n,
                 kv_block,
@@ -5050,6 +5133,7 @@ class DMBackwardSm100:
             # Block sparsity: iterate over sparse m_block count and derive actual m_block
             # from Q_IDX/FULL_Q_IDX tensors. Dense: iterate m_block_min..m_block_max directly.
             for iter_idx in cutlass.range(loop_count, unroll=1):
+                self._dm_prog(Int32(5), dm_pt, iter_idx, Int32(2))
                 m_block = m_block_min + iter_idx
                 m_block_oob_upper = False
                 if const_expr(self.use_block_sparsity):
@@ -5236,6 +5320,8 @@ class DMBackwardSm100:
                         mdQ_semaphore_cur[(m_block, None)].iterator, tidx, cta_rank_in_cluster, 1
                     )
 
+            self._dm_prog(Int32(5), dm_pt, Int32(0), Int32(15))
+            dm_pt = dm_pt + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 

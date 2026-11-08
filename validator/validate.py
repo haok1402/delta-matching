@@ -502,6 +502,9 @@ def main():
     jp, op = os.path.join(tmp, "job.pt"), os.path.join(tmp, "out.pt")
     torch.save({"device": a.device, "case_files": files, "fwd_only": FWD_ONLY}, jp)
     out = _run_runner(a.candidate, jp, op)
+    # the pool keeps one done-owner per GPU: the runner's done() replaced ours and lapsed when it exited, which put the
+    # lease back into auto mode (filler stopped while this process holds a context) - re-assert it for the checks
+    _hook("gpupool_done")
     if "fatal" in out:
         print("FAIL: " + out["fatal"]); sys.exit(1)
     leaked |= set(out["meta"].get("leaked_modules", []))

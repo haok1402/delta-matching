@@ -179,6 +179,12 @@ def train(attn, data, a, dev):
         opt.step()
         if isinstance(attn, Shadow):
             attn.step = step + 1
+        if step % 100 == 0:   # the pool keeps one done-owner per GPU; packed sibling processes exiting can lapse it
+            try:
+                from gpupool_hook import gpupool_done
+                gpupool_done()
+            except ImportError:
+                pass
         losses.append(loss.item())
         if not math.isfinite(losses[-1]):
             break

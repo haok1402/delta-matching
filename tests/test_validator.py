@@ -20,7 +20,7 @@ def _run(cand, env_extra, only="B1_H8_Hk2_N1024_c_randn"):
     return p.returncode, p.stdout + p.stderr
 
 
-@pytest.mark.parametrize("preset", ["sm90", "mxfp8", "mxfp8-p"])
+@pytest.mark.parametrize("preset", ["sm90", "mxfp8", "mxfp8-p", "kda-v1"])
 def test_honest_emulation_passes(preset):
     rc, out = _run("emul.py", {"SELFTEST_PRESET": preset}, only=None if preset == "sm90" else "N1024")
     assert rc == 0 and "\nPASS" in out, out[-3000:]

@@ -93,6 +93,44 @@ def fake_mx(x: torch.Tensor, axis: int, block: int = 32, rounding: str = "ceil")
     return dq_mx(c, s, axis, block)
 
 
+def pow2_scale(amax: torch.Tensor) -> torch.Tensor:
+    """2^ceil(log2(amax / 448)) (no saturation, tightest power of two); amax == 0 -> 1."""
+    s = e8m0_scale(amax, "ceil")
+    return torch.where(amax > 0, s, torch.ones_like(s))
+
+
+def fake_blockrows_pow2(x: torch.Tensor, blk: int) -> torch.Tensor:
+    *lead, N, D = x.shape
+    xp = _pad_to(x, blk, 1)
+    xb = xp.reshape(*lead, xp.shape[-2] // blk, blk * D)
+    s = pow2_scale(xb.abs().amax(-1, keepdim=True))
+    return (e4m3_round(xb / s) * s).reshape(xp.shape)[..., :N, :]
+
+
+def fake_mx2d(x: torch.Tensor, r_: int, c_: int) -> torch.Tensor:
+    R_, C = x.shape[-2:]
+    xp = _pad_to(x, r_, c_)
+    Rp, Cp = xp.shape[-2:]
+    t = xp.reshape(*xp.shape[:-2], Rp // r_, r_, Cp // c_, c_)
+    s = pow2_scale(t.abs().amax(dim=(-3, -1), keepdim=True))
+    return (e4m3_round(t / s) * s).reshape(xp.shape)[..., :R_, :C]
+
+
+def kda_pfwd(P, ctx, blk=32):
+    """kda-sm100's forward P (sm100/kda/docs/draft.md): x = S log2(e); per (row, blk-key block) k = floor(max x);
+    code = e4m3(2^(x - k + 7)), value code * 2^(k - 7).  Independent of the running max (weights are exact powers of 2).
+    Returns P-hat in the units of P = exp(S - rowmax)."""
+    S = ctx.S
+    R_, C = S.shape[-2:]
+    x = _pad_to(S, 1, blk, float("-inf")) * LOG2E
+    xb = x.reshape(*x.shape[:-1], x.shape[-1] // blk, blk)
+    kk = torch.floor(xb.amax(-1, keepdim=True))
+    xm = (ctx.rowmax * LOG2E).unsqueeze(-1)                             # (..., R, 1, 1)
+    kk = torch.where(torch.isfinite(kk), kk, xm.expand_as(kk))          # blocks with no live key: codes are 0
+    ph = e4m3_round(torch.exp2(xb - kk + 7)) * torch.exp2(kk - 7 - xm)
+    return ph.reshape(x.shape)[..., :C]
+
+
 def fake_blockrows(x: torch.Tensor, blk: int, mul: bool = False) -> torch.Tensor:
     c, s = quant_blockrows(x, blk, mul)
     *lead, N, D = x.shape
@@ -125,6 +163,7 @@ class Preset:
     do2: str | None = None
     ds2: str | None = None
     center_k: bool = True        # K centered by its per-head mean before quantization (softmax-invariant)
+    delta_norm: bool = False     # matched delta = sum_j P dP / sum_j P (instead of sum_j P dP)
     mx_rounding: str = "ceil"
     notes: str = ""
 
@@ -159,6 +198,26 @@ _register(Preset("mxfp8-p", q="blockrows:128", k="blockrows:64", v="blockrows:64
                  p_fwd="mx:keys", p_bwd="mx:keys", ds="mx:keys",
                  notes="sm90 input quantizers; P (PV, dV) and dS (dK, dQ) MX e4m3 per row per 32 keys"))
 PRESETS["mxfp8-all"] = PRESETS["mxfp8"]
+
+
+def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,
+                    register=True):
+    """kda-sm100's sm100 numerics (sm100/kda/docs/draft.md "Numerics design"), with knobs:
+      tok_block   Q / K / V / dO: one scale per tok_block tokens over all D (pow2: 2^ceil(log2(amax/448)), else fp32 amax/448)
+      p_block     forward P: per (row, p_block keys) block exponent k = floor(max S log2e), code e4m3(2^(x-k+7))
+      pt_block    backward P^T for dV: pow2 scale per (key, pt_block queries)
+      ds_block    dS (one code set for dK and dQ): pow2 scale per (queries x keys) 2-D block
+      delta_norm  matched delta = sum P dP / sum P (True) or sum P dP (False, sm90 style)"""
+    inp = f"blockrows_pow2:{tok_block}" if pow2 else f"blockrows:{tok_block}"
+    pr = Preset(name, q=inp, k=inp, v=inp, do=inp, p_fwd=f"kda_pfwd:{p_block}", p_bwd=f"mx:queries:{pt_block}",
+                ds=f"mx2d:{ds_block[0]}x{ds_block[1]}", delta_norm=delta_norm,
+                notes=f"kda sm100 numerics: inputs {inp}, P fwd per row x {p_block} keys, P^T per key x {pt_block} "
+                      f"queries, dS {ds_block[0]}x{ds_block[1]} blocks, delta_norm={delta_norm}")
+    return _register(pr) if register else pr
+
+
+make_kda_preset("kda-v1")
+make_kda_preset("kda-v1-nonorm", delta_norm=False)
 _register(Preset("bf16", q="bf16", k="bf16", v="bf16", do="bf16", p_fwd="bf16", p_bwd="bf16", ds="bf16",
                  notes="no fp8 anywhere: bf16 operands, fp32 accumulation (the control a cheating candidate matches)"))
 _register(Preset("fp32", q="none", k="none", v="none", do="none", p_fwd="none", p_bwd="none", ds="none",
@@ -188,8 +247,16 @@ def _site(scheme: str, x: torch.Tensor, ctx: _Ctx, preset: Preset) -> torch.Tens
         return fake_blockrows(x, int(scheme.split(":")[1]), mul=True)
     if scheme.startswith("blockrows:"):
         return fake_blockrows(x, int(scheme.split(":")[1]))
-    if scheme.startswith("mx:"):
-        return fake_mx(x, _AXES[scheme.split(":")[1]], 32, preset.mx_rounding)
+    if scheme.startswith("mx:"):                 # "mx:<axis>[:<block>]"
+        parts = scheme.split(":")
+        return fake_mx(x, _AXES[parts[1]], int(parts[2]) if len(parts) > 2 else 32, preset.mx_rounding)
+    if scheme.startswith("blockrows_pow2:"):     # one 2^ceil(log2(amax/448)) scale per R rows over all D (amax 0 -> 1)
+        return fake_blockrows_pow2(x, int(scheme.split(":")[1]))
+    if scheme.startswith("mx2d:"):               # one 2^ceil(log2(amax/448)) scale per R x C block of a (rows, cols) tensor
+        r_, c_ = (int(t) for t in scheme.split(":")[1].split("x"))
+        return fake_mx2d(x, r_, c_)
+    if scheme.startswith("kda_pfwd:"):
+        return kda_pfwd(x, ctx, int(scheme.split(":")[1]))
     if scheme.startswith("e4m3"):          # plain e4m3 with a fixed power-of-two multiplier: "e4m3*256"
         mul = float(scheme.split("*")[1]) if "*" in scheme else 1.0
         return e4m3_round(x * mul) / mul
@@ -356,7 +423,10 @@ def _matched_delta(P, Pq, dP, p: Preset):
     fn = SITE_FNS.get(p.name + ":matched_delta")
     if fn is not None:
         return fn(P, Pq, dP, p)
-    return (P.double() * dP.double()).sum(-1, keepdim=True).float()
+    num = (P.double() * dP.double()).sum(-1, keepdim=True)
+    if p.delta_norm:
+        num = num / P.double().sum(-1, keepdim=True)
+    return num.float()
 
 
 def _ds_operand(P, Pq, p: Preset):

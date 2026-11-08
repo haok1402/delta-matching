@@ -33,7 +33,7 @@ _CLASSES = {}
 
 def _variant(exp_variant: str):
     if exp_variant not in _CLASSES:
-        _CLASSES[exp_variant] = type(f"DMPass0Sm100_{exp_variant}", (DMPass0Sm100,), {"dm_exp_variant": exp_variant})
+        _CLASSES[exp_variant] = type(f"DMPass0Sm100_{exp_variant.replace('+', '_F_')}", (DMPass0Sm100,), {"dm_exp_variant": exp_variant})
         c = _make_cache()
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
             c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / f"pass0_{exp_variant}")

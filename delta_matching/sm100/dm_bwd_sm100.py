@@ -4035,12 +4035,25 @@ class DMBackwardSm100:
 
                 #### APPLY MASK (after score_mod, matching forward pass order)
                 check_m_boundary = (m_block + 1) * self.tile_m > seqlen.seqlen_q
-                if const_expr("nomskip" not in self.dm_opts and self.is_causal and not self.is_local
-                              and self.mask_mod is None and not mask.swap_AB):
-                    # DM mskip (default; nomskip disables): per-thread causal offset (as in apply_mask_sm100_transposed); <= 0 means no
-                    # element of this thread's rows is above the diagonal -> skip the R2P/SEL mask
-                    dm_col_lim = mask.seqlen_k - work_n * mask.tile_n - tScS_t2r[0][1]
-                    dm_row_lim = mask.seqlen_q - m_block * mask.tile_m - tScS_t2r[0][0]
+                if const_expr("nomskipu" not in self.dm_opts and self.is_causal and not self.is_local
+                              and self.mask_mod is None and mask.qhead_per_kvhead_packgqa == 1):
+                    # DM mskipu (default; nomskipu disables): CTA-uniform test - every query of the tile is >= every key of the cluster
+                    if m_block * mask.tile_m < (work_n + 1) * mask.tile_n or check_m_boundary:
+                        mask_fn(
+                            tSrS_t2r,
+                            m_block=m_block,
+                            is_full_block=is_full_block,
+                            check_m_boundary=check_m_boundary,
+                        )
+                elif const_expr("mskip" in self.dm_opts and self.is_causal and not self.is_local
+                              and self.mask_mod is None and mask.qhead_per_kvhead_packgqa == 1):
+                    # DM mskip (opt-in; the dynamic branch makes causal ~8% SLOWER than always masking): per-thread causal offset (as in apply_mask_sm100_transposed); <= 0 means no
+                    # element of this thread's rows is above the diagonal -> skip the R2P/SEL mask.
+                    # ROW = query, COL = key coordinate (index 1/0 when swap_AB, as in the mask)
+                    dm_ROW = 0 if const_expr(not mask.swap_AB) else 1
+                    dm_COL = 1 - dm_ROW
+                    dm_col_lim = mask.seqlen_k - work_n * mask.tile_n - tScS_t2r[0][dm_COL]
+                    dm_row_lim = mask.seqlen_q - m_block * mask.tile_m - tScS_t2r[0][dm_ROW]
                     if dm_row_lim - dm_col_lim > 0 or dm_col_lim <= 0 or check_m_boundary:
                         mask_fn(
                             tSrS_t2r,
@@ -4261,6 +4274,14 @@ class DMBackwardSm100:
                 # dS.T = P.T * (dP.T - D)
                 # ---------------------------------------------
                 pipeline_dPsum.consumer_wait(consumer_state_dPsum)
+                # DM dpsearly: delta (dPsum) smem loads issued before the dP wait (LDS latency hidden by the wait)
+                dm_dps_all = [None] * num_stages
+                if const_expr("dpsearly" in self.dm_opts):
+                    dm_dps_all = [None] * num_stages
+                    for stage in cutlass.range_constexpr(num_stages):
+                        tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
+                        dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
+                        cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
                 pipeline_dP.consumer_wait(consumer_state_S_P_dP)
                 if const_expr(dm_tr is not None):
                     dm_now = dm_utils.clock32()
@@ -4273,11 +4294,12 @@ class DMBackwardSm100:
 
                 ##### DM: dS.T = P.T * (dP.T * (vs*dos) - delta), all stages first (tile-wide dS scale)
                 # delta (dPsum) smem loads for all stages issued before the TMEM dP loads (latency overlap)
-                dm_dps_all = [None] * num_stages
-                for stage in cutlass.range_constexpr(num_stages):
-                    tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
-                    dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
-                    cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
+                if const_expr("dpsearly" not in self.dm_opts):
+                    dm_dps_all = [None] * num_stages
+                    for stage in cutlass.range_constexpr(num_stages):
+                        tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
+                        dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
+                        cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
                 tdPrdP_all = [None] * num_stages
                 ds_amax = Float32(0.0)
                 for stage in cutlass.range_constexpr(num_stages):

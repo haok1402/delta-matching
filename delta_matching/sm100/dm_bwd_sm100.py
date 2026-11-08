@@ -418,6 +418,8 @@ class DMBackwardSm100:
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
         _p5 = next((x[3:] for x in self.dm_opts if x.startswith("p5=")), None)   # p5=freq:res
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
+        # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
+        self.dm_fws = "nofws" not in self.dm_opts
         _p3 = next((x[3:] for x in self.dm_opts if x.startswith("p3=")), None)   # p3=freq:res (deg-3)
         self.dm_p3 = tuple(int(t) for t in _p3.split(":")) if _p3 else None
         self.dm_sfa_dv_col = self.tmem_P_offset + self.tmem_cols_P            # 4 groups x 4 cols
@@ -4794,6 +4796,7 @@ class DMBackwardSm100:
                 # followed consumer_release, so the MMA warp could start the next dQ MMA during
                 # the poll; now the poll overlaps the current dQ MMA instead, which measured
                 # faster. This m_block's adds are only issued below, after the acquire.
+                dm_first = cutlass.Boolean(False)
                 if const_expr(self.deterministic):
                     if not m_block_oob_upper:
                         lock_value = self._dq_semaphore_lock_value(
@@ -4813,6 +4816,10 @@ class DMBackwardSm100:
                             cta_rank_in_cluster,
                             lock_value,
                         )
+                        if const_expr(self.dm_fws):
+                            # DM fws: the first writer in the deterministic order stores instead of adding, so
+                            # dq_accum needs no zero-fill (dense causal / non-causal: lock 0 always exists per m_block)
+                            dm_first = lock_value == 0
                 pipeline_dQ.consumer_wait(dQ_consumer_state)
                 # TMEM -> RMEM
                 tdQrdQ_t2r = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
@@ -4844,11 +4851,18 @@ class DMBackwardSm100:
                     # Copy from shared memory to global memory
                     if is_tma_warp and not m_block_oob_upper:
                         with cute.arch.elect_one():
-                            copy_utils.cpasync_reduce_bulk_add_f32(
-                                sdQaccum[None, smem_idx].iterator,
-                                gdQaccum_cur[None, stage + stage_offset].iterator,
-                                self.tma_copy_bytes["dQ"] // 1,
-                            )
+                            if dm_first:
+                                dm_utils.cpasync_bulk_store_s2g(
+                                    sdQaccum[None, smem_idx].iterator,
+                                    gdQaccum_cur[None, stage + stage_offset].iterator,
+                                    self.tma_copy_bytes["dQ"] // 1,
+                                )
+                            else:
+                                copy_utils.cpasync_reduce_bulk_add_f32(
+                                    sdQaccum[None, smem_idx].iterator,
+                                    gdQaccum_cur[None, stage + stage_offset].iterator,
+                                    self.tma_copy_bytes["dQ"] // 1,
+                                )
                         cute.arch.cp_async_bulk_commit_group()
                         cute.arch.cp_async_bulk_wait_group(self.sdQaccum_stage - 1, read=read_flag)
                     elif is_tma_warp:

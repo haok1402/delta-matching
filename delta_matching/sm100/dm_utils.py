@@ -411,3 +411,23 @@ def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
 def clock32(*, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %clock;", "=r",
                                  has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+# 2^f on [0, 1), fp32 Horner, degree 5: max rel error 1.7e-7 (= MUFU ex2.approx accuracy); fitted IRLS minimax
+POLY5_EX2 = (0.9999999403953552, 0.6931530833244324, 0.24015361070632935, 0.05582635849714279,
+             0.008989292196929455, 0.001877596601843834)
+
+
+@dsl_user_op
+def ex2_poly5_2(x: Float32, y: Float32, *, loc=None, ip=None):
+    """Accurate (1.7e-7 rel) 2^x for a pair on the FMA pipe (FA4's ex2_emulation_2 with a degree-5 polynomial).
+    Inputs are clamped at -126 (results ~2^-126 instead of 0 below that; negligible vs any row sum)."""
+    from flash_attn.cute import utils as fu
+    fp32_round_int = float(2**23 + 2**22)
+    # clamp at -126: c0 < 1 means 2^frac can be < 1, and floor(x) = -127 would wrap the exponent field
+    xy = (cute.arch.fmax(x, -126.0), cute.arch.fmax(y, -126.0))
+    r = cute.arch.add_packed_f32x2(xy, (fp32_round_int, fp32_round_int), rnd="rm")
+    rb = cute.arch.sub_packed_f32x2(r, (fp32_round_int, fp32_round_int))
+    fr = cute.arch.sub_packed_f32x2(xy, rb)
+    pe = fu.evaluate_polynomial_2(*fr, POLY5_EX2, loc=loc, ip=ip)
+    return fu.combine_int_frac_ex2(r[0], pe[0], loc=loc, ip=ip), fu.combine_int_frac_ex2(r[1], pe[1], loc=loc, ip=ip)

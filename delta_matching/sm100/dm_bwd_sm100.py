@@ -416,6 +416,8 @@ class DMBackwardSm100:
         # variant knobs for same-process A/B (bwd.py keys the compile cache on DM_BWD_OPTS)
         self.dm_opts = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
+        _p5 = next((x[3:] for x in self.dm_opts if x.startswith("p5=")), None)   # p5=freq:res
+        self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         self.dm_sfa_dv_col = self.tmem_P_offset + self.tmem_cols_P            # 4 groups x 4 cols
         self.dm_sfb_dv_col = self.dm_sfa_dv_col + 16                         # 4 cols (const 1.0)
         self.dm_sfa_dq_col = self.dm_sfb_dv_col + 4                          # 2 cols (const 1.0)
@@ -4061,7 +4063,12 @@ class DMBackwardSm100:
                             (dm_c[stage], dm_c[stage]),
                             (-lse_pair[0], -lse_pair[1]),
                         )
-                        if const_expr("noexp" not in self.dm_abl):
+                        if const_expr("noexp" in self.dm_abl):
+                            pass
+                        elif const_expr(self.dm_p5 is not None and v % self.dm_p5[0] < self.dm_p5[1]):
+                            # accurate (1.7e-7) degree-5 FMA polynomial for a static subset of pairs (MUFU offload)
+                            tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_utils.ex2_poly5_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
+                        else:
                             tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
                             tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
                     if const_expr(self.acc_m64):

@@ -80,4 +80,19 @@ def dm_bwd_p_pair_mix(s0: Float32, s1: Float32, c: Float32, l2: Float32, odd):
     return Float32(cutlass.select_(odd, pp, pm)), Float32(cutlass.select_(odd, pm, pp))
 
 
+def dm_bwd_p_pair_poly5(s0: Float32, s1: Float32, c: Float32, l2: Float32):
+    """Same fp32 FFMA, exp2 via an accurate degree-5 FMA polynomial (max rel err 1.7e-7 = MUFU ex2.approx accuracy).
+    Mixing it with MUFU in any static pattern keeps P within ~1e-7 between passes, so the delta_norm identity
+    rowsum(dS) = 0 still holds to fp32 round-off (not bitwise)."""
+    from . import dm_utils
+    x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (c, c), (-l2, -l2))
+    return dm_utils.ex2_poly5_2(x0, x1)
+
+
+def p5_uses_poly(variant: str, v: int) -> bool:
+    """Static pair schedule for variants 'p5_<freq>_<res>': pair v uses the polynomial iff v % freq < res."""
+    _, f, r = variant.split("_")
+    return v % int(f) < int(r)
+
+
 P_PAIR_VARIANTS["mix"] = None  # needs the row parity: dispatched explicitly by the kernels

@@ -2169,6 +2169,11 @@ class DMPass0Sm100:
                             i0 = 32 * j + 2 * v
                             if const_expr(self.dm_exp_variant == "mix"):
                                 p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
+                            elif const_expr(self.dm_exp_variant.startswith("p5_")):
+                                if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant, v)):
+                                    p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                else:
+                                    p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                             else:
                                 p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                             tSrS[i0], tSrS[i0 + 1] = p

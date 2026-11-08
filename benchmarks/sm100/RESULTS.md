@@ -203,7 +203,7 @@ A vs A-repeat (noise floor):
 | dm_stale | 1 | fwd | 0.879 | 0.880 | +0.1% | 0.880 | 0.992..1.001 | 12 |
 | dm_stale | 1 | fwd_bwd | 0.890 | 0.892 | +0.2% | 0.927 | 0.995..1.001 | 12 |
 
-### 30ec6cf (validated, current headline) vs 3122cc4, same lease, GPUs 0-3 of nvl72053-T07 (2026-11-08 21:55)
+### 30ec6cf (validated; superseded by 9c690e1) vs 3122cc4, same lease, GPUs 0-3 of nvl72053-T07 (2026-11-08 21:55)
 **matched causal fwd+bwd 0.757x FA4 (0.789x vs FA4 deterministic)**, +1.0% vs 3122cc4. Per-shape candidate time is
 1.005-1.019x, above the 0.993-1.005 noise floor, from both bwd (+0.2..1.0%) and fwd (+0.2..5.0%, causal). The A-repeat
 was cancelled to free the GPUs for kda-sm100; the noise floor is from the 3122cc4/aaca3a0 A/B/A run.

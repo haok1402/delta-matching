@@ -9,7 +9,7 @@ import torch
 
 from .quant import quant_qkv2, quant_do_delta
 from .fwd import dm_fwd
-from .bwd import dm_bwd_main
+from .bwd import dm_bwd_main, dm_bwd_prestage
 from .pass0 import dm_delta
 
 D = 128
@@ -30,6 +30,7 @@ class _DMAttnSm100(torch.autograd.Function):
     def backward(ctx, do):
         q8, qs, k8, ks, v8, vs, o, lse = ctx.saved_tensors
         do = do.contiguous()
+        dm_bwd_prestage(q8, k8, lse, ctx.causal)    # scratch alloc / zero / lse_log2 on a side stream (overlaps pass 0)
         do8, dos, delta = quant_do_delta(do, o if ctx.mode == "stale" else None)   # stale delta fused
         if ctx.mode == "matched":
             delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, ctx.causal)

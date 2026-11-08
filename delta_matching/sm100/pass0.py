@@ -52,7 +52,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1+ma+nd")   # P0-v4: + 4 accumulators (causal), delta = sum P dP (sum P = 1 via fwd LSE)
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1+ma")   # P0-v4: + 4 accumulators, dP scale per chunk (causal); keeps /sum P (rowsum(dS)=0 at fp32 round-off)
     over = dict(FORCE)
     if config_override:
         over.update(config_override)

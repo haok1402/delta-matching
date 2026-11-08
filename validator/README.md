@@ -8,7 +8,10 @@ python validator/validate.py /abs/path/cand.py[:attn] --shapes quick      # ~1 m
 python validator/train_check.py /abs/path/cand.py[:attn] --steps 400      # slow tier: short LM training vs bf16 attention
 ```
 The last stdout line before PASS/FAIL is `SUMMARY_JSON {...}` (one line, for candidates.jsonl). Exit code 0 = PASS.
-On hsgpark run it through the pool: `gpupool run --gpus 1 --who <you> -- <python> validator/validate.py ...`.
+On hsgpark run it through the pool: `gpupool run --gpus 1 --who <you> -- sm100/validate/validate.sh ...` (uses the
+shared env sm100/env/venv). The pool kills a reservation idle for 90 s: a candidate that JIT-compiles on first call
+(CuTe DSL, Triton, torch cpp_extension) should compile into a persistent cache in a `--gpus 0` run first, or pass
+`--warmup 3m` to `gpupool run`. All cases run in one candidate process, so compilation happens once per validation.
 
 ## Candidate contract
 A Python file (any language underneath) defining

@@ -5,6 +5,7 @@ dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal) -> delta (B, H, N) fp32 
 Scales, dO codes and lse travel as aux tensors; delta comes back in the LSE output slot.
 """
 import dataclasses
+import os
 import threading
 
 import torch
@@ -32,7 +33,7 @@ _CLASSES = {}
 
 def _variant(exp_variant: str):
     if exp_variant not in _CLASSES:
-        _CLASSES[exp_variant] = type(f"DMPass0Sm100_{exp_variant}", (DMPass0Sm100,), {"dm_exp_variant": exp_variant})
+        _CLASSES[exp_variant] = type(f"DMPass0Sm100_{exp_variant.replace('+', '_F_')}", (DMPass0Sm100,), {"dm_exp_variant": exp_variant})
         c = _make_cache()
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
             c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / f"pass0_{exp_variant}")
@@ -47,7 +48,9 @@ def _aux(t: torch.Tensor, leading_dim: int):
 
 
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
-             exp_variant: str = "mufu"):
+             exp_variant: str | None = None):
+    if exp_variant is None:
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1")   # P0-v3: 1 in 4 pairs on FA4 deg-3 poly (pass-0-only; identity <=1.6e-4)
     over = dict(FORCE)
     if config_override:
         over.update(config_override)

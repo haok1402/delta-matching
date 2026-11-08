@@ -3,6 +3,7 @@ shared FA4 checkout) to run DMBackwardSm100 on fp8 codes, with our delta / LSE i
 passed as aux tensors [qs, ks, vs, dos], bf16 outputs, and no softmax-scale factor on dK (Q codes carry sm)."""
 import inspect
 import math
+import os
 
 import torch
 import flash_attn.cute.interface as fi
@@ -14,13 +15,20 @@ from .fwd import _fingerprint
 LOG2E = math.log2(math.e)
 
 
-def _make_cache():
-    if cache_utils.CUTE_DSL_CACHE_ENABLED:
-        return cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / "bwd")
-    return cache_utils.JITCache()
+_CACHES = {}
 
 
-_DM_BWD_CACHE = _make_cache()
+def _dm_bwd_cache():
+    """One compile cache per DM_BWD_OPTS string (kernel variant knobs read in DMBackwardSm100.__init__), so A/B
+    variants can run in one process."""
+    opts = os.environ.get("DM_BWD_OPTS", "")
+    if opts not in _CACHES:
+        if cache_utils.CUTE_DSL_CACHE_ENABLED:
+            _CACHES[opts] = cache_utils.JITPersistentCache(
+                cache_utils.get_cache_path() / "dm_sm100" / _fingerprint(opts) / "bwd")
+        else:
+            _CACHES[opts] = cache_utils.JITCache()
+    return _CACHES[opts]
 
 
 _CTX = {}
@@ -53,7 +61,7 @@ def _patched_source():
         ("dv = torch.empty_like(v)", "dv = torch.empty_like(v, dtype=torch.bfloat16)"),
         ("    _bwd_preprocess(\n        out, dout,", "    _dm_bwd_preprocess(\n        out, dout,"),
         ("fa_bwd_obj = FlashAttentionBackwardSm100(", "fa_bwd_obj = _DMBackwardSm100("),
-        ("_flash_attn_bwd.compile_cache", "_DM_BWD_CACHE"),
+        ("_flash_attn_bwd.compile_cache", "_dm_bwd_cache()"),
         ("dk_accum, dk, softmax_scale,", "dk_accum, dk, 1.0,"),
         ("            q.detach(),\n            k.detach(),\n            v.detach(),\n            dout,\n",
          "            q.detach().view(torch.uint8),\n            k.detach().view(torch.uint8),\n"
@@ -66,7 +74,7 @@ def _patched_source():
     a = "        config = select_bwd_config(inputs)\n"
     if a not in src:
         raise RuntimeError("bwd host patch anchor not found: select_bwd_config")
-    src = src.replace(a, a + "        config = __import__('dataclasses').replace(config, pack_gqa=False)\n")
+    src = src.replace(a, a + "        config = _dm_cfg(config)\n")
     # bf16 for every host-side dtype decision (config, postprocess output); the kernel reads fp8 from the tensors
     a = "dtype = torch2cute_dtype_map[q.dtype]"
     if a in src:
@@ -74,18 +82,32 @@ def _patched_source():
     return src
 
 
+def _dm_cfg(config):
+    """bwd config overrides: no pack_gqa; DM_BWD_OPTS spt0 / spt1 force the deterministic dQ lock order."""
+    import dataclasses
+    over = dict(pack_gqa=False)
+    opts = os.environ.get("DM_BWD_OPTS", "").split(",")
+    if "spt0" in opts:
+        over["spt"] = False
+    if "spt1" in opts:
+        over["spt"] = True
+    return dataclasses.replace(config, **over)
+
+
 _ns = dict(vars(fi))
-_ns.update(_DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _DM_BWD_CACHE=_DM_BWD_CACHE)
+_ns.update(_DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _dm_bwd_cache=_dm_bwd_cache, _dm_cfg=_dm_cfg)
 exec(compile(_patched_source(), fi.__file__ + ":dm_patched_bwd", "exec"), _ns)
 _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
 
 FORCE = dict(pack_gqa=False)
 
 
-def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=True):
+def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=True, trace=None):
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
+    if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
+        aux.append(trace)
     _CTX["delta"] = delta
     dq, dk, dv = _dm_flash_attn_bwd(
         q8, k8, v8, do8, do8, lse.contiguous(), softmax_scale=sm, causal=causal,

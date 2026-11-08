@@ -67,6 +67,56 @@ def dm_hswz_scheduler(qh: int):
     return DMHswzLPTBwdScheduler
 
 
+_DM_POSMAJ_CLS = {}
+
+
+def dm_posmajor_scheduler(qh: int):
+    """DM posmaj (GQA, deterministic): LPT bwd scheduler over (KV head, batch, block) tiles, run qh times in
+    group-position-major order: all tiles of group position 0, then 1, ... (query head = kv_head * qh + pos). The
+    deterministic dK/dV lock order is the group position, so a tile's predecessor ran ~total/qh tiles earlier instead
+    of concurrently (no dK/dV semaphore serialization); dQ lock order per query head is unchanged (bitwise).
+    Built with num_head = Hk; grid x qh."""
+    if qh in _DM_POSMAJ_CLS:
+        return _DM_POSMAJ_CLS[qh]
+
+    class DMPosMajLPTBwdScheduler(SingleTileLPTBwdScheduler):
+        @staticmethod
+        @cute.jit
+        def create(params, *, loc=None, ip=None):
+            return DMPosMajLPTBwdScheduler(params, cute.arch.block_idx()[0], loc=loc, ip=ip)
+
+        @staticmethod
+        def get_grid_shape(params, *, loc=None, ip=None):
+            return (params.total_blocks * qh, Int32(1), Int32(1))
+
+        @cute.jit
+        def get_current_work(self, *, loc=None, ip=None):
+            params = self.params
+            pos = self._tile_idx // params.total_blocks
+            local = self._tile_idx - pos * params.total_blocks
+            cluster_idx = local // params.cluster_shape_mn[0]
+            bidhb, l2_mod = divmod(cluster_idx, params.l2_major_divmod)
+            block, bidhb_residual = 0, 0
+            if bidhb < params.num_hb_quotient:
+                block, bidhb_residual = divmod(l2_mod, params.l2_minor_divmod)
+            else:
+                block, bidhb_residual = divmod(l2_mod, params.l2_minor_residual_divmod)
+            bidhb_actual = bidhb * params.l2_minor + bidhb_residual
+            batch_idx, kv_head = divmod(bidhb_actual, params.num_head_divmod)
+            if const_expr(params.spt):
+                block = params.num_block - 1 - block
+            is_valid = self._tile_idx < params.total_blocks * qh
+            return _DMWorkTileInfo((Int32(block), Int32(kv_head * qh + pos), Int32(batch_idx), Int32(0)), is_valid)
+
+        def advance_to_next_work(self, *, loc=None, ip=None):
+            # single tile per CTA: the end marker must be past the qh x larger range
+            self._tile_idx = self.params.total_blocks * qh
+            return self.get_current_work()
+
+    _DM_POSMAJ_CLS[qh] = DMPosMajLPTBwdScheduler
+    return DMPosMajLPTBwdScheduler
+
+
 _DM_PERS_CLS = {}
 
 
@@ -1131,6 +1181,9 @@ class DMBackwardSm100:
         # TileScheduler = SingleTileScheduler
         if const_expr(self.is_varlen_k):
             TileScheduler = SingleTileVarlenScheduler
+        elif const_expr(self.deterministic and "noposmaj" not in self.dm_opts and self.qhead_per_kvhead > 1
+                        and not self.pack_gqa and self.cta_group_size > 1):
+            TileScheduler = dm_posmajor_scheduler(self.qhead_per_kvhead)
         elif const_expr(self.deterministic and self.dm_pers > 0 and not self.pack_gqa):
             TileScheduler = dm_persistent_scheduler(self.qhead_per_kvhead, "nohswz" not in self.dm_opts, self.dm_pers)
         elif const_expr(self.deterministic and "nohswz" not in self.dm_opts and self.qhead_per_kvhead > 1
@@ -1143,7 +1196,9 @@ class DMBackwardSm100:
         tile_sched_args = TileSchedulerArguments(
             # work tiles of C * tile_n KV rows, see NOTE [SM100 backward work coordinates]
             cute.ceil_div(cute.size(mK.shape[0]), self.cluster_tile_n),  # num_blocks
-            cute.size(mQ.shape[2]),  # num_heads = num_query_heads
+            cute.size(mQ.shape[2]) // (self.qhead_per_kvhead if const_expr(
+                self.deterministic and "noposmaj" not in self.dm_opts and self.qhead_per_kvhead > 1 and not self.pack_gqa
+                and self.cta_group_size > 1) else 1),  # num_heads = num_query_heads (posmaj: KV heads)
             cute.size(mK.shape[3])
             if const_expr(mCuSeqlensK is None)
             else cute.size(mCuSeqlensK.shape[0] - 1),  # num_batches

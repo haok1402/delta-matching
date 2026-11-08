@@ -45,10 +45,21 @@ def load_spec(spec):
     return mod, getattr(mod, func)
 
 
+CACHE = os.environ.get("DMVAL_CORPUS", os.path.expanduser("~/workspace/haok1402/sm100/validate/corpus_stdlib.bin"))
+
+
 def corpus(device):
-    root = sysconfig.get_paths()["stdlib"]
-    files = sorted(glob.glob(os.path.join(root, "**", "*.py"), recursive=True))
-    data = b"".join(open(f, "rb").read() for f in files)
+    """Bytes of the Python stdlib sources, cached in one file (build it without a GPU: `train_check.py --build-corpus`)."""
+    if not os.path.exists(CACHE):
+        root = sysconfig.get_paths()["stdlib"]
+        files = sorted(glob.glob(os.path.join(root, "**", "*.py"), recursive=True))
+        data = b"".join(open(f, "rb").read() for f in files)
+        with open(CACHE + ".tmp", "wb") as f:
+            f.write(data)
+        os.replace(CACHE + ".tmp", CACHE)
+    if device is None:
+        return None
+    data = open(CACHE, "rb").read()
     return torch.frombuffer(bytearray(data), dtype=torch.uint8).to(device)
 
 
@@ -133,7 +144,10 @@ def main():
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--arms", default="bf16,matched,stale")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--build-corpus", action="store_true", help="only build the corpus cache (no GPU) and exit")
     a = ap.parse_args()
+    if a.build_corpus:
+        corpus(None); print("corpus at", CACHE, os.path.getsize(CACHE)); return
     dev = torch.device(a.device)
     torch.cuda.set_device(dev)
     data = corpus(dev)
@@ -148,18 +162,21 @@ def main():
         R = importlib.util.module_from_spec(ms); ms.loader.exec_module(R)
         preset = getattr(mod, "NUMERICS", "sm90") if mod else "sm90"
 
-        class _E(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, q, k, v):
-                ctx.save_for_backward(q, k, v)
-                return R.dm_reference(q, k, v, torch.zeros_like(q), True, "stale", preset)["O"].contiguous()
+        def make(mode):
+            class _E(torch.autograd.Function):
+                @staticmethod
+                def forward(ctx, q, k, v):
+                    ctx.save_for_backward(q, k, v)
+                    return R.dm_reference(q, k, v, torch.zeros_like(q), True, "stale", preset)["O"].contiguous()
 
-            @staticmethod
-            def backward(ctx, do):
-                q, k, v = ctx.saved_tensors
-                r = R.dm_reference(q, k, v, do.contiguous(), True, "matched", preset)
-                return r["dQ"].to(q.dtype), r["dK"].to(k.dtype), r["dV"].to(v.dtype)
-        arms["emul"] = _E.apply
+                @staticmethod
+                def backward(ctx, do):
+                    q, k, v = ctx.saved_tensors
+                    r = R.dm_reference(q, k, v, do.contiguous(), True, mode, preset)
+                    return r["dQ"].to(q.dtype), r["dK"].to(k.dtype), r["dV"].to(v.dtype)
+            return _E.apply
+        arms["emul"] = make("matched")
+        arms["emul_stale"] = make("stale")
     res = {}
     for name in a.arms.split(","):
         if name not in arms:

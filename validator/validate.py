@@ -159,12 +159,21 @@ def build_cases(tier, supports, seed):
         shapes += [(1, 4, 4, up(256), True, base_kinds + ["outliers", "scaled10"]),
                    (1, 8, 2, up(1024), True, base_kinds + (adv if tier == "full" else ["nearsat", "peaked"])),
                    (2, 4, 1, up(768), True, base_kinds),                      # MQA, non-power-of-two seqlen
-                   (1, 16, 16, up(4096), True, base_kinds)]
+                   (1, 16, 16, up(4096), True, base_kinds),
+                   # odd numbers of 128-row blocks (partial 2-CTA clusters, tail tiles): causal and full, MHA and GQA
+                   (1, 4, 4, up(1152), True, base_kinds), (1, 8, 2, up(1408), True, base_kinds),
+                   (1, 4, 1, up(384), True, base_kinds)]
+        if nc:
+            shapes += [(1, 4, 4, up(1152), False, base_kinds), (1, 8, 2, up(1408), False, base_kinds)]
         if nc:
             shapes += [(1, 8, 2, up(1024), False, base_kinds + ["outliers"]), (2, 4, 4, up(640), False, base_kinds)]
         if m < 128:
             shapes += [(1, 4, 2, up(1000), True, base_kinds), (1, 2, 1, up(1), True, base_kinds), (1, 4, 2, up(77), True, base_kinds)]
     if tier == "full":
+        shapes += [(2, 16, 16, up(2944), True, base_kinds), (1, 32, 8, up(4992), True, base_kinds),
+                   (3, 8, 4, up(1664), True, ["randn", "scaled3"]), (1, 2, 2, up(128), True, base_kinds)]
+        if nc:
+            shapes += [(2, 16, 16, up(2944), False, base_kinds), (1, 32, 8, up(4992), False, base_kinds)]
         shapes += [(1, 8, 8, up(1280), True, adv), (1, 16, 4, up(8192), True, base_kinds + ["outliers"]),
                    (1, 4, 4, up(16384), True, base_kinds), (3, 6, 3, up(2304), True, ["randn", "scaled3"])]
         if nc:

@@ -48,9 +48,23 @@ def call(fn, q, k, v, causal, mode):
 
 
 FWD_ONLY = False
+POISON_BYTES = int(os.environ.get("DMVAL_POISON_GB", "8")) << 30
+
+
+def poison():
+    """Fill the caching allocator's free memory with 0xFF (e4m3 / bf16 / fp32 NaN patterns) so that an out-of-bounds read
+    in the candidate (e.g. a scale index past the end) returns NaN deterministically instead of whatever happened to be
+    there.  The block stays in the allocator cache, so the candidate's own allocations are carved from poisoned memory."""
+    free, _ = torch.cuda.mem_get_info()
+    n = min(POISON_BYTES, max(0, free - (8 << 30)))
+    if n > 0:
+        x = torch.empty(n, dtype=torch.uint8, device="cuda")
+        x.fill_(0xFF)
+        del x
 
 
 def fwd_bwd(fn, q, k, v, do, causal, mode):
+    poison()
     if FWD_ONLY:
         with torch.no_grad():
             o = call(fn, q.detach().clone(), k.detach().clone(), v.detach().clone(), causal, mode)
@@ -66,6 +80,7 @@ def fwd_bwd(fn, q, k, v, do, causal, mode):
 def fwd_bwd_views(fn, q, k, v, do, causal, mode):
     """q / k / v as strided views of one packed (B, N, H + 2Hk, D) buffer (flash-attention's usual call)."""
     H, Hk = q.shape[2], k.shape[2]
+    poison()
     if FWD_ONLY:
         qkv = torch.cat([q, k, v], dim=2)
         with torch.no_grad():

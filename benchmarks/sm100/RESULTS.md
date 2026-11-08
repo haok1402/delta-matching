@@ -4,12 +4,20 @@ All rows are measured by attnbench.py. The candidate and FA4 are timed in the sa
 in 6 rounds, with every GPU busy (4 shards). Speedup = FA4_ms / cand_ms, geomean over 12 shapes (H16/16 + H32/8,
 N 1k-32k). "e2e" means the time starts from bf16 q/k/v, so the quantization producers are included, as in training.
 
+> **Stale mode diverges in training** at sm100-mx precision (dm-validator, 2026-11-08; see validator/README.md). Its speed is reported for reference only; the headline is **matched, causal, fwd+bwd**.
+
 | date | cand (sha) | pass | causal geomean (min-max) | non-causal geomean (min-max) | FA4 fp8 fwd same run | rel.err O vs fp32 | raw |
 |---|---|---|---|---|---|---|---|
 | 2026-11-08 17:38 | C1-v1 fwd e2e (811db9e) | fwd | 0.902 (0.624-1.170) | 0.936 (0.705-1.161) | 1.173 / 1.030 | 5.0-5.7e-2 | results/c1v1_fwd.s*.jsonl |
 | 2026-11-08 17:53 | B1 fwd+bwd, stale mode, deterministic bwd (kda/cands/b1_cur.py @ wt/kda-sm100 7ed21b0) | fwd_bwd | 0.639 (0.368-1.003) vs FA4; 0.661 vs FA4-det | 0.728 (0.438-1.089); 0.746 vs FA4-det | - | O 5e-2, dQ/dK 6.7e-2, dV 5e-2 | results/b1_stale.s*.jsonl |
 | 2026-11-08 18:23 | FULL matched (api.dm_attn_func, pinned snap 6a31419: C1-v2 fwd + P0 kernel + B1 det bwd) | fwd_bwd | **0.729** (0.537-0.891); 0.756 vs FA4-det | 0.771 (0.587-0.945); 0.793 vs FA4-det | - | O 5e-2, dQ/dK 6.5e-2, dV 5e-2 | results/full_6a31419.s*.jsonl |
-| 2026-11-08 18:23 | FULL stale (same build) | fwd_bwd | 0.686 (0.385-1.047); 0.711 vs FA4-det | 0.800 (0.462-1.169); 0.823 vs FA4-det | - | same | same |
+| 2026-11-08 18:23 | FULL stale [diverges in training] (same build) | fwd_bwd | 0.686 (0.385-1.047); 0.711 vs FA4-det | 0.800 (0.462-1.169); 0.823 vs FA4-det | - | same | same |
+| 2026-11-08 18:53 | FULL matched (snap 02016db: stale delta fused into dO quantizer) | fwd_bwd | **0.730** (0.538-0.893); 0.758 vs FA4-det | 0.772 (0.589-0.942); 0.796 vs FA4-det | - | no SUSPECT | results/full_02016db.s*.jsonl |
+| 2026-11-08 18:53 | FULL stale [diverges in training] (snap 02016db) | fwd_bwd | 0.861 (0.592-1.097); 0.894 vs FA4-det | 0.945 (0.672-1.186); 0.975 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 19:16 | FULL matched (snap 5a912b2: P0-v2, deg-5 FMA ex2 polynomial in pass 0) | fwd_bwd | **0.729** (0.540-0.893); 0.760 vs FA4-det | 0.789; 0.809 vs FA4-det | - | no SUSPECT | results/full_5a912b2.s*.jsonl |
+| 2026-11-08 19:16 | FULL stale [diverges in training] (snap 5a912b2) | fwd_bwd | 0.858; 0.894 vs FA4-det | 0.950; 0.973 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 19:40 | FULL matched (snap d227693: B1-v3, delta smem loads hoisted; numerics bitwise = 5a912b2) | fwd_bwd | **0.763** (+4.7% vs 5a912b2); 0.791 vs FA4-det | 0.802 (+1.7%); 0.826 vs FA4-det | - | no SUSPECT | results/full_d227693.s*.jsonl |
+| 2026-11-08 19:40 | FULL stale [diverges in training] (snap d227693) | fwd_bwd | 0.906; 0.940 vs FA4-det | 0.971; 1.000 vs FA4-det | - | no SUSPECT | same |
 
 ### Notes on C1-v1 (fwd only, no bwd yet)
 - It is faster than FA4 only at long sequences: 1.05-1.17x at 16k-32k, where FA4 hits the power cap and its clock drops.
@@ -41,3 +49,34 @@ N 1k-32k). "e2e" means the time starts from bf16 q/k/v, so the quantization prod
   extra producers).
 - Stale wins at 32k only: 1.05x causal H32/8, 1.17x non-causal H32/8.
 - The candidate was loaded from a pinned clean snapshot (bench/snap/6a31419); the live worktree had uncommitted edits.
+
+### Notes on FULL @02016db
+- Stale improved from 0.686x to 0.861x causal fwd+bwd (0.800x to 0.945x non-causal). The stale bwd at 8k causal H16/16
+  went from 2.97 to 2.41 ms, and 1k from 1.21 to 0.65 ms. Matched is unchanged at 0.730x (as expected: kernels unchanged).
+- The matched-vs-stale gap is now the P0 (matched delta) pass: bwd 8k causal 3.07 vs 2.41 ms (+27%), 32k 10.98 vs
+  8.44 ms (+30%). The stale bwd main kernel alone runs at 1141 TF (8k) and 1303 TF (32k) against FA4's 1304/1313 TF,
+  so at long shapes the bwd main kernel is already at parity; **P0 is the main lever for the headline (matched).**
+
+### Notes on FULL @5a912b2 vs 02016db
+- Matched causal fwd+bwd 0.730x -> 0.729x (per-shape candidate time 1.000-1.005x faster: no change). Matched
+  non-causal 0.772x -> 0.789x (+2.2%; the bwd is 1.2-2.7% faster on every shape). Stale and fwd unchanged (+-0.5%).
+- The commit is mainly an accuracy change (more exact ex2 in pass 0). It does not make the causal matched pre-pass
+  measurably faster: P0 still costs +27-29% of the bwd (8k causal: 3.06 vs 2.41 ms; 32k: 10.96 vs 8.44 ms).
+
+### Delta d227693 vs 5a912b2 (python delta.py 5a912b2 d227693)
+The bwd is 3-8% faster on every causal shape; the fwd is unchanged.
+
+| arm | causal | pass | 5a912b2 | d227693 | change | d227693 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.731 | 0.748 | +2.3% | 0.783 | 1.012..1.033 | 12 |
+| dm_matched | 0 | fwd | 0.939 | 0.937 | -0.2% | 0.937 | 1.000..1.004 | 12 |
+| dm_matched | 0 | fwd_bwd | 0.789 | 0.802 | +1.7% | 0.826 | 1.010..1.027 | 12 |
+| dm_matched | 1 | bwd | 0.682 | 0.721 | +5.7% | 0.762 | 1.031..1.084 | 12 |
+| dm_matched | 1 | fwd | 0.899 | 0.899 | -0.0% | 0.900 | 1.000..1.001 | 12 |
+| dm_matched | 1 | fwd_bwd | 0.729 | 0.763 | +4.7% | 0.791 | 1.024..1.068 | 12 |
+| dm_stale | 0 | bwd | 0.929 | 0.958 | +3.1% | 1.003 | 1.014..1.044 | 12 |
+| dm_stale | 0 | fwd | 0.939 | 0.936 | -0.2% | 0.936 | 0.998..1.002 | 12 |
+| dm_stale | 0 | fwd_bwd | 0.950 | 0.971 | +2.3% | 1.000 | 1.011..1.038 | 12 |
+| dm_stale | 1 | bwd | 0.838 | 0.898 | +7.2% | 0.950 | 1.038..1.110 | 12 |
+| dm_stale | 1 | fwd | 0.899 | 0.898 | -0.1% | 0.899 | 0.997..1.001 | 12 |
+| dm_stale | 1 | fwd_bwd | 0.858 | 0.906 | +5.6% | 0.940 | 1.027..1.084 | 12 |

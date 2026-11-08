@@ -174,6 +174,7 @@ def _ref_hash():
     h = hashlib.sha256(open(REF_PATH, "rb").read())
     h.update(inspect.getsource(make_inputs).encode())
     h.update(inspect.getsource(build_cases).encode())
+    h.update(json.dumps(headline_shapes(), sort_keys=True).encode())
     return h.hexdigest()[:16]
 
 
@@ -204,6 +205,18 @@ def cached_refs(case, preset, q, k, v, do, exact, qbk, dev):
         torch.save({kk: {n: (t.cpu() if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in out.items()}, tmpf)
         os.replace(tmpf, path)
     return out
+
+
+HEADLINE = os.environ.get("DMVAL_HEADLINE", os.path.expanduser("~/workspace/haok1402/sm100/bench/headline_shapes.json"))
+
+
+def headline_shapes():
+    """The benchmark's headline shapes (shared with fa4-bench); fallback = the user's re-scope N in {8k, 32k, 64k} x
+    {MHA 16/16, GQA 32/8} x {causal, non-causal}, B = max(1, 32768 / N)."""
+    if os.path.exists(HEADLINE):
+        return json.load(open(HEADLINE))["shapes"]
+    return [{"B": max(1, 32768 // N), "H": H, "Hk": Hk, "N": N, "causal": c}
+            for (H, Hk) in ((16, 16), (32, 8)) for N in (8192, 32768, 65536) for c in (True, False)]
 
 
 def build_cases(tier, supports, seed):
@@ -249,11 +262,10 @@ def build_cases(tier, supports, seed):
         shapes += [(1, 16, 16, up(8192), True, ["stress"]), (1, 4, 4, up(4096), True, ["stress"])]
         if nc:
             shapes += [(1, 16, 16, up(8192), False, ["stress"])]
-    if tier == "bench":   # exactly the shapes fa4-bench times (sm100/bench/attnbench.py SUITES "main")
-        for (H, Hk) in ((16, 16), (32, 8)):
-            for N in (1024, 2048, 4096, 8192, 16384, 32768):
-                for c in ((True, False) if nc else (True,)):
-                    shapes.append((max(1, 32768 // N), H, Hk, N, c, ["randn"]))
+    if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
+        for sh in headline_shapes():
+            if sh["causal"] or nc:
+                shapes.append((sh["B"], sh["H"], sh["Hk"], up(sh["N"]), sh["causal"], ["randn"]))
     cases = []
     for i, (B, H, Hk, N, causal, kinds) in enumerate(shapes):
         for kind in kinds:

@@ -177,10 +177,40 @@ def quant_qkv(q, k, v, sm: float, mean: torch.Tensor | None = None):
 
 
 @triton.jit
-def _prod_a_kernel(Q, K, V, Q8, V8, QS, VS, KVW, PART, N, H, Hk, B,
-                   sqb, sqn, sqh, skb, skn, skh, svb, svn, svh, sm, ROWS: tl.constexpr, D: tl.constexpr):
+def _qtile(X, MEAN, Y, S, WB, N, H, h, b, pid_n, sxb, sxn, sxh, prescale, HAS_MEAN: tl.constexpr,
+           WANT_W: tl.constexpr, W_OFF: tl.constexpr, TR: tl.constexpr, D: tl.constexpr):
+    """TR-row tile (TR % 32 == 0): codes, per-32 scales, and (WANT_W) the UE8M0 bytes into the packed word buffer
+    WB viewed as bytes: byte (2*(row//128) + W_OFF)*4 + (row//32)%4 of head (b, h)."""
+    NB: tl.constexpr = TR // 32
+    rows = pid_n * TR + tl.arange(0, TR)
+    cols = tl.arange(0, D)
+    x = tl.load(X + b * sxb + h * sxh + rows[:, None] * sxn + cols[None, :]).to(tl.float32)
+    if HAS_MEAN:
+        mu = tl.load(MEAN + (b * H + h) * D + cols)
+        x = x - mu[None, :]
+    x = x * prescale
+    x3 = tl.reshape(x, (NB, 32, D))
+    amax = tl.max(tl.max(tl.abs(x3), axis=2), axis=1)
+    ab = amax.to(tl.int32, bitcast=True)
+    eb = ((ab >> 23) & 0xFF) - 8 + ((ab & 0x7FFFFF) > 0x600000).to(tl.int32)
+    eb = tl.minimum(tl.maximum(eb, 1), 254)
+    eb = tl.where(amax > 0, eb, 127)
+    scale = (eb << 23).to(tl.float32, bitcast=True)
+    inv = ((254 - eb) << 23).to(tl.float32, bitcast=True)
+    y = tl.reshape(x3 * inv[:, None, None], (TR, D)).to(tl.float8e4nv)
+    tl.store(Y + (b * N * H + rows[:, None] * H + h) * D + cols[None, :], y)
+    blk = pid_n * NB + tl.arange(0, NB)
+    tl.store(S + (b * H + h) * (N // 32) + blk, scale)
+    if WANT_W:
+        tl.store(WB + ((b * H + h) * (N // 64) + 2 * (blk // 4) + W_OFF) * 4 + blk % 4, eb.to(tl.uint8))
+
+
+@triton.jit
+def _prod_a_kernel(Q, K, V, Q8, V8, QS, VS, KVWB, PART, N, H, Hk, B,
+                   sqb, sqn, sqh, skb, skn, skh, svb, svn, svh, sm, ROWS: tl.constexpr, TR: tl.constexpr,
+                   D: tl.constexpr):
     """1-D grid: [K-mean partials (ROWS rows each) | Q tiles | V tiles]  (partials first: longest programs start first)."""
-    NT = N // 128
+    NT = N // TR
     nq = B * H * NT
     nv = B * Hk * NT
     npart = B * Hk * (N // ROWS)
@@ -189,13 +219,13 @@ def _prod_a_kernel(Q, K, V, Q8, V8, QS, VS, KVW, PART, N, H, Hk, B,
         pid = pid + nq + nv + npart
     if pid < nq:
         bh = pid // NT
-        _quant_tile(Q, Q, Q8, QS, KVW, N, H, bh % H, bh // H, pid % NT, sqb, sqn, sqh, sm,
-                    HAS_MEAN=False, WANT_W=False, W_OFF=0, D=D)
+        _qtile(Q, Q, Q8, QS, KVWB, N, H, bh % H, bh // H, pid % NT, sqb, sqn, sqh, sm,
+               HAS_MEAN=False, WANT_W=False, W_OFF=0, TR=TR, D=D)
     elif pid < nq + nv:
         p = pid - nq
         bh = p // NT
-        _quant_tile(V, V, V8, VS, KVW, N, Hk, bh % Hk, bh // Hk, p % NT, svb, svn, svh, 1.0,
-                    HAS_MEAN=False, WANT_W=True, W_OFF=1, D=D)
+        _qtile(V, V, V8, VS, KVWB, N, Hk, bh % Hk, bh // Hk, p % NT, svb, svn, svh, 1.0,
+               HAS_MEAN=False, WANT_W=True, W_OFF=1, TR=TR, D=D)
     else:
         p = pid - nq - nv
         S = N // ROWS
@@ -213,8 +243,9 @@ def _prod_a_kernel(Q, K, V, Q8, V8, QS, VS, KVW, PART, N, H, Hk, B,
 
 
 @triton.jit
-def _prod_b_kernel(K, K8, KS, KVW, PART, MEAN, N, Hk, skb, skn, skh, ROWS: tl.constexpr, D: tl.constexpr):
-    """grid (N/128, B*Hk): mean = (fixed-order sum of the partials) / N, then quantize the K tile."""
+def _prod_b_kernel(K, K8, KS, KVWB, PART, MEAN, N, Hk, skb, skn, skh, ROWS: tl.constexpr, TR: tl.constexpr,
+                   D: tl.constexpr):
+    """grid (N/TR, B*Hk): mean = (fixed-order sum of the partials) / N, then quantize the K tile."""
     pid_n = tl.program_id(0)
     bh = tl.program_id(1)
     S = N // ROWS
@@ -225,11 +256,12 @@ def _prod_b_kernel(K, K8, KS, KVW, PART, MEAN, N, Hk, skb, skn, skh, ROWS: tl.co
     mu = acc / N
     if pid_n == 0:
         tl.store(MEAN + bh * D + cols, mu)
-    rows = pid_n * 128 + tl.arange(0, 128)
+    rows = pid_n * TR + tl.arange(0, TR)
     b = bh // Hk
     h = bh % Hk
+    NB: tl.constexpr = TR // 32
     x = tl.load(K + b * skb + h * skh + rows[:, None] * skn + cols[None, :]).to(tl.float32) - mu[None, :]
-    x3 = tl.reshape(x, (4, 32, D))
+    x3 = tl.reshape(x, (NB, 32, D))
     amax = tl.max(tl.max(tl.abs(x3), axis=2), axis=1)
     ab = amax.to(tl.int32, bitcast=True)
     eb = ((ab >> 23) & 0xFF) - 8 + ((ab & 0x7FFFFF) > 0x600000).to(tl.int32)
@@ -237,16 +269,17 @@ def _prod_b_kernel(K, K8, KS, KVW, PART, MEAN, N, Hk, skb, skn, skh, ROWS: tl.co
     eb = tl.where(amax > 0, eb, 127)
     scale = (eb << 23).to(tl.float32, bitcast=True)
     inv = ((254 - eb) << 23).to(tl.float32, bitcast=True)
-    y = tl.reshape(x3 * inv[:, None, None], (128, D)).to(tl.float8e4nv)
+    y = tl.reshape(x3 * inv[:, None, None], (TR, D)).to(tl.float8e4nv)
     tl.store(K8 + (b * N * Hk + rows[:, None] * Hk + h) * D + cols[None, :], y)
-    tl.store(KS + bh * (N // 32) + pid_n * 4 + tl.arange(0, 4), scale)
-    word = tl.sum(eb << (tl.arange(0, 4) * 8), axis=0)
-    tl.store(KVW + bh * (N // 64) + pid_n * 2, word)
+    blk = pid_n * NB + tl.arange(0, NB)
+    tl.store(KS + bh * (N // 32) + blk, scale)
+    tl.store(KVWB + (bh * (N // 64) + 2 * (blk // 4)) * 4 + blk % 4, eb.to(tl.uint8))
 
 
-def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 4, warps_b: int = 4):
-    """Two-launch fused producer.  Same outputs as quant_qkv; the K mean is (sequential sum of ROWS-row fp32 partial
-    sums, each a sum of 64-row chunk sums) / N."""
+def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: int = 2, tr: int = 32):
+    """Two-launch fused producer.  Returns (q8, qs, k8, ks, v8, vs, kvw, mean); kvw (B, Hk, N/64) int32 packed UE8M0
+    words ([2t] K bytes of 128-key tile t, [2t+1] V bytes).  The K mean is (sequential sum of ROWS-row fp32 partial
+    sums, each a sum of 64-row chunk sums) / N.  Bitwise = quant_rows(...) with that mean."""
     B, N, H, D = q.shape
     Hk = k.shape[2]
     assert N % 128 == 0 and q.stride(-1) == 1 and k.stride(-1) == 1 and v.stride(-1) == 1
@@ -265,13 +298,14 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 4, warps_b: 
     kvw = torch.empty(B, Hk, N // 64, device=dev, dtype=torch.int32)
     part = torch.empty(B * Hk, S, D, device=dev, dtype=torch.float32)
     mean = torch.empty(B, Hk, D, device=dev, dtype=torch.float32)
-    NT = N // 128
+    NT = N // tr
+    kvwb = kvw.view(torch.uint8)
     _prod_a_kernel[(B * H * NT + B * Hk * NT + B * Hk * S,)](
-        q, k, v, q8, v8, qs, vs, kvw, part, N, H, Hk, B,
+        q, k, v, q8, v8, qs, vs, kvwb, part, N, H, Hk, B,
         q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
-        v.stride(0), v.stride(1), v.stride(2), float(sm), ROWS=ROWS, D=D, num_warps=warps_a)
-    _prod_b_kernel[(NT, B * Hk)](k, k8, ks, kvw, part, mean, N, Hk, k.stride(0), k.stride(1), k.stride(2),
-                                 ROWS=ROWS, D=D, num_warps=warps_b)
+        v.stride(0), v.stride(1), v.stride(2), float(sm), ROWS=ROWS, TR=tr, D=D, num_warps=warps_a)
+    _prod_b_kernel[(NT, B * Hk)](k, k8, ks, kvwb, part, mean, N, Hk, k.stride(0), k.stride(1), k.stride(2),
+                                 ROWS=ROWS, TR=tr, D=D, num_warps=warps_b)
     return q8, qs, k8, ks, v8, vs, kvw, mean
 
 

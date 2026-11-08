@@ -431,3 +431,60 @@ def ex2_poly5_2(x: Float32, y: Float32, *, loc=None, ip=None):
     fr = cute.arch.sub_packed_f32x2(xy, rb)
     pe = fu.evaluate_polynomial_2(*fr, POLY5_EX2, loc=loc, ip=ip)
     return fu.combine_int_frac_ex2(r[0], pe[0], loc=loc, ip=ip), fu.combine_int_frac_ex2(r[1], pe[1], loc=loc, ip=ip)
+
+
+@dsl_user_op
+def e4m3x4_sum_f32(word: Float32, acc: Float32, *, loc=None, ip=None) -> Float32:
+    """acc + sum of the 4 e4m3 codes packed in `word` (an f32 register holding the bits), fp32 accumulate:
+    cvt.rn.f16x2.e4m3x2 (exact) + add.rn.f32.f16 (FHADD)."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [Float32(word).ir_value(loc=loc, ip=ip), Float32(acc).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 w, h01, h23;\n\t.reg .b16 c01, c23, a, b, c, d;\n\t.reg .f32 s;\n\t"
+        "mov.b32 w, $1;\n\tmov.b32 {c01, c23}, w;\n\t"
+        "cvt.rn.f16x2.e4m3x2 h01, c01;\n\tcvt.rn.f16x2.e4m3x2 h23, c23;\n\t"
+        "mov.b32 {a, b}, h01;\n\tmov.b32 {c, d}, h23;\n\t"
+        "add.rn.f32.f16 s, a, $2;\n\tadd.rn.f32.f16 s, b, s;\n\t"
+        "add.rn.f32.f16 s, c, s;\n\tadd.rn.f32.f16 $0, d, s;\n\t}",
+        "=f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def st_global_v4_f32(ptr_i64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [ptr_i64] + [Float32(v).ir_value(loc=loc, ip=ip) for v in (a, b, c, d)],
+                    "st.global.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def st_global_kb_s16(addr: cutlass.Int64, kb: Float32, *, loc=None, ip=None):
+    """store an integer-valued f32 kb (clamped to [-32000, 32000]) as s16 at a global byte address"""
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Float32(kb).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .f32 c;\n\t.reg .s32 i;\n\t"
+                    "max.f32 c, $1, 0fC6FA0000;\n\tmin.f32 c, c, 0f46FA0000;\n\t"
+                    "cvt.rzi.s32.f32 i, c;\n\tst.global.b16 [$0], i;\n\t}",
+                    "l,f", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def ld_global_kb_bias(addr: cutlass.Int64, *, loc=None, ip=None) -> Float32:
+    """load s16 kb at a global byte address -> f32 (kb - 7)"""
+    return Float32(llvm.inline_asm(
+        T.f32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .s16 h;\n\t.reg .s32 i;\n\tld.global.nc.s16 h, [$1];\n\tcvt.s32.s16 i, h;\n\t"
+        "sub.s32 i, i, 7;\n\tcvt.rn.f32.s32 $0, i;\n\t}",
+        "=f,l", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def e4m3_roundtrip2(x0: Float32, x1: Float32, *, loc=None, ip=None):
+    """(f32(rn_e4m3_satfinite(x0)), f32(rn_e4m3_satfinite(x1))) — the codes the e4m3x2 convert produces"""
+    from cutlass._mlir.dialects import llvm as _llvm
+    st = _llvm.StructType.get_literal([T.f32(), T.f32()])
+    r = llvm.inline_asm(
+        st, [Float32(x0).ir_value(loc=loc, ip=ip), Float32(x1).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b16 c;\n\t.reg .b32 h;\n\t.reg .b16 a, b;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 c, $3, $2;\n\tcvt.rn.f16x2.e4m3x2 h, c;\n\t"
+        "mov.b32 {a, b}, h;\n\tcvt.f32.f16 $0, a;\n\tcvt.f32.f16 $1, b;\n\t}",
+        "=f,=f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+    return (Float32(llvm.extractvalue(T.f32(), r, [0], loc=loc, ip=ip)),
+            Float32(llvm.extractvalue(T.f32(), r, [1], loc=loc, ip=ip)))

@@ -22,7 +22,7 @@ def _pow2_floor_exp(x):
     return (e - 1).to(torch.float32)
 
 
-def fwd_ref(q8, qs, k8, ks, v8, vs, causal, emulate_p=True):
+def fwd_ref(q8, qs, k8, ks, v8, vs, causal, emulate_p=True, l_from_codes=False):
     """O (B, N, H, D) fp32, LSE (B, H, N) natural, plus P-code fingerprint data.
 
     Scores x = (Q8 K8^T) * qs * ks * log2e (log2 units).  Per (row, 32-key block): kb = floor(max x);
@@ -51,7 +51,7 @@ def fwd_ref(q8, qs, k8, ks, v8, vs, causal, emulate_p=True):
     # global max for numerically-safe normalization (exact pow2 shifts)
     m = torch.amax(kb, dim=-2, keepdim=True)
     w = torch.exp2(kb - 7 - m)
-    l = (pt.sum(-1, keepdim=True) * w).sum(-2).squeeze(-1)        # (B, H, N)
+    l = ((pc if l_from_codes else pt).sum(-1, keepdim=True) * w).sum(-2).squeeze(-1)   # (B, H, N); lq/cp: code sum
     P = (pc * w).view(B, H, N, N)
     O = torch.matmul(P, V) / l[..., None]
     lse = (m.squeeze(-1).squeeze(-1) + torch.log2(l)) / LOG2E
@@ -106,3 +106,47 @@ def bwd_ref(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm):
         dV = dV.view(B, Hk, rep, N, D).sum(2)
     t = lambda a: a.permute(0, 2, 1, 3)  # noqa: E731
     return t(dQ), t(dK), t(dV), delta, rowsum
+
+
+def cp_p_ref(q8, qs, k8, ks, causal):
+    """sm100-mx-cp backward P (B,H,N,N): the forward's e4m3 codes * 2^(kb-7-m) / l_codes (rows sum to 1), and kb (B,H,N,N/32)."""
+    B, N, H, D = q8.shape
+    rep = H // k8.shape[2]
+    Q = _deq(q8, qs)
+    K = _deq(k8, ks).repeat_interleave(rep, dim=1)
+    x = torch.matmul(Q, K.transpose(-1, -2)) * LOG2E
+    if causal:
+        x = x.masked_fill(~torch.ones(N, N, dtype=torch.bool, device=x.device).tril(), float("-inf"))
+    xb = x.view(B, H, N, N // BLK, BLK)
+    bmax = xb.amax(-1, keepdim=True)
+    kb = torch.where(torch.isfinite(bmax), torch.floor(bmax), torch.zeros_like(bmax))
+    pc = torch.exp2(xb - kb + 7).to(torch.float8_e4m3fn).float()
+    m = kb.amax(-2, keepdim=True)
+    P = (pc * torch.exp2(kb - 7 - m)).view(B, H, N, N)
+    return P / P.sum(-1, keepdim=True), kb.squeeze(-1)
+
+
+def bwd_ref_cp(q8, qs, k8, ks, v8, vs, do8, dos, causal, sm, P=None):
+    """sm100-mx-cp backward (dev ref): P = forward code-P (cp_p_ref, or given), delta = sum P dP, then as bwd_ref."""
+    B, N, H, D = q8.shape
+    Hk = k8.shape[2]
+    rep = H // Hk
+    if P is None:
+        P, _ = cp_p_ref(q8, qs, k8, ks, causal)
+    Q = _deq(q8, qs)
+    K = _deq(k8, ks).repeat_interleave(rep, dim=1)
+    V = _deq(v8, vs).repeat_interleave(rep, dim=1)
+    dO = _deq(do8, dos)
+    dP = torch.matmul(dO, V.transpose(-1, -2))
+    delta = (P * dP).sum(-1) / P.sum(-1)
+    dS = P * (dP - delta[..., None])
+    PT = _q_blocks(P.transpose(-1, -2), 1, 32)
+    dSq = _q_blocks(dS, 128, 32)
+    dV = torch.matmul(PT, dO)
+    dK = torch.matmul(dSq.transpose(-1, -2), Q)
+    dQ = torch.matmul(dSq, K) * sm
+    if rep > 1:
+        dK = dK.view(B, Hk, rep, N, D).sum(2)
+        dV = dV.view(B, Hk, rep, N, D).sum(2)
+    t = lambda a: a.permute(0, 2, 1, 3)  # noqa: E731
+    return t(dQ), t(dK), t(dV), delta, dP

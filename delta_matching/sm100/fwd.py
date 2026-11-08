@@ -84,12 +84,25 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
             over[kv.split("=")[0]] = int(kv.split("=")[1])
     if config_override:
         over.update(config_override)
-    if "kvpack=0" not in os.environ.get("DM_FWD_OPTS", ""):
+    cp = "cp=1" in os.environ.get("DM_FWD_OPTS", "")
+    obar = kbt = None
+    if cp:
+        # sm100-mx-cp: one fp32 buffer = Obar (B,N,H,D) followed by kbT (B,H,N/32,N) s16; passed as v_descale
+        B, N, H, D = q8.shape
+        n_o = B * N * H * D
+        n_k = (B * H * (N // 32) * N + 1) // 2
+        buf = torch.empty(n_o + n_k, device=q8.device, dtype=torch.float32)
+        obar = buf[:n_o].view(B, N, H, D)
+        kbt = buf[n_o:].view(torch.int16)[: B * H * (N // 32) * N].view(B, H, N // 32, N)
+        qsc, ksc, vsc = qs.contiguous(), (ks if ks.dtype == torch.int32 else pack_kv_scales(ks, vs)), obar
+    elif "kvpack=0" not in os.environ.get("DM_FWD_OPTS", ""):
         # ks may be passed pre-packed (int32, from pack_kv_scales; producer side) with vs=None
         qsc, ksc, vsc = qs.contiguous(), (ks if ks.dtype == torch.int32 else pack_kv_scales(ks, vs)), None
     else:
         qsc, ksc, vsc = qs.contiguous(), ks.contiguous(), vs.contiguous()
     ids = {id(qsc), id(ksc), id(vsc)} - {id(None)}
+    if cp:
+        ids = {id(qsc), id(ksc)}
     orig = (fi.FlashAttentionForwardSm100, fi._validate_tensor, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config,
             fi.to_cute_tensor)
 
@@ -101,6 +114,8 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
     def tct(t, *a, **k):
         if id(t) in ids:          # scales are (B, H, NB) with NB unit-stride
             k["leading_dim"] = 2
+        if obar is not None and id(t) == id(obar):
+            k["leading_dim"] = 3
         return orig[4](t, *a, **k)
 
     with _LOCK:
@@ -116,4 +131,6 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
         finally:
             (fi.FlashAttentionForwardSm100, fi._validate_tensor, fi._flash_attn_fwd.compile_cache,
              fi.select_fwd_config, fi.to_cute_tensor) = orig
+    if cp:
+        return out, lse, obar, kbt
     return out, lse

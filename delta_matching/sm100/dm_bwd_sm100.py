@@ -420,6 +420,8 @@ class DMBackwardSm100:
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         _p3 = next((x[3:] for x in self.dm_opts if x.startswith("p3=")), None)   # p3=freq:res (deg-3)
         self.dm_p3 = tuple(int(t) for t in _p3.split(":")) if _p3 else None
+        # sm100-mx-cp: P = the forward's e4m3 code * 2^(kb - 7 - lse2) (kbT s16 in aux tensor 5), see fwd cp=1
+        self.dm_cp = "cp" in self.dm_opts
         self.dm_sfa_dv_col = self.tmem_P_offset + self.tmem_cols_P            # 4 groups x 4 cols
         self.dm_sfb_dv_col = self.dm_sfa_dv_col + 16                         # 4 cols (const 1.0)
         self.dm_sfa_dq_col = self.dm_sfb_dv_col + 4                          # 2 cols (const 1.0)
@@ -1965,7 +1967,7 @@ class DMBackwardSm100:
                 TileSchedulerCls,
                 is_leader_cta,
                 blocksparse_tensors,
-                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4) else None,
+                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "trace" in self.dm_opts) else None,
             )
             # Dealloc the tensor memory buffer
             tmem.relinquish_alloc_permit()
@@ -2024,7 +2026,7 @@ class DMBackwardSm100:
                 fastdiv_mods,
                 blocksparse_tensors,
                 sDm=sDm,
-                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4) else None,
+                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "trace" in self.dm_opts) else None,
                 dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.use_2cta_instrs) else None,
             )
             tmem_alloc_barrier.arrive()
@@ -4078,7 +4080,34 @@ class DMBackwardSm100:
                         tSrLSE = tSrLSE_s2r
                     else:
                         tSrLSE = tSsLSE_cur[lane_idx]
-                    for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
+                    if const_expr(self.dm_cp):
+                        # forward-identical exp argument x = fma(S, c, 7 - kb) (c = qs*ks*log2e, pow2 scalings: same
+                        # bits as the forward's (qs*log2e)*ks), code = rn_e4m3(ex2.approx.ftz(x)), P = code * 2^(kb-7-lse2)
+                        dm_kbt = aux_data.tensors[5]
+                        for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
+                            q0 = m_block * self.tile_m + dm_idx0[2 * v, stage, 0, 0][1]
+                            q1 = m_block * self.tile_m + dm_idx0[2 * v + 1, stage, 0, 0][1]
+                            kbm0 = Float32(Int32(dm_kbt[batch_idx, head_idx, dm_kv_blk, q0]) - 7)
+                            kbm1 = Float32(Int32(dm_kbt[batch_idx, head_idx, dm_kv_blk, q1]) - 7)
+                            x0, x1 = cute.arch.fma_packed_f32x2(
+                                (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]), (dm_c[stage], dm_c[stage]), (-kbm0, -kbm1))
+                            e0 = cute.math.exp2(x0, fastmath=True)
+                            e1 = cute.math.exp2(x1, fastmath=True)
+                            c0, c1 = dm_utils.e4m3_roundtrip2(e0, e1)
+                            if const_expr(not self.shuffle_LSE):
+                                lse_c = (tSrLSE[2 * v], tSrLSE[2 * v + 1])
+                            else:
+                                lse_c = (utils.shuffle_sync(tSrLSE, offset=2 * v), utils.shuffle_sync(tSrLSE, offset=2 * v + 1))
+                            w0 = cute.math.exp2(kbm0 - lse_c[0], fastmath=True)
+                            w1 = cute.math.exp2(kbm1 - lse_c[1], fastmath=True)
+                            tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = cute.arch.mul_packed_f32x2((c0, c1), (w0, w1))
+                            if const_expr("cpdump" in self.dm_opts):
+                                # debug: P (B, H, N, N) fp32 in aux tensor 6
+                                kk = dm_idx0[2 * v, stage, 0, 0][0]
+                                if kk < seqlen.seqlen_k:
+                                    aux_data.tensors[6][batch_idx, head_idx, q0, kk] = tSrS_cur[2 * v]
+                                    aux_data.tensors[6][batch_idx, head_idx, q1, kk] = tSrS_cur[2 * v + 1]
+                    for v in cutlass.range_constexpr(0 if const_expr(self.dm_cp) else cute.size(tSrS_t2r, mode=[0]) // 2):
                         if const_expr(not self.shuffle_LSE):
                             lse_pair = (tSrLSE[2 * v], tSrLSE[2 * v + 1])
                         else:

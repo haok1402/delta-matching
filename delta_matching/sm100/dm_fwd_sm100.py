@@ -403,6 +403,9 @@ class DMForwardSm100:
         import os as _os
         self.dm_opts = dict(kv.split("=") for kv in _os.environ.get("DM_FWD_OPTS", "").split(",") if "=" in kv)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
+        # sm100-mx-cp: MUFU-only exps, l from the codes, Obar fp32 + per-(row, 32-key block) kb (s16) outputs for the
+        # pass-0-free matched backward that reuses the forward's P codes (Obar/kb ride in the v_descale buffer)
+        self.dm_cp = self.dm_opts.get("cp", "0") == "1"
         if "split" in self.dm_opts:
             self.split_P_arrive = int(self.dm_opts["split"])
         # vec buffer for row_max & row_sum
@@ -2408,6 +2411,7 @@ class DMForwardSm100:
                 thr_tmem_store_sf=thr_tmem_store_sf,
                 tStSF_r2t=tStSF_r2t,
                 dm_qsc=dm_qsc,
+                dm_row=dm_row,
                 dm_scales=descale_tensors,
                 kv_head_idx=kv_head_idx,
                 stage=stage,
@@ -2606,6 +2610,7 @@ class DMForwardSm100:
         tStSF_r2t: cute.Tensor,
         dm_qsc: Float32,
         dm_scales,
+        dm_row: Int32,
         kv_head_idx: Int32,
         stage: int | Int32,
         batch_idx: Int32,
@@ -2739,6 +2744,15 @@ class DMForwardSm100:
             dm_bias[j] = Float32(7.0) - kb
             dm_w[j] = dm_utils.exp2i_f32(e)
             dm_sfa[j] = dm_utils.ue8m0_byte(e)
+        if const_expr(self.dm_cp):
+            # kbT[b, h, blk, q] (s16) after the B*N*H*D fp32 Obar elements of the v_descale buffer
+            vt = dm_scales.v_descale
+            nB, nN, nH, nD = cute.size(vt, mode=[0]), cute.size(vt, mode=[1]), cute.size(vt, mode=[2]), cute.size(vt, mode=[3])
+            if dm_row < nN:
+                kb_base = vt.iterator.toint() + cutlass.Int64(nB) * nN * nH * nD * 4
+                kb_row = ((cutlass.Int64(batch_idx) * nH + head_idx) * (nN // 32) + nb4) * nN + dm_row
+                for j in cutlass.range_constexpr(4):
+                    dm_utils.st_global_kb_s16(kb_base + (kb_row + j * nN) * 2, Float32(7.0) - dm_bias[j])
         sfa_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3]))
         if const_expr(self.dm_opts.get("kvpack", "1") == "1"):
             sfb_word = dm_utils.bitcast_i32_f32(dm_vw)
@@ -2792,7 +2806,7 @@ class DMForwardSm100:
             softmax.apply_exp2_convert(
                 tSrS_t2r,
                 tSrP_r2t,
-                ex2_emu_freq=self.ex2_emu_freq,
+                ex2_emu_freq=self.ex2_emu_freq if const_expr(not self.dm_cp) else 0,
                 ex2_emu_start_frg=self.ex2_emu_start_frg,
             )
         if const_expr(self.s0_s1_barrier):
@@ -2820,7 +2834,15 @@ class DMForwardSm100:
         # l = l * acc_scale + sum_b w_b * sum_{j in b} p~_j   (fp32 pre-rounding values)
         dm_l = Float32(0.0) if const_expr(is_first) else softmax.row_sum[0] * acc_scale
         for j in cutlass.range_constexpr(4):
-            if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
+            if const_expr(self.dm_cp or self.dm_opts.get("lq", "0") == "1"):
+                # l from the quantized P the PV MMA uses (sum of dequantized e4m3 codes)
+                a0 = dm_utils.e4m3x4_sum_f32(tSrP_r2t_f32[8 * j], Float32(0.0))
+                a1 = dm_utils.e4m3x4_sum_f32(tSrP_r2t_f32[8 * j + 1], Float32(0.0))
+                for w in cutlass.range_constexpr(2, 8, 2):
+                    a0 = dm_utils.e4m3x4_sum_f32(tSrP_r2t_f32[8 * j + w], a0)
+                    a1 = dm_utils.e4m3x4_sum_f32(tSrP_r2t_f32[8 * j + w + 1], a1)
+                dm_l = dm_l + (a0 + a1) * dm_w[j]
+            elif const_expr(self.dm_opts.get("exp", "f32") == "h2"):
                 dm_l = dm_l + dm_bsum[j] * dm_w[j]
             else:
                 ps = (tSrS_t2r[32 * j], tSrS_t2r[32 * j + 1])
@@ -3069,6 +3091,8 @@ class DMForwardSm100:
                         gmem_tiled_copy_O,
                         # TMA KV loads a dummy tile when seqlen_k == 0 (see correction_epilogue)
                         zero_fill=seqlen.seqlen_k == 0 if const_expr(self.use_tma_KV) else False,
+                        dm_obar_cur=descale_tensors.v_descale[batch_idx, None, head_idx, None] if const_expr(self.dm_cp) else None,
+                        dm_row0=self._q_block(work_m, stage, thr_mma_pv.thr_idx) * self.m_block_size if const_expr(self.dm_cp) else None,
                     )
                     # Signal for the next work tile that O buffers in tmem are already read, so
                     # mma warp can write to them
@@ -3253,6 +3277,8 @@ class DMForwardSm100:
         gO: Optional[cute.Tensor] = None,
         gmem_tiled_copy_O: Optional[cute.TiledCopy] = None,
         zero_fill: bool | Boolean = False,
+        dm_obar_cur: Optional[cute.Tensor] = None,
+        dm_row0: Optional[Int32] = None,
     ):
         """Apply final scaling and transformation to attention output before writing to global memory.
 
@@ -3335,6 +3361,15 @@ class DMForwardSm100:
                         tOrO_frg[j], tOrO_frg[j + 1] = cute.arch.mul_packed_f32x2(
                             (tOrO_frg[j], tOrO_frg[j + 1]), (scale, scale)
                         )
+                if const_expr(dm_obar_cur is not None):
+                    # cp: Obar = O / l in fp32 (pass-0-free matched delta); row segment of contiguous columns
+                    dm_crd0 = tOcO_t2r[None, 0, 0, i][0]
+                    r_ = dm_row0 + dm_crd0[0]
+                    if r_ < seqlen_q:
+                        rowp = dm_obar_cur[r_, None]
+                        for e in cutlass.range_constexpr(0, cute.size(tOrO_frg), 4):
+                            ptr = (rowp.iterator + dm_crd0[1] + chunk * self.epi_head_dim_v + e).toint()
+                            dm_utils.st_global_v4_f32(ptr.ir_value(), tOrO_frg[e], tOrO_frg[e + 1], tOrO_frg[e + 2], tOrO_frg[e + 3])
                 copy_utils.cvt_copy(tiled_smem_store, tOrO_frg, tOsO_r2s_i)
             cute.arch.fence_view_async_shared()
 

@@ -102,12 +102,18 @@ _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
 FORCE = dict(pack_gqa=False)
 
 
-def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=True, trace=None):
+def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=True, trace=None,
+                kbt=None, pdump=None):
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
-    if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
-        aux.append(trace)
+    if trace is not None or kbt is not None:   # int64 accumulators of wait cycles (DM_BWD_OPTS must contain 'trace')
+        aux.append(trace if trace is not None else torch.zeros(64, dtype=torch.int64, device=q8.device))
+    if kbt is not None:            # sm100-mx-cp: forward kbT (B,H,N/32,N) s16; DM_BWD_OPTS must contain 'cp'
+        assert "cp" in os.environ.get("DM_BWD_OPTS", "").split(",")
+        aux.append(kbt)
+    if pdump is not None:          # debug (DM_BWD_OPTS cp,cpdump): backward P (B,H,N,N) fp32
+        aux.append(pdump)
     _CTX["delta"] = delta
     dq, dk, dv = _dm_flash_attn_bwd(
         q8, k8, v8, do8, do8, lse.contiguous(), softmax_scale=sm, causal=causal,

@@ -3821,6 +3821,7 @@ class DMBackwardSm100:
         if const_expr(dm_tr is not None):
             dm_s0, dm_s1, dm_s2, dm_s3, dm_s4 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
             dm_s5, dm_s6, dm_s7, dm_s8, dm_s9 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
+            dm_s10, dm_s11 = Int32(0), Int32(0)
             dm_tprev = dm_utils.clock32()
         while work_tile.is_valid_tile:
             (
@@ -4071,6 +4072,10 @@ class DMBackwardSm100:
                         else:
                             tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
                             tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
+                    if const_expr(dm_tr is not None):
+                        dm_now = dm_utils.clock32()
+                        dm_s10 = dm_s10 + (dm_now - dm_tprev)
+                        dm_tprev = dm_now
                     if const_expr(self.acc_m64):
                         # P^T goes to SMEM; S stays untouched in TMEM until the dS pipeline
                         # releases it, so no cross-warp barrier is needed before the store.
@@ -4099,6 +4104,10 @@ class DMBackwardSm100:
                             tSrPq[2 * v], tSrPq[2 * v + 1] = cute.arch.mul_packed_f32x2(
                                 (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]), (p_inv, p_inv))
                         tSrP_r2t[None, stage, 0, 0].store(tSrPq.load().to(self.q_dtype))
+                        if const_expr(dm_tr is not None):
+                            dm_now = dm_utils.clock32()
+                            dm_s11 = dm_s11 + (dm_now - dm_tprev)
+                            dm_tprev = dm_now
                         if const_expr(stage == 0):
                             if const_expr(self.split_P_dS):
                                 # wait until the previous pdo UMMA has consumed the P slot
@@ -4362,12 +4371,16 @@ class DMBackwardSm100:
                 for wg_ in range(2 if const_expr("noflush" not in self.dm_opts) else 0):
                     if dm_tid == 128 * wg_:
                         dm_vals = (dm_s0, dm_s1, dm_s2, dm_s3, dm_s4, dm_s5, dm_s6, dm_s7, dm_s8, dm_s9)
+                        if wg_ == 0:
+                            dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 40, Int64(dm_s10))
+                            dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 41, Int64(dm_s11))
                         if const_expr("flushconst" in self.dm_opts):
                             dm_vals = tuple(Int64(1) for _ in range(10))
                         for k_, a_ in enumerate(dm_vals):
                             dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (16 + 10 * wg_ + k_), Int64(a_))
                 dm_s0, dm_s1, dm_s2, dm_s3, dm_s4 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
                 dm_s5, dm_s6, dm_s7, dm_s8, dm_s9 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
+                dm_s10, dm_s11 = Int32(0), Int32(0)
             # Epilogue
             # Run epilogue if we processed any m_blocks for this n_block
             if process_tile:

@@ -3942,6 +3942,12 @@ class DMBackwardSm100:
                 tSrLSE_s2r = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
                 if const_expr(prefetch_LSE and not self.shuffle_LSE):
                     cute.autovec_copy(tSsLSE[None, 0, 0, 0, consumer_state_LSE.index], tSrLSE_s2r)
+                # DM lseall: LSE for every stage loaded right after the LSE wait (before the S wait)
+                dm_lse_all = [None] * cute.size(tScS_t2r, mode=[1])
+                if const_expr("lseall" in self.dm_opts):
+                    for st_ in cutlass.range_constexpr(cute.size(tScS_t2r, mode=[1])):
+                        dm_lse_all[st_] = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
+                        cute.autovec_copy(tSsLSE[None, st_, 0, 0, consumer_state_LSE.index], dm_lse_all[st_])
 
                 if const_expr(self.split_P_dS):
                     pipeline_S_P.consumer_wait(consumer_state_S)
@@ -4045,7 +4051,9 @@ class DMBackwardSm100:
                 for stage in cutlass.range_constexpr(num_stages):
                     tSrS_cur = tSrS_t2r[None, stage, 0, 0]
                     tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
-                    if const_expr(not self.shuffle_LSE):
+                    if const_expr("lseall" in self.dm_opts):
+                        tSrLSE = dm_lse_all[stage]
+                    elif const_expr(not self.shuffle_LSE):
                         if const_expr(stage > 0 or not prefetch_LSE):
                             cute.autovec_copy(tSsLSE_cur, tSrLSE_s2r)
                         tSrLSE = tSrLSE_s2r

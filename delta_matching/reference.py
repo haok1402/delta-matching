@@ -165,6 +165,7 @@ class Preset:
     center_k: bool = True        # K centered by its per-head mean before quantization (softmax-invariant)
     delta_norm: bool = False     # matched delta = sum_j P dP / sum_j P (instead of sum_j P dP)
     l_from_codes: bool = False   # forward row sum l from the quantized P used in PV (O a convex combination of V rows)
+    delta_from_o: bool = False   # matched delta = dequant(dO codes) . O_fp32 (forward's normalized fp32 output, no pass 0)
     mx_rounding: str = "ceil"
     notes: str = ""
 
@@ -202,7 +203,7 @@ PRESETS["mxfp8-all"] = PRESETS["mxfp8"]
 
 
 def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,
-                    register=True, l_from_codes=False):
+                    register=True, l_from_codes=False, p_fwd=None, delta_from_o=False):
     """kda-sm100's sm100 numerics (sm100/kda/docs/draft.md "Numerics design"), with knobs:
       tok_block   Q / K / V / dO: one scale per tok_block tokens over all D (pow2: 2^ceil(log2(amax/448)), else fp32 amax/448)
       p_block     forward P: per (row, p_block keys) block exponent k = floor(max S log2e), code e4m3(2^(x-k+7))
@@ -210,8 +211,9 @@ def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_b
       ds_block    dS (one code set for dK and dQ): pow2 scale per (queries x keys) 2-D block
       delta_norm  matched delta = sum P dP / sum P (True) or sum P dP (False, sm90 style)"""
     inp = f"blockrows_pow2:{tok_block}" if pow2 else f"blockrows:{tok_block}"
-    pr = Preset(name, q=inp, k=inp, v=inp, do=inp, p_fwd=f"kda_pfwd:{p_block}", p_bwd=f"mx:queries:{pt_block}",
+    pr = Preset(name, q=inp, k=inp, v=inp, do=inp, p_fwd=p_fwd or f"kda_pfwd:{p_block}", p_bwd=f"mx:queries:{pt_block}",
                 ds=f"mx2d:{ds_block[0]}x{ds_block[1]}", delta_norm=delta_norm, l_from_codes=l_from_codes,
+                delta_from_o=delta_from_o,
                 notes=f"kda sm100 numerics: inputs {inp}, P fwd per row x {p_block} keys, P^T per key x {pt_block} "
                       f"queries, dS {ds_block[0]}x{ds_block[1]} blocks, delta_norm={delta_norm}")
     return _register(pr) if register else pr
@@ -408,6 +410,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             dP = dOa[:, :, i0:i1] @ Vd[:, :, :nk].repeat_interleave(rep, 1).transpose(-1, -2)
             if mode == "stale":
                 dl = (doh[:, :, i0:i1] * Ost[:, :, i0:i1]).sum(-1, keepdim=True)
+            elif p.delta_from_o:
+                dl = (dOa[:, :, i0:i1].double() * O[:, :, i0:i1].double()).sum(-1, keepdim=True).float()
             else:
                 dl = _matched_delta(P, Pq, dP, p)
             delta[:, :, i0:i1] = dl.squeeze(-1)
@@ -515,3 +519,5 @@ SITE_FNS["sm90_ds"] = sm90_ds
 make_kda_preset("sm100-mx", ds_block=(128, 32), delta_norm=True)
 make_kda_preset("sm100-mx-nonorm", ds_block=(128, 32), delta_norm=False)
 make_kda_preset("sm100-mx-lq", ds_block=(128, 32), delta_norm=True, l_from_codes=True)
+# kda-sm100 19:00: forward with ~exact P (fp8 code + 2 bf16 residuals ~ fp32), matched delta = dequant(dO8) . O_fp32
+make_kda_preset("sm100-mx-x", ds_block=(128, 32), p_fwd="none", delta_from_o=True)

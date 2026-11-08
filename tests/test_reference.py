@@ -18,7 +18,7 @@ DEV = "cuda" if torch.cuda.is_available() else "cpu"
 BIG = DEV == "cuda"
 BF = torch.bfloat16
 D = 128
-FP8_PRESETS = ["sm90", "mxfp8", "kda-v1"]
+FP8_PRESETS = ["sm90", "mxfp8", "kda-v1", "sm100-mx", "sm100-mx-x"]
 # fp8 floor bounds on Gaussian inputs (README "Accuracy": O, dV ~0.04, dQ, dK ~0.06; bound = 2x)
 TOL = {"O": 8e-2, "dV": 8e-2, "dQ": 1.2e-1, "dK": 1.2e-1}
 NAMES = ("O", "dQ", "dK", "dV")

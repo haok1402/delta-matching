@@ -2381,7 +2381,9 @@ class DMBackwardSm100:
                     # DM pers: previous tile's dK/dV epilogue (sdK/sdV alias sK/sV) has drained, and its MMAs are done
                     # with sK/sV/sKt (the Kt release is committed after the last dQ MMA)
                     cute.arch.mbarrier_wait(self.dm_kvfree_mbar, phase=(dm_pt - 1) & 1)
+                    self._dm_prog(Int32(1), dm_pt, Int32(0), Int32(3))
                     pipeline_Kt.sync_object_empty.wait(producer_state_Kt.index, producer_state_Kt.phase)
+                    self._dm_prog(Int32(1), dm_pt, Int32(0), Int32(4))
             (
                 work_n,
                 kv_block,
@@ -2987,10 +2989,14 @@ class DMBackwardSm100:
                                 pipeline_dO.producer_commit(producer_state_O_Ot)
                                 producer_state_O_Ot.advance()
 
-                            pipeline_Q.producer_tail(producer_state_Q_Qt)
-                            pipeline_LSE.producer_tail(producer_state_LSE)
-                            pipeline_dO.producer_tail(producer_state_O_Ot)
-                            pipeline_dPsum.producer_tail(producer_state_dPsum)
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_Q.producer_tail(producer_state_Q_Qt)
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_LSE.producer_tail(producer_state_LSE)
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_dO.producer_tail(producer_state_O_Ot)
+                            if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                pipeline_dPsum.producer_tail(producer_state_dPsum)
                         else:
                             #### Prologue ####
                             if const_expr(should_load_Q):
@@ -3108,13 +3114,18 @@ class DMBackwardSm100:
                                     pipeline_Qt.producer_commit(producer_state_Qt)
                                     producer_state_Qt.advance()
 
-                                pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
-                                pipeline_LSE.producer_tail(producer_state_Q_LSE)
+                                if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                    pipeline_Q.producer_tail(producer_state_Q_LSE.clone())
+                                if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                    pipeline_LSE.producer_tail(producer_state_Q_LSE)
                                 if const_expr(load_Qt is not None):
-                                    pipeline_Qt.producer_tail(producer_state_Qt)
+                                    if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                        pipeline_Qt.producer_tail(producer_state_Qt)
                             if const_expr(should_load_dO):
-                                pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
-                                pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
+                                if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                    pipeline_dO.producer_tail(producer_state_dO_dPsum.clone())
+                                if const_expr(self.dm_pers == 0):  # DM pers: tails advance the shared states; per-tile is wrong
+                                    pipeline_dPsum.producer_tail(producer_state_dO_dPsum)
 
                 else:
                     assert blocksparse_tensors is not None

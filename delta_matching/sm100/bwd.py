@@ -277,6 +277,22 @@ def _dm_cfg(config):
 
 
 _ns = dict(vars(fi))
+_ORIG_VALIDATE = _ns["validate_bwd_config"]
+
+
+def _dm_validate(config, inputs):
+    """brain8k: allow a lowering reduce WG (reduce < 128 via setmaxnreg.dec); check the real per-warp pool instead."""
+    import dataclasses
+    r = config.registers
+    if r is not None and r.reduce < 128:
+        # per-SMSP register file: warps w, w+4, w+8, w+12 share one quarter -> reduce + 2*compute + max(misc) <= 512
+        # (the per-CTA total 4R+8C+3L+E is NOT enough: 104:168:80 deadlocks in setmaxnreg.inc)
+        assert r.reduce + 2 * r.compute + max(r.load, r.mma, r.empty) <= 512, r
+        assert r.reduce >= 24 and r.reduce % 8 == 0 and r.compute % 8 == 0 and r.compute <= 256, r
+        config = dataclasses.replace(config, registers=dataclasses.replace(r, reduce=128, compute=128))
+    return _ORIG_VALIDATE(config, inputs)
+
+
 def _dm_post_convert(acc, out, *a, **k):
     """FA4 postprocess wrapper: skipped for dQ when the kernel's last writer already wrote bf16 dQ (DM lwc)."""
     if _CTX.get("dq") is not None and out is _CTX["dq"]:
@@ -294,6 +310,7 @@ def _dm_gloop():
 _ns.update(_dm_gloop=_dm_gloop)
 _ns.update(_dm_zeros=_dm_zeros, _dm_empty=_dm_empty, _DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _dm_bwd_cache=_dm_bwd_cache, _dm_cfg=_dm_cfg)
 exec(compile(_patched_source(), fi.__file__ + ":dm_patched_bwd", "exec"), _ns)
+_ns["validate_bwd_config"] = _dm_validate   # after exec: the patched source re-imports the original
 _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
 
 FORCE = dict(pack_gqa=False)

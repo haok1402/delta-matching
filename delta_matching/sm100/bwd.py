@@ -359,7 +359,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
             mst.wait_event(s2[2])
 
         return fastpath.call("bwd", inp, (key, _ao, float(sm), bool(deterministic)), slow, pre=pre, reset=reset,
-                             loose=() if deterministic else (0,))
+                             loose=() if deterministic else (0, 1, 2))   # nd: dQ and (GQA) dK/dV accumulate unordered
     opts0 = _env("DM_BWD_OPTS", "")
     os.environ["DM_BWD_OPTS"] = _ao     # kernel knobs + compile cache follow the effective opts
     if st is not None and st[0] == key and trace is None:

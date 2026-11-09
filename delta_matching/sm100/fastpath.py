@@ -3,12 +3,14 @@
 The first call of a (shape, strides, dtypes, options) key goes through FA4's full host interface (_flash_attn_fwd /
 _flash_attn_bwd: config selection, validation, tensor conversion, compile-cache lookup) with the compile caches wrapped
 so that every compiled-kernel invocation is RECORDED (compiled fn + argument structure).  A plan is then built that maps
-every tensor argument either to one of the caller's input tensors (same storage, recreated as the same view), or to a
-fresh allocation (zero-filled if it was all-zero when the kernel was called, otherwise only allowed if it is returned
-to the caller, i.e. an output the kernels overwrite).  Later calls with the same key skip the host interface and just
-call the recorded compiled functions with the new tensors.  Kernel launches, kernel arguments' values and launch order
-are identical, so results are bitwise identical to the slow path.  Any structure the recorder can't prove safe (a
-non-zero scratch buffer that isn't returned, a tensor that aliases nothing known) disables the fast path for that key.
+every tensor argument either to one of the caller's input tensors (same storage, recreated as the same view of the
+first input on that storage; the aliasing pattern of the inputs is part of the key), or to a fresh allocation whose
+provenance was observed while recording: torch.empty(_like) / torch.zeros(_like) (hooked during the recording call;
+empty results sentinel-filled) and untouched by host code before the first kernel that uses it.  Later calls with the
+same key skip the host interface and just call the recorded compiled functions with the new tensors.  Kernel launches,
+kernel arguments' values and launch order are identical, so results are bitwise identical to the slow path.  Any
+buffer of other provenance (made by another op, written by host code, never seen by a kernel) disables the fast path
+for that key (WHY records the reason).
 Disable globally with DM_FASTPATH=0.
 """
 import os
@@ -203,12 +205,12 @@ class Plan:
             if p not in allocs:
                 st = t.untyped_storage()
                 k = rec.state.get(p)
-                # provenance known (hooked torch.empty / torch.zeros, untouched until the first kernel): re-create
-                # the same way; otherwise infer from the bytes at first kernel use (zero -> zeros)
-                zero = (k == "z") if k else rec.zero.get(p, None)
-                if k is False:
-                    zero = "modified"
-                allocs[p] = [st.nbytes(), t.device, zero, p in ret_ptrs or k == "e", st.data_ptr()]
+                # only buffers of known provenance are replayable: created by a hooked torch.empty(_like) /
+                # torch.zeros(_like) and untouched by host code until the first kernel that uses them (re-created the
+                # same way). Anything else (made by another torch op, written by host code, never seen by a kernel)
+                # makes the plan non-replayable (its bytes would depend on the recording call's data).
+                zero = {"z": True, "e": False, False: "modified"}.get(k, "unknown")
+                allocs[p] = [st.nbytes(), t.device, zero, p in ret_ptrs, st.data_ptr()]
             a = allocs[p]
             return ("alloc", p, (t.dtype, tuple(t.shape), tuple(t.stride()), t.data_ptr() - a[4]))
 
@@ -234,6 +236,9 @@ class Plan:
             if zero == "modified":
                 self.ok = False      # host code wrote into a fresh buffer before the kernel: not replayable
                 self.why.append(("host-modified", nb))
+            elif zero == "unknown":
+                self.ok = False
+                self.why.append(("unknown-provenance", nb, returned))
             elif zero is None and not returned:
                 self.ok = False      # a returned-only tensor never passed to a kernel / unknown provenance
                 self.why.append(("unknown-not-returned", nb))
@@ -352,11 +357,19 @@ WHY = {}
 
 def key_of(tag, inputs: dict, extra):
     parts = [tag, extra]
-    for name, t in inputs.items():       # call sites build the dict in a fixed order; order is part of the key
+    first = {}           # storage ptr -> (index, data_ptr) of the first input on that storage
+    for i, (name, t) in enumerate(inputs.items()):   # call sites build the dict in a fixed order; order is in the key
         if t is None:
             parts.append((name, None))
         else:
-            parts.append((name, t.shape, t.stride(), t.dtype, t.get_device(), t.data_ptr() % 128))
+            dp = t.data_ptr()
+            sp = t.untyped_storage().data_ptr()
+            f = first.get(sp)
+            if f is None:
+                f = first[sp] = (i, dp)
+            # alias signature: (first input sharing this storage, byte offset from it); plans rebuild aliased inputs
+            # as views of that first input, so a call with different aliasing must not hit the same plan
+            parts.append((name, t.shape, t.stride(), t.dtype, t.get_device(), dp % 128, f[0], dp - f[1]))
     return tuple(parts)
 
 

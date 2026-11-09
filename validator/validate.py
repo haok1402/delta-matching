@@ -538,8 +538,16 @@ def check_case(case, cr, preset, dev, verbose):
                 dl_c = dbg["delta"].reshape(B, H, N).float()
                 lse_err = (lse_c.double() - em["LSE"].double()).abs()
                 lse_tol = 1e-3 + 1e-5 * em["LSE"].double().abs()
+                km_c = dbg.get("kmean")
+                if km_c is not None:
+                    # the candidate's K-centering mean must equal the reference mean to fp32 round-off (summation order only)
+                    km_r = R.kmean_sm90(k.float().transpose(1, 2)).squeeze(-2)
+                    km_err = (km_c.reshape(km_r.shape).float() - km_r).abs().max().item()
+                    km_tol = 1e-6 * k.float().abs().amax().item() + 1e-9
+                    chk("matched:kmean_roundoff", km_err <= km_tol,
+                        f"candidate K-centering mean vs reference: max |diff| {km_err:.2e} (fp32 round-off limit {km_tol:.1e})")
                 emc = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, lse_override=lse_c,
-                                     delta_override=dl_c, q_block=qbk)
+                                     delta_override=dl_c, q_block=qbk, k_mean=km_c)
                 den = emc["sum_absPdP"]
                 live = den > 0
                 r = ((dl_c.double() * emc["sum_P"] - emc["sum_PdP"]).abs() / den.clamp_min(1e-300))[live]

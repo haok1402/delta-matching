@@ -370,7 +370,7 @@ def attention_exact_blocked(q, k, v, do, causal=True, q_block=1024):
 # ----------------------------------------------------------------------------------------------------------------- engine
 def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_block=1024, aux=False,
                  o_for_stale=None, round_o=True, fwd_s_noise=0.0, bwd_p_noise=0.0, lse_override=None,
-                 delta_override=None):
+                 delta_override=None, k_mean=None):
     """Emulate an fp8 Delta-Matching kernel in torch.
 
     q (B, N, H, D), k / v (B, N, Hk, D), do (B, N, H, D); mode "matched" | "stale"; preset a PRESETS name or Preset.
@@ -392,7 +392,10 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
         qh = q.to(f32).transpose(1, 2) * sm                  # (B, H, N, D), the softmax scale baked into Q
         kh = k.to(f32).transpose(1, 2)
         if p.center_k:
-            kh = kh - kmean_sm90(kh)
+            # k_mean (B, Hk, D): a candidate's own fp32 K-centering mean.  The exact fp32 mean is an implementation detail
+            # (summation order); at 128k a 7e-9 difference flipped 102 of 67M K codes by one e4m3 step (dm-validator 17:20),
+            # so identity cross-checks run the emulation on the candidate's mean (checked separately to fp32 round-off)
+            kh = kh - (k_mean.to(f32).reshape(B, Hk, 1, D) if k_mean is not None else kmean_sm90(kh))
         vh = v.to(f32).transpose(1, 2)
         doh = do.to(f32).transpose(1, 2)
         c0 = _Ctx(role="input")

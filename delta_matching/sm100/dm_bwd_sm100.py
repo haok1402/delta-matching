@@ -3763,7 +3763,10 @@ class DMBackwardSm100:
                         self._tlev(dm_trace, dm_mi, 0, True)
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
-                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                        if const_expr("nodqe" not in self.dm_abl):
+                            # DM abl:nodqe (timing only, outputs WRONG): S(t+1) does not wait for dQ(t-1)'s drain (bound for a
+                            # separate dQ TMEM home)
+                            pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                         if const_expr(dm_trace is not None):
                             dm_acc1 = dm_acc1 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 1, True)
@@ -5899,7 +5902,10 @@ class DMBackwardSm100:
         """DM tlev: record clock64 of event e of tile j (j < 64) for CTA self.dm_tlev (one thread: pred and lane 0)."""
         if const_expr(dm_tr is not None and self.dm_tlev >= 0):
             if pred and cute.arch.lane_idx() == 0 and cute.arch.block_idx()[0] == self.dm_tlev and cute.arch.block_idx()[1] == 0 and cute.arch.block_idx()[2] == 0 and j < 64:
-                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (40000 + 32 * j + e), dm_utils.clock64())
+                if const_expr("tlns" in self.dm_opts):
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (40000 + 32 * j + e), dm_utils.globaltimer())
+                else:
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (40000 + 32 * j + e), dm_utils.clock64())
 
     def _dm_setmaxreg_dec(self, n: int):
         if not self.dm_noreg:   # trace-time python

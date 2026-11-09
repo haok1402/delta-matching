@@ -413,7 +413,7 @@ class DMForwardSm100:
             # kda-sm100-sspv2: ss_pv default OFF. Every race-free sScale hand-off measured +34..45% fwd (crd, dbs, late;
             # fwdrw-design 6.9), and racy ss_pv was only 0.1-0.6% faster than the old path with lean=1,kvs=6 (bitwise, no
             # new hand-off). dbs (+2 KB SMEM) needs one K/V ring stage less: kvs=5.
-            for _k, _v in (("ss_pv", "0"), ("kvs", "5" if self.dm_opts.get("dbs", "0") == "1" else "6"), ("lean", "1")):
+            for _k, _v in (("ss_pv", "0"), ("kvs", "5" if (self.dm_opts.get("ss_pv", "0") == "1" and self.dm_opts.get("dbs", "0") == "1") else "6"), ("lean", "1")):
                 self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
         if "split" in self.dm_opts:
@@ -439,7 +439,7 @@ class DMForwardSm100:
         # ordered by the existing chain read(k-1) -> O-rescaled(k-1) -> PV(k-1) -> pvdone; no extra handshake (fwdrw-design 6.9)
         self.dm_late = self.dm_sspv and not self.dm_dbs and self.dm_opts.get("late", "1") == "1"
         self.dm_crd = self.dm_sspv and not self.dm_dbs and not self.dm_late and self.dm_opts.get("crd", "1") == "1"
-        self.dm_trc = int(self.dm_opts.get("trc", "0"))   # DEBUG ONLY: LSE <- correction clock counters (1 stats sync, 2 pvdone wait, 3 loop total)
+        self.dm_trc = int(self.dm_opts.get("trc", "0")) if self.dm_sspv else 0   # DEBUG ONLY: LSE <- correction clock counters (1 stats sync, 2 pvdone wait, 3 loop total)
         if self.dm_sspv:
             assert self.n_block_size == 128 and self.head_dim_v_padded == 128
             # the pipe=1 softmax branch stores P to TMEM and bypasses the SS-PV P/SF/pvdone protocol (Codex review)
@@ -2720,7 +2720,8 @@ class DMForwardSm100:
                             dm_wcnt[0] = dm_wc + 1
                         if const_expr(self.dm_late):
                             # late final stats: PV_s(K-1) complete => the correction read scale_s(K-1) (and, across tiles, its previous
-                            # final-stats read preceded its O release that PV_s(0) of this tile waited for); exact: completions in {K-1, K}
+                            # final-stats read preceded its O release that PV_s(0) of this tile waited for); waits global completion #j (j = steps
+                            # before this tile + K); exact: completed count in {j, j+1} (PV of the next tile needs a later P store)
                             dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, s_p_o_consumer_count)
                         sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
                         if const_expr(mLSE is not None or learnable_sink is not None):
@@ -2818,7 +2819,8 @@ class DMForwardSm100:
                             dm_wcnt[0] = dm_wc + 1
                         if const_expr(self.dm_late):
                             # late final stats: PV_s(K-1) complete => the correction read scale_s(K-1) (and, across tiles, its previous
-                            # final-stats read preceded its O release that PV_s(0) of this tile waited for); exact: completions in {K-1, K}
+                            # final-stats read preceded its O release that PV_s(0) of this tile waited for); waits global completion #j (j = steps
+                            # before this tile + K); exact: completed count in {j, j+1} (PV of the next tile needs a later P store)
                             dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, s_p_o_consumer_count)
                         sScale[tidx + sm_stats_index * self.m_block_size] = softmax.row_sum[0]
                         if const_expr(mLSE is not None or learnable_sink is not None):
@@ -3438,7 +3440,7 @@ class DMForwardSm100:
                             # cute.arch.fence_view_async_tmem_load()
                             # scale = tSrScale_t2r[0]
                             scale = sScale[tidx + sm_stats_index * self.m_block_size]
-                            if const_expr(self.dm_opts.get("nsr", "0") == "1"):
+                            if const_expr(self.dm_sspv and self.dm_opts.get("nsr", "0") == "1"):
                                 scale = Float32(1.0)   # DEBUG ONLY (wrong when a rescale is due): no sScale read
                             if const_expr(self.dm_crd):
                                 dm_utils.mbar_arrive(self.dm_cread + 8 * sm_stats_index)   # read done -> softmax may overwrite

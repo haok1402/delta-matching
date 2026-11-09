@@ -70,7 +70,7 @@ def _fws(deterministic):
     return bool(deterministic) and "nofws" not in os.environ.get("DM_BWD_OPTS", "").split(",")
 
 
-def _auto_opts(q8, k8):
+def _auto_opts(q8, k8, causal=False):
     """Effective DM_BWD_OPTS for this shape. DM gloop (GQA, auto): short sequences spend most of a KV tile on the
     fp32 dK/dV accumulation across the qh query-head CTAs + postprocess; loop the group inside one CTA instead (dK/dV
     in TMEM, stored once). Long causal sequences lose (4x longer tiles -> tail), so only N <= gloopN (default 2048).
@@ -79,11 +79,33 @@ def _auto_opts(q8, k8):
     gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "2048"))
     if q8.shape[2] > k8.shape[2] and "gloop" not in ol and "nogloop" not in ol and q8.shape[1] <= gN:
         ol = ol + ["gloop"]
+    # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA
+    # launch/prologue/epilogue is a large share of a KV tile; long sequences keep the hardware's dynamic CTA order
+    # (static striding loses 4-18% there). 'nopers' disables, explicit 'pers=N' overrides, persN= sets the cut.
+    pN = int(next((o[5:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
+    # DM pcN (MHA causal, auto, pers2): dynamic persistent grid (pdyn) over all SMs for causal N <= pcN (default 8192):
+    # +6-8% bwd main at causal 8k (2 GPUs, same-process A/B); -1.5% at 32k/64k and -4% non-causal, so off there.
+    pcN = int(next((o[4:] for o in ol if o.startswith("pcN=")), "0"))   # off: fa4-bench harness 8k causal MHA bwd 0.998x (no gain)
+    if (q8.shape[2] == k8.shape[2] and "nopers" not in ol and not any(o.startswith("pers=") for o in ol)):
+        if q8.shape[1] <= pN:
+            ol = ol + ["pers=148"]
+        elif causal and q8.shape[1] <= pcN:
+            ol = ol + [f"pers={_num_sms(q8)}", "pdyn"]
     return ",".join(ol)
 
 
+def _num_sms(q8):
+    n = int(os.environ.get("DM_NSM", "0"))
+    if n:
+        return n
+    try:
+        return int(torch.cuda.get_device_properties(q8.device).multi_processor_count)
+    except Exception:
+        return 148
+
+
 def _key(q8, k8, causal, deterministic):
-    return (tuple(q8.shape), tuple(k8.shape), bool(causal), bool(deterministic), _auto_opts(q8, k8),
+    return (tuple(q8.shape), tuple(k8.shape), bool(causal), bool(deterministic), _auto_opts(q8, k8, causal),
             q8.device.index)
 
 
@@ -220,12 +242,17 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
         aux.append(_CTX["dq"])
+    if "pdyn" in _auto_opts(q8, k8, causal).split(","):
+        # DM pdyn: claim counter for the dynamic persistent scheduler (last aux tensor), zeroed per launch
+        _CTX["pdyn_ctr"] = torch.zeros(1, dtype=torch.int32, device=q8.device)
     if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
         aux.append(trace)
+    if "pdyn" in _auto_opts(q8, k8, causal).split(","):
+        aux.append(_CTX.pop("pdyn_ctr"))
     _CTX["delta"] = delta
     _CTX["deterministic"] = deterministic
     opts0 = os.environ.get("DM_BWD_OPTS", "")
-    os.environ["DM_BWD_OPTS"] = _auto_opts(q8, k8)     # kernel knobs + compile cache follow the effective opts
+    os.environ["DM_BWD_OPTS"] = _auto_opts(q8, k8, causal)     # kernel knobs + compile cache follow the effective opts
     key = _key(q8, k8, causal, deterministic)
     st = _CTX.pop("staged", None)
     if st is not None and st[0] == key and trace is None:

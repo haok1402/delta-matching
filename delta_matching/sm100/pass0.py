@@ -24,6 +24,8 @@ FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_s
 REGS = dict(softmax=208, correction=32, other=64)  # P0: correction warps idle -> registers to softmax
 _c3r = _env("DM_P0_C3REGS", "168,96,64").split(",")   # +c3: correction WG computes chunk 3
 REGS_C3 = dict(softmax=int(_c3r[0]), correction=int(_c3r[1]), other=int(_c3r[2]))
+_tlr = _env("DM_P0_TLREGS", "112,112,32").split(",")   # +tl: 640 threads (96-reg launch), per SMSP 4 compute warps + 1 other
+REGS_TL = dict(softmax=int(_tlr[0]), correction=int(_tlr[1]), other=int(_tlr[2]))
 
 
 def _make_cache():
@@ -107,6 +109,9 @@ def _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant):
         cfg = orig[2](inputs)
         cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "registers"})
         regs = over.get("registers", REGS_C3 if "c3" in exp_variant.split("+")[1:] else REGS)
+        if "tl" in exp_variant.split("+")[1:]:
+            regs = REGS_TL
+            assert 4 * regs["softmax"] + regs["other"] <= 480 and regs["softmax"] == regs["correction"], "tl regs"
         for fl in exp_variant.split("+")[1:]:      # +r<softmax>_<correction>: register split (other = 64)
             if fl.startswith("r") and "_" in fl and fl[1:].split("_")[0].isdigit():
                 r_ = [int(x) for x in fl[1:].split("_")]

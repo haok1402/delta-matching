@@ -293,6 +293,13 @@ class DMPass0Sm100:
         # +ni: the correction WG and non-scheduler empty warps have no per-tile work in pass 0: they leave the
         # dynamic-scheduler consumer group and skip the schedule walk (no CLC-response spin stealing issue slots)
         self.dm_ni = "ni" in _fl0
+        # +tl (track AG): two lanes per query row (tcgen05.ld.16x64b), 4 compute warps / SMSP: warps 0-3 / 4-7 = stage 0 / 1
+        # rows 0-15 of each quadrant, warps 8-11 / 12-15 (the "correction" ids) = stage 0 / 1 rows 16-31; MMA / epilogue /
+        # load / empty move to 16-19 (640 threads). Bitwise the h2+ts path (see tl_loop).
+        self.dm_tl = "tl" in _fl0 and self.q_stage == 2 and self.use_tma_KV   # else: the default h2 path
+        if self.dm_tl:
+            assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
+            assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
             assert not any(f in _fl for f in ("fu", "fa", "sq")), "c3 supports the plain static-mix path only"
@@ -373,6 +380,12 @@ class DMPass0Sm100:
         self.epilogue_warp_ids = (13,)
         self.load_warp_ids = (14,)
         self.empty_warp_ids = (15,)
+        if self.dm_tl:
+            self.correction_warp_ids = (8, 9, 10, 11, 12, 13, 14, 15)
+            self.mma_warp_id = 16
+            self.epilogue_warp_ids = (17,)
+            self.load_warp_ids = (18,)
+            self.empty_warp_ids = (19,)
         self.tmem_alloc_cols = cute.arch.get_max_tmem_alloc_cols("sm_100")
 
         self.threads_per_cta = cute.arch.WARP_SIZE * len(
@@ -387,7 +400,7 @@ class DMPass0Sm100:
             )
         )
         # config.select_sm100_registers and its validation assume this launch shape.
-        assert self.threads_per_cta == SM100_THREADS_PER_CTA
+        assert self.threads_per_cta == (640 if self.dm_tl else SM100_THREADS_PER_CTA)
 
         self.use_tma_Q = not (self.pack_gqa and self.m_block_size % self.qhead_per_kvhead != 0)
         self.use_s_ping_pong = config.use_s_ping_pong
@@ -1106,7 +1119,7 @@ class DMPass0Sm100:
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
             consumer_group=ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if self.dm_c3 else 1)
+                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if (self.dm_c3 or self.dm_tl) else 1)
             ),  # P0: softmax threads (+ c3 correction WG) release the S/dP slot
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
@@ -1126,7 +1139,7 @@ class DMPass0Sm100:
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
             consumer_group=ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if self.dm_c3 else 1)
+                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if (self.dm_c3 or self.dm_tl) else 1)
             ),
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
@@ -1274,8 +1287,10 @@ class DMPass0Sm100:
                 cutlass_pipeline.Agent.Thread
             )
             num_sched_consumer_warps_per_cta = self.threads_per_cta // cute.arch.WARP_SIZE
-            if const_expr(self.dm_ni and not self.dm_c3):
+            if const_expr(self.dm_ni and not self.dm_c3 and not self.dm_tl):
                 num_sched_consumer_warps_per_cta -= len(self.correction_warp_ids) + len(self._dm_idle_empty_warps())
+            elif const_expr(self.dm_ni and self.dm_tl):
+                num_sched_consumer_warps_per_cta -= len(self._dm_idle_empty_warps())
             # NB on CTA0 warp15 == scheduler on CTA1 == empty but still both consume
             num_sched_consumer_warps = num_sched_consumer_warps_per_cta * self.cta_group_size
             sched_consumer_group = cutlass_pipeline.CooperativeGroup(
@@ -1479,7 +1494,14 @@ class DMPass0Sm100:
                 tile_scheduler=tile_scheduler,
             )
 
-            if const_expr(not self.s0_s1_barrier):
+            if const_expr(self.dm_tl):
+                if warp_idx < self.softmax1_warp_ids[0]:
+                    self.tl_loop(0, 0, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
+                                 num_splits, SeqlenInfoCls, tile_scheduler)
+                else:
+                    self.tl_loop(1, 0, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
+                                 num_splits, SeqlenInfoCls, tile_scheduler)
+            elif const_expr(not self.s0_s1_barrier):
                 stage = Int32(0 if const_expr(self.q_stage == 1) or warp_idx < self.softmax1_warp_ids[0] else 1)
                 softmax_loop(stage=stage, tStS=tStS)
             elif const_expr(self.q_stage == 1 or len(self.softmax1_warp_ids) == 0):
@@ -1499,14 +1521,23 @@ class DMPass0Sm100:
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
             # setmaxnreg.dec cannot exceed the launch register count.
-            if const_expr(self.num_regs_correction > SM100_LAUNCH_REGISTERS):
+            if const_expr(self.dm_tl):
+                cute.arch.setmaxregister_increase(self.num_regs_correction)   # 640-thread launch: 96 regs
+            elif const_expr(self.num_regs_correction > SM100_LAUNCH_REGISTERS):
                 cute.arch.setmaxregister_increase(self.num_regs_correction)
             else:
                 cute.arch.setmaxregister_decrease(self.num_regs_correction)
             # sync with mma warp before retrieving tmem ptr
             tmem_alloc_barrier.arrive_and_wait_unaligned()
             tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
-            if const_expr(self.dm_c3):
+            if const_expr(self.dm_tl):
+                if warp_idx < self.correction_warp_ids[4]:
+                    self.tl_loop(0, 1, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
+                                 num_splits, SeqlenInfoCls, tile_scheduler)
+                else:
+                    self.tl_loop(1, 1, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
+                                 num_splits, SeqlenInfoCls, tile_scheduler)
+            elif const_expr(self.dm_c3):
                 self.c3_loop(thr_mma_qk, tStS, sScale, aux_data, pipeline_s_p_o, pipeline_o_acc, block_info, num_splits,
                              SeqlenInfoCls, tile_scheduler)
             else:
@@ -2617,6 +2648,142 @@ class DMPass0Sm100:
                 delta = num_t
             if row < seqlen.seqlen_q:
                 mLSE[row, head_idx, batch_idx] = delta
+            work_tile = tile_scheduler.advance_to_next_work()
+
+    @cute.jit
+    def tl_loop(self, stage: int, rh: int, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_dp, aux_data, block_info,
+                num_splits, SeqlenInfoCls, tile_scheduler):
+        """P0 +tl (track AG): two lanes per query row, 4 compute warps / SMSP (stage, row half rh).
+        tcgen05.ld.16x64b: thread t of the warp holds TMEM lane quad*32 + 16*rh + t//4 + 8*(t&1) and the columns of
+        parity p = (t>>1)&1, so the row's two lanes hold the x / y halves of every packed pair of the h2 path. Every scalar
+        den / num-acc / TwoSum chain lives on one lane in the h2 path's exact order (bitwise P, dP, num, den, delta); the
+        halves meet only in the final fp64 combine (shuffle xor 2). Requires +h2+ts, all-MUFU P, no c3/b6/r3."""
+        aux = aux_data.tensors
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        quad = warp_idx % 4
+        lane = cute.arch.lane_idx()
+        par = (lane >> 1) & 1
+        row_in = quad * 32 + 16 * rh + (lane >> 2) + 8 * (lane & 1)
+        lane_base = Int32((quad * 32 + 16 * rh) << 16)
+        tSAcc = tStS[(None, None), 0, 0, stage]
+        s_addr = Int32(tSAcc.iterator.toint()) + lane_base
+        d_addr = s_addr + Int32(self.tmem_o_offset[0] - self.tmem_s_offset[0])
+        s_full_phase = Int32(0)
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            work_m, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            kv_head_idx = self._kv_head_idx(head_idx)
+            seqlen = SeqlenInfoCls(batch_idx)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(
+                seqlen, work_m, split_idx=split_idx, num_splits=num_splits,
+            )
+            has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
+            m_block = self._q_block(work_m, stage)
+            row = m_block * self.m_block_size + row_in
+            rowc = cutlass.min(row, seqlen.seqlen_q - 1)
+            qsv = Float32(aux[0][batch_idx, head_idx, rowc // 32])
+            dosv = Float32(aux[3][batch_idx, head_idx, rowc // 32])
+            l2 = Float32(aux[5][batch_idx, head_idx, rowc]) * Float32(dm_common.LOG2E)
+            # this lane's component of the h2 path's TwoSum pairs, packed as (num, den)
+            ts_s = (Float32(0.0), Float32(0.0))
+            ts_e = (Float32(0.0), Float32(0.0))
+            if const_expr(self.dm_pf):
+                nb0 = cutlass.max(n_block_max - 1, 0) * (self.n_block_size // 32)
+                pks = tuple(Float32(aux[1][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
+                pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
+            if has_work:
+                for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
+                    n_block = n_block_max - 1 - n_tile
+                    cs = [None] * 4
+                    as_ = [None] * 4
+                    if const_expr(self.dm_pf):
+                        for j in cutlass.range_constexpr(4):
+                            cs[j] = dm_common.dm_bwd_c(pks[j], qsv)
+                            as_[j] = dm_common.dm_bwd_dp_scale(pvs[j], dosv)
+                        nbn = cutlass.max(n_block - 1, n_block_min) * (self.n_block_size // 32)
+                        pks = tuple(Float32(aux[1][batch_idx, kv_head_idx, nbn + j]) for j in range(4))
+                        pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nbn + j]) for j in range(4))
+                    else:
+                        for j in cutlass.range_constexpr(4):
+                            kb = n_block * (self.n_block_size // 32) + j
+                            cs[j] = dm_common.dm_bwd_c(Float32(aux[1][batch_idx, kv_head_idx, kb]), qsv)
+                            as_[j] = dm_common.dm_bwd_dp_scale(Float32(aux[2][batch_idx, kv_head_idx, kb]), dosv)
+                    # den chains of this lane's component: d01 = (c0, c1), d23 = (c2, c3) (h2: den[v % 4], v = pair)
+                    d01 = (Float32(0.0), Float32(0.0))
+                    d23 = (Float32(0.0), Float32(0.0))
+                    num = (Float32(0.0), Float32(0.0))   # (num of this component, unused)
+                    pipeline_s_p_o.consumer_wait_w_index_phase(stage, s_full_phase)
+                    diag = False
+                    if const_expr(self.is_causal):
+                        diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
+                    kbase = n_block * self.n_block_size
+                    r = cute.make_rmem_tensor(cute.make_layout(64), self.qk_acc_dtype)
+                    for h in cutlass.range_constexpr(2):
+                        vals = dm_utils.tmem_ld_16x64b_x32(s_addr + Int32(64 * h))
+                        for i in cutlass.range_constexpr(32):
+                            r[32 * h + i] = vals[i]
+                        if const_expr(h == 1):
+                            cute.arch.fence_view_async_tmem_load()
+                            with dm_utils.tcf_site("r0"):
+                                pipeline_s_p_o.consumer_release_w_index(stage)
+                        else:
+                            cute.arch.fence_view_async_tmem_load()
+                        if const_expr(self.is_causal):
+                            if diag:
+                                for i in cutlass.range_constexpr(32 * h, 32 * h + 32):
+                                    r[i] = -Float32.inf if kbase + 2 * i + par > row else r[i]
+                        for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                            for v in cutlass.range_constexpr(0, 16, 2):
+                                i0 = 16 * j + v
+                                p = dm_common.dm_bwd_p_pair(r[i0], r[i0 + 1], cs[j], l2)
+                                r[i0], r[i0 + 1] = p
+                                if const_expr(v % 4 == 0):
+                                    d01 = cute.arch.add_packed_f32x2(d01, p)
+                                else:
+                                    d23 = cute.arch.add_packed_f32x2(d23, p)
+                        if const_expr(h == 0):
+                            pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                        for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                            dpv = dm_utils.tmem_ld_16x64b_x16(d_addr + Int32(32 * j))
+                            cute.arch.fence_view_async_tmem_load()
+                            if const_expr(j == 3):
+                                with dm_utils.tcf_site("r1"):
+                                    pipeline_dp.consumer_release_w_index(stage)
+                            a01 = (Float32(0.0), Float32(0.0))
+                            a23 = (Float32(0.0), Float32(0.0))
+                            for v in cutlass.range_constexpr(0, 16, 2):
+                                i0 = 16 * j + v
+                                if const_expr(v % 4 == 0):
+                                    a01 = cute.arch.fma_packed_f32x2((r[i0], r[i0 + 1]), (dpv[v], dpv[v + 1]), a01)
+                                else:
+                                    a23 = cute.arch.fma_packed_f32x2((r[i0], r[i0 + 1]), (dpv[v], dpv[v + 1]), a23)
+                            # h2: acc01 = acc0 + acc1, acc23 = acc2 + acc3, num = fma(acc01 + acc23, a_j, num) per component
+                            t = cute.arch.add_packed_f32x2((a01[0], a23[0]), (a01[1], a23[1]))
+                            u = cute.arch.add_packed_f32x2((t[0], Float32(0.0)), (t[1], Float32(0.0)))
+                            num = cute.arch.fma_packed_f32x2((u[0], Float32(0.0)), (as_[j], Float32(0.0)), num)
+                    # dent = (den + den1) + (den2 + den3) per component
+                    t = cute.arch.add_packed_f32x2((d01[0], d23[0]), (d01[1], d23[1]))
+                    dent = cute.arch.add_packed_f32x2((t[0], Float32(0.0)), (t[1], Float32(0.0)))
+                    # packed TwoSum of (num, den) of this component (h2+ts per-component arithmetic)
+                    b = (num[0], dent[0])
+                    sn = cute.arch.add_packed_f32x2(ts_s, b)
+                    bb = cute.arch.add_packed_f32x2(sn, (-ts_s[0], -ts_s[1]))
+                    an = cute.arch.add_packed_f32x2(ts_s, (-(sn[0] - bb[0]), -(sn[1] - bb[1])))
+                    br = cute.arch.add_packed_f32x2(b, (-bb[0], -bb[1]))
+                    ts_e = cute.arch.add_packed_f32x2(ts_e, cute.arch.add_packed_f32x2(an, br))
+                    ts_s = sn
+                    s_full_phase ^= 1
+            # partner lane (other column parity of the same row) = lane ^ 2
+            o_sn = cute.arch.shuffle_sync_bfly(ts_s[0], offset=2)
+            o_sd = cute.arch.shuffle_sync_bfly(ts_s[1], offset=2)
+            o_en = cute.arch.shuffle_sync_bfly(ts_e[0], offset=2)
+            o_ed = cute.arch.shuffle_sync_bfly(ts_e[1], offset=2)
+            if par == 0:
+                tn64 = (Float64(ts_s[0]) + Float64(o_sn)) + (Float64(ts_e[0]) + Float64(o_en))
+                td64 = (Float64(ts_s[1]) + Float64(o_sd)) + (Float64(ts_e[1]) + Float64(o_ed))
+                delta = Float32(tn64 / td64) if td64 != Float64(0.0) else Float32(0.0)
+                if row < seqlen.seqlen_q:
+                    mLSE[row, head_idx, batch_idx] = delta
             work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit

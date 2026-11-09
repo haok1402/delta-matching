@@ -909,3 +909,28 @@ _tcf_raw_sync_warp = [None]
 
 _tcf_install()
 _tcf_install_min()
+
+
+# ---- pass-0 two-lane (track AG, +tl): tcgen05.ld.16x64b raw loads ----
+# Measured mapping (kda/runs/p0twolane/map1.log): thread t -> TMEM lane base + t//4 + 8*(t&1), column parity (t>>1)&1,
+# repetition r -> column 2r + parity.
+@dsl_user_op
+def tmem_ld_16x64b_x32(addr: Int32, *, loc=None, ip=None):
+    regs = ",".join(f"${i}" for i in range(32))
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 32), [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "tcgen05.ld.sync.aligned.16x64b.x32.b32 {" + regs + "}, [$32];",
+        ",".join(["=f"] * 32) + ",r", has_side_effects=True, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT)
+    return [Float32(llvm.extractvalue(T.f32(), res, [i])) for i in range(32)]
+
+
+@dsl_user_op
+def tmem_ld_16x64b_x16(addr: Int32, *, loc=None, ip=None):
+    regs = ",".join(f"${i}" for i in range(16))
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 16), [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "tcgen05.ld.sync.aligned.16x64b.x16.b32 {" + regs + "}, [$16];",
+        ",".join(["=f"] * 16) + ",r", has_side_effects=True, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT)
+    return [Float32(llvm.extractvalue(T.f32(), res, [i])) for i in range(16)]

@@ -82,7 +82,7 @@ def _auto_opts(q8, k8):
     # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA
     # launch/prologue/epilogue is a large share of a KV tile; long sequences keep the hardware's dynamic CTA order
     # (static striding loses 4-18% there). 'nopers' disables, explicit 'pers=N' overrides, persN= sets the cut.
-    pN = int(next((o[5:] for o in ol if o.startswith("persN=")), "1024"))
+    pN = int(next((o[5:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
     if (q8.shape[2] == k8.shape[2] and "nopers" not in ol and not any(o.startswith("pers=") for o in ol)
             and q8.shape[1] <= pN):
         ol = ol + ["pers=148"]

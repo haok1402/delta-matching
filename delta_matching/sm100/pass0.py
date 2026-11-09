@@ -56,7 +56,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_0+ma+h2+f64k4")   # P0-v7 (acc): + fp32 partials over 4 tiles, summed in fp64, delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_0+ma+h2+f64")   # P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
     over = dict(FORCE)
     if config_override:
         over.update(config_override)

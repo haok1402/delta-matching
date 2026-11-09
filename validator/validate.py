@@ -598,7 +598,21 @@ def main():
             case.pop(kk, None)
     jp, op = os.path.join(tmp, "job.pt"), os.path.join(tmp, "out.pt")
     torch.save({"device": a.device, "case_files": files, "fwd_only": FWD_ONLY}, jp)
+    if a.json:
+        RUNNER_LOG[0] = a.json + ".runner.log"
     out = _run_runner(a.candidate, jp, op)
+    missing = [f for f in files if not os.path.exists(f + ".out")]
+    if missing and "fatal" not in out:
+        # the candidate process produced no output for some cases (seen once on 77f470e quick, not reproducible): re-run
+        # exactly those cases once in a fresh process; the retry is reported (deterministic kernels give the same result)
+        print(f"WARNING: runner produced no output for {len(missing)} case(s); re-running them in a fresh process "
+              f"(see {RUNNER_LOG[0]})", flush=True)
+        torch.save({"device": a.device, "case_files": missing, "fwd_only": FWD_ONLY}, jp)
+        out2 = _run_runner(a.candidate, jp, op)
+        if "fatal" not in out2:
+            out["meta"]["leaked_modules"] = sorted(set(out["meta"].get("leaked_modules", []))
+                                                   | set(out2["meta"].get("leaked_modules", [])))
+        RUNNER_RETRIED[0] = len(missing)
     # the pool keeps one done-owner per GPU: the runner's done() replaced ours and lapsed when it exited, which put the
     # lease back into auto mode (filler stopped while this process holds a context) - re-assert it for the checks
     _hook("gpupool_done")
@@ -670,7 +684,7 @@ def main():
     if leaked and not os.environ.get("DMVAL_SELFTEST"):
         all_ok = False
         print(f"FAIL: the candidate imported the reference / validator: {sorted(leaked)}")
-    summary = {"candidate": a.candidate, "preset": preset, "tier": a.tier + ("-fwd" if FWD_ONLY else ""), "seed": seed, "pass": all_ok,
+    summary = {"runner_retried_cases": RUNNER_RETRIED[0], "candidate": a.candidate, "preset": preset, "tier": a.tier + ("-fwd" if FWD_ONLY else ""), "seed": seed, "pass": all_ok,
                "n_cases": len(results), "n_failed": sum(bool(r["fails"]) for r in results),
                "seconds": round(time.time() - t0, 1), "device": torch.cuda.get_device_name(dev),
                "tolerances": dict(TOL_RATIO=TOL_RATIO, TOL_ABS=TOL_ABS, BLK_RATIO=BLK_RATIO, BLK_ABS=BLK_ABS,
@@ -703,9 +717,16 @@ def _static_meta(spec):
         return None
 
 
+RUNNER_LOG = [None]
+RUNNER_RETRIED = [0]
+
+
 def _run_runner(spec, job, out):
     p = subprocess.run([sys.executable, "-u", os.path.join(HERE, "runner.py"), spec, job, out],
                        capture_output=True, text=True, cwd=os.path.dirname(job))
+    if RUNNER_LOG[0]:                         # always keep the candidate process's output (diagnosis of runner faults)
+        with open(RUNNER_LOG[0], "a") as f:
+            f.write(f"=== runner rc={p.returncode} job={job}\n--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}\n")
     if p.returncode != 0 or not os.path.exists(out):
         return {"fatal": f"runner exited {p.returncode}\n{p.stdout[-3000:]}\n{p.stderr[-6000:]}"}
     r = torch.load(out, weights_only=False)

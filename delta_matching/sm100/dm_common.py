@@ -89,6 +89,22 @@ def dm_bwd_p_pair_poly5(s0: Float32, s1: Float32, c: Float32, l2: Float32):
     return dm_utils.ex2_poly5_2(x0, x1)
 
 
+def dm_bwd_p_pair_poly6(s0: Float32, s1: Float32, c: Float32, l2: Float32):
+    """Same fp32 FFMA as dm_bwd_p_pair, exp2 via dm_utils.ex2_poly6_2 (degree-6 FMA polynomial, at least as accurate as
+    ex2.approx.ftz on every element metric). Pass 0 and the backward MUST pick it for exactly the same elements
+    (b6 rule: 32x32 block (qb, kb) uses it iff (qb + kb) % m == 0), so P stays bitwise identical in both kernels."""
+    from . import dm_utils
+    x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (c, c), (-l2, -l2))
+    return dm_utils.ex2_poly6_2(x0, x1)
+
+
+def b6_m() -> int:
+    """DM_B6=<m>: 32x32 blocks with (q//32 + k//32) % m == 0 use the degree-6 polynomial exp in pass 0 AND the backward
+    (and forward P); 0 = all MUFU (default)."""
+    import os
+    return int(os.environ.get("DM_B6", "0"))
+
+
 def p5_uses_poly(variant: str, v: int) -> bool:
     """Static pair schedule for 'p5_<f>_<r>' (deg-5) / 'p3_<f>_<r>' (FA4 deg-3): pair v (of 16 per 32-col chunk) uses the
     polynomial iff v % f < r (contiguous); 'p3b_<f>_<r>': iff (v * r) % f < r (spread, Bresenham)."""

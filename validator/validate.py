@@ -563,12 +563,19 @@ def check_case(case, cr, preset, dev, verbose):
                 lse_tol = 1e-3 + 1e-5 * em["LSE"].double().abs()
                 km_c = dbg.get("kmean")
                 if km_c is not None:
-                    # the candidate's K-centering mean must equal the reference mean to fp32 round-off (summation order only)
-                    km_r = R.kmean_sm90(k.float().transpose(1, 2)).squeeze(-2)
-                    km_err = (km_c.reshape(km_r.shape).float() - km_r).abs().max().item()
-                    km_tol = 1e-6 * k.float().abs().amax().item() + 1e-9
+                    # the candidate's K-centering mean vs the EXACT (fp64) mean of the same bf16 K (accuracy-audit 17:35):
+                    # <= 4e-9 * max|k| per element (2x the worst fp32 fold measured; today's producer <= 9.9e-10), and its
+                    # median error in fp32 ulps of the mean is reported (producer 1.9-2.9 today)
+                    km_x = k.double().mean(dim=1)                                        # (B, Hk, D)
+                    km_d = (km_c.reshape(km_x.shape).double() - km_x).abs()
+                    km_err = km_d.max().item()
+                    km_tol = 4e-9 * k.float().abs().amax().item()
+                    ulp = torch.where(km_x != 0, km_x.abs().float().double() * 2.0 ** -23, torch.ones_like(km_x) * 2.0 ** -149)
+                    km_ulp = (km_d / ulp).median().item()
+                    rec["metrics"]["matched:kmean"] = {"maxabs": km_err, "tol": km_tol, "median_ulp": km_ulp}
                     chk("matched:kmean_roundoff", km_err <= km_tol,
-                        f"candidate K-centering mean vs reference: max |diff| {km_err:.2e} (fp32 round-off limit {km_tol:.1e})")
+                        f"candidate K-centering mean vs exact fp64 mean: max |diff| {km_err:.2e} (limit 4e-9 max|k| = {km_tol:.1e}), "
+                        f"median {km_ulp:.1f} fp32 ulps")
                 emc = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, lse_override=lse_c,
                                      delta_override=dl_c, q_block=qbk, k_mean=km_c)
                 den = emc["sum_absPdP"]

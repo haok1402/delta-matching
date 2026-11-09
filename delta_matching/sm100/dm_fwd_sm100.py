@@ -40,7 +40,7 @@ from flash_attn.cute import utils
 from delta_matching.sm100 import dm_utils
 import flash_attn.cute.pipeline as pipeline_custom
 import cutlass.pipeline as cutlass_pipeline
-from flash_attn.cute.mask import AttentionMask
+from flash_attn.cute.mask import AttentionMask, mask_r2p_lambda, r2p_bitmask_below
 from flash_attn.cute.softmax import (
     SoftmaxSm100,
     apply_score_mod_inner,
@@ -337,7 +337,7 @@ class DMForwardSm100:
                 *self.empty_warp_ids,
             )
         )
-        # config.select_sm100_registers and its validation assume this launch shape.
+        # config.select_sm100_registers and its validation assume this launch shape (slice mode re-launches below).
         assert self.threads_per_cta == SM100_THREADS_PER_CTA
 
         self.use_tma_Q = not (self.pack_gqa and self.m_block_size % self.qhead_per_kvhead != 0)
@@ -451,9 +451,48 @@ class DMForwardSm100:
         # vec buffer for row_max & row_sum
         self.tmem_vec_offset = self.tmem_s_offset
 
+        # fwdmufu slice=1 (kda/docs/fwdmufu-design.md): MUFU-first softmax. 4 slice warpgroups (warps 0-15); slice WG q owns
+        # key block q (32 keys = one MX block) of the CURRENT stage; all slices process stage 0 then stage 1 of each
+        # n_block, so every exp warp feeds one stage while the other stage's PV -> QK turnaround runs. Row-level work
+        # (m, acc_scale, SFA bytes, weights, l, O rescale, epilogue) moves to the correction WG (warps 16-19): slices
+        # publish x_b = max(S_b) c_b and the fp32 block sum through SMEM. P codes of block q go to S_s + 32 q (the
+        # block's own S columns), SF to S_s + 16 (block 0's columns, written after every slice loaded S). Same TMEM map,
+        # same MMA order; every op on a value is today's op (bitwise O / LSE / P codes).
+        self.dm_slice = (self.dm_opts.get("slice", "0") == "1" and self.q_stage == 2 and not self.use_s_ping_pong
+                         and self.cta_group_size == 1 and not self.dm_sspv and self.n_block_size == 128
+                         and self.head_dim_v_padded == 128 and score_mod is None and mask_mod is None
+                         and not self.is_local and not self.is_split_kv and not self.pack_gqa
+                         and self.dm_opts.get("pipe", "0") != "1" and self.dm_opts.get("exp", "f32") == "f32"
+                         and self.dm_opts.get("kvpack", "1") == "1" and config.ex2_emu_freq == 0)
+        if self.dm_slice:
+            self.softmax0_warp_ids = tuple(range(16))
+            self.softmax1_warp_ids = ()
+            self.correction_warp_ids = (16, 17, 18, 19)
+            self.mma_warp_id = 20
+            if self.use_correction_warps_for_epi:
+                self.epilogue_warp_ids = self.correction_warp_ids
+                self.empty_warp_ids = (21, 23)
+            else:
+                self.epilogue_warp_ids = (21,)
+                self.empty_warp_ids = (23,)
+            self.load_warp_ids = (22,)
+            self.scheduler_warp_id = self.empty_warp_ids[0] if self.dynamic_persistent else None
+            self.threads_per_cta = 24 * cute.arch.WARP_SIZE
+            self.split_P_arrive = 0
+            self.dm_sl_sfcol = 16
+            # setmaxnreg split (per thread). Launch = 65536 / 768 -> 80 per thread; the CTA register pool only holds what
+            # setmaxnreg.dec released, so 4 (rs - 80) <= (80 - rc) + (80 - ro) or the slice WGs' alloc spins forever.
+            self.dm_sl_regs = (int(self.dm_opts.get("rs", "80")), int(self.dm_opts.get("rc", "112")),
+                               int(self.dm_opts.get("ro", "48")))
+            _rs, _rc, _ro = self.dm_sl_regs
+            assert 4 * max(_rs - 80, 0) + max(_rc - 80, 0) <= 4 * max(80 - _rs, 0) + max(80 - _rc, 0) + max(80 - _ro, 0), \
+                f"setmaxnreg pool: {self.dm_sl_regs}"
+
         self.num_regs_softmax = config.registers.softmax
         self.num_regs_correction = config.registers.correction
         self.num_regs_other = config.registers.other
+        if self.dm_slice:
+            self.num_regs_softmax, self.num_regs_correction, self.num_regs_other = self.dm_sl_regs
 
         self.buffer_align_bytes = 1024
 
@@ -791,6 +830,8 @@ class DMForwardSm100:
         dm_nb3 = (32 if self.dm_dbs else 2) if self.dm_sspv else 0   # crd: 2 (one per stage); dbs: [full|empty][stage][slot][warp]
         dm_sc = 2 if self.dm_dbs else 1   # dbs: two sScale slots
         dm_sP_size = cute.cosize(self.dm_sP_layout) if self.dm_sspv else 0
+        dm_slb = 6 if self.dm_slice else 0      # slice: kbfull[2], bsfull[2], bsempty[2]
+        dm_slf = 2 * 2 * 4 * self.m_block_size if self.dm_slice else 0   # slice: sX[2][4][128], sB[2][4][128] fp32
 
         @cute.struct
         class SharedStorage:
@@ -808,6 +849,7 @@ class DMForwardSm100:
             mbar_dm_sfree: cute.struct.MemRange[Int64, dm_nb1]
             mbar_dm_pvdone: cute.struct.MemRange[Int64, dm_nb2]
             mbar_dm_cread: cute.struct.MemRange[Int64, dm_nb3]
+            mbar_dm_slice: cute.struct.MemRange[Int64, dm_slb]
             # Tmem dealloc cluster barrier
             tmem_dealloc_mbar: Int64
             # Tmem holding buffer
@@ -815,6 +857,7 @@ class DMForwardSm100:
             # Smem tensors
             # store row max and row sum
             sScale: cute.struct.MemRange[Float32, self.s_p_o_stage * self.m_block_size * 2 * dm_sc]
+            sDmSlice: cute.struct.MemRange[Float32, dm_slf]
             # Scheduler buffers placed here to utilize padding before sO's 1024-byte
             # alignment. This avoids adding bytes at the end when we're at the smem limit.
             # PipelineClcFetchAsync / PipelineAsync both expect
@@ -854,6 +897,7 @@ class DMForwardSm100:
             mbar_dm_sfree: cute.struct.MemRange[Int64, dm_nb1]
             mbar_dm_pvdone: cute.struct.MemRange[Int64, dm_nb2]
             mbar_dm_cread: cute.struct.MemRange[Int64, dm_nb3]
+            mbar_dm_slice: cute.struct.MemRange[Int64, dm_slb]
             # Tmem dealloc cluster barrier
             tmem_dealloc_mbar: Int64
             # Tmem holding buffer
@@ -861,6 +905,7 @@ class DMForwardSm100:
             # Smem tensors
             # store row max and row sum
             sScale: cute.struct.MemRange[Float32, self.s_p_o_stage * self.m_block_size * 2 * dm_sc]
+            sDmSlice: cute.struct.MemRange[Float32, dm_slf]
             # Scheduler buffers placed here to utilize padding before sO's 1024-byte
             # alignment. This avoids adding bytes at the end when we're at the smem limit.
             # PipelineClcFetchAsync / PipelineAsync both expect
@@ -1152,7 +1197,10 @@ class DMForwardSm100:
             barrier_storage=storage.mbar_S_full_P_full_O_rescaled.data_ptr(),
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
-            consumer_group=softmax_correction_threads_cluster,
+            # slice: one elected arrival per slice / correction warp (20) instead of 640 thread arrivals
+            consumer_group=(ThreadCooperativeGroup(len(self.softmax0_warp_ids + self.correction_warp_ids))
+                            if const_expr(self.dm_slice and self.dm_opts.get("warr", "0") == "1")
+                            else softmax_correction_threads_cluster),
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
         )
@@ -1244,6 +1292,15 @@ class DMForwardSm100:
                 else:
                     dm_utils.mbar_init(self.dm_cread, 4 * cute.arch.WARP_SIZE)
                     dm_utils.mbar_init(self.dm_cread + 8, 4 * cute.arch.WARP_SIZE)
+                cute.arch.mbarrier_init_fence()
+        if const_expr(self.dm_slice):
+            self.dm_slbar = Int32(storage.mbar_dm_slice.data_ptr().toint())
+            self.dm_slbuf = Int32(storage.sDmSlice.data_ptr().toint())
+            if cute.arch.thread_idx()[0] == 0:
+                for _s in range(2):
+                    dm_utils.mbar_init(self.dm_slbar + 8 * _s, 16)        # kbfull[s]: one arrival per slice warp
+                    dm_utils.mbar_init(self.dm_slbar + 16 + 8 * _s, 16)   # bsfull[s]
+                    dm_utils.mbar_init(self.dm_slbar + 32 + 8 * _s, 4)    # bsempty[s]: one per correction warp
                 cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
@@ -1501,7 +1558,20 @@ class DMForwardSm100:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Softmax
         # ///////////////////////////////////////////////////////////////////////////////
-        if (
+        if const_expr(self.dm_slice):
+            if warp_idx < 16:
+                if const_expr(self.num_regs_softmax > 80):
+                    cute.arch.setmaxregister_increase(self.num_regs_softmax)
+                elif const_expr(self.num_regs_softmax < 80):
+                    cute.arch.setmaxregister_decrease(self.num_regs_softmax)
+                tmem_alloc_barrier.arrive_and_wait_unaligned()
+                tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
+                self.slice_softmax_loop(
+                    thr_mma_qk, tStS, descale_tensors, pipeline_s_p_o, block_info, num_splits, SeqlenInfoCls,
+                    tile_scheduler=tile_scheduler,
+                )
+                tmem_alloc_barrier.arrive_unaligned()
+        elif (
             (const_expr(self.q_stage == 2) and warp_idx <= self.softmax1_warp_ids[-1]) or
             (const_expr(self.q_stage == 1) and warp_idx <= self.softmax0_warp_ids[-1])
         ):
@@ -1552,40 +1622,53 @@ class DMForwardSm100:
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
             # setmaxnreg.dec cannot exceed the launch register count.
-            if const_expr(self.num_regs_correction > SM100_LAUNCH_REGISTERS):
+            if const_expr(self.dm_slice):
+                if const_expr(self.num_regs_correction > 65536 // self.threads_per_cta // 8 * 8):
+                    cute.arch.setmaxregister_increase(self.num_regs_correction)
+                elif const_expr(self.num_regs_correction < 65536 // self.threads_per_cta // 8 * 8):
+                    cute.arch.setmaxregister_decrease(self.num_regs_correction)
+            elif const_expr(self.num_regs_correction > SM100_LAUNCH_REGISTERS):
                 cute.arch.setmaxregister_increase(self.num_regs_correction)
             else:
                 cute.arch.setmaxregister_decrease(self.num_regs_correction)
             # sync with mma warp before retrieving tmem ptr
             tmem_alloc_barrier.arrive_and_wait_unaligned()
             tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
-            self.correction_loop(
-                thr_mma_qk,
-                thr_mma_pv,
-                tStS,
-                tOtO,
-                sScale,
-                mO,
-                mLSE,
-                sO,
-                pipeline_s_p_o,
-                pipeline_o_acc,
-                pipeline_sm_stats,
-                sm_stats_barrier,
-                pipeline_o_epi,
-                pipeline_load_epi,
-                learnable_sink,
-                descale_tensors,
-                gmem_tiled_copy_O,
-                tma_atom_O,
-                softmax_scale_log2,
-                block_info,
-                num_splits,
-                SeqlenInfoCls,
-                blocksparse_tensors,
-                tile_scheduler=tile_scheduler,
-            )
-            tmem_alloc_barrier.arrive_unaligned()
+            if const_expr(self.dm_slice):
+                self.slice_correction_loop(
+                    thr_mma_qk, thr_mma_pv, tStS, tOtO, mO, mLSE, sO, pipeline_s_p_o, pipeline_o_acc, pipeline_o_epi,
+                    pipeline_load_epi, descale_tensors, gmem_tiled_copy_O, block_info, num_splits, SeqlenInfoCls,
+                    tile_scheduler=tile_scheduler,
+                )
+                tmem_alloc_barrier.arrive_unaligned()
+            else:
+                self.correction_loop(
+                    thr_mma_qk,
+                    thr_mma_pv,
+                    tStS,
+                    tOtO,
+                    sScale,
+                    mO,
+                    mLSE,
+                    sO,
+                    pipeline_s_p_o,
+                    pipeline_o_acc,
+                    pipeline_sm_stats,
+                    sm_stats_barrier,
+                    pipeline_o_epi,
+                    pipeline_load_epi,
+                    learnable_sink,
+                    descale_tensors,
+                    gmem_tiled_copy_O,
+                    tma_atom_O,
+                    softmax_scale_log2,
+                    block_info,
+                    num_splits,
+                    SeqlenInfoCls,
+                    blocksparse_tensors,
+                    tile_scheduler=tile_scheduler,
+                )
+                tmem_alloc_barrier.arrive_unaligned()
 
         dm_utils.tcf_end()
         return
@@ -1989,9 +2072,12 @@ class DMForwardSm100:
                 pv_mma_op,
                 self.tmem_o_offset[stage % self.q_stage],
                 tOrP[None, None, None, stage],
-                sfa_tmem_addr=(self.dm_sf_abs[stage] if const_expr(self.dm_sspv) else self.tmem_s_offset[stage] + self.dm_sf_col),
-                sfb_tmem_addr=(self.dm_sf_abs[stage] if const_expr(self.dm_sspv) else self.tmem_s_offset[stage] + self.dm_sf_col) + 4,
+                sfa_tmem_addr=(self.dm_sf_abs[stage] if const_expr(self.dm_sspv) else self.tmem_s_offset[stage] + (self.dm_sl_sfcol if self.dm_slice else self.dm_sf_col)),
+                sfb_tmem_addr=(self.dm_sf_abs[stage] if const_expr(self.dm_sspv) else self.tmem_s_offset[stage] + (self.dm_sl_sfcol if self.dm_slice else self.dm_sf_col)) + 4,
                 split_arrive=self.split_P_arrive if self.split_P_arrive > 0 else None,
+                # slice: P codes of k-step (key block) k at S_s + 32 k, SF at S_s + 16
+                tA_addr=(Int32(self.tmem_s_offset[stage]) if const_expr(self.dm_slice) else None),
+                offs_a=((0, 32, 64, 96) if const_expr(self.dm_slice) else None),
                 # smem_desc_start_a=tOrP[None, None, None, stage].iterator.toint(),
                 # smem_desc_start_a=self.tmem_p_offset[stage],
                 # idesc=pv_mma_idesc,
@@ -2870,6 +2956,345 @@ class DMForwardSm100:
         if const_expr(self.s0_s1_barrier):
             if stage == 0:
                 pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0_s1_sequence_phase)
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # fwdmufu slice=1: slice softmax (warps 0-15) + row-level correction (warps 16-19). See __init__ and
+    # kda/docs/fwdmufu-design.md. Every value is computed by today's op sequence (bitwise O / LSE / P codes).
+    # ------------------------------------------------------------------------------------------------------------------
+    @cute.jit
+    def slice_softmax_loop(
+        self,
+        thr_mma_qk: cute.ThrMma,
+        tStS: cute.Tensor,
+        descale_tensors: Optional[DescaleTensors],
+        pipeline_s_p_o: pipeline.PipelineAsync,
+        block_info: BlockInfo,
+        num_splits: Int32,
+        SeqlenInfoCls: Callable,
+        tile_scheduler=None,
+    ):
+        tidx = cute.arch.thread_idx()[0] % (4 * cute.arch.WARP_SIZE)   # row; warp % 4 = TMEM lane quadrant
+        q = cute.arch.make_warp_uniform(cute.arch.warp_idx()) // 4     # key block owned by this slice warpgroup
+        tSAcc = tStS[(None, None), 0, 0, 0]
+        tSblk = cute.make_tensor(tSAcc.iterator, cute.composition(tSAcc.layout, cute.make_layout((self.m_block_size, 32))))
+        thr_ld = tcgen05.make_tmem_copy(
+            cute.make_copy_atom(tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)), self.qk_acc_dtype), tSblk
+        ).get_slice(tidx)
+        tSt_ld = thr_ld.partition_S(tSblk)
+        rS = cute.make_rmem_tensor(thr_ld.partition_D(cute.make_identity_tensor((self.m_block_size, 32))).shape, Float32)
+        tSP = cute.make_tensor(tSAcc.iterator, cute.composition(tSAcc.layout, cute.make_layout((self.m_block_size, 8))))
+        thr_st = tcgen05.make_tmem_copy(
+            cute.make_copy_atom(tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(8)), Float32), tSP
+        ).get_slice(tidx)
+        tSt_st = thr_st.partition_D(tSP)
+        rP = cute.make_rmem_tensor(thr_st.partition_S(cute.make_identity_tensor((self.m_block_size, 8))).shape, Float32)
+        rP8 = cute.make_tensor(cute.recast_ptr(rP.iterator, dtype=self.q_dtype), rS.layout)
+        dm_lean = const_expr(self.dm_opts.get("lean", "0") == "1")
+        st = cute.make_rmem_tensor((3,), Int32)   # [0] s_p_o full phase, [1] steps done per stage, [2] prefetched K scale word
+        st[0] = Int32(0)
+        st[1] = Int32(0)
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            work_m, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            kv_head_idx = self._kv_head_idx(head_idx)
+            seqlen = SeqlenInfoCls(batch_idx)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(
+                seqlen, work_m, split_idx=split_idx, num_splits=num_splits,
+            )
+            has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
+            qsc = [None] * 2
+            for s in cutlass.range_constexpr(2):
+                dm_row = self._q_block(work_m, s, thr_mma_qk.thr_idx) * self.m_block_size + tidx
+                dm_qblk = cutlass.min(dm_row // 32, (seqlen.seqlen_q + 31) // 32 - 1)
+                qsc[s] = Float32(descale_tensors.q_descale[batch_idx, head_idx, dm_qblk]) * Float32(math.log2(math.e))
+            step = partial(self._slice_step, q=q, tidx=tidx, st=st, qsc=qsc, rS=rS, rP=rP, rP8=rP8, tSt_ld=tSt_ld,
+                           tSt_st=tSt_st, thr_ld=thr_ld, thr_st=thr_st, dm_lean=dm_lean, pipeline_s_p_o=pipeline_s_p_o,
+                           descale_tensors=descale_tensors, batch_idx=batch_idx, kv_head_idx=kv_head_idx,
+                           work_m=work_m, seqlen=seqlen)
+            if has_work:
+                st[2] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * (n_block_max - 1)])
+                step(n_block_max - 1, mask_seqlen=True, mask_causal=self.is_causal)
+                n_block_max -= 1
+                if const_expr(self.is_causal):
+                    n_block_min_causal_local_mask = block_info.get_n_block_min_causal_local_mask(
+                        seqlen, work_m, n_block_min
+                    )
+                    for n_tile in cutlass.range(n_block_max - n_block_min_causal_local_mask, unroll=1):
+                        step(n_block_max - 1 - n_tile, mask_seqlen=False, mask_causal=True)
+                    n_block_max = cutlass.min(n_block_max, n_block_min_causal_local_mask)
+                for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
+                    step(n_block_max - 1 - n_tile, mask_seqlen=False, mask_causal=False)
+            work_tile = tile_scheduler.advance_to_next_work()
+
+    @cute.jit
+    def _slice_step(
+        self, n_block: Int32, mask_seqlen: cutlass.Constexpr, mask_causal: cutlass.Constexpr, q: Int32, tidx: Int32,
+        st: cute.Tensor, qsc, rS: cute.Tensor, rP: cute.Tensor, rP8: cute.Tensor, tSt_ld: cute.Tensor,
+        tSt_st: cute.Tensor, thr_ld, thr_st, dm_lean: cutlass.Constexpr, pipeline_s_p_o, descale_tensors,
+        batch_idx: Int32, kv_head_idx: Int32, work_m: Int32, seqlen,
+    ):
+        """One n_block for both Q stages (stage 0 then stage 1) of this slice warp's key block q."""
+        if const_expr(self.dm_opts.get("pf", "1") == "1"):
+            dm_kw = st[2]
+            # next n_block's K scale word (loaded now, consumed next step; clamped index on the last step)
+            st[2] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * cutlass.max(n_block - 1, 0)])
+        else:
+            dm_kw = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * n_block])
+        dm_ks = dm_utils.byte_pow2_f32_rt(dm_kw, q * 8)
+        ph = st[0]
+        nstep = st[1]
+        for s in cutlass.range_constexpr(2):
+            c = qsc[s] * dm_ks
+            pipeline_s_p_o.consumer_wait_w_index_phase(s, ph)
+            col = Int32(self.tmem_s_offset[s]) + q * 32
+            cute.copy(thr_ld, cute.make_tensor(tSt_ld.iterator + col, tSt_ld.layout), rS)
+            if const_expr(mask_seqlen or mask_causal):
+                # = AttentionMask.apply_mask_sm100 (non-pack-GQA, 1-CTA) restricted to columns [32 q, 32 q + 32)
+                seqlenk_col_limit = seqlen.seqlen_k - n_block * self.n_block_size
+                if const_expr(mask_causal):
+                    causal_row_offset = seqlen.seqlen_k - n_block * self.n_block_size - seqlen.seqlen_q
+                    row_idx = tidx + self._q_block(work_m, s) * self.m_block_size
+                    col_limit = row_idx + causal_row_offset + 1
+                    if const_expr(mask_seqlen):
+                        col_limit = cutlass.min(col_limit, seqlenk_col_limit)
+                else:
+                    col_limit = seqlenk_col_limit
+                lim = col_limit - q * 32
+                mask_r2p_lambda(rS, lambda ch: r2p_bitmask_below(lim, ch), rank1=True)
+            # block max: today's FMNMX order (lean / max3), then x_b = max * c_b
+            if const_expr(dm_lean):
+                lm = [utils.fmax(rS[3 * t], rS[3 * t + 1], rS[3 * t + 2]) for t in range(4)]
+                for i in cutlass.range_constexpr(12, 32, 2):
+                    t = ((i - 12) // 2) % 4
+                    lm[t] = utils.fmax(lm[t], rS[i], rS[i + 1])
+                v = utils.fmax(utils.fmax(lm[0], lm[1], lm[2]), lm[3])
+            else:
+                lm = [utils.fmax(rS[0], rS[1]), utils.fmax(rS[2], rS[3]), utils.fmax(rS[4], rS[5]), utils.fmax(rS[6], rS[7])]
+                for i in cutlass.range_constexpr(8, 32, 8):
+                    for t in cutlass.range_constexpr(4):
+                        lm[t] = utils.fmax(lm[t], rS[i + 2 * t], rS[i + 2 * t + 1])
+                v = utils.fmax(utils.fmax(lm[0], lm[1]), lm[2], lm[3])
+            xb = v * c
+            dm_utils.st_shared_b32(self.dm_slbuf + 4 * ((s * 4 + q) * self.m_block_size + tidx), dm_utils.bitcast_f32_i32(xb))
+            dm_utils.tc_fence_before()     # this warp's S loads ordered before the kb-published arrival (SF overwrites S)
+            cute.arch.sync_warp()
+            with cute.arch.elect_one():
+                dm_utils.mbar_arrive(self.dm_slbar + 8 * s)
+            kb = cute.arch.fmax(dm_utils.floor_f32(xb), Float32(-1e30))
+            bias = Float32(7.0) - kb
+            for i in cutlass.range_constexpr(0, 32, 2):
+                rS[i], rS[i + 1] = cute.arch.fma_packed_f32x2((rS[i], rS[i + 1]), (c, c), (bias, bias))
+            for i in cutlass.range_constexpr(0, 32, 2):
+                rS[i] = cute.math.exp2(rS[i], fastmath=True)
+                rS[i + 1] = cute.math.exp2(rS[i + 1], fastmath=True)
+            rP8.store(rS.load().to(self.q_dtype))
+            cute.copy(thr_st, rP, cute.make_tensor(tSt_st.iterator + col, tSt_st.layout))
+            cute.arch.fence_view_async_tmem_store()
+            if const_expr(self.dm_opts.get("warr", "0") == "1"):
+                dm_utils.tc_fence_before()
+                cute.arch.sync_warp()
+                with cute.arch.elect_one():
+                    pipeline_s_p_o.consumer_release_w_index(s)
+            else:
+                pipeline_s_p_o.consumer_release_w_index(s)
+            ps = (rS[0], rS[1])
+            for i in cutlass.range_constexpr(2, 32, 2):
+                ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
+            bsum = ps[0] + ps[1]
+            if nstep > 0:
+                dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * s, (nstep - 1) & 1)
+            dm_utils.st_shared_b32(self.dm_slbuf + 4 * (1024 + (s * 4 + q) * self.m_block_size + tidx),
+                                   dm_utils.bitcast_f32_i32(bsum))
+            cute.arch.sync_warp()
+            with cute.arch.elect_one():
+                dm_utils.mbar_arrive(self.dm_slbar + 16 + 8 * s)
+        st[0] = ph ^ 1
+        st[1] = nstep + 1
+
+    @cute.jit
+    def slice_correction_loop(
+        self,
+        thr_mma_qk: cute.ThrMma,
+        thr_mma_pv: cute.ThrMma,
+        tStS: cute.Tensor,
+        tOtO: cute.Tensor,
+        mO: cute.Tensor,
+        mLSE: Optional[cute.Tensor],
+        sO: cute.Tensor,
+        pipeline_s_p_o: pipeline.PipelineAsync,
+        pipeline_o_acc: pipeline.PipelineAsync,
+        pipeline_o_epi: Optional[pipeline.PipelineAsync],
+        pipeline_load_epi: Optional[pipeline.PipelineAsync],
+        descale_tensors: Optional[DescaleTensors],
+        gmem_tiled_copy_O: cute.TiledCopy,
+        block_info: BlockInfo,
+        num_splits: Int32,
+        SeqlenInfoCls: Callable,
+        tile_scheduler=None,
+    ):
+        tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * len(self.correction_warp_ids))
+        mma_tile_coord_v = thr_mma_qk.thr_idx
+        dm_lean = const_expr(self.dm_opts.get("lean", "0") == "1")
+        tSAcc = tStS[(None, None), 0, 0, 0]
+        tSF = cute.make_tensor(tSAcc.iterator, cute.composition(tSAcc.layout, cute.make_layout((self.m_block_size, 8))))
+        thr_sf = tcgen05.make_tmem_copy(
+            cute.make_copy_atom(tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(8)), Float32), tSF
+        ).get_slice(tidx)
+        tSt_sf = thr_sf.partition_D(tSF)
+        rSF = cute.make_rmem_tensor(thr_sf.partition_S(cute.make_identity_tensor((self.m_block_size, 8))).shape, Float32)
+        rst = cute.make_rmem_tensor((5,), Float32)    # m0, m1, l0, l1, acc (scratch)
+        cnt = cute.make_rmem_tensor((2,), Int32)      # [0] steps done per stage (kb / bs barrier parity), [1] V scale word
+        cnt[0] = Int32(0)
+        o_corr_consumer_phase = Int32(0)
+        corr_epi_producer_phase = Int32(1)
+        load_epi_producer_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, 1)
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            work_m, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            kv_head_idx = self._kv_head_idx(head_idx)
+            seqlen = SeqlenInfoCls(batch_idx)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(
+                seqlen, work_m, split_idx=split_idx, num_splits=num_splits,
+            )
+            mO_cur = seqlen.offset_batch_Q(mO, batch_idx, dim=3)[None, None, head_idx]
+            tiler_gO = ((self.mma_tiler_pv[0] * self.q_stage), self.epi_head_dim_v)
+            gO = cute.local_tile(mO_cur, tiler_gO, (work_m, 0))
+            gO = layout_utils.select(cute.flat_divide(gO, (self.mma_tiler_pv[0],)), mode=[0, 2, 1])
+            gO = cute.flat_divide(gO, (self.mma_tiler_pv[0] // self.cta_group_size,))[None, mma_tile_coord_v, None, None]
+            stats = [(0.0, -Float32.inf if const_expr(mLSE is not None) else None, True)] * self.q_stage
+            total_block_count = n_block_max - n_block_min
+            has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
+            if has_work:
+                cnt[1] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * (n_block_max - 1) + 1])
+                for k in cutlass.range(total_block_count, unroll=1):
+                    n_block = n_block_max - 1 - k
+                    sfb_word = dm_utils.bitcast_i32_f32(cnt[1])   # V scale word of n_block (prefetched one step ahead)
+                    cnt[1] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * cutlass.max(n_block - 1, 0) + 1])
+                    nstep = cnt[0]
+                    for s in cutlass.range_constexpr(2):
+                        # ---- row max / rescale / SF bytes (today's softmax_step prefix, verbatim ops) ----
+                        dm_utils.mbar_wait_parity(self.dm_slbar + 8 * s, nstep & 1)
+                        dm_utils.tc_fence_after()
+                        x = [dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(
+                            self.dm_slbuf + 4 * ((s * 4 + j) * self.m_block_size + tidx))) for j in range(4)]
+                        if const_expr(dm_lean):
+                            dm_xmax = utils.fmax(utils.fmax(x[0], x[1], x[2]), x[3])
+                        else:
+                            dm_xmax = cute.arch.fmax(cute.arch.fmax(x[0], x[1]), cute.arch.fmax(x[2], x[3]))
+                        dm_mcand = dm_utils.ceil_f32(dm_xmax)
+                        m_old = rst[s]
+                        row_max = m_old
+                        acc_scale = Float32(1.0)
+                        if k == 0:
+                            row_max = dm_mcand
+                            acc_scale = Float32(0.0)
+                        else:
+                            if dm_mcand > m_old + Float32(self.dm_rescale_T):
+                                row_max = dm_mcand
+                                acc_scale = dm_utils.exp2i_f32(m_old - dm_mcand)
+                        rst[s] = row_max
+                        m_safe = row_max if row_max != -Float32.inf else Float32(0.0)
+                        dm_w = [None] * 4
+                        dm_sfa = [None] * 4
+                        for j in cutlass.range_constexpr(4):
+                            kb = cute.arch.fmax(dm_utils.floor_f32(x[j]), Float32(-1e30))
+                            e = kb - Float32(7.0) - m_safe
+                            if const_expr(dm_lean):
+                                dm_sfa[j] = dm_utils.ue8m0_byte(e)
+                                dm_w[j] = dm_utils.byte_shl23_f32(dm_sfa[j])
+                            else:
+                                dm_w[j] = dm_utils.exp2i_f32(e)
+                                dm_sfa[j] = dm_utils.ue8m0_byte(e)
+                        sfa_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3]))
+                        for j in cutlass.range_constexpr(4):
+                            rSF[j] = sfa_word
+                            rSF[4 + j] = sfb_word
+                        cute.copy(thr_sf, rSF, cute.make_tensor(
+                            tSt_sf.iterator + (self.tmem_s_offset[s] + self.dm_sl_sfcol), tSt_sf.layout))
+                        if k > 0:
+                            # S_s(k) complete (seen through the slices' kb arrivals) => PV_s(k-1) complete
+                            should_rescale = cute.arch.vote_ballot_sync(acc_scale < 1.0) != 0
+                            if should_rescale:
+                                self.correction_rescale(thr_mma_pv, tOtO[None, None, None, s], tidx, acc_scale)
+                        cute.arch.fence_view_async_tmem_store()
+                        cute.arch.fence_view_async_tmem_load()   # (k == 0) previous tile's epilogue O loads done
+                        dm_utils.tc_fence_before()
+                        if const_expr(self.dm_opts.get("warr", "0") == "1"):
+                            cute.arch.sync_warp()
+                            with cute.arch.elect_one():
+                                pipeline_s_p_o.consumer_release_w_index(s)    # SF written + O rescaled (+ O free at k == 0)
+                        else:
+                            pipeline_s_p_o.consumer_release_w_index(s)
+                        # ---- l = l * acc + sum_b s_b w_b (today's order) ----
+                        dm_utils.mbar_wait_parity(self.dm_slbar + 16 + 8 * s, nstep & 1)
+                        bs = [dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(
+                            self.dm_slbuf + 4 * (1024 + (s * 4 + j) * self.m_block_size + tidx))) for j in range(4)]
+                        cute.arch.sync_warp()
+                        with cute.arch.elect_one():
+                            dm_utils.mbar_arrive(self.dm_slbar + 32 + 8 * s)
+                        dm_l = rst[2 + s] * acc_scale
+                        if k == 0:
+                            dm_l = Float32(0.0)
+                        for j in cutlass.range_constexpr(4):
+                            dm_l = dm_l + bs[j] * dm_w[j]
+                        rst[2 + s] = dm_l
+                    cnt[0] = nstep + 1
+                # ---- epilogue (= correction_loop, dense non-split path) ----
+                for stage in cutlass.range_constexpr(self.q_stage):
+                    row_sum = rst[2 + stage]
+                    row_max = rst[stage] if const_expr(mLSE is not None) else None
+                    acc_O_mn_row_is_zero_or_nan = row_sum == 0.0 or row_sum != row_sum
+                    stats[stage] = (row_sum, row_max, acc_O_mn_row_is_zero_or_nan)
+                    scale = cute.arch.rcp_approx(row_sum if not acc_O_mn_row_is_zero_or_nan else 1.0)
+                    scale = scale * Float32(1.0)
+                    pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
+                    dm_utils.tc_fence_after()
+                    if const_expr(not self.use_correction_warps_for_epi):
+                        pipeline_o_epi.producer_acquire_w_index_phase(stage, corr_epi_producer_phase)
+                    self.correction_epilogue(
+                        thr_mma_pv,
+                        tOtO[None, None, None, stage],
+                        tidx,
+                        stage,
+                        work_m,
+                        seqlen.seqlen_q,
+                        scale,
+                        sO[None, None, stage],
+                        mO_cur,
+                        gO[None, None, stage],
+                        gmem_tiled_copy_O,
+                        zero_fill=seqlen.seqlen_k == 0 if const_expr(self.use_tma_KV) else False,
+                    )
+                    if const_expr(not self.use_correction_warps_for_epi):
+                        pipeline_o_epi.producer_commit_w_index(stage)
+                o_corr_consumer_phase ^= 1
+                corr_epi_producer_phase ^= 1
+            if const_expr(mLSE is not None):
+                if const_expr(not seqlen.has_cu_seqlens_q):
+                    mLSE_cur = mLSE[None, head_idx, batch_idx]
+                else:
+                    mLSE_cur = cute.domain_offset((seqlen.offset_q,), mLSE[None, head_idx])
+                for stage in cutlass.range_constexpr(self.q_stage):
+                    q_block = self._q_block(work_m, stage, mma_tile_coord_v)
+                    row_sum, row_max, acc_O_mn_row_is_zero_or_nan = stats[stage]
+                    LN2 = math.log(2.0)
+                    lse = (
+                        (row_max * Float32(1.0) + (cute.math.log2(row_sum, fastmath=True) - Float32(0.0))) * LN2
+                        if not acc_O_mn_row_is_zero_or_nan
+                        else -Float32.inf
+                    )
+                    gLSE = cute.local_tile(mLSE_cur, (self.m_block_size,), (q_block,))
+                    if tidx < seqlen.seqlen_q - q_block * self.m_block_size:
+                        gLSE[tidx] = lse
+            if const_expr(pipeline_load_epi is not None and self.use_correction_warps_for_epi):
+                pipeline_load_epi.producer_acquire(load_epi_producer_state)
+                with cute.arch.elect_one():
+                    pipeline_load_epi.producer_commit(load_epi_producer_state)
+                load_epi_producer_state.advance()
+            work_tile = tile_scheduler.advance_to_next_work()
+        if const_expr(not self.use_correction_warps_for_epi):
+            pipeline_o_epi.producer_acquire_w_index_phase(self.q_stage - 1, corr_epi_producer_phase)
+
 
     def _dm_wait(self, mbar, phase):
         if const_expr(self.dm_opts.get("wnh", "1") == "1"):

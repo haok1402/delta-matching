@@ -97,7 +97,7 @@ def _bs_idesc(idesc_plain: int, k: int) -> int:
 
 def gemm_ptx_bs_ts(
     op, acc_tmem_addr, tCrA, tCrB, sB, sfa_tmem_addr, sfb_tmem_addr,
-    mbar_ptr=None, mbar_phase=None, split_arrive=None, zero_init=False, tA_addr=None, cta_group: int = 1,
+    mbar_ptr=None, mbar_phase=None, split_arrive=None, zero_init=False, tA_addr=None, cta_group: int = 1, offs_a=None,
 ):
     """TS block-scaled MMA: A (e4m3) from TMEM, B (e4m3) from smem, SFA/SFB (UE8M0) in TMEM.
     One 32-bit SF word per row holds the 4 k-step scales; k-step k selects byte k via sf_id (idesc).
@@ -114,7 +114,7 @@ def gemm_ptx_bs_ts(
         sm100_desc.Major.K if op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K else sm100_desc.Major.MN)
     smem_desc_base_b_lo, smem_desc_b_hi = i64_to_i32x2(smem_desc_base_b)
     tCrA_layout = cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
-    offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)]
+    offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)] if offs_a is None else list(offs_a)
     offset_b = [cute.crd2idx((0, 0, k), tCrB.layout) for k in range(nk)]
     smem_desc_start_b_lo = Int32(smem_desc_base_b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
     pred_str = "p" if isinstance(zero_init, cutlass.Boolean) else "0" if zero_init else "1"
@@ -233,7 +233,7 @@ def gemm_ptx_bs(
     start_b = Int32(b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
     if is_ts:
         tCrA_layout = cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
-        offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)]
+        offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)] if offs_a is None else list(offs_a)
         a_arg = Int32(cute.arch.make_warp_uniform(tA_addr))
         a_hi = None
     else:
@@ -407,6 +407,15 @@ def byte_pow2_f32(word: Int32, j: int, *, loc=None, ip=None) -> Float32:
         T.f32(), [Int32(word).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .b32 t;\n\t" f"bfe.u32 t, $1, {8 * j}, 8;\n\t" "shl.b32 $0, t, 23;\n\t}",
         "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def byte_pow2_f32_rt(word: Int32, pos: Int32, *, loc=None, ip=None) -> Float32:
+    """byte_pow2_f32 with a runtime bit position pos = 8 j (same bfe/shl -> same value)."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [Int32(word).ir_value(loc=loc, ip=ip), Int32(pos).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 t;\n\tbfe.u32 t, $1, $2, 8;\n\tshl.b32 $0, t, 23;\n\t}",
+        "=f,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
 
 
 @dsl_user_op

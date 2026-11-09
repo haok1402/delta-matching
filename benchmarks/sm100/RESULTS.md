@@ -1,56 +1,80 @@
 # Results: kda-sm100 candidates vs FA4 (hd128, GB200) — maintained by fa4-bench
 
-## HEADLINE (user target: causal, N = 4k / 8k / 32k / 64k x H16/16, H32/8; bench/headline_shapes.json, 8 shapes), updated 2026-11-09 02:20
+## STATUS 2026-11-09 03:10: NO COMPLIANT HEADLINE
 
-**Validated cc1dbf2 (matched / Delta-Matching, deterministic bwd), nvl72131-T16, every shape on all 4 GPUs, per-shape
-median across GPUs: causal fwd+bwd geomean over the 8 target shapes = 0.917x FA4 (0.950x vs FA4 deterministic).**
+**Every commit since 3122cc4 (P0-v3) breaks the zero-sum invariant and is NON-COMPLIANT, NOT PROMOTABLE.** The affected
+commits are 3122cc4, 30ec6cf, 9c690e1, 69f570a, 5b50ab2, e34bc6b, 3fec800/4ea8bd5, cc1dbf2 and e646cb1, and all their speedups below.
+- Rule (user): "You must not break the zero sum invariant. Any operations that trade away the accuracy is banned."
+- Evidence: dm-validator found it (validate/runs/ve646/full.json, gate log validate/runs/gate/e646_full.log) and
+  accuracy-audit confirmed it (audit/runs/zs_own_p.log). Pass 0 builds delta with a different exp mix (FA4 deg-3 polynomial
+  / MUFU) than the backward's P. On adversarial input families (outliers, scaled3/10, nearsat, peaked), rowsum(dS) =
+  5e-5..2e-4, against ~1e-7 fp32 round-off (the exact emulation stays <= ~3e-5). On ordinary randn inputs it is ~2e-7.
+- Why my bench missed it: its sanity gate checks rel. L2 of O/dQ/dK/dV vs fp32 on randn inputs only. It does not test the
+  rowsum(dS) identity or adversarial inputs, so these headlines passed it. Headline eligibility now requires the
+  validator's new identity gate (validator/validate.py) in addition to VALIDATED.md.
+- Next: kda-sm100-fix0 (pass 0 = bitwise the backward's P, deg-3 mix dropped; kda expects -1..3% bwd). Once it passes the
+  gate I re-measure the headline (4-GPU median) and report the pass-0 slowdown vs e646cb1 separately (same-lease A/B).
+- The numbers below are kept as measured, but they are labelled NON-COMPLIANT. The last validated commit before 3122cc4
+  (21b6b15) has an OOB bug, so there is no compliant headline right now.
 
-| matched causal fwd+bwd vs FA4 (median of 4 GPUs) | 4k | 8k | 32k | 64k |
-|---|---|---|---|---|
-| H16/16 | 0.827 | 0.851 | 0.979 | 1.008 |
-| H32/8  | 0.819 | 0.878 | 1.001 | 1.002 |
-| bwd alone, H16/16 / H32/8 | 0.821 / 0.788 | 0.816 / 0.828 | 0.904 / 0.937 | 0.943 / 0.936 |
-| fwd alone, H16/16 / H32/8 | 0.885 / 0.919 | 0.937 / 0.996 | 1.042 / 1.165 | 1.232 / 1.286 |
+## LAST MEASURED (NON-COMPLIANT) HEADLINE (user target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 02:55
 
-- At parity with FA4 at 32k-64k (0.98-1.01x). 4k and 8k are the gap (0.82-0.88x), and the bwd (0.79-0.83x there) is most of it.
-- GPU spread on this node is small: at most 0.025 per shape (8k H32/8: 0.865-0.887), much tighter than on nvl72052-T18.
-- Validation: cc1dbf2 is in validate/VALIDATED.md (02:05). No SUSPECT flags on any GPU.
-- Next: e646cb1 (pending validation) measured +1.3% vs 4ea8bd5 in a same-lease A/B; it becomes the headline once validated.
-- Method: bench/run_headline.sh = one 4-GPU lease (194 s), every target shape on each GPU, FA4 / FA4-det / candidate
-  interleaved per GPU, median of the 4 per-GPU ratios. Commit deltas: same-lease A/B (bench/run_ab.sh).
+**[NON-COMPLIANT, NOT PROMOTABLE: breaks the zero-sum invariant] e646cb1 (= cc1dbf2 + msplit; matched / Delta-Matching, deterministic bwd), nvl72131-T16, 4-GPU median per
+shape: geomean over the 6 target shapes = 0.960x FA4 (0.994x vs FA4 deterministic). Target 1.10x: +14.6% still needed.**
 
-Full tables (python bench/headline.py hl_cc1dbf2):
+| matched causal fwd+bwd vs FA4 (median of 4 GPUs) | 8k | 32k | 64k |
+|---|---|---|---|
+| H16/16 | 0.853 | 0.985 | 1.015 |
+| H32/8  | 0.889 | 1.016 | 1.014 |
+| **gap to 1.10x** H16/16 (cut in our time needed) | +29.0% (-22.5%) | +11.7% (-10.5%) | +8.4% (-7.7%) |
+| **gap to 1.10x** H32/8 | +23.7% (-19.2%) | +8.3% (-7.6%) | +8.5% (-7.8%) |
+| bwd alone, H16/16 / H32/8 | 0.819 / 0.836 | 0.918 / 0.959 | 0.955 / 0.964 |
+| fwd alone, H16/16 / H32/8 | 0.947 / 0.994 | 1.038 / 1.170 | 1.230 / 1.278 |
 
-arm=dm_matched  files=results/hl_cc1dbf2.[sg]*.jsonl  host=nvl72131-T16
+- vs the previous headline cc1dbf2 (0.951x, same node and method, 30 min earlier): kernel time is +0.6..1.6% faster on
+  every shape (median over GPUs), and the geomean rises +0.9%.
+- 8k is the biggest gap (+24-29%). The bwd (0.82-0.96x) is the lever.
+- GPU spread <= 0.032 per shape (32k H16: 0.969-1.001). No SUSPECT flags. Validated 02:23 (validate/VALIDATED.md).
+
+Full tables (python bench/headline.py hl_e646cb1):
+
+arm=dm_matched  files=results/hl_e646cb1.[sg]*.jsonl  host=nvl72131-T16
 
 vs fa4_bf16  (speedup = fa4_bf16_ms / dm_matched_ms)
 
-| causal | pass | H/Hk | 4k | 8k | 32k | 64k | geomean (8 shapes) |
-|---|---|---|---|---|---|---|---|
-| 1 | fwd_bwd | 16/16 | 0.827 | 0.851 | 0.979 | 1.008 | **0.917** |
-| 1 | fwd_bwd | 32/8 | 0.819 | 0.878 | 1.001 | 1.002 |  |
-| 1 | fwd | 16/16 | 0.885 | 0.937 | 1.042 | 1.232 | 1.048 |
-| 1 | fwd | 32/8 | 0.919 | 0.996 | 1.165 | 1.286 |  |
-| 1 | bwd | 16/16 | 0.821 | 0.816 | 0.904 | 0.943 | 0.869 |
-| 1 | bwd | 32/8 | 0.788 | 0.828 | 0.937 | 0.936 |  |
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.853 | 0.985 | 1.015 | **0.960** |
+| 1 | fwd_bwd | 32/8 | 0.889 | 1.016 | 1.014 |  |
+| 1 | fwd | 16/16 | 0.947 | 1.038 | 1.230 | 1.102 |
+| 1 | fwd | 32/8 | 0.994 | 1.170 | 1.278 |  |
+| 1 | bwd | 16/16 | 0.819 | 0.918 | 0.955 | 0.907 |
+| 1 | bwd | 32/8 | 0.836 | 0.959 | 0.964 |  |
 
 vs fa4_bf16_det  (speedup = fa4_bf16_det_ms / dm_matched_ms)
 
-| causal | pass | H/Hk | 4k | 8k | 32k | 64k | geomean (8 shapes) |
-|---|---|---|---|---|---|---|---|
-| 1 | fwd_bwd | 16/16 | 0.858 | 0.875 | 1.006 | 1.040 | **0.950** |
-| 1 | fwd_bwd | 32/8 | 0.852 | 0.929 | 1.032 | 1.039 |  |
-| 1 | fwd | 16/16 | 0.878 | 0.941 | 1.044 | 1.222 | 1.046 |
-| 1 | fwd | 32/8 | 0.921 | 0.997 | 1.156 | 1.282 |  |
-| 1 | bwd | 16/16 | 0.855 | 0.849 | 0.964 | 0.992 | 0.920 |
-| 1 | bwd | 32/8 | 0.829 | 0.901 | 0.993 | 1.000 |  |
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.881 | 1.009 | 1.045 | **0.994** |
+| 1 | fwd_bwd | 32/8 | 0.936 | 1.058 | 1.052 |  |
+| 1 | fwd | 16/16 | 0.945 | 1.042 | 1.221 | 1.099 |
+| 1 | fwd | 32/8 | 0.994 | 1.156 | 1.277 |  |
+| 1 | bwd | 16/16 | 0.856 | 0.968 | 1.003 | 0.961 |
+| 1 | bwd | 32/8 | 0.915 | 1.008 | 1.026 |  |
+
+gap to the 1.10x target (causal fwd+bwd vs fa4_bf16): speedup still needed = 1.10 / current
+
+| H/Hk | 8k | 32k | 64k | geomean |
+|---|---|---|---|---|
+| 16/16 | +29.0% | +11.7% | +8.4% | +14.6% |
+| 32/8 | +23.7% | +8.3% | +8.5% |  |
 
 spread across runs/GPUs (min..max of the per-GPU ratio, n = 4), causal fwd+bwd vs fa4_bf16:
 
-| H/Hk | 4k | 8k | 32k | 64k |
-|---|---|---|---|---|
-| 16/16 | 0.819..0.833 | 0.837..0.857 | 0.970..0.983 | 0.995..1.010 |
-| 32/8 | 0.808..0.825 | 0.865..0.887 | 0.991..1.012 | 0.992..1.004 |
+| H/Hk | 8k | 32k | 64k |
+|---|---|---|---|
+| 16/16 | 0.838..0.860 | 0.969..1.001 | 1.008..1.023 |
+| 32/8 | 0.880..0.898 | 1.013..1.026 | 1.003..1.015 |
 
 ---
 
@@ -74,13 +98,13 @@ N 1k-32k). "e2e" means the time starts from bf16 q/k/v, so the quantization prod
 | 2026-11-08 19:40 | FULL stale  [reference only] (snap d227693) | fwd_bwd | 0.906; 0.940 vs FA4-det | 0.971; 1.000 vs FA4-det | - | no SUSPECT | same |
 | 2026-11-08 20:10 | **VALIDATED** FULL matched (snap 21b6b15, in validate/VALIDATED.md; = d227693 + debug hook) on nvl72053-T07 | fwd_bwd | **0.745** (0.551-0.931); 0.776 vs FA4-det | 0.796; 0.821 vs FA4-det | - | no SUSPECT | results/full_21b6b15.s*.jsonl |
 | 2026-11-08 20:10 | FULL stale  [reference only] (snap 21b6b15) | fwd_bwd | 0.884; 0.921 vs FA4-det | 0.966; 0.996 vs FA4-det | - | no SUSPECT | same |
-| 2026-11-08 21:20 | VALIDATED FULL matched, snap 3122cc4 (= a911afe NaN fix + P0-v3 exp mix + OOB clamp), nvl72053-T07 GPUs 0,1,3 | fwd_bwd | **0.752** (0.551-0.94); 0.781 vs FA4-det | 0.805; 0.829 vs FA4-det | - | no SUSPECT | results/full_3122cc4g3.s*.jsonl |
-| 2026-11-08 21:20 | FULL stale  [reference only], snap 3122cc4 | fwd_bwd | 0.890; 0.924 vs FA4-det | 0.968; 0.996 vs FA4-det | - | no SUSPECT | same |
-| 2026-11-08 21:55 | VALIDATED FULL matched, snap 30ec6cf (= 3122cc4 + aaca3a0 P0-v4 + 0c3f1e1), nvl72053-T07 GPUs 0-3, same lease as 3122cc4 | fwd_bwd | **0.757** (+1.0% vs 3122cc4 same lease); 0.789 vs FA4-det | 0.807; 0.832 vs FA4-det | - | no SUSPECT | results/ab_3122cc4_30ec6cf_30ec6cf.s*.jsonl |
-| 2026-11-08 22:25 | VALIDATED FULL matched, snap 9c690e1 (= 30ec6cf + e2e glue + bwd2; bitwise = 30ec6cf), nvl72053-T07 GPUs 1-3, same lease as 30ec6cf | fwd_bwd | **0.794** (0.581-0.961; +5.2% vs 30ec6cf same lease); 0.827 vs FA4-det | 0.850; 0.876 vs FA4-det | - | no SUSPECT | results/ab_30ec6cf_9c690e1_9c690e1.s*.jsonl |
-| 2026-11-08 22:25 | FULL stale  [reference only], snap 9c690e1 | fwd_bwd | 0.943; 0.982 vs FA4-det | 1.031; 1.063 vs FA4-det | - | no SUSPECT | same |
-| 2026-11-08 23:30 | **VALIDATED (current headline)** FULL matched, snap 5b50ab2 (= 69f570a + posmaj GQA schedule; bitwise = 69f570a), nvl72052-T18 GPUs 2-3, same lease as 69f570a | fwd_bwd | **0.817** (0.626-0.988; +1.6% vs 69f570a same lease); 0.854 vs FA4-det | 0.895; 0.924 vs FA4-det | - | no SUSPECT | results/ab_69f570a_5b50ab2_5b50ab2.s*.jsonl |
-| 2026-11-08 23:30 | FULL stale  [reference only], snap 5b50ab2 | fwd_bwd | 0.975; 1.019 vs FA4-det | 1.092; 1.128 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 21:20 | [NON-COMPLIANT: zero-sum invariant] VALIDATED FULL matched, snap 3122cc4 (= a911afe NaN fix + P0-v3 exp mix + OOB clamp), nvl72053-T07 GPUs 0,1,3 | fwd_bwd | **0.752** (0.551-0.94); 0.781 vs FA4-det | 0.805; 0.829 vs FA4-det | - | no SUSPECT | results/full_3122cc4g3.s*.jsonl |
+| 2026-11-08 21:20 | [NON-COMPLIANT: zero-sum invariant] FULL stale  [reference only], snap 3122cc4 | fwd_bwd | 0.890; 0.924 vs FA4-det | 0.968; 0.996 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 21:55 | [NON-COMPLIANT: zero-sum invariant] VALIDATED FULL matched, snap 30ec6cf (= 3122cc4 + aaca3a0 P0-v4 + 0c3f1e1), nvl72053-T07 GPUs 0-3, same lease as 3122cc4 | fwd_bwd | **0.757** (+1.0% vs 3122cc4 same lease); 0.789 vs FA4-det | 0.807; 0.832 vs FA4-det | - | no SUSPECT | results/ab_3122cc4_30ec6cf_30ec6cf.s*.jsonl |
+| 2026-11-08 22:25 | [NON-COMPLIANT: zero-sum invariant] VALIDATED FULL matched, snap 9c690e1 (= 30ec6cf + e2e glue + bwd2; bitwise = 30ec6cf), nvl72053-T07 GPUs 1-3, same lease as 30ec6cf | fwd_bwd | **0.794** (0.581-0.961; +5.2% vs 30ec6cf same lease); 0.827 vs FA4-det | 0.850; 0.876 vs FA4-det | - | no SUSPECT | results/ab_30ec6cf_9c690e1_9c690e1.s*.jsonl |
+| 2026-11-08 22:25 | [NON-COMPLIANT: zero-sum invariant] FULL stale  [reference only], snap 9c690e1 | fwd_bwd | 0.943; 0.982 vs FA4-det | 1.031; 1.063 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 23:30 | [NON-COMPLIANT: zero-sum invariant] VALIDATED (current headline)** FULL matched, snap 5b50ab2 (= 69f570a + posmaj GQA schedule; bitwise = 69f570a), nvl72052-T18 GPUs 2-3, same lease as 69f570a | fwd_bwd | **0.817** (0.626-0.988; +1.6% vs 69f570a same lease); 0.854 vs FA4-det | 0.895; 0.924 vs FA4-det | - | no SUSPECT | results/ab_69f570a_5b50ab2_5b50ab2.s*.jsonl |
+| 2026-11-08 23:30 | [NON-COMPLIANT: zero-sum invariant] FULL stale  [reference only], snap 5b50ab2 | fwd_bwd | 0.975; 1.019 vs FA4-det | 1.092; 1.128 vs FA4-det | - | no SUSPECT | same |
 
 ### Notes on C1-v1 (fwd only, no bwd yet)
 - It is faster than FA4 only at long sequences: 1.05-1.17x at 16k-32k, where FA4 hits the power cap and its clock drops.

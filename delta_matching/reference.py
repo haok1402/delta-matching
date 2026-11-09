@@ -535,3 +535,5 @@ make_kda_preset("sm100-mx-nonorm", ds_block=(128, 32), delta_norm=False)
 make_kda_preset("sm100-mx-lq", ds_block=(128, 32), delta_norm=True, l_from_codes=True)
 # kda-sm100 19:00: forward with ~exact P (fp8 code + 2 bf16 residuals ~ fp32), matched delta = dequant(dO8) . O_fp32
 make_kda_preset("sm100-mx-x", ds_block=(128, 32), p_fwd="none", delta_from_o=True)
+# kda-sm100-bwd8 proposal (2026-11-09): dS scaled per 32 keys x 32 queries (MXFP8 granularity), everything else sm100-mx
+make_kda_preset("sm100-mx-ds32", ds_block=(32, 32), delta_norm=True)

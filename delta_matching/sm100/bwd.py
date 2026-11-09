@@ -245,6 +245,12 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     if "pdyn" in _auto_opts(q8, k8, causal).split(","):
         # DM pdyn: claim counter for the dynamic persistent scheduler (last aux tensor), zeroed per launch
         _CTX["pdyn_ctr"] = torch.zeros(1, dtype=torch.int32, device=q8.device)
+    if trace is not None and "rsdbg" in os.environ.get("DM_BWD_OPTS", ""):
+        if isinstance(trace, (tuple, list)):   # (rs, pdump (B, H, N, N) fp32) with DM_BWD_OPTS=rsdbg,pdump
+            aux.extend(trace)
+        else:
+            aux.append(trace)          # DEBUG rsdbg: float64 (B, H, N, 2) = (rowsum dS, sum |P dP|) accumulators
+        trace = None
     if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
         aux.append(trace)
     if "pdyn" in _auto_opts(q8, k8, causal).split(","):

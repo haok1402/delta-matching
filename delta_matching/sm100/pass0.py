@@ -43,6 +43,10 @@ def _variant(exp_variant: str):
     return _CLASSES[exp_variant], _CACHES[exp_variant]
 
 
+DPDUMP = None
+PDUMP = None   # DEBUG (kda-sm100-fix0): set to a (B, H, N, N) fp32 tensor before dm_delta with exp variant "+pd"
+
+
 def _aux(t: torch.Tensor, leading_dim: int):
     t.__leading_dim__ = leading_dim
     t.__assumed_align__ = 16 if t.dtype == torch.uint8 else 4
@@ -52,7 +56,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_6+ma+h2")   # P0-v5: two 64-col halves (S half -> exp -> dP half -> num), 6 of 16 pairs per chunk on FA4 deg-3, 4 accumulators; keeps /sum P
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_0+ma+h2+f64")   # P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
     over = dict(FORCE)
     if config_override:
         over.update(config_override)
@@ -62,6 +66,10 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
         global TRACE
         TRACE = torch.zeros(64, dtype=torch.int64, device=lse.device)
         aux.append(_aux(TRACE, 0))
+    if "pd" in exp_variant.split("+")[1:]:       # DEBUG: (B, H, N, N) fp32 P dump (last aux)
+        global PDUMP
+        aux.append(_aux(PDUMP, 3))
+        aux.append(_aux(DPDUMP, 3))
     orig = (fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config)
 
     def select(inputs):

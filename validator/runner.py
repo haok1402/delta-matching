@@ -211,6 +211,15 @@ def run_case(mod, fn, case, dev):
                     # whole-tensor, per-128-row-block and per-element deviation from the first call, and keep every
                     # call's outputs for small cases so the parent can judge accuracy on the WORST call
                     n = int(kind.split(":")[1])
+                    # concurrent load on the same GPU perturbs timing: the nondet race of 6a313b0 (forward O off by 3e-2)
+                    # showed up only this way (2/1200 calls, 0/2400 unloaded).  DMVAL_STRESS_LOAD=0 turns it off.
+                    load = None
+                    if os.environ.get("DMVAL_STRESS_LOAD", "1") != "0":
+                        import subprocess as _sp
+                        load = _sp.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                       "gpuload.py")], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                        import atexit
+                        atexit.register(load.kill)          # never leave the load running if the runner dies
                     POISON_MODE[0] = "none"
                     out = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
                     keep = q.shape[0] * q.shape[2] * q.shape[1] ** 2 <= 2 ** 28
@@ -250,6 +259,9 @@ def run_case(mod, fn, case, dev):
                             calls.append([None if t is None else t.cpu() for t in o2])
                         del o2
                     POISON_MODE[0] = "none"
+                    if load is not None:
+                        load.kill()
+                        load.wait()
                     nonfin += any(t is not None and not torch.isfinite(t).all() for t in out)
                     r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin, "mismatch_calls": 0,
                                                                  "rel_max": gmax, "block_rel_max": bmax, "elem_rel_max": emax,

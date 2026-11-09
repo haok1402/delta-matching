@@ -148,7 +148,7 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     def rn(*s):
         return torch.randn(*s, generator=gen, device=dev, dtype=torch.float32)
     q, k, v, do = rn(B, N, H, D), rn(B, N, Hk, D), rn(B, N, Hk, D), rn(B, N, H, D)
-    if kind in ("randn", "stress", "stress20"):
+    if kind in ("randn", "stress", "stress20", "stress60"):
         pass
     elif kind.startswith("scaled"):                   # larger logit range: q, k * s
         s = float(kind[6:])
@@ -299,6 +299,12 @@ def build_cases(tier, supports, seed):
             shapes += [(1, 16, 16, up(8192), False, ["stress"])]
     if tier == "bench":   # races at the longest headline length
         shapes.append((1, 16, 16, up(65536), True, ["stress"]))
+    if tier != "quick":
+        # 6a313b0's forward race (ss_pv defaults) changed one O tile on ~1% of calls at B8 H32/8 N4096 and was invisible
+        # to 8-call stress: many calls on a multi-batch GQA shape with several CTAs per SM, causal and non-causal
+        shapes += [(8, 32, 8, up(4096), True, ["stress60"])]
+        if nc:
+            shapes += [(8, 32, 8, up(4096), False, ["stress60"])]
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
             if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
@@ -312,7 +318,7 @@ def build_cases(tier, supports, seed):
                 modes = modes[:1]
             runs = [(md, "plain") for md in modes]
             big = B * H * N * N > 2 ** 33
-            if kind not in ("stress", "stress20"):
+            if kind not in ("stress", "stress20", "stress60"):
                 runs += [(modes[0], "repeat")]          # run-to-run spread per case (binding envelope, race detection)
             if kind == "randn" and not big:
                 runs += [(modes[0], "views")]
@@ -322,6 +328,8 @@ def build_cases(tier, supports, seed):
                 runs = [(md, f"stress:{stress_n}") for md in modes]
             if kind == "stress20":
                 runs = [(md, "stress:20") for md in modes]
+            if kind == "stress60":
+                runs = [(md, "stress:60") for md in modes]
             # full / bench: a fixed seed per case name, so the reference outputs can be cached and reused across candidates;
             # quick: fresh random inputs on every run (no candidate can be tuned to fixed inputs without failing quick)
             cseed = (zlib.crc32(name.encode()) & 0x7FFFFFFF) if (tier in CACHED_TIERS and CACHE) else seed * 1000003 + len(cases)
@@ -351,7 +359,7 @@ def check_case(case, cr, preset, dev, verbose):
         chk("runs", False, cr["error"][-1500:])
         rec["fails"] = fails
         return False, rec
-    if case["kind"] in ("stress", "stress20"):
+    if case["kind"] in ("stress", "stress20", "stress60"):
         for key, st in cr.get("stress", {}).items():
             rec["metrics"][f"{key}"] = st
             chk(f"{key}:finite_every_call", st["nonfinite_calls"] == 0,

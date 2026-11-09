@@ -52,12 +52,16 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1+ma")   # P0-v4: + 4 accumulators, dP scale per chunk (causal); keeps /sum P (rowsum(dS)=0 at fp32 round-off)
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_6+ma+h2")   # P0-v5: two 64-col halves (S half -> exp -> dP half -> num), 6 of 16 pairs per chunk on FA4 deg-3, 4 accumulators; keeps /sum P
     over = dict(FORCE)
     if config_override:
         over.update(config_override)
     aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
            _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2)]
+    if "tr" in exp_variant.split("+")[1:]:
+        global TRACE
+        TRACE = torch.zeros(64, dtype=torch.int64, device=lse.device)
+        aux.append(_aux(TRACE, 0))
     orig = (fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config)
 
     def select(inputs):

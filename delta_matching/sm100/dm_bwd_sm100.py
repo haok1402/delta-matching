@@ -760,6 +760,13 @@ class DMBackwardSm100:
                 self.dQ_reduce_ncol = 16 if self.deterministic else 8
                 self.sdQaccum_stage = 2 if self.deterministic else 4
                 self.dQ_reduce_ncol_t2r = 32
+                # DM dq32 / dq32s1: 32-column staging chunks (half the per-tile r2s/barrier/bulk-add rounds),
+                # 2 stages (+16 KB smem) or 1 stage (same smem as today); same adds per element, same order
+                _dqo = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
+                if "dq32" in _dqo:
+                    self.dQ_reduce_ncol, self.sdQaccum_stage = 32, 2
+                elif "dq32s1" in _dqo:
+                    self.dQ_reduce_ncol, self.sdQaccum_stage = 32, 1
             else:
                 self.dQ_reduce_ncol = 32
                 self.sdQaccum_stage = 64 // self.dQ_reduce_ncol
@@ -5719,7 +5726,7 @@ class DMBackwardSm100:
                                 m_block,
                                 work_n,
                             )
-                            if const_expr("dqearly" not in self.dm_opts):
+                            if const_expr("dqearly" not in self.dm_opts and "dqnone" not in self.dm_abl):
                                 barrier.wait_eq(
                                     mdQ_semaphore_cur[(m_block, None)].iterator,
                                     tidx,
@@ -5764,7 +5771,33 @@ class DMBackwardSm100:
                     )
                     tdQrdQ = cute.make_tensor(tdQrdQ_t2r.iterator, tdQrdQ_shape)
 
-                    for stage in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1])):
+                    if const_expr("dqred" in self.dm_opts):
+                        # DM dqred (REJECTED: +11% slower, not bitwise on non-causal N4096): no SMEM staging / bulk adds: each thread adds its registers straight to dq_accum with
+                        # red.global.add.v4.f32 (first writer: st.global.v4), then fences before the reduce barrier; the
+                        # (delayed) semaphore release below follows that barrier. Same per-element adds, same CTA order.
+                        if not m_block_oob_upper:
+                            for dm_st in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1])):
+                                for dm_k in cutlass.range_constexpr(self.dQ_reduce_ncol // 4):
+                                    dm_ptr = gdQaccum_cur[None, dm_st + stage_offset].iterator.toint() + Int64(4 * (4 * tidx + 512 * dm_k))
+                                    dm_a = tdQrdQ[4 * dm_k + 0, dm_st]
+                                    dm_b = tdQrdQ[4 * dm_k + 1, dm_st]
+                                    dm_c = tdQrdQ[4 * dm_k + 2, dm_st]
+                                    dm_d = tdQrdQ[4 * dm_k + 3, dm_st]
+                                    if dm_first:
+                                        dm_utils.st_v4_f32(dm_ptr, dm_a, dm_b, dm_c, dm_d)
+                                    else:
+                                        dm_utils.red_add_v4_f32(dm_ptr, dm_a, dm_b, dm_c, dm_d)
+                        dm_utils.fence_acq_rel_gpu()
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        if const_expr(self.deterministic and delay_semaphore_release):
+                            if not release_now and m_block > m_block_min:
+                                barrier.arrive_inc_async(
+                                    mdQ_semaphore_cur[(m_block - 1, None)].iterator,
+                                    tidx,
+                                    cta_rank_in_cluster,
+                                    1,
+                                )
+                    for stage in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1]) if const_expr("dqnone" not in self.dm_abl and "dqred" not in self.dm_opts) else 0):
                         smem_idx = dQ_tma_store_producer_state.index
                         tdQsdQ_r2s = tdQsdQ[None, None, smem_idx]
                         tdQrdQ_r2s = cute.make_tensor(tdQrdQ[None, stage].iterator, tdQsdQ_r2s.shape)
@@ -5786,7 +5819,7 @@ class DMBackwardSm100:
                                                 dm_v = gdQaccum_cur[4 * tidx + dm_i + 512 * dm_k, stage + stage_offset] + dm_v
                                             dm_dq[batch_idx, dm_row, head_idx, dm_col0 + dm_j] = dm_dq.element_type(
                                                 dm_v * Float32(self.tile_hdim ** -0.5))
-                        if is_tma_warp and not m_block_oob_upper and not dm_last:
+                        if is_tma_warp and not m_block_oob_upper and not dm_last and const_expr("dqtma" not in self.dm_abl):
                             with cute.arch.elect_one():
                                 if dm_first:
                                     dm_utils.cpasync_bulk_store_s2g(
@@ -5801,7 +5834,15 @@ class DMBackwardSm100:
                                         self.tma_copy_bytes["dQ"] // 1,
                                     )
                             cute.arch.cp_async_bulk_commit_group()
-                            cute.arch.cp_async_bulk_wait_group(self.sdQaccum_stage - 1, read=read_flag)
+                            if const_expr("nodqrd" not in self.dm_opts and self.deterministic and self.sdQaccum_stage > 1):   # dqrd default (bitwise)
+                                # DM dqrd: staging-buffer reuse only needs the older bulk adds to have READ smem;
+                                # completion (visibility in global) is needed only before the semaphore release of
+                                # the previous m_block (below, stage 0) and at tile end. Same adds, same order: bitwise.
+                                cute.arch.cp_async_bulk_wait_group(self.sdQaccum_stage - 1, read=True)
+                                if const_expr(stage == 0 and delay_semaphore_release):
+                                    cute.arch.cp_async_bulk_wait_group(1, read=False)
+                            else:
+                                cute.arch.cp_async_bulk_wait_group(self.sdQaccum_stage - 1, read=read_flag)
                         elif is_tma_warp:
                             # Drain pending TMA stores so SMEM buffers are safe to reuse
                             cute.arch.cp_async_bulk_wait_group(0, read=read_flag)

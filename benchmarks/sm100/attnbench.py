@@ -42,15 +42,27 @@ HD = 128
 # hd128 (hidden 2048), seqlen 1k..32k.  Plus GQA at Llama-3-8B (32q/8kv) and Llama-3-70B (64q/8kv, per-TP-shard
 # variants are the same per-head work) ratios.  B*H*ceil(N/128) >= 4096 CTA tiles everywhere: all 148 SMs are filled.
 SEQLENS = [1024, 2048, 4096, 8192, 16384, 32768]
+SUITE_SEQLENS = {"focus": [8192, 32768, 65536]}
 SUITES = {
     # name: list of (H, Hk, total_tokens)
     "main": [(16, 16, 32768), (32, 8, 32768)],
     "full": [(16, 16, 32768), (32, 8, 32768), (64, 8, 32768), (32, 32, 32768)],
     "quick": [(16, 16, 32768)],
+    # user focus (2026-11-08): N = 8k, 32k, 64k only.  B = max(1, 32k tokens // N): 4 x 8k, 1 x 32k, 1 x 64k (one
+    # 64k sequence = the long-context case; still >= 512 128-row tiles x H heads, all 148 SMs busy).
+    "focus": [(16, 16, 32768), (32, 8, 32768)],
 }
 
 
+HEADLINE_SHAPES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "headline_shapes.json")
+
+
 def shapes_for(suite, seqlens, causals):
+    if suite == "focus" and os.path.exists(HEADLINE_SHAPES):
+        # single source of truth shared with dm-validator's bench tier (sm100/bench/headline_shapes.json)
+        shp = json.load(open(HEADLINE_SHAPES))["shapes"]
+        return [dict(B=x["B"], N=x["N"], H=x["H"], Hk=x["Hk"], D=HD, causal=x["causal"]) for x in shp
+                if x["causal"] in causals and (seqlens is None or x["N"] in seqlens)]
     out = []
     for (H, Hk, tot) in SUITES[suite]:
         for N in seqlens:
@@ -227,12 +239,36 @@ def ref_attn_fp32(q, k, v, causal, do):
     return dict(o=o, dq=dq, dk=dk, dv=dv), nk, g
 
 
+def ref_attn_long(q, k, v, causal, do, rows_n=512):
+    """N too long for a full fp32 S: O and dQ exact in fp32 for the LAST rows_n query rows (they see the whole context),
+    batch 0, first 2 kv groups; dK / dV (which need every row) from FA4 bf16 (~2e-3 from exact, far below the fp8 gate)."""
+    from flash_attn.cute import flash_attn_func as fa4
+    B, N, H, D = q.shape
+    Hk = k.shape[2]; g = H // Hk; nk = min(Hk, 2)
+    rows = slice(N - rows_n, N)
+    qs = q[:1, rows, : nk * g].detach().float().requires_grad_()
+    kk = k[:1, :, :nk].detach().float().repeat_interleave(g, dim=2)
+    vv = v[:1, :, :nk].detach().float().repeat_interleave(g, dim=2)
+    sc = torch.einsum("bnhd,bmhd->bhnm", qs, kk) * HD ** -0.5
+    if causal:
+        i = torch.arange(N - rows_n, N, device=q.device)[:, None]
+        sc = sc.masked_fill(torch.arange(N, device=q.device)[None, :] > i, float("-inf"))
+    o = torch.einsum("bhnm,bmhd->bnhd", sc.softmax(-1), vv)
+    dq, = torch.autograd.grad(o, (qs,), do[:1, rows, : nk * g].float())
+    del sc
+    qf, kf, vf = (t.detach().requires_grad_() for t in (q, k, v))
+    of = _first(fa4(qf, kf, vf, causal=causal))
+    _, dkf, dvf = torch.autograd.grad(of, (qf, kf, vf), do)
+    return dict(o=o, dq=dq, dk=dkf[:1, :, :nk].float(), dv=dvf[:1, :, :nk].float(), rows=rows), nk, g
+
+
 def sanity(fn, s, q, k, v, do, ref, nk, g, fwd_only):
+    rows = ref.get("rows", slice(None))          # long N: O / dQ checked on a query-row slice (exact fp32)
     o = fn(q, k, v, s["causal"])
-    errs = dict(o=rel_err(o[:1, :, : nk * g], ref["o"]))
+    errs = dict(o=rel_err(o[:1, rows, : nk * g], ref["o"]))
     if not fwd_only:
         dq, dk, dv = torch.autograd.grad(o, (q, k, v), do)
-        errs.update(dq=rel_err(dq[:1, :, : nk * g], ref["dq"]), dk=rel_err(dk[:1, :, :nk], ref["dk"]),
+        errs.update(dq=rel_err(dq[:1, rows, : nk * g], ref["dq"]), dk=rel_err(dk[:1, :, :nk], ref["dk"]),
                     dv=rel_err(dv[:1, :, :nk], ref["dv"]))
     # anti-caching: perturb q, the output must change
     with torch.no_grad():
@@ -305,7 +341,8 @@ def main():
     ap.add_argument("--cand-mode", default=None, help="force mode for candidates (default matched if causal else stale)")
     ap.add_argument("--pythonpath", action="append", default=[])
     ap.add_argument("--suite", default="main", choices=list(SUITES))
-    ap.add_argument("--seqlens", default=",".join(map(str, SEQLENS)))
+    ap.add_argument("--seqlens", default=None, help="default: per suite (focus: 8k,32k,64k; others 1k..32k)")
+    ap.add_argument("--no-long-ref", action="store_true", help="skip the sanity gate for N > 8k")
     ap.add_argument("--causal", default="both", choices=["true", "false", "both"])
     ap.add_argument("--passes", default="fwd,bwd,fwd_bwd")
     ap.add_argument("--shard", default="0/1", help="i/n: run every n-th shape starting at i")
@@ -324,7 +361,7 @@ def main():
 
     dev = torch.device("cuda")
     torch.backends.cuda.matmul.allow_tf32 = False
-    seqlens = [int(x) for x in a.seqlens.split(",")]
+    seqlens = [int(x) for x in a.seqlens.split(",")] if a.seqlens else (None if a.suite == "focus" else SEQLENS)
     causals = {"true": [True], "false": [False], "both": [True, False]}[a.causal]
     shards = shapes_for(a.suite, seqlens, causals)
     si, sn = map(int, a.shard.split("/"))
@@ -385,7 +422,8 @@ def main():
         from gpupool_hook import gpupool_ready, gpupool_done
     except ImportError:
         gpupool_ready = gpupool_done = lambda: None
-    gpupool_ready()
+    torch.cuda.init(); torch.empty(1, device=dev)    # create the CUDA context, then hand the GPU back to the filler:
+    gpupool_done()                                   # setup / JIT / fp32 reference / sanity run beside the filler
     for s in shards:
         g = torch.Generator(device=dev).manual_seed(1234)
         B, N, H, Hk, D = s["B"], s["N"], s["H"], s["Hk"], s["D"]
@@ -396,6 +434,8 @@ def main():
         ref = None
         if N <= 8192:
             ref, nk, gg = ref_attn_fp32(q, k, v, s["causal"], do)
+        elif not a.no_long_ref:
+            ref, nk, gg = ref_attn_long(q, k, v, s["causal"], do)
         items = []                                 # (arm, pass, make_call, rec0)
         for arm, (fn, fwd_only) in arms.items():
             sup = getattr(fn, "supports", {})
@@ -437,6 +477,11 @@ def main():
                 fout.write(json.dumps(dict(rec0, pass_=p, error=f"{type(ex).__name__}: {str(ex)[:300]}")) + "\n")
                 fout.flush()
         R = max(1, a.rounds)
+        gpupool_ready()                              # quiet GPU only for the timed rounds (+ CUPTI) of this shape
+        for (_a, _p, _mk, _r) in ok:                 # re-warm after the filler stops (power / clock transient)
+            for _ in range(2):
+                _pre, _run = _mk(); _pre(); _run()
+        torch.cuda.synchronize()
         ts = {i: [] for i in range(len(ok))}
         rmed = {i: [] for i in range(len(ok))}
         hms = {i: [] for i in range(len(ok))}
@@ -461,6 +506,7 @@ def main():
             print(f"{arm:18s} {p:7s} B{B:<3d} N{N:<6d} H{H}/{Hk} c={int(s['causal'])}  {res['ev_ms']:8.3f} ms "
                   f"[{res['p10_ms']:.3f},{res['p90_ms']:.3f}] cupti {res.get('cupti_ms', float('nan')):8.3f}  "
                   f"host {res['host_ms']:7.3f}  {res['tflops']:7.1f} TF  sm {c1.get('sm_mhz', '?')}MHz", flush=True)
+        gpupool_done()
         del q, k, v, do, ref
         torch.cuda.empty_cache()
     gpupool_done()

@@ -116,7 +116,47 @@ def fake_mx2d(x: torch.Tensor, r_: int, c_: int) -> torch.Tensor:
     return (e4m3_round(t / s) * s).reshape(xp.shape)[..., :R_, :C]
 
 
-def kda_pfwd(P, ctx, blk=32):
+def e4m3_direct(y, mode="rn"):
+    """e4m3 code value of 2^y built directly from y (no exp then round), for the candidate "direct code" P:
+      "rn"        reference: correctly rounded e4m3(2^y)
+      "lin_floor" exponent e = floor(y), mantissa m = floor(8 * frac(y))        (value 2^e (1 + m/8); linear in log domain)
+      "lin_round" m = round-half-even(8 * frac(y)), carry into the exponent at m = 8
+      "exp_floor" m = floor(8 * (2^frac(y) - 1))  (truncation instead of rounding of the exact mantissa)
+    Normal range only for the direct modes (e >= -6); below that the subnormal grid 2^-9 is used with round-to-nearest of
+    2^y (codes that small carry no weight in P ~ 2^(k-7) code).  y = -inf -> 0.  Values above 448 saturate."""
+    if mode == "rn":
+        return e4m3_round(torch.exp2(y))
+    e = torch.floor(y)
+    f = y - e
+    if mode == "lin_floor":
+        m = torch.floor(8 * f)
+    elif mode == "lin_round":
+        m = torch.round(8 * f)
+    elif mode == "exp_floor":
+        m = torch.floor(8 * (torch.exp2(f) - 1))
+    else:
+        raise ValueError(mode)
+    carry = m >= 8
+    e = torch.where(carry, e + 1, e)
+    m = torch.where(carry, torch.zeros_like(m), m)
+    v = torch.exp2(e) * (1 + m / 8)
+    sub = e < -6
+    v = torch.where(sub, torch.round(torch.exp2(y) / 2 ** -9) * 2 ** -9, v)
+    v = torch.where(torch.isfinite(y), v, torch.zeros_like(v))
+    return v.clamp(max=E4M3_MAX)
+
+
+def code_diff_fraction(y, mode):
+    """Fraction of codes (over finite y) where the direct-code mode differs from the correctly rounded e4m3(2^y), and the
+    mean signed relative difference (bias) of the direct value."""
+    a, b = e4m3_direct(y, mode), e4m3_direct(y, "rn")
+    live = torch.isfinite(y) & (b > 0)
+    diff = (a != b) & live
+    bias = ((a - b) / b.clamp_min(1e-30))[live].mean().item() if live.any() else 0.0
+    return diff.sum().item() / max(1, live.sum().item()), bias
+
+
+def kda_pfwd(P, ctx, blk=32, mode="rn"):
     """kda-sm100's forward P (sm100/kda/docs/draft.md): x = S log2(e); per (row, blk-key block) k = floor(max x);
     code = e4m3(2^(x - k + 7)), value code * 2^(k - 7).  Independent of the running max (weights are exact powers of 2).
     Returns P-hat in the units of P = exp(S - rowmax)."""
@@ -127,7 +167,7 @@ def kda_pfwd(P, ctx, blk=32):
     kk = torch.floor(xb.amax(-1, keepdim=True))
     xm = (ctx.rowmax * LOG2E).unsqueeze(-1)                             # (..., R, 1, 1)
     kk = torch.where(torch.isfinite(kk), kk, xm.expand_as(kk))          # blocks with no live key: codes are 0
-    ph = e4m3_round(torch.exp2(xb - kk + 7)) * torch.exp2(kk - 7 - xm)
+    ph = e4m3_direct(xb - kk + 7, mode) * torch.exp2(kk - 7 - xm)
     return ph.reshape(x.shape)[..., :C]
 
 
@@ -203,7 +243,7 @@ PRESETS["mxfp8-all"] = PRESETS["mxfp8"]
 
 
 def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,
-                    register=True, l_from_codes=False, p_fwd=None, delta_from_o=False):
+                    register=True, l_from_codes=False, p_fwd=None, delta_from_o=False, p_code="rn"):
     """kda-sm100's sm100 numerics (sm100/kda/docs/draft.md "Numerics design"), with knobs:
       tok_block   Q / K / V / dO: one scale per tok_block tokens over all D (pow2: 2^ceil(log2(amax/448)), else fp32 amax/448)
       p_block     forward P: per (row, p_block keys) block exponent k = floor(max S log2e), code e4m3(2^(x-k+7))
@@ -211,7 +251,7 @@ def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_b
       ds_block    dS (one code set for dK and dQ): pow2 scale per (queries x keys) 2-D block
       delta_norm  matched delta = sum P dP / sum P (True) or sum P dP (False, sm90 style)"""
     inp = f"blockrows_pow2:{tok_block}" if pow2 else f"blockrows:{tok_block}"
-    pr = Preset(name, q=inp, k=inp, v=inp, do=inp, p_fwd=p_fwd or f"kda_pfwd:{p_block}", p_bwd=f"mx:queries:{pt_block}",
+    pr = Preset(name, q=inp, k=inp, v=inp, do=inp, p_fwd=p_fwd or (f"kda_pfwd:{p_block}" + ("" if p_code == "rn" else f":{p_code}")), p_bwd=f"mx:queries:{pt_block}",
                 ds=f"mx2d:{ds_block[0]}x{ds_block[1]}", delta_norm=delta_norm, l_from_codes=l_from_codes,
                 delta_from_o=delta_from_o,
                 notes=f"kda sm100 numerics: inputs {inp}, P fwd per row x {p_block} keys, P^T per key x {pt_block} "
@@ -258,8 +298,9 @@ def _site(scheme: str, x: torch.Tensor, ctx: _Ctx, preset: Preset) -> torch.Tens
     if scheme.startswith("mx2d:"):               # one 2^ceil(log2(amax/448)) scale per R x C block of a (rows, cols) tensor
         r_, c_ = (int(t) for t in scheme.split(":")[1].split("x"))
         return fake_mx2d(x, r_, c_)
-    if scheme.startswith("kda_pfwd:"):
-        return kda_pfwd(x, ctx, int(scheme.split(":")[1]))
+    if scheme.startswith("kda_pfwd:"):         # "kda_pfwd:<blk>[:<direct-code mode>]"
+        parts = scheme.split(":")
+        return kda_pfwd(x, ctx, int(parts[1]), parts[2] if len(parts) > 2 else "rn")
     if scheme.startswith("e4m3"):          # plain e4m3 with a fixed power-of-two multiplier: "e4m3*256"
         mul = float(scheme.split("*")[1]) if "*" in scheme else 1.0
         return e4m3_round(x * mul) / mul
@@ -535,3 +576,5 @@ make_kda_preset("sm100-mx-nonorm", ds_block=(128, 32), delta_norm=False)
 make_kda_preset("sm100-mx-lq", ds_block=(128, 32), delta_norm=True, l_from_codes=True)
 # kda-sm100 19:00: forward with ~exact P (fp8 code + 2 bf16 residuals ~ fp32), matched delta = dequant(dO8) . O_fp32
 make_kda_preset("sm100-mx-x", ds_block=(128, 32), p_fwd="none", delta_from_o=True)
+# kda-sm100-bwd8 proposal (2026-11-09): dS scaled per 32 keys x 32 queries (MXFP8 granularity), everything else sm100-mx
+make_kda_preset("sm100-mx-ds32", ds_block=(32, 32), delta_norm=True)

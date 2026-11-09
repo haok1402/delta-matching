@@ -80,6 +80,19 @@ COLSUM_RATIO, COLSUM_ABS = 2.0, 1e-4
 # emulated backward driven by the candidate's own reported delta
 ID_TOL = 1e-3
 BIND_ABS, BIND_REL = 3e-3, 0.05
+# zero-sum invariant at fp32 round-off (user rule): per case, the candidate's identity residual may exceed the exact
+# emulation's own residual (fp32 arithmetic, same P for delta and dS) by at most this factor; floor for cases at ~1e-7
+ROUNDOFF_MULT, ID_FLOOR = 4.0, 1e-5
+ID_MEAN_FLOOR = 2e-7          # mean over rows (accuracy-audit 03:05: a partial approximation can hide under the max floor)
+# families where the emulated dP matches the MMA's accumulation (accuracy-audit ruling 03:45 (2)): emulation identity hard
+EMU_ID_FAMILIES = ("randn", "bigmag", "peaked", "uniform")
+# no accuracy regression (user rule) vs the frozen baseline kernel, per case (full / bench: fixed seeds): measured
+# summation-order noise between validated commits is <= 3.4e-4 relative; allowed 5e-3 relative + 1e-5 absolute
+BASELINE = os.environ.get("DMVAL_BASELINE", os.path.expanduser("~/workspace/haok1402/sm100/validate/baseline.json"))
+REG_REL, REG_ABS = 5e-3, 1e-5
+REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / baseline err <= 1 + this (measured noise)
+# promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
+ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 
 
 def rel(a, b):
@@ -190,12 +203,21 @@ def cached_refs(case, preset, q, k, v, do, exact, qbk, dev):
     path = _cache_path(case, preset) if (CACHE and case.get("cached")) else None
     if path and os.path.exists(path):
         d = torch.load(path, weights_only=False)
-        return {kk: {n: (t.to(dev) if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in d.items()}
-    keep = ("O", "LSE", "dQ", "dK", "dV", "delta", "rowsum_dS", "colsum_dK")
+        if "em_matched" not in d or ("id_roundoff" in d and "mean" in d["id_roundoff"]):   # else recompute
+            return {kk: {n: (t.to(dev) if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in d.items()}
+    keep = ("O", "LSE", "dQ", "dK", "dV", "delta", "rowsum_dS", "colsum_dK", "sum_PdP", "sum_P", "sum_absPdP")
     out = {"ex": exact(q, k, v, do, causal)}
     if causal or case.get("matched_ok"):
         em = R.dm_reference(q, k, v, do, causal, "matched", preset, aux=True, q_block=qbk)
         out["em_matched"] = {n: em[n] for n in keep if n in em}
+        # fp32 round-off level of the identity for this case: the exact emulation's own fp32 LSE and delta pushed through
+        # exactly the path a candidate's debug() values go through (P recomputed from the stored LSE)
+        es = R.dm_reference(q, k, v, do, causal, "matched", preset, aux=True, lse_override=em["LSE"].float(),
+                            delta_override=em["delta"].float(), q_block=qbk)
+        r = ((em["delta"].double() * es["sum_P"] - es["sum_PdP"]).abs() / es["sum_absPdP"].clamp_min(1e-300))
+        r = r[es["sum_absPdP"] > 0]
+        out["id_roundoff"] = {"value": torch.tensor(r.max().item() if r.numel() else 0.0),
+                              "mean": torch.tensor(r.mean().item() if r.numel() else 0.0)}
         out["eb_matched"] = R.dm_reference(q, k, v, do, causal, "matched", "bf16", q_block=qbk)
     out["eb_stale"] = R.dm_reference(q, k, v, do, causal, "stale", "bf16", q_block=qbk)
     if path:
@@ -215,7 +237,7 @@ def headline_shapes():
     if os.path.exists(HEADLINE):
         return json.load(open(HEADLINE))["shapes"]
     return [{"B": max(1, 32768 // N), "H": H, "Hk": Hk, "N": N, "causal": c}
-            for (H, Hk) in ((16, 16), (32, 8)) for N in (8192, 32768, 65536) for c in (True, False)]
+            for (H, Hk) in ((16, 16), (32, 8)) for N in (8192, 32768, 65536) for c in (True,)]
 
 
 def build_cases(tier, supports, seed):
@@ -242,7 +264,8 @@ def build_cases(tier, supports, seed):
         if m < 128:
             shapes += [(1, 4, 2, up(1000), True, base_kinds), (1, 2, 1, up(1), True, base_kinds), (1, 4, 2, up(77), True, base_kinds)]
     if tier == "full":
-        shapes += [(2, 16, 16, up(2944), True, base_kinds), (1, 32, 8, up(4992), True, base_kinds),
+        shapes += [(2, 32, 8, up(4096), True, base_kinds),     # GQA 4k: the gloop path (N <= 4096), correctness only
+                   (2, 16, 16, up(2944), True, base_kinds), (1, 32, 8, up(4992), True, base_kinds),
                    (3, 8, 4, up(1664), True, ["randn", "scaled3"]), (1, 2, 2, up(128), True, base_kinds)]
         if nc:
             shapes += [(2, 16, 16, up(2944), False, base_kinds), (1, 32, 8, up(4992), False, base_kinds)]
@@ -265,8 +288,8 @@ def build_cases(tier, supports, seed):
         shapes.append((1, 16, 16, up(65536), True, ["stress"]))
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
-            if sh["causal"] or nc:
-                shapes.append((sh["B"], sh["H"], sh["Hk"], up(sh["N"]), sh["causal"], ["randn"]))
+            if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
+                shapes.append((sh["B"], sh["H"], sh["Hk"], up(sh["N"]), True, ["randn"]))
     cases = []
     for i, (B, H, Hk, N, causal, kinds) in enumerate(shapes):
         for kind in kinds:
@@ -290,6 +313,12 @@ def build_cases(tier, supports, seed):
 
 
 # ---------------------------------------------------------------------------------------------------------- checking
+BASE_ID, BASE_METRICS = None, {}
+if os.path.exists(BASELINE):
+    _b = json.load(open(BASELINE))
+    BASE_ID, BASE_METRICS = _b.get("commit"), _b.get("cases", {})
+
+
 def check_case(case, cr, preset, dev, verbose):
     """Compare one case's candidate outputs with exact attention and the emulation.  Returns (ok, record)."""
     rec = {"name": case["name"], "checks": {}, "metrics": {}}
@@ -405,6 +434,46 @@ def check_case(case, cr, preset, dev, verbose):
                 rec["metrics"]["matched:debug_delta"] = m
                 chk("matched:debug_lse", bool((lse_err <= lse_tol).all()),
                     f"candidate LSE vs the {preset} emulation: max |diff| {m['lse_maxabs']:.3e}")
+                # fp32 round-off level of THIS case (cached with the references): the exact emulation's own residual
+                m["emul_rowsum_rel_max"] = float(refs["id_roundoff"]["value"]) if "id_roundoff" in refs else 0.0
+                m["emul_rowsum_rel_mean"] = float(refs["id_roundoff"]["mean"]) if "id_roundoff" in refs else 0.0
+                id_tol = min(ID_TOL, max(ROUNDOFF_MULT * m["emul_rowsum_rel_max"], ID_FLOOR))
+                if "rowsum_dS" in dbg and "sum_abs_PdP" in dbg:
+                    # kernel-side identity (preferred, accuracy-audit 03:15): the backward's own fp32 per-row sum_j dS_ij
+                    # (before quantization) and sum_j |P dP|; independent of the emulation's dP accumulation order
+                    kr = (dbg["rowsum_dS"].double().abs() / dbg["sum_abs_PdP"].double().clamp_min(1e-300))[
+                        dbg["sum_abs_PdP"] > 0]
+                    m["kernel_rowsum_rel_max"] = kr.max().item() if kr.numel() else 0.0
+                    m["kernel_rowsum_rel_mean"] = kr.mean().item() if kr.numel() else 0.0
+                    chk("matched:rowsum_dS_kernel_roundoff", m["kernel_rowsum_rel_max"] <= ID_FLOOR
+                        and m["kernel_rowsum_rel_mean"] <= ID_MEAN_FLOOR,
+                        f"backward's own |sum_j dS| / sum_j |P dP|: max {m['kernel_rowsum_rel_max']:.2e} (<= {ID_FLOOR:.0e}), "
+                        f"mean {m['kernel_rowsum_rel_mean']:.2e} (<= {ID_MEAN_FLOOR:.0e})")
+                kernel_side = "kernel_rowsum_rel_max" in m
+                if kernel_side:
+                    # accuracy-audit ruling 03:45 (1): the identity comes from a debug build -> its grads must be BITWISE
+                    # the production grads, or the clean identity could come from a build that does not ship
+                    ok_bind = all(kk in dbg for kk in ("dbg_dq", "dbg_dk", "dbg_dv")) and all(
+                        torch.equal(dbg[kk].reshape(t.shape).to(t.dtype), t)
+                        for kk, t in (("dbg_dq", cand[1]), ("dbg_dk", cand[2]), ("dbg_dv", cand[3])))
+                    chk("matched:identity_build_bitwise", ok_bind,
+                        "debug(identity) build's dQ/dK/dV missing or not bitwise equal to the production grads")
+                emu_hard = (not kernel_side) or case["kind"] in EMU_ID_FAMILIES
+                b = (BASE_METRICS.get(case["name"], {}).get("matched:debug_delta") or {}) if case.get("cached") else {}
+                if emu_hard:
+                    chk("matched:rowsum_dS_roundoff_mean",
+                        m["rowsum_rel_mean"] <= max(ROUNDOFF_MULT * m["emul_rowsum_rel_mean"], ID_MEAN_FLOOR),
+                        f"mean identity {m['rowsum_rel_mean']:.2e} > {ROUNDOFF_MULT} x the emulation's mean "
+                        f"{m['emul_rowsum_rel_mean']:.2e} (floor {ID_MEAN_FLOOR:.0e})")
+                    chk("matched:rowsum_dS_roundoff", m["rowsum_rel_max"] <= id_tol,
+                        f"identity {m['rowsum_rel_max']:.2e} > {ROUNDOFF_MULT} x the exact emulation's own residual "
+                        f"{m['emul_rowsum_rel_max']:.2e} (floor {ID_FLOOR:.0e}): rowsum(dS)=0 is not at fp32 round-off - "
+                        f"pass 0 must recompute exactly the backward's P / dP")
+                elif b.get("rowsum_rel_max") is not None:
+                    # outliers / nearsat / scaled*: the emulated dP differs from the MMA's accumulation order, so the
+                    # emulation identity is not a round-off test here; gate it as no-worse than the baseline (x1.25)
+                    chk("matched:rowsum_dS_emul_no_worse", m["rowsum_rel_max"] <= 1.25 * b["rowsum_rel_max"] + 1e-9,
+                        f"emulation identity {m['rowsum_rel_max']:.2e} > 1.25 x baseline {BASE_ID} {b['rowsum_rel_max']:.2e}")
                 chk("matched:rowsum_dS_direct", m["rowsum_rel_max"] <= ID_TOL,
                     f"|delta sum P - sum P dP| / sum |P dP| = {m['rowsum_rel_max']:.2e} (mean {m['rowsum_rel_mean']:.1e}), "
                     f"allowed {ID_TOL:.0e}; stale-mode deltas sit at 1e-2..1")
@@ -423,6 +492,18 @@ def check_case(case, cr, preset, dev, verbose):
         chk("modes_share_dV", torch.equal(a[3], b[3]), "dV differs between matched and stale")
         if do.float().abs().max() > 0 and ex["dQ"].double().norm() > 1e-4 * ex["dV"].double().norm():
             chk("modes_differ_dQ", not torch.equal(a[1], b[1]), "matched and stale dQ are bitwise equal")
+    if case.get("cached") and BASE_METRICS.get(case["name"]):
+        bm = BASE_METRICS[case["name"]]
+        for key, m in rec["metrics"].items():
+            b = bm.get(key)
+            if not b:
+                continue
+            if "err" in m and "err" in b and case["kind"] not in ("lowrank_v", "zero_do"):
+                chk(f"{key}:no_regression", m["err"] <= b["err"] * (1 + REG_REL) + REG_ABS,
+                    f"error {m['err']:.5f} vs baseline {BASE_ID} {b['err']:.5f} (allowed +{REG_REL:.1%} + {REG_ABS:.0e})")
+            if key == "matched:debug_delta" and "lse_maxabs" in b:
+                chk("matched:lse_no_regression", m.get("lse_maxabs", 0) <= b["lse_maxabs"] * (1 + 1e-3) + 1e-6,
+                    f"LSE error {m.get('lse_maxabs', 0):.2e} vs baseline {b['lse_maxabs']:.2e}")
     for key, out in runs.items():
         mode, kind = key.split("/")
         base = runs[f"{mode}/plain"]
@@ -480,6 +561,9 @@ def main():
         print("FAIL: candidate import\n" + meta["fatal"]); sys.exit(1)
     preset = a.preset or meta["meta"].get("NUMERICS") or "sm90"
     supports = meta["meta"].get("SUPPORTS") or {}
+    if preset not in ACCEPTED_NUMERICS and not os.environ.get("DMVAL_SELFTEST") and not FWD_ONLY:
+        print(f"FAIL: NUMERICS={preset!r} is not an accepted spec {ACCEPTED_NUMERICS}: only numerics at least as accurate "
+              f"as sm100-mx are promotable (user: operations that trade away accuracy are banned)"); sys.exit(1)
     if preset not in R.PRESETS:
         print(f"FAIL: NUMERICS={preset!r} is not a preset of reference.py ({sorted(R.PRESETS)})"); sys.exit(1)
     cases = build_cases(a.tier, supports, seed)
@@ -514,7 +598,21 @@ def main():
             case.pop(kk, None)
     jp, op = os.path.join(tmp, "job.pt"), os.path.join(tmp, "out.pt")
     torch.save({"device": a.device, "case_files": files, "fwd_only": FWD_ONLY}, jp)
+    if a.json:
+        RUNNER_LOG[0] = a.json + ".runner.log"
     out = _run_runner(a.candidate, jp, op)
+    missing = [f for f in files if not os.path.exists(f + ".out")]
+    if missing and "fatal" not in out:
+        # the candidate process produced no output for some cases (seen once on 77f470e quick, not reproducible): re-run
+        # exactly those cases once in a fresh process; the retry is reported (deterministic kernels give the same result)
+        print(f"WARNING: runner produced no output for {len(missing)} case(s); re-running them in a fresh process "
+              f"(see {RUNNER_LOG[0]})", flush=True)
+        torch.save({"device": a.device, "case_files": missing, "fwd_only": FWD_ONLY}, jp)
+        out2 = _run_runner(a.candidate, jp, op)
+        if "fatal" not in out2:
+            out["meta"]["leaked_modules"] = sorted(set(out["meta"].get("leaked_modules", []))
+                                                   | set(out2["meta"].get("leaked_modules", [])))
+        RUNNER_RETRIED[0] = len(missing)
     # the pool keeps one done-owner per GPU: the runner's done() replaced ours and lapsed when it exited, which put the
     # lease back into auto mode (filler stopped while this process holds a context) - re-assert it for the checks
     _hook("gpupool_done")
@@ -566,12 +664,27 @@ def main():
         gpupool_done()
     except ImportError:
         pass
+    # paired no-regression (accuracy-audit 03:05): a systematic small loss on every case must not hide under the per-case cap
+    if BASE_METRICS and a.tier in CACHED_TIERS:
+        ratios = {}
+        for rec, case in zip(results, cases):
+            if case["kind"] in ("lowrank_v", "zero_do") or case["name"] not in BASE_METRICS:
+                continue
+            for key, m in rec["metrics"].items():
+                b = BASE_METRICS[case["name"]].get(key)
+                if b and "err" in m and "err" in b and b["err"] > 1e-6:
+                    ratios.setdefault(key.split(":")[0] + ":" + key.split(":")[1], []).append(m["err"] / b["err"])
+        for key, rs in sorted(ratios.items()):
+            med = sorted(rs)[len(rs) // 2]
+            if med > 1 + REG_MEDIAN:
+                all_ok = False
+                print(f"FAIL: paired no-regression {key}: median err/baseline over {len(rs)} cases = {med:.6f} > 1 + {REG_MEDIAN}")
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     if leaked and not os.environ.get("DMVAL_SELFTEST"):
         all_ok = False
         print(f"FAIL: the candidate imported the reference / validator: {sorted(leaked)}")
-    summary = {"candidate": a.candidate, "preset": preset, "tier": a.tier + ("-fwd" if FWD_ONLY else ""), "seed": seed, "pass": all_ok,
+    summary = {"runner_retried_cases": RUNNER_RETRIED[0], "candidate": a.candidate, "preset": preset, "tier": a.tier + ("-fwd" if FWD_ONLY else ""), "seed": seed, "pass": all_ok,
                "n_cases": len(results), "n_failed": sum(bool(r["fails"]) for r in results),
                "seconds": round(time.time() - t0, 1), "device": torch.cuda.get_device_name(dev),
                "tolerances": dict(TOL_RATIO=TOL_RATIO, TOL_ABS=TOL_ABS, BLK_RATIO=BLK_RATIO, BLK_ABS=BLK_ABS,
@@ -582,7 +695,7 @@ def main():
         with open(a.json, "w") as f:
             json.dump(summary, f, indent=1)
     print("SUMMARY_JSON " + json.dumps(_one_line(summary)))
-    print(f"\n{'PASS' if all_ok else 'FAIL'}: {summary['n_cases'] - summary['n_failed']}/{summary['n_cases']} cases "
+    print(f"\n{'PASS' if all_ok else 'FAIL'}: {summary['n_cases'] - summary['n_failed']}/{summary['n_cases']} cases passed "
           f"(tier {a.tier}, preset {preset}, seed {seed}, {summary['seconds']} s)")
     sys.exit(0 if all_ok else 1)
 
@@ -604,9 +717,16 @@ def _static_meta(spec):
         return None
 
 
+RUNNER_LOG = [None]
+RUNNER_RETRIED = [0]
+
+
 def _run_runner(spec, job, out):
     p = subprocess.run([sys.executable, "-u", os.path.join(HERE, "runner.py"), spec, job, out],
                        capture_output=True, text=True, cwd=os.path.dirname(job))
+    if RUNNER_LOG[0]:                         # always keep the candidate process's output (diagnosis of runner faults)
+        with open(RUNNER_LOG[0], "a") as f:
+            f.write(f"=== runner rc={p.returncode} job={job}\n--- stdout\n{p.stdout}\n--- stderr\n{p.stderr}\n")
     if p.returncode != 0 or not os.path.exists(out):
         return {"fatal": f"runner exited {p.returncode}\n{p.stdout[-3000:]}\n{p.stderr[-6000:]}"}
     r = torch.load(out, weights_only=False)

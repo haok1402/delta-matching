@@ -314,6 +314,173 @@ __global__ void __launch_bounds__(NTHR, 1) k_p0rw2(const __grid_constant__ CUten
   if (warp == 0) asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, 512;" :: "r"(tb));
 }
 
+
+// ------------------------------------------------------------------------------------------------------------------
+// IMPL 1 ("today in C++", iteration c): the DSL's h2 schedule. 12 warps: 0-7 compute (stage s = w/4, one row per thread,
+// row = 32q + lane, tcgen05.ld.32x32b), 8 MMA, 9 TMA load, 10-11 idle. Per tile and half h: S chunks 2h, 2h+1 -> exp/den
+// -> (h == 0: wait dP) -> per chunk: dP load, num.  Registers: compute 208, other 64 (pool 12 x 168).
+#define LD32X32(addr, r) asm volatile("tcgen05.ld.sync.aligned.32x32b.x32.b32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, [%32];" \
+  : "=f"(r[0]),"=f"(r[1]),"=f"(r[2]),"=f"(r[3]),"=f"(r[4]),"=f"(r[5]),"=f"(r[6]),"=f"(r[7]),"=f"(r[8]),"=f"(r[9]),"=f"(r[10]),"=f"(r[11]),"=f"(r[12]),"=f"(r[13]),"=f"(r[14]),"=f"(r[15]), \
+    "=f"(r[16]),"=f"(r[17]),"=f"(r[18]),"=f"(r[19]),"=f"(r[20]),"=f"(r[21]),"=f"(r[22]),"=f"(r[23]),"=f"(r[24]),"=f"(r[25]),"=f"(r[26]),"=f"(r[27]),"=f"(r[28]),"=f"(r[29]),"=f"(r[30]),"=f"(r[31]) : "r"(addr))
+#ifndef P0RW2_TW
+#define P0RW2_TW 12
+#endif
+constexpr int T_NWARPS = P0RW2_TW, T_NTHR = T_NWARPS * 32;
+constexpr int T_OR = T_NWARPS == 16 ? 48 : 64;
+
+template <bool MASK>
+__device__ __forceinline__ void tile_today(Bars& bars, float* r, const float* cj, const float* aj, uint32_t cS, uint32_t cD,
+                                           int s, int it, int lane, int kbase, int row, unsigned long long nl,
+                                           unsigned long long* den, unsigned long long& num) {
+  TACQ(&bars.sfull[s], it & 1, 1);
+#pragma unroll
+  for (int hf = 0; hf < 2; ++hf) {
+    LD32X32(cS + 64 * hf, (&r[64 * hf])); LD32X32(cS + 64 * hf + 32, (&r[64 * hf + 32]));
+    wait_ld();
+    if (hf == 1) rel(&bars.sempty[s], lane);
+    if (MASK) {
+#pragma unroll
+      for (int i = 64 * hf; i < 64 * hf + 64; ++i) if (kbase + i > row) r[i] = -__int_as_float(0x7f800000);
+    }
+#pragma unroll
+    for (int j = 2 * hf; j < 2 * hf + 2; ++j) {
+#pragma unroll
+      for (int v = 0; v < 16; ++v) {
+        float x0, x1;
+        upk(ffma2(pk(r[32 * j + 2 * v], r[32 * j + 2 * v + 1]), pk(cj[j], cj[j]), nl), x0, x1);
+        r[32 * j + 2 * v] = ex2(x0); r[32 * j + 2 * v + 1] = ex2(x1);
+        den[v % 4] = fadd2(den[v % 4], pk(r[32 * j + 2 * v], r[32 * j + 2 * v + 1]));
+      }
+    }
+    if (hf == 0) TACQ(&bars.dfull[s], it & 1, 2);
+#pragma unroll
+    for (int j = 2 * hf; j < 2 * hf + 2; ++j) {
+      float d[32];
+      LD32X32(cD + 32 * j, d);
+      wait_ld();
+      if (j == 3) rel(&bars.dempty[s], lane);
+      unsigned long long acc[4] = {0, 0, 0, 0};
+#pragma unroll
+      for (int v = 0; v < 16; ++v) acc[v % 4] = ffma2(pk(r[32 * j + 2 * v], r[32 * j + 2 * v + 1]), pk(d[2 * v], d[2 * v + 1]), acc[v % 4]);
+      num = ffma2(fadd2(fadd2(acc[0], acc[1]), fadd2(acc[2], acc[3])), pk(aj[j], aj[j]), num);
+    }
+  }
+}
+
+__global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUtensorMap tmQ, const __grid_constant__ CUtensorMap tmK,
+                                                     const __grid_constant__ CUtensorMap tmV, const __grid_constant__ CUtensorMap tmDO,
+                                                     const Params p) {
+  extern __shared__ uint8_t smraw[];
+  __shared__ __align__(8) Bars bars;
+  __shared__ uint32_t s_taddr;
+  const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32, quad = warp % 4;
+  const uint32_t sbase = (su32(smraw) + 1023u) & ~1023u;
+  const int BH = p.B * p.H;
+  const int mp = p.npairs - 1 - (int)(blockIdx.x / BH), bh = (int)(blockIdx.x % BH);
+  const int b = bh / p.H, h = bh % p.H, hk = h / (p.H / p.Hk);
+  const int NB = p.N / 128;
+  int n_max = NB;
+  if (p.causal) n_max = min(NB, 2 * mp + 2);
+  if (warp == 0) {
+    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], 512;" :: "r"(su32(&s_taddr)));
+    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;");
+  }
+  if (tid == 0) {
+    mbar_init(&bars.qfull, 1);
+    for (int i = 0; i < KVS; ++i) { mbar_init(&bars.kvfull[i], 1); mbar_init(&bars.kvempty[i], 1); }
+    for (int s = 0; s < 2; ++s) { mbar_init(&bars.sfull[s], 1); mbar_init(&bars.sempty[s], 4); mbar_init(&bars.dfull[s], 1); mbar_init(&bars.dempty[s], 4); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  tc_before(); __syncthreads(); tc_after();
+  const uint32_t tb = s_taddr;
+#if defined(P0RW2_TRACE) || defined(P0RW2_CYC)
+  const unsigned long long tcta0 = clock64();
+#endif
+#ifdef P0RW2_TRACE
+  g_trace = p.trace;
+#endif
+  if (warp < 8) {
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 208;");
+    const int s = warp / 4;
+    const int m_block = 2 * mp + s;
+    const int row = m_block * 128 + quad * 32 + lane, rowc = min(row, p.N - 1);
+    const uint32_t la = (uint32_t)(quad * 32) << 16;
+    const uint32_t cS = tb + la + 128u * s, cD = tb + la + 256u + 128u * s;
+    const size_t hrow = (size_t)(b * p.H + h);
+    const float qsv = p.qs[hrow * (p.N / 32) + rowc / 32], dosv = p.dos[hrow * (p.N / 32) + rowc / 32];
+    const float l2 = fmul(p.lse[hrow * p.N + rowc], LOG2E);
+    const unsigned long long nl = pk(fneg(l2), fneg(l2));
+    const float* ksr = p.ks + (size_t)(b * p.Hk + hk) * (p.N / 32);
+    const float* vsr = p.vs + (size_t)(b * p.Hk + hk) * (p.N / 32);
+    unsigned long long sn = 0, en = 0, sd = 0, ed = 0;
+    float pks[4], pvs[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) { pks[j] = ksr[4 * (n_max - 1) + j]; pvs[j] = vsr[4 * (n_max - 1) + j]; }
+    float r[128];
+    for (int it = 0; it < n_max; ++it) {
+      const int n = n_max - 1 - it;
+      float cj[4], aj[4];
+#pragma unroll
+      for (int j = 0; j < 4; ++j) { cj[j] = fmul(fmul(pks[j], qsv), LOG2E); aj[j] = fmul(pvs[j], dosv); }
+      const int nn = n > 0 ? n - 1 : 0;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) { pks[j] = ksr[4 * nn + j]; pvs[j] = vsr[4 * nn + j]; }
+      const bool diag = p.causal && (n + 1) * 128 > m_block * 128;
+      unsigned long long den[4] = {0, 0, 0, 0}, num = 0;
+      if (diag) tile_today<true>(bars, r, cj, aj, cS, cD, s, it, lane, n * 128, row, nl, den, num);
+      else tile_today<false>(bars, r, cj, aj, cS, cD, s, it, lane, n * 128, row, nl, den, num);
+      two_sum2(sn, en, num);
+      two_sum2(sd, ed, fadd2(fadd2(den[0], den[1]), fadd2(den[2], den[3])));
+    }
+    float a0, a1, e0, e1, c0, c1, f0, f1;
+    upk(sn, a0, a1); upk(en, e0, e1); upk(sd, c0, c1); upk(ed, f0, f1);
+    const double tn = ((double)a0 + (double)a1) + ((double)e0 + (double)e1), td = ((double)c0 + (double)c1) + ((double)f0 + (double)f1);
+    if (row < p.N) p.delta[hrow * p.N + row] = td != 0.0 ? (float)(tn / td) : 0.f;
+  } else {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;" :: "n"(T_OR));
+    if (warp == 9 && lane == 0) {
+      mbar_expect_tx(&bars.qfull, 4 * 16384);
+      for (int s = 0; s < 2; ++s) {
+        tma4(sbase + SMEM_Q + 16384 * s, &tmQ, 0, (2 * mp + s) * 128, h, b, &bars.qfull);
+        tma4(sbase + SMEM_DO + 16384 * s, &tmDO, 0, (2 * mp + s) * 128, h, b, &bars.qfull);
+      }
+      for (int it = 0; it < n_max; ++it) {
+        const int n = n_max - 1 - it, slot = it % KVS;
+        if (it >= KVS) TWAIT(&bars.kvempty[slot], ((it / KVS) - 1) & 1, 5);
+        mbar_expect_tx(&bars.kvfull[slot], 32768);
+        tma4(sbase + SMEM_KV + KV_STRIDE * slot, &tmK, 0, n * 128, hk, b, &bars.kvfull[slot]);
+        tma4(sbase + SMEM_KV + KV_STRIDE * slot + 16384, &tmV, 0, n * 128, hk, b, &bars.kvfull[slot]);
+      }
+    }
+    if (warp == 8 && lane == 0) {
+      TWAIT(&bars.qfull, 0, 7);
+      tc_after();
+      for (int it = 0; it < n_max; ++it) {
+        const int slot = it % KVS;
+        TWAIT(&bars.kvfull[slot], (it / KVS) & 1, 3);
+        tc_after();
+        const uint32_t sK = sbase + SMEM_KV + KV_STRIDE * slot, sV = sK + 16384;
+        for (int s = 0; s < 2; ++s) {
+          if (it > 0) TACQ(&bars.sempty[s], (it - 1) & 1, 4);
+          mma_128(tb + 128u * s, sbase + SMEM_Q + 16384 * s, sK);
+          commit(&bars.sfull[s]);
+        }
+        for (int s = 0; s < 2; ++s) {
+          if (it > 0) TACQ(&bars.dempty[s], (it - 1) & 1, 4);
+          mma_128(tb + 256u + 128u * s, sbase + SMEM_DO + 16384 * s, sV);
+          commit(&bars.dfull[s]);
+        }
+        commit(&bars.kvempty[slot]);
+      }
+    }
+  }
+#if defined(P0RW2_TRACE) || defined(P0RW2_CYC)
+  if (tid == 0) atomicAdd(&p.trace[0], clock64() - tcta0);
+#endif
+  tc_before();
+  __syncthreads();
+  if (warp == 0) asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, 512;" :: "r"(tb));
+}
 }  // namespace p0rw2
 
 // ---------------------------------------------------------------- host (C ABI, loaded with ctypes) -----------------
@@ -352,10 +519,15 @@ extern "C" int p0rw2_delta(void* q8, const float* qs, void* k8, const float* ks,
   p.qs = qs; p.ks = ks; p.vs = vs; p.dos = dos; p.lse = lse; p.delta = delta; p.trace = trace;
   p.B = B; p.N = N; p.H = H; p.Hk = Hk; p.causal = causal; p.npairs = (N / 128 + 1) / 2;
   static bool attr = false;
+#ifndef P0RW2_IMPL
+#define P0RW2_IMPL 0
+#endif
+  auto kern = P0RW2_IMPL == 1 ? p0rw2::k_today : p0rw2::k_p0rw2;
+  const int nthr = P0RW2_IMPL == 1 ? p0rw2::T_NTHR : p0rw2::NTHR;
   if (!attr) {
-    if (cudaFuncSetAttribute(p0rw2::k_p0rw2, cudaFuncAttributeMaxDynamicSharedMemorySize, p0rw2::SMEM_BYTES) != cudaSuccess) return -4;
+    if (cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, p0rw2::SMEM_BYTES) != cudaSuccess) return -4;
     attr = true;
   }
-  p0rw2::k_p0rw2<<<B * H * p.npairs, p0rw2::NTHR, p0rw2::SMEM_BYTES, (cudaStream_t)stream>>>(tq, tk, tv, td, p);
+  kern<<<B * H * p.npairs, nthr, p0rw2::SMEM_BYTES, (cudaStream_t)stream>>>(tq, tk, tv, td, p);
   return (int)cudaGetLastError();
 }

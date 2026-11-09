@@ -409,6 +409,19 @@ class DMForwardSm100:
         # two softmax warpgroups out of phase so one's non-exp work overlaps the other's MUFU exps (bitwise: order only)
         if self.dm_opts.get("s01", "0") == "1":
             self.s0_s1_barrier = True
+        # fwdrw ss_pv (layout L2/L3): P codes in SMEM (SS block-scaled PV), ONE shared S scratch at TMEM cols 256..383,
+        # O0/O1 at 0/128, SF_s at 448 + 8 s. QK of the next tile only waits for the previous S consumer's TMEM loads
+        # (mbarrier sfree); P_s/SF_s reuse waits for PV_s done (mbarrier pvdone). Numerics unchanged.
+        if "kvs" in self.dm_opts:   # fwdrw: cap the K/V smem ring depth (budget for sP); timing-checked on the baseline
+            self.kv_stage = min(self.kv_stage, int(self.dm_opts["kvs"]))
+        self.dm_sspv = self.dm_opts.get("ss_pv", "0") == "1"
+        if self.dm_sspv:
+            assert self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1
+            assert self.n_block_size == 128 and self.head_dim_v_padded == 128
+            self.split_P_arrive = 0
+            self.tmem_o_offset = [0, 128]
+            self.tmem_s_offset = [256, 256]
+            self.dm_sf_abs = [448, 456]
         # vec buffer for row_max & row_sum
         self.tmem_vec_offset = self.tmem_s_offset
 
@@ -549,6 +562,11 @@ class DMForwardSm100:
         sV_layout = sm100_utils_basic.make_smem_layout_b(
             tiled_mma_pv, self.mma_tiler_pv, self.v_dtype, self.kv_stage
         )
+        if const_expr(self.dm_sspv):
+            self.dm_tiled_mma_pv_ss = sm100_utils_basic.make_trivial_tiled_mma(
+                self.v_dtype, self.v_dtype, p_major_mode, v_major_mode, self.pv_acc_dtype, cta_group, self.mma_tiler_pv[:2])
+            self.dm_sP_layout = sm100_utils_basic.make_smem_layout_a(
+                self.dm_tiled_mma_pv_ss, self.mma_tiler_pv, self.q_dtype, self.q_stage)
         sO_layout = sm100_utils_basic.make_smem_layout_epi(
             self.o_dtype, self.o_layout, self.epi_tile, self.q_stage
         )
@@ -743,6 +761,9 @@ class DMForwardSm100:
         sched_mbar_size = self.sched_stages * 2 if self.dynamic_persistent else 0
         load_epi_mbar_size = 2 if const_expr(self.overlap_sO_sQ) else 0
 
+        dm_nb1, dm_nb2 = (1, 3) if self.dm_sspv else (0, 0)   # 4 x 8 B keeps the following smem 16-B aligned
+        dm_sP_size = cute.cosize(self.dm_sP_layout) if self.dm_sspv else 0
+
         @cute.struct
         class SharedStorage:
             # m_barriers for pipelines
@@ -756,6 +777,8 @@ class DMForwardSm100:
             mbar_O_epi: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_load_epi: cute.struct.MemRange[Int64, load_epi_mbar_size]
             mbar_s0_s1_sequence: cute.struct.MemRange[Int64, 2 * 2]
+            mbar_dm_sfree: cute.struct.MemRange[Int64, dm_nb1]
+            mbar_dm_pvdone: cute.struct.MemRange[Int64, dm_nb2]
             # Tmem dealloc cluster barrier
             tmem_dealloc_mbar: Int64
             # Tmem holding buffer
@@ -779,6 +802,10 @@ class DMForwardSm100:
             ]
             sK: cute.struct.Align[
                 cute.struct.MemRange[self.k_dtype, sKV_size],
+                self.buffer_align_bytes,
+            ]
+            sP: cute.struct.Align[
+                cute.struct.MemRange[self.q_dtype, dm_sP_size],
                 self.buffer_align_bytes,
             ]
 
@@ -1121,6 +1148,14 @@ class DMForwardSm100:
 
 
         # Cluster arrive after barrier init
+        if const_expr(self.dm_sspv):
+            self.dm_sfree = Int32(storage.mbar_dm_sfree.data_ptr().toint())
+            self.dm_pvdone = Int32(storage.mbar_dm_pvdone.data_ptr().toint())
+            if cute.arch.thread_idx()[0] == 0:
+                dm_utils.mbar_init(self.dm_sfree, 4 * cute.arch.WARP_SIZE)
+                dm_utils.mbar_init(self.dm_pvdone, 1)
+                dm_utils.mbar_init(self.dm_pvdone + 8, 1)
+                cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
         #  Generate smem tensor Q/K/V/O
@@ -1137,6 +1172,14 @@ class DMForwardSm100:
             sO = cute.make_tensor(cute.recast_ptr(sQ.iterator, sO_layout.inner, self.o_dtype), sO_layout.outer)
 
         sScale = storage.sScale.get_tensor(cute.make_layout(self.s_p_o_stage * self.m_block_size * 2))
+        if const_expr(self.dm_sspv):
+            # rebuild the SS-PV MMA atom / sP layout inside the kernel region (static metadata)
+            self.dm_tiled_mma_pv_ss = sm100_utils_basic.make_trivial_tiled_mma(
+                self.v_dtype, self.v_dtype, cute.nvgpu.OperandMajorMode.K, cute.nvgpu.OperandMajorMode.MN,
+                self.pv_acc_dtype, tcgen05.CtaGroup.ONE, self.mma_tiler_pv[:2])
+            dm_sP_layout_k = sm100_utils_basic.make_smem_layout_a(
+                self.dm_tiled_mma_pv_ss, self.mma_tiler_pv, self.q_dtype, self.q_stage)
+            self.dm_sP = storage.sP.get_tensor(dm_sP_layout_k.outer, swizzle=dm_sP_layout_k.inner)
 
         thr_mma_qk = tiled_mma_qk.get_slice(mma_tile_coord_v)
         thr_mma_pv = tiled_mma_pv.get_slice(mma_tile_coord_v)
@@ -1856,8 +1899,8 @@ class DMForwardSm100:
                 pv_mma_op,
                 self.tmem_o_offset[stage % self.q_stage],
                 tOrP[None, None, None, stage],
-                sfa_tmem_addr=self.tmem_s_offset[stage] + self.dm_sf_col,
-                sfb_tmem_addr=self.tmem_s_offset[stage] + self.dm_sf_col + 4,
+                sfa_tmem_addr=(self.dm_sf_abs[stage] if const_expr(self.dm_sspv) else self.tmem_s_offset[stage] + self.dm_sf_col),
+                sfb_tmem_addr=(self.dm_sf_abs[stage] if const_expr(self.dm_sspv) else self.tmem_s_offset[stage] + self.dm_sf_col) + 4,
                 split_arrive=self.split_P_arrive if self.split_P_arrive > 0 else None,
                 # smem_desc_start_a=tOrP[None, None, None, stage].iterator.toint(),
                 # smem_desc_start_a=self.tmem_p_offset[stage],
@@ -1884,6 +1927,15 @@ class DMForwardSm100:
         P_full_O_rescaled_phase = Int32(0)
         if const_expr(self.use_s_ping_pong):
             mma_pv_count = Int32(0)
+        if const_expr(self.dm_sspv):
+            # fwdrw ss_pv: SS block-scaled PV from sP; dummy pvdone completion #0 per stage (no PV precedes the 1st P store)
+            dm_tm_ss = self.dm_tiled_mma_pv_ss.get_slice(0)
+            dm_tCrP = dm_tm_ss.make_fragment_A(self.dm_sP)
+            dm_sfmap = tuple((0, k) for k in range(4))
+            dm_q = Int32(0)
+            with cute.arch.elect_one():
+                dm_utils.tc_commit(self.dm_pvdone)
+                dm_utils.tc_commit(self.dm_pvdone + 8)
 
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
@@ -1961,6 +2013,81 @@ class DMForwardSm100:
                         tOrVi, sV_cur, O_should_accumulate, mma_pv_count,
                     )
                     mma_pv_count += 1
+                    pipeline_kv.consumer_release(mma_kv_consumer_state)
+                    mma_kv_consumer_state.advance()
+                elif const_expr(self.dm_sspv):
+                    # QK0(0), [sfree] QK1(0); per block i: [sfree] QK0(i+1), [P0] PV0(i), [sfree] QK1(i+1), [P1] PV1(i)
+                    for stage in cutlass.range_constexpr(self.q_stage):
+                        pipeline_q.consumer_wait_w_index_phase(stage, mma_q_consumer_phase)
+                        if const_expr(stage == 0):
+                            pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        Ki_index, Ki_phase = mma_kv_consumer_state.index, mma_kv_consumer_state.phase
+                        sK_cur = sK[None, None, None, Ki_index]
+                        if const_expr(self.uneven_kv_smem):
+                            sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
+                        if dm_q > 0:
+                            dm_utils.mbar_wait_parity(self.dm_sfree, (dm_q - 1) & 1)
+                        cute.arch.fence_view_async_tmem_load()
+                        gemm_Si[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                        pipeline_s_p_o.producer_commit_w_index(stage)
+                        dm_q += 1
+                    mma_q_consumer_phase ^= 1
+                    pipeline_kv.consumer_release(mma_kv_consumer_state)
+                    mma_kv_consumer_state.advance()
+                    block_loop_count = block_iter_count - 1
+                    O_should_accumulate = False
+                    for i in cutlass.range(block_loop_count, unroll=1):
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        mma_kv_release_state = mma_kv_consumer_state.clone()
+                        Vi_index, Vi_phase = mma_kv_consumer_state.index, mma_kv_consumer_state.phase
+                        tOrVi = tOrV[None, None, None, Vi_index]
+                        sV_cur = sV[None, None, None, Vi_index]
+                        if const_expr(self.uneven_kv_smem):
+                            sV_cur = self.offset_kv_smem(sV_cur, Vi_index, Vi_phase)
+                        mma_kv_consumer_state.advance()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        Ki_index, Ki_phase = mma_kv_consumer_state.index, mma_kv_consumer_state.phase
+                        sK_cur = sK[None, None, None, Ki_index]
+                        if const_expr(self.uneven_kv_smem):
+                            sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
+                        for stage in cutlass.range_constexpr(self.q_stage):
+                            dm_utils.mbar_wait_parity(self.dm_sfree, (dm_q - 1) & 1)
+                            cute.arch.fence_view_async_tmem_load()
+                            gemm_Si[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                            pipeline_s_p_o.producer_commit_w_index(stage)
+                            dm_q += 1
+                            pipeline_s_p_o.producer_acquire_w_index_phase(stage, P_full_O_rescaled_phase)
+                            dm_utils.gemm_ptx_bs(
+                                pv_mma_op, self.tmem_o_offset[stage], dm_tCrP[None, None, None, stage], tOrVi,
+                                self.dm_sP[None, None, None, stage], sV_cur,
+                                self.dm_sf_abs[stage], self.dm_sf_abs[stage] + 4, dm_sfmap, dm_sfmap,
+                                zero_init=not O_should_accumulate, cta_group=self.cta_group_size)
+                            with cute.arch.elect_one():
+                                dm_utils.tc_commit(self.dm_pvdone + 8 * stage)
+                        pipeline_kv.consumer_release(mma_kv_release_state)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        P_full_O_rescaled_phase ^= 1
+                        O_should_accumulate = True
+                    for stage in cutlass.range(self.q_stage):
+                        pipeline_q.consumer_release_w_index(stage)
+                    pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                    Vi_index, Vi_phase = mma_kv_consumer_state.index, mma_kv_consumer_state.phase
+                    tOrVi = tOrV[None, None, None, Vi_index]
+                    sV_cur = sV[None, None, None, Vi_index]
+                    if const_expr(self.uneven_kv_smem):
+                        sV_cur = self.offset_kv_smem(sV_cur, Vi_index, Vi_phase)
+                    for stage in cutlass.range_constexpr(self.q_stage):
+                        pipeline_s_p_o.producer_acquire_w_index_phase(stage, P_full_O_rescaled_phase)
+                        dm_utils.gemm_ptx_bs(
+                            pv_mma_op, self.tmem_o_offset[stage], dm_tCrP[None, None, None, stage], tOrVi,
+                            self.dm_sP[None, None, None, stage], sV_cur,
+                            self.dm_sf_abs[stage], self.dm_sf_abs[stage] + 4, dm_sfmap, dm_sfmap,
+                            zero_init=not O_should_accumulate, cta_group=self.cta_group_size)
+                        with cute.arch.elect_one():
+                            dm_utils.tc_commit(self.dm_pvdone + 8 * stage)
+                        pipeline_o_acc.producer_commit_w_index(stage)
+                    P_full_O_rescaled_phase ^= 1
                     pipeline_kv.consumer_release(mma_kv_consumer_state)
                     mma_kv_consumer_state.advance()
                 else:
@@ -2246,6 +2373,8 @@ class DMForwardSm100:
 
         cta_qk_tiler = (self.mma_tiler_qk[0] // thr_mma_qk.thr_id.shape, self.mma_tiler_qk[1])
         tSAcc = tStS[(None, None), 0, 0, stage]  # (128, 128)
+        if const_expr(self.dm_sspv):  # one shared S scratch at cols 256..383 for both stages
+            tSAcc = cute.make_tensor(tStS[(None, None), 0, 0, 0].iterator + self.tmem_s_offset[0], tSAcc.layout)
         tStScale = cute.composition(tSAcc, cute.make_layout((self.m_block_size, 1)))
         tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
         tScS = tScS[(None, None), 0, 0]  # (128, 128)
@@ -2283,7 +2412,8 @@ class DMForwardSm100:
         tStP_r2t = thr_tmem_store.partition_D(tStP)  # (((16,32),1),1,4)
         # DM sm100-mx: scale-factor words (4 x SFA replicated, 4 x SFB) in the free S columns after fp8 P
         tStSF = cute.make_tensor(
-            tSAcc.iterator + self.dm_sf_col, cute.composition(tSAcc.layout, cute.make_layout((self.m_block_size, 8)))
+            tSAcc.iterator + (self.dm_sf_abs[0] - self.tmem_s_offset[0] + 8 * stage if const_expr(self.dm_sspv) else self.dm_sf_col),
+            cute.composition(tSAcc.layout, cute.make_layout((self.m_block_size, 8)))
         )
         tmem_store_sf_atom = cute.make_copy_atom(tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(8)), Float32)
         thr_tmem_store_sf = tcgen05.make_tmem_copy(tmem_store_sf_atom, tStSF).get_slice(tidx)
@@ -2682,6 +2812,10 @@ class DMForwardSm100:
                 hw_row_max = cute.arch.fmax(hw_row_max, tSrS_red[i])
         else:
             cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
+        if const_expr(self.dm_sspv):
+            # S scratch fully read by this warpgroup -> the MMA warp may issue the next QK into it
+            cute.arch.fence_view_async_tmem_load()
+            dm_utils.mbar_arrive(self.dm_sfree)
         # tSrS_t2r = copy_utils.load_t2r(thr_tmem_load, tScS_shape, tStS_t2r)
         if cutlass.const_expr(self.score_mod is not None):
             self.apply_score_mod(
@@ -2754,7 +2888,8 @@ class DMForwardSm100:
         for j in cutlass.range_constexpr(4):
             tSrSF[j] = sfa_word
             tSrSF[4 + j] = sfb_word
-        cute.copy(thr_tmem_store_sf, tSrSF, tStSF_r2t)
+        if const_expr(not self.dm_sspv):
+            cute.copy(thr_tmem_store_sf, tSrSF, tStSF_r2t)
 
         if const_expr(self.use_s_ping_pong):
             sm_stats_index = (s_p_o_consumer_count - 1) & 1
@@ -2858,7 +2993,22 @@ class DMForwardSm100:
                 )
             if const_expr(self.s0_s1_barrier):
                 pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
-            for i in cutlass.range_constexpr(cute.size(tStP_r2t.shape[2])):
+            if const_expr(self.dm_sspv):
+                # SF_s and P_s(previous tile) are free once PV_s(previous) completed (completion #k incl. a dummy #0);
+                # waited only after the exps so the PV latency hides under them
+                if const_expr(self.dm_opts.get("nosw", "0") != "1"):
+                    dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, s_p_o_consumer_count)
+                cute.copy(thr_tmem_store_sf, tSrSF, tStSF_r2t)
+                # P codes -> sP[stage] (K-major SW128: row r at r*128 B, 16-B chunk c at (c ^ (r & 7)) * 16)
+                tidx_row = Int32(thr_tmem_load.thr_idx)
+                dm_prow = Int32(self.dm_sP.iterator.toint()) + Int32(16384) * stage + tidx_row * 128
+                for c in cutlass.range_constexpr(8):
+                    dm_utils.st_shared_v4_b32(
+                        dm_prow + ((Int32(c) ^ (tidx_row & 7)) << 4),
+                        dm_utils.bitcast_f32_i32(tSrP_r2t_f32[4 * c]), dm_utils.bitcast_f32_i32(tSrP_r2t_f32[4 * c + 1]),
+                        dm_utils.bitcast_f32_i32(tSrP_r2t_f32[4 * c + 2]), dm_utils.bitcast_f32_i32(tSrP_r2t_f32[4 * c + 3]))
+                cute.arch.fence_view_async_shared()
+            for i in cutlass.range_constexpr(0 if const_expr(self.dm_sspv) else cute.size(tStP_r2t.shape[2])):
                 cute.copy(thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i])
                 if const_expr(self.split_P_arrive > 0):
                     split_P_arrive_idx = cute.size(tStP_r2t.shape[2]) * self.split_P_arrive // self.n_block_size
@@ -2951,6 +3101,7 @@ class DMForwardSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
+        dm_ck = Int32(0)  # fwdrw ss_pv: global softmax-step index k (pvdone completion #k precedes step k)
         if const_expr(self.use_s_ping_pong):
             o_acc_consumer_count = Int32(0)
         load_epi_producer_state = pipeline.make_pipeline_state(
@@ -3022,6 +3173,8 @@ class DMForwardSm100:
                 sm_stats_consumer_phase ^= 1
 
                 tSrScale_t2r = cute.make_rmem_tensor(tSrScale_t2r_shape, Float32)
+                if const_expr(self.dm_sspv):
+                    dm_ck += 1  # the work tile's first step needs no correction
                 for i in cutlass.range(total_block_count - 1, unroll=1):
                     for stage in cutlass.range_constexpr(self.q_stage):
                         if const_expr(self.use_s_ping_pong):
@@ -3042,6 +3195,9 @@ class DMForwardSm100:
                         # warps, S_i must have been done, so O_i-1 must have been done as well.
                         # pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
                         if should_rescale:
+                            if const_expr(self.dm_sspv and self.dm_opts.get("nocw", "0") != "1"):
+                                # the next QK no longer orders after the previous PV: wait for PV_s(k-1) explicitly
+                                dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, dm_ck & 1)
                             if const_expr(self.use_s_ping_pong):
                                 # Ping-pong issues QK(i+1) before PV(i), so S_i+1 does not imply O_i is done
                                 pipeline_o_acc.consumer_wait_w_index_phase(
@@ -3057,6 +3213,8 @@ class DMForwardSm100:
                             pipeline_s_p_o.consumer_release_w_index(stage)
                             pipeline_sm_stats.consumer_release_w_index(self.q_stage - 1 - stage)
                     sm_stats_consumer_phase ^= 1
+                    if const_expr(self.dm_sspv):
+                        dm_ck += 1
                     # o_corr_consumer_phase ^= 1
                 if const_expr(self.q_stage == 2):
                     pipeline_sm_stats.consumer_release_w_index(1)

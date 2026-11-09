@@ -625,3 +625,37 @@ def f32_is_subnormal(x: Float32, *, loc=None, ip=None) -> Int32:
                                  "selp.u32 $0, 1, 0, q;\n}\n", "=r,f",
                                  has_side_effects=False, is_align_stack=False,
                                  asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+# ---- fwdrw ss_pv helpers ----
+@dsl_user_op
+def mbar_init(mbar: Int32, count: int, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)], f"mbarrier.init.shared::cta.b64 [$0], {count};", "r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def mbar_arrive(mbar: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)], "mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];",
+                    "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def tc_commit(mbar: Int32, *, loc=None, ip=None):
+    """tcgen05.commit (cta_group::1): mbarrier arrives once all prior tcgen05 ops of this thread have completed."""
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
+                    "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [$0];", "r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def st_shared_v4_b32(addr: Int32, a: Int32, b: Int32, c: Int32, d: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (addr, a, b, c, d)],
+                    "st.shared.v4.b32 [$0], {$1, $2, $3, $4};", "r,r,r,r,r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def bitcast_f32_i32(x: Float32, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=r,f",
+                                 has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))

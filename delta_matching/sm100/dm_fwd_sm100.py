@@ -3111,7 +3111,8 @@ class DMForwardSm100:
                 ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
             bsum = ps[0] + ps[1]
             if nstep > 0:
-                dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * s, (nstep - 1) & 1)
+                if const_expr(self.dm_opts.get("slnobe", "0") != "1"):   # slnobe=1: DEBUG planted WAR bug (no bsempty wait)
+                    dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * s, (nstep - 1) & 1)
             dm_utils.st_shared_b32(self.dm_slbuf + 4 * (1024 + (s * 4 + q) * self.m_block_size + tidx),
                                    dm_utils.bitcast_f32_i32(bsum))
             cute.arch.sync_warp()
@@ -3183,7 +3184,8 @@ class DMForwardSm100:
                     nstep = cnt[0]
                     for s in cutlass.range_constexpr(2):
                         # ---- row max / rescale / SF bytes (today's softmax_step prefix, verbatim ops) ----
-                        dm_utils.mbar_wait_parity(self.dm_slbar + 8 * s, nstep & 1)
+                        if const_expr(self.dm_opts.get("slnokb", "0") != "1"):   # slnokb=1: DEBUG planted RAW bug (no kbfull wait)
+                            dm_utils.mbar_wait_parity(self.dm_slbar + 8 * s, nstep & 1)
                         dm_utils.tc_fence_after()
                         x = [dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(
                             self.dm_slbuf + 4 * ((s * 4 + j) * self.m_block_size + tidx))) for j in range(4)]

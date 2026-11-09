@@ -4797,6 +4797,10 @@ class DMBackwardSm100:
                       #### TMEM->RMEM (Load S from TMEM)
                       tSrS_t2r = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
                       cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
+                      if const_expr("ewt" in self.dm_opts):
+                          # DM ewt (track AL): explicit tcgen05.wait::ld right after the S load, so the trace's s3 includes
+                          # the TMEM-load completion and s10 is pure exp-phase compute (same values -> bitwise)
+                          cute.arch.fence_view_async_tmem_load()
                       if const_expr(self.dm_dsq and "esr" in self.dm_opts):
                           # DM esr: S(t) is in registers once this warp's TMEM load completed -> the dS helper may let
                           # dQ(t-1) overwrite the S tail (and write the dQ(t-1) SFs) now instead of after the exps
@@ -4944,11 +4948,20 @@ class DMBackwardSm100:
                       dm_a[stage] = dm_vs * dm_dosv[stage]
                       dm_qsb[stage] = dm_utils.pow2_exponent_byte(dm_qsv[stage])
                       dm_sfa_dv[stage] = dm_utils.pow2_exponent_byte(dm_dosv[stage])
+                  # DM xpf (track AL): every stage's LSE loaded into its own registers before the stage loop, so the LDS
+                  # latency of stage s>0 hides under stage 0's exps (same values -> bitwise)
+                  dm_lse_x = [None] * num_stages
+                  if const_expr("xpf" in self.dm_opts and not self.shuffle_LSE and "lseall" not in self.dm_opts):
+                      for st_ in cutlass.range_constexpr(num_stages):
+                          dm_lse_x[st_] = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
+                          cute.autovec_copy(tSsLSE[None, st_, 0, 0, consumer_state_LSE.index], dm_lse_x[st_])
                   for stage in cutlass.range_constexpr(num_stages):
                       tSrS_cur = tSrS_t2r[None, stage, 0, 0]
                       tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
                       if const_expr("lseall" in self.dm_opts):
                           tSrLSE = dm_lse_all[stage]
+                      elif const_expr("xpf" in self.dm_opts and not self.shuffle_LSE):
+                          tSrLSE = dm_lse_x[stage]
                       elif const_expr(not self.shuffle_LSE and "lse2" in self.dm_opts and stage > 0):
                           # lse2: a fresh register buffer per stage (no WAR on stage 0's LSE regs -> loads can hoist)
                           tSrLSE = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
@@ -4972,8 +4985,8 @@ class DMBackwardSm100:
                               (dm_c[stage], dm_c[stage]),
                               (-lse_pair[0], -lse_pair[1]),
                           )
-                          if const_expr("noexp" in self.dm_abl or self.dm_b6 > 0):
-                              pass   # b6: exps below, per 32x32 block
+                          if const_expr("noexp" in self.dm_abl or self.dm_b6 > 0 or "xord" in self.dm_opts):
+                              pass   # b6: exps below, per 32x32 block; xord: exps in a second loop below
                           elif const_expr("poly3" in self.dm_opts):
                               # FA4 degree-3 FMA polynomial for every element: bitwise = dm_common.dm_bwd_p_pair_poly in
                               # pass 0 (own-P delta keeps rowsum(dS)=0 at round-off; P error 8.8e-5 << 2e-3 tolerance)
@@ -4985,6 +4998,12 @@ class DMBackwardSm100:
                               # accurate (1.7e-7) degree-5 FMA polynomial for a static subset of pairs (MUFU offload)
                               tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_utils.ex2_poly5_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
                           else:
+                              tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
+                              tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
+                      if const_expr("xord" in self.dm_opts and "noexp" not in self.dm_abl and self.dm_b6 == 0):
+                          # DM xord (track AL): the same MUFU ex2 on the same FFMA2 results, issued after all of the stage's
+                          # FFMA2s (no per-pair FFMA2 -> MUFU dependency wait) -> bitwise
+                          for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
                               tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
                               tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
                       if const_expr(self.dm_b6 > 0 and "noexp" not in self.dm_abl):

@@ -216,11 +216,12 @@ def run_case(mod, fn, case, dev):
                     keep = q.shape[0] * q.shape[2] * q.shape[1] ** 2 <= 2 ** 28
                     calls = [[None if t is None else t.cpu() for t in out]] if keep else None
                     nonfin, gmax, bmax, emax = 0, 0.0, 0.0, 0.0
+                    where = {}       # location of the worst block / element deviation (tensor, call, poison, block, head)
                     for it in range(n - 1):
                         POISON_MODE[0] = ("ff", "zero", "rand", "none")[it % 4]
                         o2 = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
                         nonfin += any(t is not None and not torch.isfinite(t).all() for t in o2)
-                        for t, t0 in zip(o2, out):
+                        for tn, t, t0 in zip(("O", "dQ", "dK", "dV"), o2, out):
                             if t is None or t0 is None:
                                 continue
                             a_, b_ = t.double(), t0.double()
@@ -233,16 +234,26 @@ def run_case(mod, fn, case, dev):
                                 b_ = torch.nn.functional.pad(b_, (0, 0, 0, 0, 0, pad))
                             da = (a_ - b_).reshape(B_, nb, 128, H_, D_).pow(2).sum((2, 4)).sqrt()
                             db = b_.reshape(B_, nb, 128, H_, D_).pow(2).sum((2, 4)).sqrt()
-                            bmax = max(bmax, (da / db.clamp_min(1e-30))[db > 0].max().item() if (db > 0).any() else 0.0)
+                            br = torch.where(db > 0, da / db.clamp_min(1e-30), torch.zeros_like(da))
+                            bv = br.max().item()
+                            if bv > bmax:
+                                ix = int(br.argmax())
+                                where["block"] = {"tensor": tn, "call": it + 1, "poison": POISON_MODE[0], "rel": bv,
+                                                  "batch": ix // (nb * H_), "block": (ix // H_) % nb, "head": ix % H_}
+                            bmax = max(bmax, bv)
                             rowmax = b_.abs().amax(-1, keepdim=True).clamp_min(1e-30)
-                            emax = max(emax, ((a_ - b_).abs() / rowmax).max().item())
+                            ev = ((a_ - b_).abs() / rowmax).max().item()
+                            if ev > emax:
+                                where["elem"] = {"tensor": tn, "call": it + 1, "poison": POISON_MODE[0], "rel": ev}
+                            emax = max(emax, ev)
                         if keep:
                             calls.append([None if t is None else t.cpu() for t in o2])
                         del o2
                     POISON_MODE[0] = "none"
                     nonfin += any(t is not None and not torch.isfinite(t).all() for t in out)
                     r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin, "mismatch_calls": 0,
-                                                                 "rel_max": gmax, "block_rel_max": bmax, "elem_rel_max": emax}
+                                                                 "rel_max": gmax, "block_rel_max": bmax, "elem_rel_max": emax,
+                                                                 "where": where}
                     if keep:
                         r.setdefault("stress_calls", {})["%s/%s" % run] = calls
                 elif kind == "mutate":

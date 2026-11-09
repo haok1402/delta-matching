@@ -360,7 +360,8 @@ def check_case(case, cr, preset, dev, verbose):
                 f"outputs varied by up to {st.get('rel_max', 0.0):.2e} rel between calls (allowed {NONDET_REL:.0e})")
             # accuracy-audit 05:35 (1): a race corrupting one block hides in the whole-tensor norm -> per block / element
             chk(f"{key}:block_spread", st.get("block_rel_max", 0.0) <= SPREAD_BLK,
-                f"a 128-row block varied by {st.get('block_rel_max', 0.0):.2e} rel between calls (allowed {SPREAD_BLK:.0e})")
+                f"a 128-row block varied by {st.get('block_rel_max', 0.0):.2e} rel between calls (allowed {SPREAD_BLK:.0e})"
+                + (f" at {st['where']['block']}" if st.get("where", {}).get("block") else ""))
             chk(f"{key}:elem_spread", st.get("elem_rel_max", 0.0) <= SPREAD_ELEM,
                 f"an element varied by {st.get('elem_rel_max', 0.0):.2e} of its row max between calls "
                 f"(allowed {SPREAD_ELEM:.1e} = 2 bf16 ulp)")

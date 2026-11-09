@@ -459,3 +459,64 @@ def globaltimer(*, loc=None, ip=None) -> cutlass.Int64:
 def smid(*, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %smid;", "=r",
                                  has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+# ---- pass-0 +doq: in-kernel dO quantization (bitwise = quant.quant_rows / _quant_do_delta_kernel) ----
+@dsl_user_op
+def ld_global_nc_v4_b32(addr: cutlass.Int64, *, loc=None, ip=None):
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32(), T.i32(), T.i32(), T.i32()]),
+        [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)],
+        "ld.global.nc.v4.b32 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,l",
+        has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+    return tuple(Int32(llvm.extractvalue(T.i32(), res, [i], loc=loc, ip=ip)) for i in range(4))
+
+
+@dsl_user_op
+def st_global_v2_b32(addr: cutlass.Int64, a: Int32, b: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(a).ir_value(loc=loc, ip=ip),
+                           Int32(b).ir_value(loc=loc, ip=ip)],
+                    "st.global.v2.b32 [$0], {$1, $2};", "l,r,r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def amax_bf16x8(m: Float32, w0: Int32, w1: Int32, w2: Int32, w3: Int32, *, loc=None, ip=None) -> Float32:
+    """max(m, |8 bf16 values in w0..w3|) (bf16 -> fp32 exact)."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [Float32(m).ir_value(loc=loc, ip=ip)] + [Int32(w).ir_value(loc=loc, ip=ip) for w in (w0, w1, w2, w3)],
+        "{\n\t.reg .b32 lo, hi;\n\t.reg .f32 x, y, acc;\n\tmov.f32 acc, $1;\n\t"
+        + "".join(f"shl.b32 lo, ${i}, 16;\n\tand.b32 hi, ${i}, 0xFFFF0000;\n\tmov.b32 x, lo;\n\tmov.b32 y, hi;\n\t"
+                  "abs.f32 x, x;\n\tabs.f32 y, y;\n\tmax.f32 acc, acc, x;\n\tmax.f32 acc, acc, y;\n\t"
+                  for i in (2, 3, 4, 5))
+        + "mov.f32 $0, acc;\n\t}",
+        "=f,f,r,r,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def pow2_quant_eb(amax: Float32, *, loc=None, ip=None) -> Int32:
+    """Biased exponent eb of the pow2 scale (quant_rows rule): amax = m 2^E -> E-8 if m <= 1.75 else E-7, clamp [1,254];
+    amax == 0 -> 127."""
+    return Int32(llvm.inline_asm(
+        T.i32(), [Float32(amax).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 ab, e, m;\n\t.reg .pred big, pos;\n\tmov.b32 ab, $1;\n\t"
+        "shr.u32 e, ab, 23;\n\tand.b32 e, e, 0xFF;\n\tsub.s32 e, e, 8;\n\t"
+        "and.b32 m, ab, 0x7FFFFF;\n\tsetp.gt.u32 big, m, 0x600000;\n\t@big add.s32 e, e, 1;\n\t"
+        "max.s32 e, e, 1;\n\tmin.s32 e, e, 254;\n\tsetp.gt.f32 pos, $1, 0f00000000;\n\t"
+        "selp.b32 $0, e, 127, pos;\n\t}",
+        "=r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def bf16x8_to_e4m3x8(w0: Int32, w1: Int32, w2: Int32, w3: Int32, inv: Float32, *, loc=None, ip=None):
+    """8 bf16 (element 0 = low half of w0) -> rn_satfinite_e4m3(x * inv) packed in memory order into 2 words."""
+    body = "{\n\t.reg .b32 lo, hi;\n\t.reg .f32 x, y;\n\t.reg .b16 p0, p1, p2, p3;\n\t"
+    for k, i in enumerate((2, 3, 4, 5)):
+        body += (f"shl.b32 lo, ${i}, 16;\n\tand.b32 hi, ${i}, 0xFFFF0000;\n\tmov.b32 x, lo;\n\tmov.b32 y, hi;\n\t"
+                 f"mul.rn.f32 x, x, $6;\n\tmul.rn.f32 y, y, $6;\n\tcvt.rn.satfinite.e4m3x2.f32 p{k}, y, x;\n\t")
+    body += "mov.b32 $0, {p0, p1};\n\tmov.b32 $1, {p2, p3};\n\t}"
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32(), T.i32()]),
+        [Int32(w).ir_value(loc=loc, ip=ip) for w in (w0, w1, w2, w3)] + [Float32(inv).ir_value(loc=loc, ip=ip)],
+        body, "=r,=r,r,r,r,r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+    return Int32(llvm.extractvalue(T.i32(), res, [0], loc=loc, ip=ip)), Int32(llvm.extractvalue(T.i32(), res, [1], loc=loc, ip=ip))

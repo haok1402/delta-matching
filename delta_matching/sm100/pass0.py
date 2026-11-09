@@ -50,14 +50,28 @@ def _aux(t: torch.Tensor, leading_dim: int):
 
 
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
-             exp_variant: str | None = None):
+             exp_variant: str | None = None, do_bf16: torch.Tensor | None = None):
+    """do_bf16 given (and '+doq' in the variant, added automatically): pass 0 quantizes dO itself; do8 / dos are then
+    OUTPUT buffers (allocated here if None) and (delta, do8, dos) is returned."""
     if exp_variant is None:
         exp_variant = os.environ.get("DM_P0_EXP", "p3_4_1+ma")   # P0-v4: + 4 accumulators, dP scale per chunk (causal); keeps /sum P (rowsum(dS)=0 at fp32 round-off)
+    doq = do_bf16 is not None
+    if doq:
+        if "doq" not in exp_variant.split("+")[1:]:
+            exp_variant = exp_variant + "+doq"
+        B, N, H, D = do_bf16.shape
+        assert do_bf16.is_contiguous() and do_bf16.dtype == torch.bfloat16
+        if do8 is None:
+            do8 = torch.empty(B, N, H, D, device=do_bf16.device, dtype=torch.float8_e4m3fn)
+        if dos is None:
+            dos = torch.empty(B, H, N // 32, device=do_bf16.device, dtype=torch.float32)
     over = dict(FORCE)
     if config_override:
         over.update(config_override)
     aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
            _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2)]
+    if doq:
+        aux.append(_aux(do_bf16, 3))
     orig = (fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config)
 
     def select(inputs):
@@ -82,4 +96,6 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
                                               pack_gqa=False, aux_tensors=aux)
         finally:
             fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config = orig
+    if doq:
+        return delta, do8, dos
     return delta

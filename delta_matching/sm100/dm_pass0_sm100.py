@@ -268,6 +268,9 @@ class DMPass0Sm100:
         _fl0 = self.dm_exp_variant.split("+")[1:]
         self.dm_ma = ("ma" in _fl0 and self.is_causal) or "maa" in _fl0
         self.dm_nd = "nd" in _fl0   # no denominator: sum_j P := 1 (P is normalized by the forward LSE)
+        # +doq: pass 0 quantizes dO itself (bf16 aux[6] -> codes aux[4] + scales aux[3], exactly quant_rows) in the
+        # otherwise idle correction warpgroup, then TMA-loads its own codes; replaces the separate dO quant kernel
+        self.dm_doq = "doq" in _fl0
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
             assert not any(f in _fl for f in ("fu", "fa", "sq")), "c3 supports the plain static-mix path only"
@@ -612,7 +615,9 @@ class DMPass0Sm100:
                 ("V", mV, sV_layout),
             ]
         }
-        self.tma_copy_bytes["Q"] *= 2  # P0: Q and dO tiles land on the same pipeline_q stage
+        self.dm_doq_bytes = self.tma_copy_bytes["Q"] * self.cta_group_size
+        if const_expr(not self.dm_doq):
+            self.tma_copy_bytes["Q"] *= 2  # P0: Q and dO tiles land on the same pipeline_q stage
         for name in ("Q", "K", "V"):
             self.tma_copy_bytes[name] *= self.cta_group_size
 
@@ -782,6 +787,7 @@ class DMPass0Sm100:
             mbar_O_epi: cute.struct.MemRange[Int64, self.q_stage * 2]
             mbar_load_epi: cute.struct.MemRange[Int64, load_epi_mbar_size]
             mbar_s0_s1_sequence: cute.struct.MemRange[Int64, 2 * 2]
+            dm_doq_mbar: cute.struct.MemRange[Int64, 4]   # +doq: dO full[2] (TMA), dO empty[2] (softmax)
             # Tmem dealloc cluster barrier
             tmem_dealloc_mbar: Int64
             # Tmem holding buffer
@@ -1157,6 +1163,14 @@ class DMPass0Sm100:
             )
 
 
+        dm_doq_mbar = storage.dm_doq_mbar.data_ptr()
+        if const_expr(self.dm_doq):
+            if warp_idx == 0:
+                with cute.arch.elect_one():
+                    for i_ in cutlass.range_constexpr(2):
+                        cute.arch.mbarrier_init(dm_doq_mbar + i_, 1)
+                        cute.arch.mbarrier_init(dm_doq_mbar + 2 + i_, cute.arch.WARP_SIZE * len(self.softmax0_warp_ids))
+                cute.arch.mbarrier_init_fence()
         # Cluster arrive after barrier init
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
@@ -1380,6 +1394,7 @@ class DMPass0Sm100:
                 SeqlenInfoCls,
                 blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                dm_doq_mbar=dm_doq_mbar,
                 sdO=sdO,
             )
             # Dealloc the tensor memory buffer
@@ -1444,6 +1459,7 @@ class DMPass0Sm100:
                 head_divmod=head_divmod,
                 blocksparse_tensors=blocksparse_tensors,
                 tile_scheduler=tile_scheduler,
+                dm_doq_mbar=dm_doq_mbar,
             )
 
             if const_expr(not self.s0_s1_barrier):
@@ -1473,6 +1489,9 @@ class DMPass0Sm100:
             if const_expr(self.dm_c3):
                 self.c3_loop(thr_mma_qk, tStS, sScale, aux_data, pipeline_s_p_o, pipeline_o_acc, block_info, num_splits,
                              SeqlenInfoCls, tile_scheduler)
+            elif const_expr(self.dm_doq):
+                self.doq_loop(thr_mma_qk, aux_data, tma_atom_dO, mdO, sdO, pipeline_q, dm_doq_mbar, block_info,
+                              num_splits, SeqlenInfoCls, tile_scheduler)
             else:
               self.correction_loop(
                 thr_mma_qk,
@@ -1851,6 +1870,7 @@ class DMPass0Sm100:
         SeqlenInfoCls: Callable,
         blocksparse_tensors: Optional[BlockSparseTensors],
         tile_scheduler=None,
+        dm_doq_mbar=None,
         sdO: Optional[cute.Tensor] = None,
     ):
         tSrQ = tiled_mma_qk.make_fragment_A(sQ)
@@ -1983,6 +2003,7 @@ class DMPass0Sm100:
                 # P0 schedule per KV tile: S_s = Q_s K^T (both stages), then dP_s = dO_s V^T, commit stage s.
                 for stage in cutlass.range_constexpr(self.q_stage):
                     pipeline_q.consumer_wait_w_index_phase(stage, mma_q_consumer_phase)
+                dm_doq_par = mma_q_consumer_phase
                 mma_q_consumer_phase ^= 1
                 for i in cutlass.range(block_iter_count, unroll=1):
                     pipeline_kv.consumer_wait(mma_kv_consumer_state)
@@ -1999,6 +2020,9 @@ class DMPass0Sm100:
                     sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
                     for stage in cutlass.range_constexpr(self.q_stage):
                         pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                        if const_expr(self.dm_doq):
+                            if i == 0:
+                                cute.arch.mbarrier_wait(dm_doq_mbar + stage, dm_doq_par)
                         gemm_dPi[stage](
                             smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator)
                         )
@@ -2128,6 +2152,7 @@ class DMPass0Sm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         tile_scheduler=None,
         pipeline_dp=None,
+        dm_doq_mbar=None,
     ):
         """P0: per query row delta = sum_j P dP / sum_j P over all visible keys; written to mLSE (s, h, b)."""
         tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * len(self.softmax0_warp_ids))
@@ -2149,6 +2174,7 @@ class DMPass0Sm100:
         nc = n_chunks - 1 if const_expr(self.dm_c3) else n_chunks   # c3: chunk 3 belongs to the correction WG
         s_full_phase = Int32(0)
         s0s1_phase = Int32(1 if stage == 0 else 0)
+        dm_doq_phase = Int32(0)
 
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
@@ -2170,7 +2196,10 @@ class DMPass0Sm100:
             # rows past seqlen_q (second q stage of the last tile) are never stored: clamp reads (no OOB)
             rowc = cutlass.min(row, seqlen.seqlen_q - 1)
             qsv = Float32(aux[0][batch_idx, head_idx, rowc // 32])
-            dosv = Float32(aux[3][batch_idx, head_idx, rowc // 32])
+            if const_expr(self.dm_doq):
+                dosv = Float32(1.0)   # dO scale written by the correction WG during this tile; applied at the end
+            else:
+                dosv = Float32(aux[3][batch_idx, head_idx, rowc // 32])
             l2 = Float32(aux[5][batch_idx, head_idx, rowc]) * Float32(dm_common.LOG2E)
             num = (Float32(0.0), Float32(0.0))
             den = (Float32(0.0), Float32(0.0))
@@ -2346,6 +2375,13 @@ class DMPass0Sm100:
             den = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
             num_t = num[0] + num[1]
             den_t = den[0] + den[1]
+            if const_expr(self.dm_doq):
+                if has_work:
+                    # a = vs * dos with dos a power of 2: num(dos) = dos * num(1) exactly -> bitwise = the 2-kernel path
+                    cute.arch.mbarrier_wait(dm_doq_mbar + stage, dm_doq_phase)
+                    num_t = num_t * Float32(aux[3][batch_idx, head_idx, rowc // 32])
+                    cute.arch.mbarrier_arrive(dm_doq_mbar + 2 + stage)
+                    dm_doq_phase ^= 1
             if const_expr(self.dm_c3):
                 # chunk-3 partials of this stage from the correction WG (named barrier 12 + stage, 256 threads)
                 cute.arch.barrier(barrier_id=12 + stage, number_of_threads=256)
@@ -2719,6 +2755,72 @@ class DMPass0Sm100:
             work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
+    def doq_loop(self, thr_mma_qk, aux_data, tma_atom_dO, mdO, sdO, pipeline_q, dm_doq_mbar, block_info, num_splits,
+                 SeqlenInfoCls, tile_scheduler):
+        """P0 +doq: correction WG quantizes this tile's dO rows (bf16 aux[6]) exactly like quant_rows (pow2 scale per
+        32 rows over all of D), writes the codes (aux[4]) and scales (aux[3]) the main backward reads, then TMA-loads
+        its own codes into sdO (generic -> async proxy fence) and signals dO full[stage]."""
+        tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * len(self.correction_warp_ids))
+        warp = tidx // 32
+        lane = tidx % 32
+        aux = aux_data.tensors
+        H = aux[6].shape[2]
+        N = aux[6].shape[1]
+        D = self.head_dim_padded
+        dob_base = aux[6].iterator.toint()
+        do8_base = aux[4].iterator.toint()
+        tiler_gQ = ((self.mma_tiler_qk[0] * self.q_stage), self.head_dim_padded)
+        tile_cnt = Int32(0)
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            work_m, head_idx, batch_idx, split_idx = work_tile.tile_idx
+            seqlen = SeqlenInfoCls(batch_idx)
+            n_block_min, n_block_max = block_info.get_n_block_min_max(
+                seqlen, work_m, split_idx=split_idx, num_splits=num_splits,
+            )
+            if self.process_work_tile(block_info, seqlen, n_block_min, n_block_max):
+                par = tile_cnt & 1
+                mdO_cur = seqlen.offset_batch_Q(mdO, batch_idx, dim=3)[None, None, head_idx]
+                gdO = cute.local_tile(mdO_cur, tiler_gQ, (work_m, 0))
+                gdO = layout_utils.select(cute.flat_divide(gdO, (self.mma_tiler_qk[0],)), mode=[0, 2, 1])
+                tSgdO = thr_mma_qk.partition_A(gdO)
+                load_dO_fn, _, _ = copy_utils.tma_get_copy_fn(tma_atom_dO, 0, cute.make_layout(1), tSgdO, sdO)
+                for stage in cutlass.range_constexpr(self.q_stage):
+                    # Q(stage) of this tile landed => the previous tile's dP MMAs on this sdO stage are done
+                    cute.arch.mbarrier_wait(pipeline_q.sync_object_full.get_barrier(stage), par)
+                    if tile_cnt > 0:   # softmax of the previous tile has read its dO scale
+                        cute.arch.mbarrier_wait(dm_doq_mbar + 2 + stage, par ^ 1)
+                    row0 = self._q_block(work_m, stage) * self.m_block_size + warp * 32
+                    col = (lane % 16) * 8
+                    amax = Float32(0.0)
+                    for r in cutlass.range(16, unroll=1):
+                        row = row0 + 2 * r + lane // 16
+                        if row < seqlen.seqlen_q:
+                            off = ((Int64(batch_idx) * N + row) * H + head_idx) * D + col
+                            w0, w1, w2, w3 = dm_utils.ld_global_nc_v4_b32(dob_base + off * 2)
+                            amax = dm_utils.amax_bf16x8(amax, w0, w1, w2, w3)
+                    amax = dm_utils.redux_max_abs_f32(amax)
+                    eb = dm_utils.pow2_quant_eb(amax)
+                    inv = dm_utils.bitcast_i32_f32((Int32(254) - eb) << 23)
+                    for r in cutlass.range(16, unroll=1):
+                        row = row0 + 2 * r + lane // 16
+                        if row < seqlen.seqlen_q:
+                            off = ((Int64(batch_idx) * N + row) * H + head_idx) * D + col
+                            w0, w1, w2, w3 = dm_utils.ld_global_nc_v4_b32(dob_base + off * 2)
+                            c0, c1 = dm_utils.bf16x8_to_e4m3x8(w0, w1, w2, w3, inv)
+                            dm_utils.st_global_v2_b32(do8_base + off, c0, c1)
+                    if lane == 0:
+                        if row0 < seqlen.seqlen_q:
+                            aux[3][batch_idx, head_idx, row0 // 32] = dm_utils.bitcast_i32_f32(eb << 23)
+                    cute.arch.fence_proxy("async.global")
+                    cute.arch.barrier(barrier_id=12 + stage, number_of_threads=cute.arch.WARP_SIZE * len(self.correction_warp_ids))
+                    if tidx == 0:
+                        cute.arch.mbarrier_arrive_and_expect_tx(dm_doq_mbar + stage, self.dm_doq_bytes)
+                        load_dO_fn(src_idx=stage, dst_idx=stage, tma_bar_ptr=dm_doq_mbar + stage)
+                tile_cnt += 1
+            work_tile = tile_scheduler.advance_to_next_work()
+
+    @cute.jit
     def correction_rescale(
         self,
         thr_mma: cute.ThrMma,
@@ -3062,7 +3164,8 @@ class DMPass0Sm100:
     ):
         pipeline_q.producer_acquire_w_index_phase(stage, phase)
         load_Q_fn(src_idx=block, dst_idx=stage, tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(stage))
-        load_dO_fn(src_idx=block, dst_idx=stage, tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(stage))
+        if const_expr(not self.dm_doq):
+            load_dO_fn(src_idx=block, dst_idx=stage, tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(stage))
 
     def load_Q_non_tma(
         self,

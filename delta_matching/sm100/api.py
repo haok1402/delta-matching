@@ -5,6 +5,8 @@ backward: dO quant -> delta (matched: pass-0 kernel dm_delta, sum P dP / sum P; 
           -> dm_bwd_main (B1: 2-CTA, MXFP8 dV / dK / dQ, deterministic)
 q (B, N, H, 128) bf16, k / v (B, N, Hk, 128) bf16 -> o (B, N, H, 128) bf16.  N % 128 == 0, softmax scale 128^-0.5.
 """
+import os
+
 import torch
 
 from .quant import quant_qkv2, quant_do_delta
@@ -13,6 +15,7 @@ from .bwd import dm_bwd_main, dm_bwd_prestage
 from .pass0 import dm_delta
 
 D = 128
+_DOQ = os.environ.get("DM_P0_DOQ", "0") == "1"   # opt-in, UNTESTED on GPU: pass 0 quantizes dO (matched)
 
 
 class _DMAttnSm100(torch.autograd.Function):
@@ -31,9 +34,13 @@ class _DMAttnSm100(torch.autograd.Function):
         q8, qs, k8, ks, v8, vs, o, lse = ctx.saved_tensors
         do = do.contiguous()
         dm_bwd_prestage(q8, k8, lse, ctx.causal)    # scratch alloc / zero / lse_log2 on a side stream (overlaps pass 0)
-        do8, dos, delta = quant_do_delta(do, o if ctx.mode == "stale" else None)   # stale delta fused
-        if ctx.mode == "matched":
-            delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, ctx.causal)
+        if ctx.mode == "matched" and _DOQ:
+            # pass 0 quantizes dO itself (bitwise = quant_do_delta's codes / scales)
+            delta, do8, dos = dm_delta(q8, qs, k8, ks, v8, vs, None, None, lse, ctx.causal, do_bf16=do)
+        else:
+            do8, dos, delta = quant_do_delta(do, o if ctx.mode == "stale" else None)   # stale delta fused
+            if ctx.mode == "matched":
+                delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, ctx.causal)
         dq, dk, dv = dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal, D ** -0.5)
         return dq, dk, dv, None, None
 

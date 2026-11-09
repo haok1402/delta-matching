@@ -614,7 +614,7 @@ class DMBackwardSm100:
         # pers=<CTAs>: persistent grid of that many CTAs (= SM count, a cluster multiple), 0 = single-tile CTAs
         self.dm_pers = int(next((x[5:] for x in self.dm_opts if x.startswith("pers=")), "0"))
         # pdyn: dynamic (atomic-counter) persistent claim order instead of static grid-stride (needs pers=N)
-        self.dm_pdyn = self.dm_pers > 0 and "pdyn" in self.dm_opts
+        self.dm_pdyn = self.dm_pers > 0 and "pdyn" in self.dm_opts and self.qhead_per_kvhead == 1
         # DM gloop (GQA): one CTA (pair) per (KV head, KV tile) loops over the qh query heads of the group (single
         # m-block stream of qh * L blocks, head-major); dK/dV stay in TMEM across the group and are stored once
         # (no fp32 dK/dV accumulation, no dK/dV semaphores, no dKV postprocess). Order of the dK/dV fp32 sums:
@@ -4009,6 +4009,10 @@ class DMBackwardSm100:
             while go > 0:
                 s = k & 1
                 if rank == 0:
+                    if k >= 1:
+                        # claim tile k only when this CTA has finished tile k - 1 (its dK/dV epilogue drained): a
+                        # claimed-but-not-started tile would block the deterministic semaphore chains through it
+                        dm_utils.mbar_wait_parity(sbase + 8 * 2, (k - 1) & 1)
                     if k >= 2:
                         dm_utils.mbar_wait_parity_cluster(sbase + 8 * 5 + 8 * s, ((k >> 1) - 1) & 1)
                     t = dm_utils.atom_add_global_u32(counter, Int32(1))

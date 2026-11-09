@@ -3241,6 +3241,9 @@ class DMForwardSm100:
                             pipeline_s_p_o.consumer_release_w_index(s)
                         # ---- l = l * acc + sum_b s_b w_b (today's order) ----
                         dm_utils.mbar_wait_parity(self.dm_slbar + 16 + 8 * s, nstep & 1)
+                        if const_expr(int(self.dm_opts.get("slcdly", "0")) > 0):   # DEBUG: widen the sB WAR window
+                            for _i in cutlass.range_constexpr(int(self.dm_opts.get("slcdly", "0"))):
+                                dm_utils.nanosleep_1us()
                         bs = [dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(
                             self.dm_slbuf + 4 * (1024 + (s * 4 + j) * self.m_block_size + tidx))) for j in range(4)]
                         cute.arch.sync_warp()

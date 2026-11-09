@@ -918,3 +918,8 @@ _tcf_raw_sync_warp = [None]
 
 _tcf_install()
 _tcf_install_min()
+@dsl_user_op
+def nanosleep_1us(*, loc=None, ip=None):
+    """DEBUG only: nanosleep ~1 us (used to widen race windows in positive controls)."""
+    llvm.inline_asm(None, [], "nanosleep.u32 1000;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)

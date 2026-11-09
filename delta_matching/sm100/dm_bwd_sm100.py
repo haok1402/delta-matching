@@ -117,6 +117,63 @@ def dm_posmajor_scheduler(qh: int):
     return DMPosMajLPTBwdScheduler
 
 
+_DM_NDLPT_CLS = {}
+
+
+def dm_ndlpt_scheduler(mode: int):
+    """DM ndlpt (non-deterministic only; gap8k): longest-processing-time-first CTA order for causal nd.
+    The nd default (SingleTileScheduler) launches x = kv block fastest per (head, batch), so every head runs
+    long -> short and the LAST heads' longest kv blocks (block 0 = all q tiles) start near the end -> tail.
+    mode 0: global block-major order (block 0 of every (head, batch) first, then block 1, ...);
+    mode 1: FA4's L2-swizzled LPT bwd order (groups of `swizzle` heads, block-major inside), longest first.
+    Only the CTA -> tile mapping changes: every tile runs the same code, nd accumulation is unordered anyway."""
+    if mode in _DM_NDLPT_CLS:
+        return _DM_NDLPT_CLS[mode]
+
+    class DMNdLPTBwdScheduler(SingleTileLPTBwdScheduler):
+        @staticmethod
+        @cute.jit
+        def create(params, *, loc=None, ip=None):
+            return DMNdLPTBwdScheduler(params, cute.arch.block_idx()[0], loc=loc, ip=ip)
+
+        @cute.jit
+        def get_current_work(self, *, loc=None, ip=None):
+            params = self.params
+            cluster_idx = self._tile_idx // params.cluster_shape_mn[0]
+            block, bidhb_actual = Int32(0), Int32(0)
+            if const_expr(mode == 0):
+                hb = params.total_blocks // (params.num_block * params.cluster_shape_mn[0])
+                block = cluster_idx // hb
+                bidhb_actual = cluster_idx - block * hb
+            elif const_expr(mode >= 100):
+                # ndlpt=1<tt>: the default order (head-major, kv block 0 -> n-1-t) for all but the t shortest kv
+                # blocks of every head, then those short blocks block-major across heads (they fill the tail)
+                hb = params.total_blocks // (params.num_block * params.cluster_shape_mn[0])
+                nl = params.num_block - (mode - 100)
+                if cluster_idx < hb * nl:
+                    bidhb_actual = cluster_idx // nl
+                    block = cluster_idx - bidhb_actual * nl
+                else:
+                    c2 = cluster_idx - hb * nl
+                    j = c2 // hb
+                    bidhb_actual = c2 - j * hb
+                    block = nl + j
+            else:
+                bidhb, l2_mod = divmod(cluster_idx, params.l2_major_divmod)
+                bidhb_residual = Int32(0)
+                if bidhb < params.num_hb_quotient:
+                    block, bidhb_residual = divmod(l2_mod, params.l2_minor_divmod)
+                else:
+                    block, bidhb_residual = divmod(l2_mod, params.l2_minor_residual_divmod)
+                bidhb_actual = bidhb * params.l2_minor + bidhb_residual
+            batch_idx, head_idx = divmod(bidhb_actual, params.num_head_divmod)
+            is_valid = self._tile_idx < params.total_blocks
+            return _DMWorkTileInfo((Int32(block), Int32(head_idx), Int32(batch_idx), Int32(0)), is_valid)
+
+    _DM_NDLPT_CLS[mode] = DMNdLPTBwdScheduler
+    return DMNdLPTBwdScheduler
+
+
 _DM_PERS_CLS = {}
 
 
@@ -606,6 +663,9 @@ class DMBackwardSm100:
         self.dm_abl = tuple(x for x in os.environ.get("DM_ABL", "").split(",") if x)
         # variant knobs for same-process A/B (bwd.py keys the compile cache on DM_BWD_OPTS)
         self.dm_opts = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
+        # DM ndlpt=<mode> (nd only, gap8k): LPT CTA order; -1 = off
+        _nl = [x for x in self.dm_opts if x.startswith("ndlpt")]
+        self.dm_ndlpt = (int(_nl[0][6:]) if len(_nl[0]) > 6 else 0) if _nl else -1
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
         _p5 = next((x[3:] for x in self.dm_opts if x.startswith("p5=")), None)   # p5=freq:res
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
@@ -1290,6 +1350,9 @@ class DMBackwardSm100:
             TileScheduler = dm_hswz_scheduler(self.qhead_per_kvhead)
         elif const_expr(self.deterministic):
             TileScheduler = SingleTileLPTBwdScheduler
+        elif const_expr(self.dm_ndlpt >= 0):
+            # DM ndlpt=<mode> (nd only): LPT CTA order, see dm_ndlpt_scheduler
+            TileScheduler = dm_ndlpt_scheduler(self.dm_ndlpt)
         else:
             TileScheduler = SingleTileScheduler
         tile_sched_args = TileSchedulerArguments(
@@ -1707,7 +1770,7 @@ class DMBackwardSm100:
         if const_expr("tl2" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
             # DM tl2: kernel-entry globaltimer per CTA at [64 + 8 * bid + 4]
             if cute.arch.thread_idx()[0] == 0:
-                dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 4), dm_utils.globaltimer())
+                dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * (cute.arch.block_idx()[0] + cute.arch.grid_dim()[0] * (cute.arch.block_idx()[1] + cute.arch.grid_dim()[1] * cute.arch.block_idx()[2])) + 4), dm_utils.globaltimer())
         # The CTA rank of a 2CTA pair; NOTE [SM100 backward coordinate spaces].
         mma_tile_coord_v = bidx % self.cta_group_size
         is_leader_cta = mma_tile_coord_v == 0
@@ -5322,7 +5385,7 @@ class DMBackwardSm100:
             if const_expr(dm_tr is not None and "tl" in self.dm_opts):
                 # DM tl: per-CTA timeline (start/end globaltimer ns of the compute mainloop, SM id) at [64 + 4 * bid]
                 if dm_tid == 0:
-                    dm_bid = cute.arch.block_idx()[0]
+                    dm_bid = (cute.arch.block_idx()[0] + cute.arch.grid_dim()[0] * (cute.arch.block_idx()[1] + cute.arch.grid_dim()[1] * cute.arch.block_idx()[2]))
                     dm_tb = dm_tr.iterator.toint() + 8 * (64 + (8 if const_expr("tl2" in self.dm_opts) else 4) * dm_bid)
                     dm_utils.red_add_u64(dm_tb, dm_tl0)
                     dm_utils.red_add_u64(dm_tb + 8, dm_utils.globaltimer())
@@ -5394,7 +5457,7 @@ class DMBackwardSm100:
                         self.dm_epi_barrier,  # barrier_id
                         mdV_semaphore,
                         "V",
-                        dm_tlp=(dm_tr.iterator.toint() + 8 * (64 + 8 * cute.arch.block_idx()[0] + 6)
+                        dm_tlp=(dm_tr.iterator.toint() + 8 * (64 + 8 * (cute.arch.block_idx()[0] + cute.arch.grid_dim()[0] * (cute.arch.block_idx()[1] + cute.arch.grid_dim()[1] * cute.arch.block_idx()[2])) + 6)
                                 if const_expr(dm_tr is not None and "tl3" in self.dm_opts) else None),
                     )
                     #### STORE dK
@@ -5420,7 +5483,7 @@ class DMBackwardSm100:
                     )
             if const_expr(dm_tr is not None and "tl2" in self.dm_opts):
                 if dm_tid == 0:
-                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (64 + 8 * cute.arch.block_idx()[0] + 5),
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (64 + 8 * (cute.arch.block_idx()[0] + cute.arch.grid_dim()[0] * (cute.arch.block_idx()[1] + cute.arch.grid_dim()[1] * cute.arch.block_idx()[2])) + 5),
                                          dm_utils.globaltimer())
             if const_expr(self.dm_pers > 0 and not self.dm_dkvdir):
                 # DM pers: every compute thread's bulk stores have finished READING sdK/sdV (= sK/sV), then one

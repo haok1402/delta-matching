@@ -57,7 +57,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_0+ma+h2+f64+pf+sq")   # P0-v8 (p0floor): +pf scale prefetch, +sq per-stage specialized code (both bitwise). P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
+        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_0+ma+h2+pf+sq+ts")   # P0-v9 (small): +ts double-float TwoSum cross-tile sums replace the per-tile fp64 flush (identity equal to +f64 on 49 cases, pass 0 +2-3%). P0-v8 (p0floor): +pf scale prefetch, +sq per-stage specialized code (both bitwise). P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
     if dm_common.b6_m() > 0 and "+b6_" not in exp_variant:
         exp_variant = exp_variant + f"+b6_{dm_common.b6_m()}"
     over = dict(FORCE)

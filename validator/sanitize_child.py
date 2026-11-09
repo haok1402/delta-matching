@@ -46,7 +46,8 @@ for _i, (B, H, Hk, N) in enumerate(SHAPES):
         g = torch.Generator(device="cuda").manual_seed(N + H)
         q, k, v, do = [torch.randn(B, N, h, 128, device="cuda", generator=g).bfloat16() for h in (H, Hk, Hk, H)]
         modes = ["matched", "stale"] if causal or sup.get("matched_noncausal") else ["stale"]
-        for mode in modes:
+        _ms = os.environ.get("DMVAL_SAN_MODE")            # finest shard: one of matched / stale
+        for mode in (modes if _ms is None else [m_ for m_ in modes if m_ == _ms]):
             l = [x.clone().requires_grad_(True) for x in (q, k, v)]
             o = fn(*l, causal=causal, mode=mode)
             o = o[0] if isinstance(o, (tuple, list)) else o
@@ -54,5 +55,6 @@ for _i, (B, H, Hk, N) in enumerate(SHAPES):
             if mode == "matched" and hasattr(mod, "debug"):
                 mod.debug(q, k, v, do, causal, mode)
             torch.cuda.synchronize()
+            print(f"  mode {mode} done t={_t.time() - _t0:.0f}s", flush=True)
         print("ok", B, H, Hk, N, causal, f"t={_t.time() - _t0:.0f}s", flush=True)
 print("SANITIZE_CHILD_DONE", flush=True)

@@ -1533,8 +1533,7 @@ class DMBackwardSm100:
             )
 
         # 2-CTA: 231424 and 1-CTA: 232448
-        if os.environ.get("DM_PRINT_SMEM"):
-            print("DM SMEM bytes:", self.shared_storage.size_in_bytes(), flush=True)
+        # print("SMEM: ", self.shared_storage.size_in_bytes())
         if const_expr(self.use_block_sparsity):
             assert all(x is None for x in (mCuSeqlensQ, mCuSeqlensK, mSeqUsedQ, mSeqUsedK)), (
                 "Variable sequence length is not supported yet for blocksparse in bwd"

@@ -534,7 +534,9 @@ class DMBackwardSm100:
         _o = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
         self.dm_dsqw = "dsqw" in _o
         self.dm_noreg = "dsqnoreg" in _o   # debug: no setmaxnreg at all
-        self.dm_dqstream = "dqstream" in _o   # stream the dQ drain in 32-column t2r chunks
+        self.dm_dqstream = "dqstream" in _o
+        self.dm_dsqsr = "dsqsr" in _o   # signal S-read to the dS helper right after the S load
+        self.dm_dsqdv = "dsqdv" in _o   # MMA issue order: dV(t+1) before dQ(t)
         self.dsq_warp_ids = (16, 17, 18, 19) if self.dm_dsqw else ()
         if self.dm_dsqw:
             r_ = [int(x) for x in next((o[5:] for o in _o if o.startswith("dsqr=")), "80:120:72:88").split(":")]
@@ -3796,34 +3798,65 @@ class DMBackwardSm100:
                         mma_dov_fn(B_idx=consumer_state_dO.index)
                         pipeline_dP.sync_object_full.arrive(0, pipeline_dP.producer_mask, cta_group)
 
-                        # (5) dQ = dS @ K (cur)
-                        if const_expr(dm_trace is not None):
-                            dm_t0 = dm_utils.clock64()
-                        pipeline_dS.consumer_wait(consumer_state_dS)
-                        if const_expr(dm_trace is not None):
-                            dm_acc5 = dm_acc5 + (dm_utils.clock64() - dm_t0)
-                        if const_expr(dm_trace is not None):
-                            dm_t0 = dm_utils.clock64()
-                        cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
-                        if const_expr(dm_trace is not None):
-                            dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
-                        mma_dsk_fn()
-                        pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
-                        pipeline_dS.consumer_release(consumer_state_dS)
-                        consumer_state_dS.advance()
-                        dS_cluster_phase ^= 1
-                        producer_phase_dQ ^= 1
+                        if const_expr(self.dm_dsqdv):
+                            # DM dsqdv: dV(t+1) before the dQ(t) commit wait (the in-order MMA warp is not stuck behind it)
+                            # (4) dV += P.T @ dO (next)
+                            producer_phase_acc ^= 1
+                            if const_expr(dm_trace is not None):
+                                dm_t0 = dm_utils.clock64()
+                            pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)  # S -> P
+                            if const_expr(dm_trace is not None):
+                                dm_acc7 = dm_acc7 + (dm_utils.clock64() - dm_t0)
+                            mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+                            pipeline_dO.consumer_release(consumer_state_dO)
+                            consumer_state_dO.advance()
+                            # (5) dQ = dS @ K (cur)
+                            if const_expr(dm_trace is not None):
+                                dm_t0 = dm_utils.clock64()
+                            pipeline_dS.consumer_wait(consumer_state_dS)
+                            if const_expr(dm_trace is not None):
+                                dm_acc5 = dm_acc5 + (dm_utils.clock64() - dm_t0)
+                            if const_expr(dm_trace is not None):
+                                dm_t0 = dm_utils.clock64()
+                            cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
+                            if const_expr(dm_trace is not None):
+                                dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
+                            mma_dsk_fn()
+                            pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
+                            pipeline_dS.consumer_release(consumer_state_dS)
+                            consumer_state_dS.advance()
+                            dS_cluster_phase ^= 1
+                            producer_phase_dQ ^= 1
 
-                        # (4) dV += P.T @ dO (next)
-                        producer_phase_acc ^= 1
-                        if const_expr(dm_trace is not None):
-                            dm_t0 = dm_utils.clock64()
-                        pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)  # S -> P
-                        if const_expr(dm_trace is not None):
-                            dm_acc7 = dm_acc7 + (dm_utils.clock64() - dm_t0)
-                        mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
-                        pipeline_dO.consumer_release(consumer_state_dO)
-                        consumer_state_dO.advance()
+                        else:
+                            # (5) dQ = dS @ K (cur)
+                            if const_expr(dm_trace is not None):
+                                dm_t0 = dm_utils.clock64()
+                            pipeline_dS.consumer_wait(consumer_state_dS)
+                            if const_expr(dm_trace is not None):
+                                dm_acc5 = dm_acc5 + (dm_utils.clock64() - dm_t0)
+                            if const_expr(dm_trace is not None):
+                                dm_t0 = dm_utils.clock64()
+                            cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
+                            if const_expr(dm_trace is not None):
+                                dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
+                            mma_dsk_fn()
+                            pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
+                            pipeline_dS.consumer_release(consumer_state_dS)
+                            consumer_state_dS.advance()
+                            dS_cluster_phase ^= 1
+                            producer_phase_dQ ^= 1
+
+                            # (4) dV += P.T @ dO (next)
+                            producer_phase_acc ^= 1
+                            if const_expr(dm_trace is not None):
+                                dm_t0 = dm_utils.clock64()
+                            pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)  # S -> P
+                            if const_expr(dm_trace is not None):
+                                dm_acc7 = dm_acc7 + (dm_utils.clock64() - dm_t0)
+                            mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+                            pipeline_dO.consumer_release(consumer_state_dO)
+                            consumer_state_dO.advance()
 
                     if const_expr(dm_trace is not None):
                         dm_tot = dm_utils.clock64() - dm_tl0
@@ -4769,6 +4802,15 @@ class DMBackwardSm100:
                       dm_s3 = dm_s3 + (dm_now - dm_tprev)
                       dm_tprev = dm_now
 
+                  if const_expr(self.dm_dsq and self.dm_dsqsr):
+                      # DM dsqsr: S(t) is in registers -> tell the dS helper right away (dQ(t-1) may overwrite the S tail
+                      # [64,128) and the dQ SFs [52,58); this warp's P codes / dV SFs go to [0,52) after the pair barrier)
+                      cute.arch.fence_view_async_tmem_load()
+                      dm_utils.tc_fence_before()
+                      cute.arch.sync_warp()
+                      if iter_idx > 0:
+                          if cute.arch.lane_idx() == 0:
+                              dm_utils.mbar_arrive(dm_mbar + 8 * 10)
                   if const_expr(self.split_P_dS):
                       # S is in registers: release it before the softmax so the MMA warp can
                       # issue the next QK into the slot
@@ -4791,7 +4833,9 @@ class DMBackwardSm100:
                           cute.arch.fence_view_async_tmem_load()
                           self.compute_sync_barrier.arrive_and_wait()
                           if iter_idx > 0:
-                              if const_expr(self.dm_dsq):
+                              if const_expr(self.dm_dsq and self.dm_dsqsr):
+                                  pass   # DM dsqsr: S-read already signalled right after the S load
+                              elif const_expr(self.dm_dsq):
                                   # DM dsq: S(t) read by this warp (wait::ld done before the pair barrier) -> the reduce warps may let
                                   # dQ(t-1) overwrite the S tail; they install the dQ(t-1) SFs and commit pipeline_dS(t-1)
                                   dm_utils.tc_fence_before()
@@ -5011,7 +5055,9 @@ class DMBackwardSm100:
                                       self.compute_sync_barrier.arrive_and_wait()
                                   if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
                                       if iter_idx > 0:
-                                          if const_expr(self.dm_dsq):
+                                          if const_expr(self.dm_dsq and self.dm_dsqsr):
+                                              pass   # DM dsqsr: S-read already signalled right after the S load
+                                          elif const_expr(self.dm_dsq):
                                               # DM dsq: S(t) read by this warp (wait::ld done before the pair barrier) -> the reduce warps may let
                                               # dQ(t-1) overwrite the S tail; they install the dQ(t-1) SFs and commit pipeline_dS(t-1)
                                               dm_utils.tc_fence_before()
@@ -5051,7 +5097,9 @@ class DMBackwardSm100:
                               self.compute_sync_barrier.arrive_and_wait()
                           if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
                               if iter_idx > 0:
-                                  if const_expr(self.dm_dsq):
+                                  if const_expr(self.dm_dsq and self.dm_dsqsr):
+                                      pass   # DM dsqsr: S-read already signalled right after the S load
+                                  elif const_expr(self.dm_dsq):
                                       # DM dsq: S(t) read by this warp (wait::ld done before the pair barrier) -> the reduce warps may let
                                       # dQ(t-1) overwrite the S tail; they install the dQ(t-1) SFs and commit pipeline_dS(t-1)
                                       dm_utils.tc_fence_before()

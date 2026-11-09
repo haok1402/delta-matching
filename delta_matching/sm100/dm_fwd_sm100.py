@@ -458,7 +458,8 @@ class DMForwardSm100:
         # publish x_b = max(S_b) c_b and the fp32 block sum through SMEM. P codes of block q go to S_s + 32 q (the
         # block's own S columns), SF to S_s + 16 (block 0's columns, written after every slice loaded S). Same TMEM map,
         # same MMA order; every op on a value is today's op (bitwise O / LSE / P codes).
-        self.dm_slice = (self.dm_opts.get("slice", "0") == "1" and self.q_stage == 2 and not self.use_s_ping_pong
+        # DEFAULT ON (fwdmufu promotion, bitwise vs the previous forward); DM_FWD_OPTS slice=0 = previous softmax layout
+        self.dm_slice = (self.dm_opts.get("slice", "1") == "1" and self.q_stage == 2 and not self.use_s_ping_pong
                          and self.cta_group_size == 1 and not self.dm_sspv and self.n_block_size == 128
                          and self.head_dim_v_padded == 128 and score_mod is None and mask_mod is None
                          and not self.is_local and not self.is_split_kv and not self.pack_gqa

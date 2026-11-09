@@ -223,15 +223,20 @@ def run_case(mod, fn, case, dev):
                         atexit.register(load.kill)          # never leave the load running if the runner dies
                     POISON_MODE[0] = "none"
                     out = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
-                    keep = q.shape[0] * q.shape[2] * q.shape[1] ** 2 <= 2 ** 28
+                    # mixed stress (accuracy-audit 11:25): alternate the primary inputs with an alt family; each call is
+                    # compared with the first call of its own input set
+                    alt = tuple(case[n_].to(dev) for n_ in ("aq", "ak", "av", "ado")) if "aq" in case else None
+                    out_alt = fwd_bwd(fn, *alt, case["causal"], mode) if alt else None
+                    keep = q.shape[0] * q.shape[2] * q.shape[1] ** 2 <= 2 ** 28 and alt is None
                     calls = [[None if t is None else t.cpu() for t in out]] if keep else None
                     nonfin, gmax, bmax, emax = 0, 0.0, 0.0, 0.0
                     where = {}       # location of the worst block / element deviation (tensor, call, poison, block, head)
                     for it in range(n - 1):
                         POISON_MODE[0] = ("ff", "zero", "rand", "none")[it % 4]
-                        o2 = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
+                        use_alt = alt is not None and it % 2 == 1
+                        o2 = fwd_bwd(fn, *(alt if use_alt else (q, k, v, do)), case["causal"], mode)
                         nonfin += any(t is not None and not torch.isfinite(t).all() for t in o2)
-                        for tn, t, t0 in zip(("O", "dQ", "dK", "dV"), o2, out):
+                        for tn, t, t0 in zip(("O", "dQ", "dK", "dV"), o2, out_alt if use_alt else out):
                             if t is None or t0 is None:
                                 continue
                             a_, b_ = t.double(), t0.double()
@@ -249,6 +254,7 @@ def run_case(mod, fn, case, dev):
                             if bv > bmax:
                                 ix = int(br.argmax())
                                 where["block"] = {"tensor": tn, "call": it + 1, "poison": POISON_MODE[0], "rel": bv,
+                                                  "inputs": "alt" if use_alt else "primary",
                                                   "batch": ix // (nb * H_), "block": (ix // H_) % nb, "head": ix % H_}
                             bmax = max(bmax, bv)
                             rowmax = b_.abs().amax(-1, keepdim=True).clamp_min(1e-30)

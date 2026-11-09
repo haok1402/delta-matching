@@ -148,8 +148,30 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     def rn(*s):
         return torch.randn(*s, generator=gen, device=dev, dtype=torch.float32)
     q, k, v, do = rn(B, N, H, D), rn(B, N, Hk, D), rn(B, N, Hk, D), rn(B, N, H, D)
+    if kind.startswith("stress60mix_"):               # alternating stress: primary inputs randn, alt = the named family
+        kind = "randn"
     if kind.startswith("stress60_"):                  # stress60 on a named input family, e.g. stress60_ramp
         kind = kind[len("stress60_"):]
+    if kind.startswith("audit_"):
+        # accuracy-audit's rescale families (sm100/audit/families.py, 11:25): q ~ sqrt(D) u + noise, k_j = s_j u + noise,
+        # so the logit ~ s_j along the keys.  ramp +12 nats/tile (rescale every tile), ramp_th +6, ramp_sm +3, ramp_neg -12
+        # (control), growmax: spike keys every 512 whose height grows +10 nats each
+        fam = kind[len("audit_"):]
+        u = rn(D)
+        u = u / u.norm()
+        j = torch.arange(N, device=dev, dtype=torch.float32)
+        if fam in ("ramp", "ramp_th", "ramp_sm", "ramp_neg"):
+            sj = {"ramp": 12.0, "ramp_th": 6.0, "ramp_sm": 3.0, "ramp_neg": -12.0}[fam] / 128.0 * j
+        elif fam == "growmax":
+            sj = torch.zeros(N, device=dev)
+            pos = torch.arange(256, N, 512, device=dev)
+            sj[pos] = 10.0 * torch.arange(1, len(pos) + 1, device=dev, dtype=torch.float32)
+        else:
+            raise ValueError(kind)
+        q = math.sqrt(D) * u.expand(B, N, H, D) + 0.5 * rn(B, N, H, D)
+        k = sj[None, :, None, None] * u + 0.5 * rn(B, N, Hk, D)
+        v, do = rn(B, N, Hk, D), rn(B, N, H, D)
+        return [x.to(BF).contiguous() for x in (q, k, v, do)]
     if kind in ("randn", "stress", "stress20", "stress60"):
         pass
     elif kind == "ramp":
@@ -320,9 +342,12 @@ def build_cases(tier, supports, seed):
         shapes += [(8, 32, 8, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"])]
         if nc:
             shapes += [(8, 32, 8, up(4096), False, ["stress60", "stress60_ramp", "stress60_growmax"])]
-        shapes += [(1, 8, 2, up(1152), True, ["ramp", "growmax"]), (2, 16, 16, up(4096), True, ["ramp", "growmax"])]
+        RESC = ["ramp", "growmax", "audit_ramp", "audit_ramp_th", "audit_ramp_sm", "audit_growmax", "audit_ramp_neg"]
+        shapes += [(1, 8, 2, up(1152), True, RESC), (2, 16, 16, up(4096), True, RESC)]
         if nc:
-            shapes += [(1, 8, 2, up(1408), False, ["ramp", "growmax"])]
+            shapes += [(1, 8, 2, up(1408), False, RESC)]
+        # accuracy-audit 11:25 (3): alternate randn and rescale-family calls in one stress sequence
+        shapes += [(8, 32, 8, up(4096), True, ["stress60mix_audit_ramp", "stress60mix_audit_growmax"])]
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
             if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
@@ -685,10 +710,13 @@ def main():
         if any(r[1] == "mutate" for r in case["runs"]):
             case["q2"], case["k2"], case["v2"], _ = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"],
                                                                 gen, cpu)
+        if case["kind"].startswith("stress60mix_"):
+            case["aq"], case["ak"], case["av"], case["ado"] = make_inputs(case["kind"][len("stress60mix_"):], case["B"],
+                                                                          case["N"], case["H"], case["Hk"], gen, cpu)
         cf = os.path.join(tmp, f"case{i:03d}.pt")
         torch.save({kk: (vv.cpu() if torch.is_tensor(vv) else vv) for kk, vv in case.items()}, cf)
         files.append(cf)
-        for kk in ("q", "k", "v", "do", "q2", "k2", "v2"):
+        for kk in ("q", "k", "v", "do", "q2", "k2", "v2", "aq", "ak", "av", "ado"):
             case.pop(kk, None)
     jp, op = os.path.join(tmp, "job.pt"), os.path.join(tmp, "out.pt")
     torch.save({"device": a.device, "case_files": files, "fwd_only": FWD_ONLY}, jp)

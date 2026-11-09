@@ -215,7 +215,7 @@ def headline_shapes():
     if os.path.exists(HEADLINE):
         return json.load(open(HEADLINE))["shapes"]
     return [{"B": max(1, 32768 // N), "H": H, "Hk": Hk, "N": N, "causal": c}
-            for (H, Hk) in ((16, 16), (32, 8)) for N in (4096, 8192, 32768, 65536) for c in (True, False)]
+            for (H, Hk) in ((16, 16), (32, 8)) for N in (4096, 8192, 32768, 65536) for c in (True,)]
 
 
 def build_cases(tier, supports, seed):
@@ -265,8 +265,8 @@ def build_cases(tier, supports, seed):
         shapes.append((1, 16, 16, up(65536), True, ["stress"]))
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
-            if sh["causal"] or nc:
-                shapes.append((sh["B"], sh["H"], sh["Hk"], up(sh["N"]), sh["causal"], ["randn"]))
+            if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
+                shapes.append((sh["B"], sh["H"], sh["Hk"], up(sh["N"]), True, ["randn"]))
     cases = []
     for i, (B, H, Hk, N, causal, kinds) in enumerate(shapes):
         for kind in kinds:

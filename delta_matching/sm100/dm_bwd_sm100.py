@@ -5050,8 +5050,9 @@ class DMBackwardSm100:
                                   if const_expr("pdump" in self.dm_opts):
                                       dm_pb = aux_data.tensors[5]
                                       dm_kg = dm_idx0[None, stage, 0, 0][i_][0]
-                                      dm_pb[batch_idx, head_idx, dm_qg, dm_kg] = tSrS_cur[i_]
-                                      aux_data.tensors[6][batch_idx, head_idx, dm_qg, dm_kg] = tdPrdP_cur[i_]
+                                      if dm_kg < seqlen.seqlen_k:   # keys past N (empty half of a partial cluster)
+                                          dm_pb[batch_idx, head_idx, dm_qg, dm_kg] = tSrS_cur[i_]
+                                          aux_data.tensors[6][batch_idx, head_idx, dm_qg, dm_kg] = tdPrdP_cur[i_]
                           tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
                               (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                               (dm_a[stage], dm_a[stage]),

@@ -3564,7 +3564,7 @@ class DMBackwardSm100:
                 cta_group=self.cta_group_size,
             )
         # DM mmaiss timing-only ablations (outputs WRONG): skip issuing MMA groups, keep every commit/arrive.
-        # abl:nodk / abl:nodq / abl:nodv / abl:nos / abl:nodp ; abl:noacc = nodk+nodq+nodv
+        # abl:dqhalf: skip the dQ bulk reduce of odd kv_block (timing bound for halving dQ L2 traffic). abl:nodk / abl:nodq / abl:nodv / abl:nos / abl:nodp ; abl:noacc = nodk+nodq+nodv
         # abl:pace=<P>: each skipped dK / dQ / dV group is replaced by a ~P/4 / P/2 / P/4 clock spin on the issuer
         # (Codex "paced skip" control: separates issue/control timing from MMA execution/contention).
         _pace = int(next((x[9:] for x in self.dm_opts if x.startswith("abl:pace=")), "0"))
@@ -6218,7 +6218,7 @@ class DMBackwardSm100:
                                                 dm_v = gdQaccum_cur[4 * tidx + dm_i + 512 * dm_k, stage + stage_offset] + dm_v
                                             dm_dq[batch_idx, dm_row, head_idx, dm_col0 + dm_j] = dm_dq.element_type(
                                                 dm_v * Float32(self.tile_hdim ** -0.5))
-                        if is_tma_warp and not m_block_oob_upper and not dm_last and const_expr("dqtma" not in self.dm_abl):
+                        if is_tma_warp and not m_block_oob_upper and not dm_last and const_expr("dqtma" not in self.dm_abl) and (const_expr("dqhalf" not in self.dm_abl) or (kv_block & 1) == 0):
                             with cute.arch.elect_one():
                                 if dm_first:
                                     dm_utils.cpasync_bulk_store_s2g(

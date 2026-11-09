@@ -402,6 +402,12 @@ class DMForwardSm100:
         # variant knobs: DM_FWD_OPTS="k=v,k=v" (hashed into the compile-cache fingerprint by fwd.py)
         import os as _os
         self.dm_opts = dict(kv.split("=") for kv in _os.environ.get("DM_FWD_OPTS", "").split(",") if "=" in kv)
+        # det2 defaults (bitwise, fwdrw R6): ss_pv=1 (P codes in SMEM, SS PV), kvs=6 (smem budget), lean=1; an explicit
+        # DM_FWD_OPTS value overrides (e.g. "ss_pv=0,lean=0,kvs=99" = the previous forward)
+        # (only where ss_pv is supported: q_stage == 2, 1-CTA, no S ping-pong; short N picks q_stage = 1 -> old path)
+        if self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1:
+            for _k, _v in (("ss_pv", "1"), ("kvs", "6"), ("lean", "1")):
+                self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
         if "split" in self.dm_opts:
             self.split_P_arrive = int(self.dm_opts["split"])

@@ -18,8 +18,8 @@ D = 128
 
 
 def _det():
-    """DM_BWD_DET=0: non-deterministic backward (FA4-style unordered dQ / GQA dK,dV accumulation). Default 1."""
-    return os.environ.get("DM_BWD_DET", "1") != "0"
+    """DM_BWD_DET=0 or DM_DETERMINISTIC=0: non-deterministic backward (FA4-style unordered dQ / GQA dK,dV accumulation). Default 1."""
+    return os.environ.get("DM_BWD_DET", os.environ.get("DM_DETERMINISTIC", "1")) != "0"
 
 
 class _DMAttnSm100(torch.autograd.Function):

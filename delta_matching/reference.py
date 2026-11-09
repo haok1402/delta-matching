@@ -420,6 +420,7 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
         pdp = torch.empty(B, H, N, device=dev, dtype=torch.float64) if aux else None     # sum_j P dP
         psum = torch.empty(B, H, N, device=dev, dtype=torch.float64) if aux else None    # sum_j P
         pdpa = torch.empty(B, H, N, device=dev, dtype=torch.float64) if aux else None    # sum_j |P dP|
+        pdpt = torch.empty(B, H, N, device=dev, dtype=torch.float64) if aux else None    # sum_j P (|dO| . |V_j|): dP term size
         qb = min(q_block, N)
         assert qb % 128 == 0 or qb == N
         kidx = torch.arange(N, device=dev)
@@ -464,6 +465,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
                 pdp[:, :, i0:i1] = (P.double() * dP.double()).sum(-1)
                 psum[:, :, i0:i1] = P.double().sum(-1)
                 pdpa[:, :, i0:i1] = (P.double() * dP.double()).abs().sum(-1)
+                pdpt[:, :, i0:i1] = (P.double() * (dOa[:, :, i0:i1].abs() @ Vd[:, :, :nk].abs().repeat_interleave(rep, 1)
+                                                   .transpose(-1, -2)).double()).sum(-1)
             if delta_override is not None:
                 dl = delta_override.to(f32).reshape(B, H, N)[:, :, i0:i1, None]
             elif mode == "stale":
@@ -487,7 +490,7 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
     out = {"O": (Ob if round_o else O).transpose(1, 2), "LSE": LSE, "dQ": dQ.transpose(1, 2), "dK": dK.transpose(1, 2),
            "dV": dV.transpose(1, 2), "delta": delta}
     if aux:
-        out.update(rowsum_dS=rs, rowsum_dSq=rsq, colsum_dK=dK.sum(2), sum_PdP=pdp, sum_P=psum, sum_absPdP=pdpa)
+        out.update(rowsum_dS=rs, rowsum_dSq=rsq, colsum_dK=dK.sum(2), sum_PdP=pdp, sum_P=psum, sum_absPdP=pdpa, sum_PdPterms=pdpt)
     return out
 
 

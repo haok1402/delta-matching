@@ -585,11 +585,18 @@ def check_case(case, cr, preset, dev, verbose):
                                      delta_override=dl_c, q_block=qbk, k_mean=km_c)
                 den = emc["sum_absPdP"]
                 live = den > 0
-                r = ((dl_c.double() * emc["sum_P"] - emc["sum_PdP"]).abs() / den.clamp_min(1e-300))[live]
+                res = (dl_c.double() * emc["sum_P"] - emc["sum_PdP"]).abs()
+                r_raw = (res / den.clamp_min(1e-300))[live]
+                # dP's own fp32 accumulation order (tensor-core MMA vs emulation) is not modelled: allow 4 fp32 ulps of the
+                # size of dP's terms, sum_j P (|dO| . |V_j|), per row. Matters only for rows whose dP cancels inside its own dot
+                # product (32/4 peaked: one row at 4.4e-5 raw with kernel identity 1e-8, delta off by 5e-7 abs)
+                r = ((res - 2.0 ** -21 * emc["sum_PdPterms"]).clamp_min(0) / den.clamp_min(1e-300))[live] \
+                    if "sum_PdPterms" in emc else r_raw
                 bind = max(rel(cand[1], emc["dQ"]), rel(cand[2], emc["dK"]))
                 bind_tol = BIND_ABS + BIND_REL * max(rel(em["dQ"], ex["dQ"]), rel(em["dK"], ex["dK"]))
                 m = {"lse_maxabs": lse_err.max().item(), "rowsum_rel_max": r.max().item() if r.numel() else 0.0,
-                     "rowsum_rel_mean": r.mean().item() if r.numel() else 0.0, "bind_dist": bind}
+                     "rowsum_rel_mean": r_raw.mean().item() if r_raw.numel() else 0.0, "bind_dist": bind,
+                     "rowsum_rel_max_raw": r_raw.max().item() if r_raw.numel() else 0.0}
                 rec["metrics"]["matched:debug_delta"] = m
                 rep_l = (cr.get("debug_repeat") or {}).get("lse")
                 if rep_l is not None:

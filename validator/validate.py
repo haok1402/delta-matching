@@ -148,8 +148,22 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     def rn(*s):
         return torch.randn(*s, generator=gen, device=dev, dtype=torch.float32)
     q, k, v, do = rn(B, N, H, D), rn(B, N, Hk, D), rn(B, N, Hk, D), rn(B, N, H, D)
+    if kind.startswith("stress60_"):                  # stress60 on a named input family, e.g. stress60_ramp
+        kind = kind[len("stress60_"):]
     if kind in ("randn", "stress", "stress20", "stress60"):
         pass
+    elif kind == "ramp":
+        # online-softmax RESCALE path (kda-sm100-sspv2: randn never triggers it): logits rise steadily along the keys, so
+        # every row's running max grows on every key tile.  Channel 0: q = 8, k ramps -28 .. +28 (~40 nats over the row)
+        j = torch.arange(N, device=dev, dtype=torch.float32)
+        q[..., 0] = 8.0
+        k[..., 0] = (28.0 * (2.0 * j / max(N - 1, 1) - 1.0))[None, :, None]
+    elif kind == "growmax":
+        # growing-max rows in steps: k channel 0 is a staircase (16 steps over the sequence), q channel 0 a per-row slope
+        # in [2, 14], so some rows jump the max by many log2 units at each step and others barely move
+        j = torch.arange(N, device=dev, dtype=torch.float32)
+        k[..., 0] = (2.5 * torch.floor(16.0 * j / N) - 20.0)[None, :, None]
+        q[..., 0] = 2.0 + 12.0 * torch.rand(B, N, H, generator=gen, device=dev)
     elif kind.startswith("scaled"):                   # larger logit range: q, k * s
         s = float(kind[6:])
         q, k = q * s, k * s
@@ -302,9 +316,13 @@ def build_cases(tier, supports, seed):
     if tier != "quick":
         # 6a313b0's forward race (ss_pv defaults) changed one O tile on ~1% of calls at B8 H32/8 N4096 and was invisible
         # to 8-call stress: many calls on a multi-batch GQA shape with several CTAs per SM, causal and non-causal
-        shapes += [(8, 32, 8, up(4096), True, ["stress60"])]
+        # kda-sm100-sspv2: also on rescale-triggering inputs (ramp / growing-max rows), and the rescale families in accuracy
+        shapes += [(8, 32, 8, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"])]
         if nc:
-            shapes += [(8, 32, 8, up(4096), False, ["stress60"])]
+            shapes += [(8, 32, 8, up(4096), False, ["stress60", "stress60_ramp", "stress60_growmax"])]
+        shapes += [(1, 8, 2, up(1152), True, ["ramp", "growmax"]), (2, 16, 16, up(4096), True, ["ramp", "growmax"])]
+        if nc:
+            shapes += [(1, 8, 2, up(1408), False, ["ramp", "growmax"])]
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
             if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
@@ -318,7 +336,7 @@ def build_cases(tier, supports, seed):
                 modes = modes[:1]
             runs = [(md, "plain") for md in modes]
             big = B * H * N * N > 2 ** 33
-            if kind not in ("stress", "stress20", "stress60"):
+            if not kind.startswith("stress"):
                 runs += [(modes[0], "repeat")]          # run-to-run spread per case (binding envelope, race detection)
             if kind == "randn" and not big:
                 runs += [(modes[0], "views")]
@@ -328,7 +346,7 @@ def build_cases(tier, supports, seed):
                 runs = [(md, f"stress:{stress_n}") for md in modes]
             if kind == "stress20":
                 runs = [(md, "stress:20") for md in modes]
-            if kind == "stress60":
+            if kind.startswith("stress60"):
                 runs = [(md, "stress:60") for md in modes]
             # full / bench: a fixed seed per case name, so the reference outputs can be cached and reused across candidates;
             # quick: fresh random inputs on every run (no candidate can be tuned to fixed inputs without failing quick)
@@ -359,7 +377,7 @@ def check_case(case, cr, preset, dev, verbose):
         chk("runs", False, cr["error"][-1500:])
         rec["fails"] = fails
         return False, rec
-    if case["kind"] in ("stress", "stress20", "stress60"):
+    if case["kind"].startswith("stress"):
         for key, st in cr.get("stress", {}).items():
             rec["metrics"][f"{key}"] = st
             chk(f"{key}:finite_every_call", st["nonfinite_calls"] == 0,

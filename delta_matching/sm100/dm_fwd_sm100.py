@@ -2337,14 +2337,14 @@ class DMForwardSm100:
                             sV_cur = sV[None, None, None, Vi_index]
                             if const_expr(self.uneven_kv_smem):
                                 sV_cur = self.offset_kv_smem(sV_cur, Vi_index, Vi_phase)
-                            gemm_Pi[stage](
-                                tCrB=tOrVi,
-                                sB=sV_cur,
-                                # smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator),
-                                zero_init=not O_should_accumulate,
-                                mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage) if self.split_P_arrive > 0 else None,
-                                mbar_phase=P_full_O_rescaled_phase,
-                            )
+                            if const_expr(self.dm_opts.get("afpv", "0") != "1"):   # afpv=1: TIMING-ONLY, no in-loop PV MMA
+                                gemm_Pi[stage](
+                                    tCrB=tOrVi,
+                                    sB=sV_cur,
+                                    zero_init=not O_should_accumulate,
+                                    mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage) if self.split_P_arrive > 0 else None,
+                                    mbar_phase=P_full_O_rescaled_phase,
+                                )
                             # Don't need to signal O_full to the correction warps since the
                             # correction warps wait for the softmax warps anyway. By the time the softmax
                             # warps finished, S_i for the next iteration must have been done, so O_i-1
@@ -3056,7 +3056,8 @@ class DMForwardSm100:
             c = qsc[s] * dm_ks
             pipeline_s_p_o.consumer_wait_w_index_phase(s, ph)
             col = Int32(self.tmem_s_offset[s]) + q * 32
-            cute.copy(thr_ld, cute.make_tensor(tSt_ld.iterator + col, tSt_ld.layout), rS)
+            if const_expr(self.dm_opts.get("afl", "0") != "1"):   # afl=1: TIMING-ONLY ablation, no S tcgen05.ld (stale S)
+                cute.copy(thr_ld, cute.make_tensor(tSt_ld.iterator + col, tSt_ld.layout), rS)
             if const_expr(mask_seqlen or mask_causal):
                 # = AttentionMask.apply_mask_sm100 (non-pack-GQA, 1-CTA) restricted to columns [32 q, 32 q + 32)
                 n_blk = cutlass.max(n_block, 0)   # apply_mask_sm100 treats negative n_blocks as block 0 (empty KV range)
@@ -3095,11 +3096,16 @@ class DMForwardSm100:
             bias = Float32(7.0) - kb
             for i in cutlass.range_constexpr(0, 32, 2):
                 rS[i], rS[i + 1] = cute.arch.fma_packed_f32x2((rS[i], rS[i + 1]), (c, c), (bias, bias))
-            for i in cutlass.range_constexpr(0, 32, 2):
-                rS[i] = cute.math.exp2(rS[i], fastmath=True)
-                rS[i + 1] = cute.math.exp2(rS[i + 1], fastmath=True)
+            if const_expr(self.dm_opts.get("afx", "0") == "1"):   # afx=1: TIMING-ONLY ablation, exp2 -> FMA (no MUFU)
+                for i in cutlass.range_constexpr(0, 32, 2):
+                    rS[i], rS[i + 1] = cute.arch.fma_packed_f32x2((rS[i], rS[i + 1]), (Float32(0.25), Float32(0.25)), (Float32(0.5), Float32(0.5)))
+            else:
+                for i in cutlass.range_constexpr(0, 32, 2):
+                    rS[i] = cute.math.exp2(rS[i], fastmath=True)
+                    rS[i + 1] = cute.math.exp2(rS[i + 1], fastmath=True)
             rP8.store(rS.load().to(self.q_dtype))
-            cute.copy(thr_st, rP, cute.make_tensor(tSt_st.iterator + col, tSt_st.layout))
+            if const_expr(self.dm_opts.get("afs", "0") != "1"):   # afs=1: TIMING-ONLY ablation, no P tcgen05.st
+                cute.copy(thr_st, rP, cute.make_tensor(tSt_st.iterator + col, tSt_st.layout))
             cute.arch.fence_view_async_tmem_store()
             dm_utils.tc_fence_before()     # P tcgen05.st ordered before the P-full arrival (PV reads it)
             if const_expr(self.dm_opts.get("warr", "0") == "1"):

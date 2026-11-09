@@ -234,6 +234,25 @@ def time_iters(make_call, flusher, min_iters, min_time, max_iters, host_ms):
     return ts
 
 
+def sustained_ms(make_call, seconds, clocks):
+    """Training-like duty cycle: back-to-back calls with NO flush and NO spin for ~`seconds`, timed as one event window.
+    Returns (ms per call, mean SM MHz, share of NVML samples with a power-cap clock-event reason).  fwd / fwd_bwd only
+    (a bwd needs its forward in the window)."""
+    pre, run = make_call(); pre(); run(); torch.cuda.synchronize()
+    t0 = time.perf_counter(); k = 0
+    e0 = torch.cuda.Event(enable_timing=True); e1 = torch.cuda.Event(enable_timing=True)
+    e0.record()
+    mhz, cap = [], []
+    while time.perf_counter() - t0 < seconds or k < 3:
+        pre, run = make_call(); pre(); run(); k += 1
+        if k % 2 == 0:
+            c = clocks.read()
+            if "sm_mhz" in c:
+                mhz.append(c["sm_mhz"]); cap.append(bool(c.get("throttle", 0) & 0x4))
+    e1.record(); e1.synchronize()
+    return e0.elapsed_time(e1) / k, (statistics.mean(mhz) if mhz else float("nan")), (sum(cap) / len(cap) if cap else float("nan"))
+
+
 def summarize(ts):
     ts_sorted = sorted(ts)
     q = lambda p: ts_sorted[min(len(ts_sorted) - 1, int(p * len(ts_sorted)))]
@@ -379,6 +398,9 @@ def main():
     ap.add_argument("--pythonpath", action="append", default=[])
     ap.add_argument("--suite", default="main", choices=list(SUITES))
     ap.add_argument("--seqlens", default=None, help="default: per suite (focus: 8k,32k,64k; others 1k..32k)")
+    ap.add_argument("--sustain-s", type=float, default=1.0, help="seconds of back-to-back (no flush/spin) calls per "
+                    "fwd / fwd_bwd arm, reported as sus_ms (training-like duty cycle); 0 disables")
+    ap.add_argument("--heads", default=None, help="only these H/Hk, e.g. 32/4,16/4")
     ap.add_argument("--no-long-ref", action="store_true", help="skip the sanity gate for N > 8k")
     ap.add_argument("--causal", default="both", choices=["true", "false", "both"])
     ap.add_argument("--passes", default="fwd,bwd,fwd_bwd")
@@ -401,6 +423,9 @@ def main():
     seqlens = [int(x) for x in a.seqlens.split(",")] if a.seqlens else (None if a.suite == "focus" else SEQLENS)
     causals = {"true": [True], "false": [False], "both": [True, False]}[a.causal]
     shards = shapes_for(a.suite, seqlens, causals)
+    if a.heads:
+        hk = {tuple(map(int, x.split("/"))) for x in a.heads.split(",")}
+        shards = [x for x in shards if (x["H"], x["Hk"]) in hk]
     si, sn = map(int, a.shard.split("/"))
     shards = shards[si::sn]
     passes = a.passes.split(",")
@@ -475,6 +500,15 @@ def main():
             ref, nk, gg = ref_attn_fp32(q, k, v, s["causal"], do)
         elif not a.no_long_ref:
             ref, nk, gg = ref_attn_long(q, k, v, s["causal"], do)
+        # --resume unit = the whole shape: a shape cut mid-way is re-timed with EVERY arm, so each arm's ratio to FA4 stays
+        # same-process (a resume that re-timed only the missing arm left it without an FA4 partner, 46a5/ba97 20:17).
+        def _runs(fn):
+            sp = getattr(fn, "supports", {})
+            return (s["causal"] or sp.get("noncausal", False in sp.get("causal", [True, False]))) and \
+                not N % sp.get("seqlen_multiple", sp.get("min_seqlen_multiple", 1))
+        want = {(arm, B, N, H, Hk, s["causal"], p) for arm, (fn, fo) in arms.items() if _runs(fn)
+                for p in passes if not (fo and p != "fwd")}
+        sdone = done if want <= done else set()
         items = []                                 # (arm, pass, make_call, rec0)
         for arm, (fn, fwd_only) in arms.items():
             sup = getattr(fn, "supports", {})
@@ -485,7 +519,7 @@ def main():
                 continue                           # outside what the candidate declares (and was validated for)
             rec0 = dict(meta, arm=arm, **s)
             todo = [p for p in passes if not (fwd_only and p != "fwd")
-                    and (arm, B, N, H, Hk, s["causal"], p) not in done]
+                    and (arm, B, N, H, Hk, s["causal"], p) not in sdone]
             if not todo:
                 continue
             if ref is not None:
@@ -524,6 +558,7 @@ def main():
         ts = {i: [] for i in range(len(ok))}
         rmed = {i: [] for i in range(len(ok))}
         hms = {i: [] for i in range(len(ok))}
+        clk_s = {i: [] for i in range(len(ok))}; cap_s = {i: [] for i in range(len(ok))}
         c0 = clocks.read()
         for r in range(R):
             order = list(range(len(ok)))
@@ -532,11 +567,18 @@ def main():
                 t = time_iters(ok[i][2], flusher, max(1, a.min_iters // R), a.min_time / R, max(1, a.max_iters // R),
                                hms[i])
                 ts[i] += t; rmed[i].append(statistics.median(t))
+                cr = clocks.read()
+                if "sm_mhz" in cr:
+                    clk_s[i].append(cr["sm_mhz"]); cap_s[i].append(bool(cr.get("throttle", 0) & 0x4))
         c1 = clocks.read()
         for i, (arm, p, mk, rec0) in enumerate(ok):
             res = summarize(ts[i]); res["round_ms"] = rmed[i]
             res["host_ms"] = statistics.median(hms[i])
             res["launch_bound"] = bool(res["host_ms"] > 0.9 * res["ev_ms"])
+            res["sm_mhz_rounds"] = statistics.mean(clk_s[i]) if clk_s[i] else float("nan")
+            res["pcap_share_rounds"] = (sum(cap_s[i]) / len(cap_s[i])) if cap_s[i] else float("nan")
+            if a.sustain_s > 0 and p in ("fwd", "fwd_bwd"):
+                res["sus_ms"], res["sus_sm_mhz"], res["sus_pcap_share"] = sustained_ms(mk, a.sustain_s, clocks)
             if a.cupti_iters:
                 res["cupti_ms"] = cupti_ms(mk, flusher, a.cupti_iters)
             res["tflops"] = fa_flops(s, p) / (res["ev_ms"] * 1e-3) / 1e12

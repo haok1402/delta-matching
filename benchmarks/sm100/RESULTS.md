@@ -2,6 +2,71 @@
 
 ## HEADLINE (target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 12:52
 
+> **17:50 FULL 8-SHAPE STATUS (128k now counts: 94ec380 PASSED at 128k in both modes, dm-validator 18:40).**
+> 94ec380 our NON-DET vs FA4 NON-DET, causal fwd+bwd, GQA 32/4 and 16/4:
+>
+> | timing | 32/4 8k / 32k / 64k / 128k | 16/4 8k / 32k / 64k / 128k | geomean (8) |
+> |---|---|---|---|
+> | per-call (gapped; 4-GPU median 8k-64k, 1 GPU at 128k) | 0.861 / 0.992 / 0.997 / 1.022 | 0.821 / 0.969 / 1.011 / 1.015 | **0.958x** |
+> | **sustained (back to back, training-like; 1 GPU, same lease)** | 0.974 / 0.989 / 0.996 / 0.997 | 0.966 / 0.986 / 0.998 / 1.001 | **0.988x** |
+>
+> Gap to 1.10x: +14.8% (gapped) / +11.3% (sustained). The 128k gapped ratios (1.015-1.022) and the sustained ratios at 64k-128k
+> (~1.00) agree: at long context the fp8 kernel is at parity or slightly ahead of FA4. The remaining gap is the bwd (0.96x at
+> 128k) and, for per-call timing, 8k.
+> **Fence v3 4582e24 (minimal fences; pending validation) vs 94ec380, same lease, all 8 shapes: fwd+bwd nd -0.6%, det -0.8%**
+> (per shape 0.993..0.996; the same under sustained timing; fwd -1.2%, bwd -0.3% nd). v2 (927eb0f) was -0.8% / -1.2%.
+> 4-GPU re-measure of the 8-shape headline (gapped + sustained) when 4582e24 is validated (one 4-GPU run per hour).
+
+> **17:25 NEW: training duty cycle (sustained) vs per-call (gapped) timing, 94ec380, same lease, nvl72086-T17 GPU 0.**
+> kda-sm100-interf found both kernels sit at the ~1170 W power cap. My per-call method (L2 flush + GPU spin before every
+> call) leaves short idle gaps that let the clock recover, and that mostly helps FA4, the more power-hungry kernel. attnbench
+> now also times 1 s of back-to-back calls (no flush/spin) per arm = sus_ms, plus NVML SM clock / power-cap share.
+> Our non-det vs FA4 non-det, fwd+bwd, gapped -> **sustained** (SM clock FA4 vs DM during the sustained loop):
+>
+> | H/Hk | 8k | 32k | 64k |
+> |---|---|---|---|
+> | 32/4 | 0.847 -> **0.974** (1762 vs 2055 MHz) | 0.979 -> **0.989** (1841 vs 2046 MHz) | 0.988 -> **0.996** (1356 vs 2058 MHz) |
+> | 16/4 | 0.805 -> **0.966** (1598 vs 2057 MHz) | 0.940 -> **0.986** (1596 vs 2051 MHz) | 0.993 -> **0.998** (1379 vs 2054 MHz) |
+>
+> **Geomean of these 6 shapes: gapped 0.922 -> sustained 0.985** (det vs FA4-det sustained 1.020). In
+> sustained loops FA4 throttles to 1.36-1.84 GHz while DM holds ~2.05 GHz. The 8k gap shrinks from 0.81-0.85 to 0.97, and 32k-64k
+> barely move. Training runs back to back, so **the sustained number is the more training-relevant one.** Both will be
+> reported from now on; the headline column stays gapped until the user decides. 128k sustained is coming with the 4582e24 run.
+>
+> 94ec380 at 128k: DETERMINISTIC mode PASSED at 128k (dm-validator 17:50); the nd 128k reruns are pending.
+
+> **16:25 128k (94ec380, single GPU per head config). NOT COUNTED YET: the 16:45 128k finding was resolved on the KERNEL
+> side (accuracy-audit 16:55 exact-operand probe, identity 1.5e-7; dm-validator 17:30: root cause = its emulation's
+> K-centering summation order flipping 102 of 67M K codes). It still awaits dm-validator's 32/4 128k accuracy rerun and a
+> VALIDATED.md entry.** our non-det vs FA4 non-det
+> fwd+bwd **32/4: 1.022x, 16/4: 1.015x** (det vs FA4: 1.007 / 1.002; det vs FA4-det: 1.078 / 1.068). The forward is 1.27-1.29x FA4
+> at 128k (FA4 bf16 is power-capped: SM ~1.31-1.34 GHz), the backward 0.96x. So the fp8 forward's advantage grows with
+> length, but the backward still limits fwd+bwd to about parity. Sanity: O 5.5e-2, dQ 6.7e-2 (same as the shorter shapes), no
+> SUSPECT. Raw: results/hl_94ec380.g10/g11.jsonl.
+> **Fence fix 927eb0f vs 94ec380 (same lease, 1 GPU, --gate; 8k-64k; 128k done 16:30 but cross-lease, see below):** cost
+> fwd+bwd nd -0.8% (per shape 0.988..1.000), det -1.2%; fwd -0.6%, bwd -0.9% nd / -1.3% det. Sanity unchanged (4e-8). Small,
+> on every shape, and within kda's <= 1% estimate for nd.
+> 128k fence pair (16:30): A's 128k came from the timed-out lease and B's from the relaunch with a 15-min timeout. Not same-lease,
+> so the +1.0% (nd) / +1.4% (det) for the fenced build at 128k is within cross-lease noise. The fence cost stays the 8k-64k
+> same-lease number: nd -0.8%, det -1.2%. kda-sm100-fwdfence notes the fences act as ptxas code-motion barriers (+NOPs,
+> some pass-0 spills) and is preparing a minimal fence variant.
+
+> **15:50 USER: shapes changed to GQA only, H/Hk = 32/4 and 16/4 (16/4 = the 1.67B model), hd128, causal, N = 8k / 32k / 64k /
+> 128k (B 4/1/1/1). MHA 16/16 and 32/8 dropped.** FA4 backward sweep on these shapes (results/fa4sweep.s0.jsonl, Hk=4 rows):
+> the default is still FA4's fastest (tile_n 64 / pack_gqa / no-2CTA within about +-2%; FA4-det 5-9% slower).
+> **94ec380 on the new shapes (nvl72086-T17, 4-GPU median, 8k-64k): our non-det vs FA4 non-det 32/4: 0.861 / 0.992 / 0.997,
+> 16/4: 0.821 / 0.969 / 1.011 (8k / 32k / 64k), geomean over these 6 = 0.939x.** Det vs FA4-det: 32/4 0.913 / 1.033 / 1.028,
+> 16/4 0.870 / 0.986 / 1.041. GPU spread: 8k up to 0.06, 32k-64k <= 0.04. bwd: 0.79-0.82 at 8k, 0.91-0.97 at 32k-64k.
+> **128k is pending:** 1-GPU leases are queued (the lead's rule allows one 4-GPU run per hour), and the numbers count only after
+> dm-validator validates 128k. The full 8-shape geomean follows then.
+
+> **14:15 accuracy-audit ruling (fix required, no measured result affected):** the production kernels (fwd, pass 0, bwd) lack
+> the tcgen05 fence::before/after_thread_sync around cross-thread TMEM hand-offs. They are ordered in practice (~50k clean
+> stress calls) but not by the memory model. kda-sm100 is adding them; the fix must stay bitwise and is expected to cost
+> <= 1%. **Fairness note: upstream FA4 has the same missing fences.** The baseline stays FA4 as shipped, so after the fix our
+> kernel carries a small correctness cost that FA4 does not. I will report the fence cost separately (same-lease A/B vs 94ec380).
+> 0fc2c46 (host-only bwd knob fix on 94ec380, bitwise rider, PASS 14:10): no GPU change, not re-timed.
+
 Status source of truth: sm100/validate/VALIDATED.md. **94ec380 = PROMOTION PASS in both modes (13:50), the validated kda-sm100
 tip** = 3a1533b host fast path + e57fe49 forward (bitwise vs 3a1533b 27/27, cold full 92/92 per mode, replay probe 100/100).
 
@@ -1427,3 +1492,67 @@ Forward sync changes require accuracy-audit's forward stress (>= 1500 calls/shap
 | dm_stale | 1 | bwd | 1.185 | 1.185 | +0.0% | 1.259 | 0.993..1.008 | 6 |
 | dm_stale | 1 | fwd | 0.987 | 1.017 | +3.0% | 1.013 | 1.021..1.025 | 6 |
 | dm_stale | 1 | fwd_bwd | 1.144 | 1.154 | +0.9% | 1.196 | 0.998..1.007 | 6 |
+
+### Pre-measured, PENDING validation (incl. forward stress): 59ac22a (slice softmax as forward default, bitwise) vs e218a9a (= 94ec380 + b4e635a knob fix), same lease, nvl72086-T17 GPU 0 (15:10)
+- fwd +6.2% kernel time (+5.3..7.3% per shape, both modes). fwd+bwd nd +0.7% (single-GPU 0.930x -> 0.937x FA4), det +0.4%.
+- bwd -1.0..-1.2% geomean (per shape 0.981..1.000): small but on most shapes. Worth a look: the backward code is unchanged, so this
+  may be a side effect of the forward's outputs/layout on the bwd prestage, or noise at the edge of the floor.
+- Sanity: det bitwise, nd 5e-8. No SUSPECT flags. Matches kda-sm100-fwdmufu's own screen (fwd 0.94, fwd+bwd 0.99 time).
+
+| arm | causal | pass | e218a9a | 59ac22a | change | 59ac22a vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 1 | bwd | 0.888 | 0.880 | -1.0% | 0.933 | 0.981..1.000 | 6 |
+| dm_matched | 1 | fwd | 1.025 | 1.089 | +6.2% | 1.087 | 1.053..1.073 | 6 |
+| dm_matched | 1 | fwd_bwd | 0.926 | 0.930 | +0.4% | 0.970 | 0.995..1.015 | 6 |
+| dm_nd | 1 | bwd | 0.895 | 0.884 | -1.2% | 0.938 | 0.983..1.000 | 6 |
+| dm_nd | 1 | fwd | 1.026 | 1.089 | +6.2% | 1.087 | 1.057..1.073 | 6 |
+| dm_nd | 1 | fwd_bwd | 0.930 | 0.937 | +0.7% | 0.976 | 1.006..1.015 | 6 |
+| dm_stale | 1 | bwd | 1.192 | 1.176 | -1.3% | 1.248 | 0.974..1.000 | 6 |
+| dm_stale | 1 | fwd | 1.025 | 1.088 | +6.1% | 1.086 | 1.052..1.072 | 6 |
+| dm_stale | 1 | fwd_bwd | 1.153 | 1.166 | +1.1% | 1.215 | 1.009..1.019 | 6 |
+
+### 8a8a19a (slice softmax on fence v3) vs 4582e24, final (19:48): same lease 8k-64k, 128k cross-lease (one commit x head per run)
+nd fwd+bwd: 8k-64k +0.7% (per shape 0.999..1.018); 128k +0.2% (both heads, cross-lease; FA4 itself equal across the two leases to
+0.2%). fwd +7..8% everywhere; **bwd -0.7% (8k-64k), -0.9..-1.4% at 128k: the unchanged bwd gets slower behind the slice forward**
+(flagged to kda-sm100-fwdmufu 19:05). det fwd+bwd +0.5%. No SUSPECT flags; sanity unchanged.
+
+### 19:50 — 39d692a / 868cb74 rider A/Bs closed (lead decision)
+39d692a dropped (off by default); 868cb74 is inside abfd948. Remaining 128k parts cancelled (runs f4d9, b9de). Final, 8k–64k only, same-lease, nd vs e218a9a: 39d692a +1.1%, 868cb74 +4.2% (bwd +6.3%). 128k not measured. GPU time moved to abfd948 vs b14fd55 (gated, run 9a82) and the 4582e24 headline re-measure (0567 4-GPU queued, 128k part f9ee running).
+
+### 20:03 — 4582e24 128k parts (1 GPU, nvl72093-T09 gpu0, gated). The first try f9ee hit its 8m timeout; gpupool's retry a20f finished rc=0, so both heads are complete.
+| fwd+bwd 128k (ms, per-call) | FA4 nd | FA4 det | DM det | DM nd | **nd/nd** | det/det |
+|---|---|---|---|---|---|---|
+| 32/4 | 371.1 | 395.9 | 379.9 | 376.3 | **0.986** | 1.042 |
+| 16/4 | 184.4 | 196.4 | 188.7 | 186.5 | **0.989** | 1.041 |
+Compared with 94ec380 (nvl72086-T17): DM nd is 0.6–1.6% faster (378.7→376.3, 189.6→186.5), but FA4 nd is 4.1–4.2% faster on this GPU (387.0→371.1, 192.5→184.4). The drop in the 128k ratio from the earlier 1.022/1.015 therefore comes from the FA4 node/GPU, not from DM. Treat the earlier 128k ratios as ±3–4% node-dependent. No SUSPECT flags.
+
+### 21:03 — 4582e24 headline re-measure (8k–64k: 4-GPU median, nvl72093-T09, run 0567; 128k: 1-GPU parts) — PROVISIONAL, 32/4 128k being re-timed
+Main number = DM non-det (dm_nd) vs FA4 default non-det backward; causal fwd+bwd, per call.
+| H/Hk | 8k | 32k | 64k | 128k |
+|---|---|---|---|---|
+| 32/4 | 0.857 | 0.998 | 0.994 | re-timing (77ce) |
+| 16/4 | 0.822 | 0.964 | 0.999 | 0.989 |
+- Geomean over 7 shapes: 0.943x. 94ec380 had 0.958x over 8 shapes.
+- Sustained (back-to-back, 1 s) nd/nd: 32/4 0.982/1.004/1.002 and 16/4 0.980/1.000/1.004 at 8k/32k/64k.
+- Reference, det vs FA4-det, 8 shapes: 0.990x.
+- Gap to 1.10x: +16.6% geomean (+28–34% at 8k, +10–14% at 32k–64k).
+- Sanity: no SUSPECT flags. o/dq/dk/dv errors are identical to 94ec380 (same seeds, numerics unchanged).
+- **CORRECTION of the 20:02 entry:** in the 32/4 128k row (0.986), FA4 was timed in run f9ee and DM in its retry a20f, two different processes. That pairing is not valid, so the row is withdrawn and is being re-timed in one process (77ce, 12m limit). The 16/4 row (0.989) was paired in one process and stands. Cause: `--resume` re-timed only the missing arms. Fixed 20:33: a shape that was cut part-way is now re-timed with every arm.
+
+### 21:03 — abfd948 (compose: slice + dsqw + fast-path, dq32 off) vs b14fd55, same-lease at 8k–64k, cross-lease at 128k, 8 shapes
+| mode / pass | b14fd55 vs FA4 | abfd948 vs FA4 | change |
+|---|---|---|---|
+| **nd fwd+bwd vs FA4 nd** | 0.939 | **0.993** | **+5.7%** (per shape +2.5..+6.8%) |
+| nd fwd | 1.061 | 1.144 | +7.8% |
+| nd bwd | 0.902 | 0.948 | +5.2% |
+| det fwd+bwd vs FA4 det | 0.926 | 0.959 | +3.5% |
+- The composed build does not show slice 8a8a19a's −0.9% backward cost (nd backward +5.2%).
+- This confirms kda-sm100-compose's estimate (~+4.1%) and comes in higher.
+- abfd948 is not yet validated, so this is not a headline.
+
+### 21:20 — 4582e24 headline FINAL (replaces the PROVISIONAL entry above): 32/4 128k re-timed in one process (77ce, nvl72155-T01 gpu0)
+32/4 128k nd fwd+bwd: FA4 nd 368.2 ms, DM nd 372.5 ms, ratio **0.988** (det vs FA4 det: 392.1 / 377.1 = 1.040).
+- **8-shape geomean, DM nd vs FA4 nd, per call: 0.949x.** 32/4: 0.857/0.998/0.994/0.988; 16/4: 0.822/0.964/0.999/0.989.
+- Gap to 1.10x: +15.9%.
+- 94ec380 (previous headline) was 0.958x.
+- The difference is the v3 fence (−0.6%) plus a FA4 that was ~4% faster on these nodes at 128k.

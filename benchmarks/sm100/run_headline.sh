@@ -7,10 +7,10 @@ SHA=$1
 cd /lustre/fs1/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/sm100/bench
 C=$PWD/cands/kda_full.py:attn
 export FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=${FLASH_ATTENTION_CUTE_DSL_CACHE_DIR:-/lustre/fs1/portfolios/nvr/projects/nvr_elm_llm/users/hcai/workspace/haok1402/sm100/kda/env/dslcache}
-GPUPOOL_WHO=fa4-bench exec ../gpupool/bin/gpupool run --gpus ${NG:-4} --timeout 20m --retry 2 --shell -- "
+GPUPOOL_WHO=fa4-bench exec ../gpupool/bin/gpupool run --gpus ${NG:-4} --headline "$SHA headline re-measure (4-GPU median, fa4-bench)" --timeout 20m --retry 2 --shell -- "
 source ../env/activate.sh
 IFS=, read -ra G <<< \"\$CUDA_VISIBLE_DEVICES\"
 for ((i=0; i<\${#G[@]}; i++)); do
-  KDA_SNAP=\$PWD/snap/$SHA CUDA_VISIBLE_DEVICES=\${G[\$i]} python attnbench.py --arms fa4,fa4_det --cand dm_matched=$C@matched --cand dm_stale=$C@stale ${ND:+--cand dm_nd=$PWD/cands/kda_full_nd.py:attn@matched} --suite focus --tag hl-$SHA-gpu\${G[\$i]} --out results/hl_$SHA.g\$i.jsonl --resume > results/hl_$SHA.g\$i.log 2>&1 &
+  KDA_SNAP=\$PWD/snap/$SHA CUDA_VISIBLE_DEVICES=\${G[\$i]} python attnbench.py --arms fa4,fa4_det --cand dm_matched=$C@matched ${STALE:+--cand dm_stale=$C@stale} ${ND:+--cand dm_nd=$PWD/cands/kda_full_nd.py:attn@matched} --suite focus ${NS:+--seqlens $NS} --tag hl-$SHA-gpu\${G[\$i]} --out results/hl_$SHA.g\$i.jsonl --resume > results/hl_$SHA.g\$i.log 2>&1 &
 done
 wait"

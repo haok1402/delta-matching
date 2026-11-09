@@ -22,7 +22,9 @@ for f in glob.glob(f"results/{pre}.s*.jsonl") + glob.glob(f"results/{pre}.g*.jso
         if "pass_" in r and "error" not in r and (r["H"], r["Hk"], r["N"], r["causal"]) in TARGET:
             d[(r["run_id"], r["arm"], r["H"], r["Hk"], r["N"], r["causal"], r["pass_"])] = r
 gm = lambda xs: math.exp(sum(map(math.log, xs)) / len(xs)) if xs else float("nan")  # noqa: E731
-Ns = sorted({x["N"] for x in json.load(open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), "headline_shapes.json")))["shapes"]})
+_HS2 = json.load(open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), "headline_shapes.json")))["shapes"]
+Ns = sorted({x["N"] for x in _HS2})
+HEADS = sorted({(x["H"], x["Hk"]) for x in _HS2}, reverse=True)
 spread = {}
 hosts = sorted({r["host"] for r in d.values()})
 print(f"arm={arm}  files=results/{pre}.[sg]*.jsonl  host={','.join(hosts)}")
@@ -37,7 +39,7 @@ for base in ("fa4_bf16", "fa4_bf16_det"):
         for p in ("fwd_bwd", "fwd", "bwd"):
             allx = []
             rows = []
-            for (H, Hk) in ((16, 16), (32, 8)):
+            for (H, Hk) in HEADS:
                 cells = []
                 for N in Ns:
                     xs = [d[k][ "ev_ms"] for k in d if k[1:] == (base, H, Hk, N, c, p)]
@@ -72,7 +74,7 @@ if nmax > 1:
     print(f"\nspread across runs/GPUs (min..max of the per-GPU ratio, n = {nmax}), causal fwd+bwd vs fa4_bf16:\n")
     print("| H/Hk | " + " | ".join(f"{n//1024}k" for n in Ns) + " |")
     print("|" + "---|" * (1 + len(Ns)))
-    for (H, Hk) in ((16, 16), (32, 8)):
+    for (H, Hk) in HEADS:
         print(f"| {H}/{Hk} | " + " | ".join("%.3f..%.3f" % spread[(True, "fwd_bwd", H, N, "fa4_bf16")][:2]
                                          if (True, "fwd_bwd", H, N, "fa4_bf16") in spread else "-" for N in Ns) + " |")
 
@@ -92,7 +94,7 @@ if calib:
     print("| H/Hk | " + " | ".join(f"{n//1024}k" for n in Ns) + " | (causal fwd+bwd vs fa4_bf16: raw -> calibrated) |")
     print("|" + "---|" * (2 + len(Ns)))
     est_all = []
-    for (H, Hk) in ((16, 16), (32, 8)):
+    for (H, Hk) in HEADS:
         cells = []
         for N in Ns:
             per = {}

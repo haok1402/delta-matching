@@ -426,6 +426,8 @@ class DMForwardSm100:
         if self.dm_sspv:
             assert self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1
             assert self.n_block_size == 128 and self.head_dim_v_padded == 128
+            # the pipe=1 softmax branch stores P to TMEM and bypasses the SS-PV P/SF/pvdone protocol (Codex review)
+            assert self.dm_opts.get("pipe", "0") != "1", "ss_pv=1 is incompatible with pipe=1"
             self.split_P_arrive = 0
             self.tmem_o_offset = [0, 128]
             self.tmem_s_offset = [256, 256]

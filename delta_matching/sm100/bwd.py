@@ -85,7 +85,7 @@ def _auto_opts(q8, k8, causal=False):
     pN = int(next((o[5:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
     # DM pcN (MHA causal, auto, pers2): dynamic persistent grid (pdyn) over all SMs for causal N <= pcN (default 8192):
     # +6-8% bwd main at causal 8k (2 GPUs, same-process A/B); -1.5% at 32k/64k and -4% non-causal, so off there.
-    pcN = int(next((o[4:] for o in ol if o.startswith("pcN=")), "8192"))
+    pcN = int(next((o[4:] for o in ol if o.startswith("pcN=")), "0"))   # off: fa4-bench harness 8k causal MHA bwd 0.998x (no gain)
     if (q8.shape[2] == k8.shape[2] and "nopers" not in ol and not any(o.startswith("pers=") for o in ol)):
         if q8.shape[1] <= pN:
             ol = ol + ["pers=148"]

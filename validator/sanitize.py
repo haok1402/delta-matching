@@ -51,6 +51,45 @@ def race_sites(out):
     return s
 
 
+def snap_root(cand_file):
+    """The source tree a candidate wrapper imports (its first sys.path.insert of a snapshot / worktree)."""
+    m = re.search(r'sys\.path\.insert\(0, "([^"]+)"\)', open(cand_file.partition(":")[0]).read())
+    return m.group(1) if m else None
+
+
+def map_src_sites(sites, base_root, cand_root):
+    """Carry baseline source sites (file:line) into the candidate's source by diffing the files: a line maps only if it is in an
+    unchanged block (identical text); a site whose line changed does not map, so the candidate's site there counts as NEW."""
+    import difflib
+    cache, out = {}, set()
+    def line_map(fn):
+        if fn not in cache:
+            try:
+                a = open(os.path.join(base_root, "delta_matching/sm100", fn)).read().splitlines()
+                b = open(os.path.join(cand_root, "delta_matching/sm100", fn)).read().splitlines()
+            except OSError:
+                cache[fn] = {}
+                return cache[fn]
+            mp = {}
+            for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+                if tag == "equal":
+                    for k_ in range(i2 - i1):
+                        mp[i1 + k_ + 1] = j1 + k_ + 1
+            cache[fn] = mp
+        return cache[fn]
+    for x in sites:
+        k_, w, r = x.split("|")
+        parts = []
+        for acc in (w, r):
+            kind, loc = acc.split("@")
+            fn, ln = loc.rsplit(":", 1)
+            nl = line_map(fn).get(int(ln))
+            parts.append(None if nl is None else f"{kind}@{fn}:{nl}")
+        if None not in parts:
+            out.add(f"{k_}|{parts[0]}|{parts[1]}")
+    return out
+
+
 def cand_mode(path):
     """'nd' if the candidate declares DETERMINISTIC = False (a different backward binary, its own site set), else 'det'."""
     src = open(path.partition(":")[0]).read()
@@ -128,13 +167,20 @@ def main():
             # SOURCE-keyed gate (accuracy-audit + lead 17:05): every (kernel, W/R file:line pair) must be in the reviewed set;
             # sites without a source line fall back to a count that must not grow.  (racecheck does not name the smem buffer;
             # the write / read source lines identify the code that touches it.)
-            new = sorted(src - set(base["src_sites"]))
+            base_src = set(base["src_sites"])
+            cr_ = snap_root(tgt)
+            if base.get("src_root") and cr_ and os.path.realpath(base["src_root"]) != os.path.realpath(cr_):
+                base_src = map_src_sites(base_src, base["src_root"], cr_)      # line numbers follow edits above them
+            new = sorted(src - base_src)
             unm_ok = len(unm) <= base.get("unmapped_max", 0)
         else:
             new = sorted(sites - set(base["sites"]))
             unm_ok = True
         if a.accept_sites and done and not timed_out:
             if lineinfo_dir is not None:
+                if base.get("src_root") and snap_root(tgt) and os.path.realpath(base["src_root"]) != os.path.realpath(snap_root(tgt)):
+                    base["src_sites"] = sorted(map_src_sites(set(base.get("src_sites", [])), base["src_root"], snap_root(tgt)))
+                base["src_root"] = snap_root(tgt)
                 base["src_sites"] = sorted(set(base.get("src_sites", [])) | src)
                 base["unmapped_max"] = max(base.get("unmapped_max", 0), len(unm))
             base["sites"] = sorted(set(base["sites"]) | sites)

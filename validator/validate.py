@@ -345,10 +345,15 @@ def build_cases(tier, supports, seed):
         shapes += [(1, 16, 16, up(8192), True, ["stress"]), (1, 4, 4, up(4096), True, ["stress"])]
         if nc:
             shapes += [(1, 16, 16, up(8192), False, ["stress"])]
+    if tier != "quick":   # accuracy-audit 15:50 (2): rep-8 (32/4) at odd N, causal + non-causal, incl. the GQA gloop path
+        shapes += [(1, 32, 4, up(1408), True, base_kinds + ["outliers"]), (1, 32, 4, up(1152), True, ["ramp", "audit_growmax"])]
+        if nc:
+            shapes += [(1, 32, 4, up(1408), False, base_kinds)]
     if tier != "quick":   # headline GQA shapes at full size (accuracy + identity hooks)
         shapes += [(1, 32, 4, up(8192), True, base_kinds + ["outliers"]), (1, 16, 4, up(8192), True, ["randn", "scaled3", "peaked"])]
     if tier == "bench":   # races at the longest headline length, both headline GQA ratios
-        shapes += [(1, 32, 4, up(65536), True, ["stress"]), (1, 16, 4, up(65536), True, ["stress"])]
+        shapes += [(1, 32, 4, up(65536), True, ["stress"]), (1, 16, 4, up(65536), True, ["stress"]),
+                   (1, 32, 4, up(131072), True, ["stress"]), (1, 16, 4, up(131072), True, ["stress"])]   # user: + 128k
     if tier != "quick":
         # 6a313b0's forward race (ss_pv defaults) changed one O tile on ~1% of calls at B8 H32/8 N4096 and was invisible
         # to 8-call stress: many calls on a multi-batch GQA shape with several CTAs per SM, causal and non-causal

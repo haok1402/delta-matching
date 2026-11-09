@@ -100,7 +100,7 @@ REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / b
 # kernels measure exactly 0, so their binding stays effectively bitwise.
 NONDET_REL = 2e-4             # whole tensor
 SPREAD_BLK = 5e-4             # per (batch, 128-row block, head)
-SPREAD_ELEM = 8e-3            # per element, relative to its row's max |x| (~2 bf16 ulp)
+SPREAD_ELEM = 1.6e-2          # per element, relative to its row's max |x|: 2 bf16 ulp (1 ulp flip can be 2^-7 = 7.8e-3)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 
@@ -312,7 +312,7 @@ def build_cases(tier, supports, seed):
                 modes = modes[:1]
             runs = [(md, "plain") for md in modes]
             big = B * H * N * N > 2 ** 33
-            if not big and kind not in ("stress", "stress20"):
+            if kind not in ("stress", "stress20"):
                 runs += [(modes[0], "repeat")]          # run-to-run spread per case (binding envelope, race detection)
             if kind == "randn" and not big:
                 runs += [(modes[0], "views")]
@@ -362,7 +362,7 @@ def check_case(case, cr, preset, dev, verbose):
                 f"a 128-row block varied by {st.get('block_rel_max', 0.0):.2e} rel between calls (allowed {SPREAD_BLK:.0e})")
             chk(f"{key}:elem_spread", st.get("elem_rel_max", 0.0) <= SPREAD_ELEM,
                 f"an element varied by {st.get('elem_rel_max', 0.0):.2e} of its row max between calls "
-                f"(allowed {SPREAD_ELEM:.0e} = ~2 bf16 ulp)")
+                f"(allowed {SPREAD_ELEM:.1e} = 2 bf16 ulp)")
         calls_all = cr.get("stress_calls") or {}
         if calls_all:
             # accuracy-audit 05:35 (3): judge accuracy on the WORST call and the paired median over calls, not the first

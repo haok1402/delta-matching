@@ -405,6 +405,10 @@ class DMForwardSm100:
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
         if "split" in self.dm_opts:
             self.split_P_arrive = int(self.dm_opts["split"])
+        # fwdrw: s01=1 -> FA4's S0/S1 exp-sequencing barrier (softmax WG1 exps wait for WG0's, alternating) to keep the
+        # two softmax warpgroups out of phase so one's non-exp work overlaps the other's MUFU exps (bitwise: order only)
+        if self.dm_opts.get("s01", "0") == "1":
+            self.s0_s1_barrier = True
         # vec buffer for row_max & row_sum
         self.tmem_vec_offset = self.tmem_s_offset
 
@@ -2778,60 +2782,115 @@ class DMForwardSm100:
         tSrP_r2t = cute.make_tensor(
             cute.recast_ptr(tSrP_r2t_f32.iterator, dtype=self.q_dtype), tSrS_t2r.layout
         )
-        dm_bsum = [None] * 4
-        if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
-            # f16x2 MUFU exp (2 exps / instruction) + direct f16x2 -> e4m3x2 convert; block sums in f16x2 (tree) -> f32
+        if const_expr(self.dm_opts.get("pipe", "0") == "1" and self.dm_opts.get("exp", "f32") != "h2"
+                      and self.ex2_emu_freq == 0 and self.dm_opts.get("nosum", "0") != "1"):
+            # fwdrw pipe=1: per-32-key-block software pipeline (bitwise = default): block j's FFMA2 already applied above;
+            # exps+convert+TMEM store of block j are interleaved (in program order) with the UNWEIGHTED row-sum chain of block
+            # j-1, so the FADD2 sum work overlaps the MUFU exps instead of trailing after the P release. The weighted
+            # accumulation l = ((l*acc + s0 w0) + s1 w1) + ... keeps today's exact operation order.
+            frgS = cute.logical_divide(tSrS_t2r, cute.make_layout(32))
+            frgP = cute.logical_divide(tSrP_r2t, cute.make_layout(32))
+            n_st = const_expr(cute.size(tStP_r2t.shape[2]))
+            dm_bs = [None] * 4
             for j in cutlass.range_constexpr(4):
-                hs = []
-                for w in cutlass.range_constexpr(8):
-                    i0 = 32 * j + 4 * w
-                    word, e0, e1 = dm_utils.exp2_h2_e4m3x4(tSrS_t2r[i0], tSrS_t2r[i0 + 1], tSrS_t2r[i0 + 2], tSrS_t2r[i0 + 3])
-                    tSrP_r2t_f32[8 * j + w] = dm_utils.bitcast_i32_f32(word)
-                    hs.append(e0)
-                    hs.append(e1)
-                dm_bsum[j] = dm_utils.h2_sum_f32(dm_utils.hadd2_tree(hs))
-        else:
-            softmax.apply_exp2_convert(
-                tSrS_t2r,
-                tSrP_r2t,
-                ex2_emu_freq=self.ex2_emu_freq,
-                ex2_emu_start_frg=self.ex2_emu_start_frg,
-            )
-        if const_expr(self.s0_s1_barrier):
-            pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
-        for i in cutlass.range_constexpr(cute.size(tStP_r2t.shape[2])):
-            cute.copy(thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i])
+                for k in cutlass.range_constexpr(0, 32, 2):
+                    frgS[k, j] = cute.math.exp2(frgS[k, j], fastmath=True)
+                    frgS[k + 1, j] = cute.math.exp2(frgS[k + 1, j], fastmath=True)
+                frgP[None, j].store(frgS[None, j].load().to(tSrP_r2t.element_type))
+                if const_expr(j >= 1):
+                    ps = (tSrS_t2r[32 * (j - 1)], tSrS_t2r[32 * (j - 1) + 1])
+                    for i in cutlass.range_constexpr(2, 32, 2):
+                        ps = cute.arch.add_packed_f32x2(ps, (tSrS_t2r[32 * (j - 1) + i], tSrS_t2r[32 * (j - 1) + i + 1]))
+                    dm_bs[j - 1] = ps[0] + ps[1]
+                if const_expr(n_st == 4):
+                    cute.copy(thr_tmem_store, tSrP_r2t_f32[None, None, j], tStP_r2t[None, None, j])
+                    if const_expr(self.split_P_arrive > 0):
+                        if const_expr(j + 1 == 4 * self.split_P_arrive // self.n_block_size):
+                            cute.arch.fence_view_async_tmem_store()
+                            pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
+            if const_expr(n_st != 4):
+                for i in cutlass.range_constexpr(n_st):
+                    cute.copy(thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i])
+                    if const_expr(self.split_P_arrive > 0):
+                        if const_expr(i + 1 == n_st * self.split_P_arrive // self.n_block_size):
+                            cute.arch.fence_view_async_tmem_store()
+                            pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
+            cute.arch.fence_view_async_tmem_store()
             if const_expr(self.split_P_arrive > 0):
-                split_P_arrive_idx = cute.size(tStP_r2t.shape[2]) * self.split_P_arrive // self.n_block_size
-                if const_expr(i + 1 == split_P_arrive_idx):
-                    cute.arch.fence_view_async_tmem_store()
-                    pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
-        cute.arch.fence_view_async_tmem_store()
-        if const_expr(self.split_P_arrive > 0):
-            cute.arch.sync_warp()
-            with cute.arch.elect_one():
-                pipeline_p_lastsplit.producer_commit_w_index(s_p_o_index)
-        else:
-            pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
-        if const_expr(self.use_s_ping_pong):
-            pipeline_sm_stats.producer_acquire_w_index_phase(
-                s_p_o_consumer_count & 1, 1 ^ ((s_p_o_consumer_count >> 1) & 1)
-            )
-        else:
-            pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
-        # l = l * acc_scale + sum_b w_b * sum_{j in b} p~_j   (fp32 pre-rounding values)
-        dm_l = Float32(0.0) if const_expr(is_first) else softmax.row_sum[0] * acc_scale
-        for j in cutlass.range_constexpr(0 if const_expr(self.dm_opts.get("nosum", "0") == "1") else 4):  # nosum: UPPER-BOUND experiment only (l wrong)
-            if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
-                dm_l = dm_l + dm_bsum[j] * dm_w[j]
+                cute.arch.sync_warp()
+                with cute.arch.elect_one():
+                    pipeline_p_lastsplit.producer_commit_w_index(s_p_o_index)
             else:
-                ps = (tSrS_t2r[32 * j], tSrS_t2r[32 * j + 1])
-                for i in cutlass.range_constexpr(2, 32, 2):
-                    ps = cute.arch.add_packed_f32x2(ps, (tSrS_t2r[32 * j + i], tSrS_t2r[32 * j + i + 1]))
-                dm_l = dm_l + (ps[0] + ps[1]) * dm_w[j]
-        if const_expr(self.dm_opts.get("nosum", "0") == "1"):
-            dm_l = dm_l + dm_w[0]
-        softmax.row_sum[0] = dm_l
+                pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
+            ps = (tSrS_t2r[96], tSrS_t2r[97])
+            for i in cutlass.range_constexpr(2, 32, 2):
+                ps = cute.arch.add_packed_f32x2(ps, (tSrS_t2r[96 + i], tSrS_t2r[96 + i + 1]))
+            dm_bs[3] = ps[0] + ps[1]
+            if const_expr(self.use_s_ping_pong):
+                pipeline_sm_stats.producer_acquire_w_index_phase(
+                    s_p_o_consumer_count & 1, 1 ^ ((s_p_o_consumer_count >> 1) & 1)
+                )
+            else:
+                pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
+            dm_l = Float32(0.0) if const_expr(is_first) else softmax.row_sum[0] * acc_scale
+            for j in cutlass.range_constexpr(4):
+                dm_l = dm_l + dm_bs[j] * dm_w[j]
+            softmax.row_sum[0] = dm_l
+        else:
+            dm_bsum = [None] * 4
+            if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
+                # f16x2 MUFU exp (2 exps / instruction) + direct f16x2 -> e4m3x2 convert; block sums in f16x2 (tree) -> f32
+                for j in cutlass.range_constexpr(4):
+                    hs = []
+                    for w in cutlass.range_constexpr(8):
+                        i0 = 32 * j + 4 * w
+                        word, e0, e1 = dm_utils.exp2_h2_e4m3x4(tSrS_t2r[i0], tSrS_t2r[i0 + 1], tSrS_t2r[i0 + 2], tSrS_t2r[i0 + 3])
+                        tSrP_r2t_f32[8 * j + w] = dm_utils.bitcast_i32_f32(word)
+                        hs.append(e0)
+                        hs.append(e1)
+                    dm_bsum[j] = dm_utils.h2_sum_f32(dm_utils.hadd2_tree(hs))
+            else:
+                softmax.apply_exp2_convert(
+                    tSrS_t2r,
+                    tSrP_r2t,
+                    ex2_emu_freq=self.ex2_emu_freq,
+                    ex2_emu_start_frg=self.ex2_emu_start_frg,
+                )
+            if const_expr(self.s0_s1_barrier):
+                pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
+            for i in cutlass.range_constexpr(cute.size(tStP_r2t.shape[2])):
+                cute.copy(thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i])
+                if const_expr(self.split_P_arrive > 0):
+                    split_P_arrive_idx = cute.size(tStP_r2t.shape[2]) * self.split_P_arrive // self.n_block_size
+                    if const_expr(i + 1 == split_P_arrive_idx):
+                        cute.arch.fence_view_async_tmem_store()
+                        pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
+            cute.arch.fence_view_async_tmem_store()
+            if const_expr(self.split_P_arrive > 0):
+                cute.arch.sync_warp()
+                with cute.arch.elect_one():
+                    pipeline_p_lastsplit.producer_commit_w_index(s_p_o_index)
+            else:
+                pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
+            if const_expr(self.use_s_ping_pong):
+                pipeline_sm_stats.producer_acquire_w_index_phase(
+                    s_p_o_consumer_count & 1, 1 ^ ((s_p_o_consumer_count >> 1) & 1)
+                )
+            else:
+                pipeline_sm_stats.producer_acquire_w_index_phase(stage, sm_stats_producer_phase)
+            # l = l * acc_scale + sum_b w_b * sum_{j in b} p~_j   (fp32 pre-rounding values)
+            dm_l = Float32(0.0) if const_expr(is_first) else softmax.row_sum[0] * acc_scale
+            for j in cutlass.range_constexpr(0 if const_expr(self.dm_opts.get("nosum", "0") == "1") else 4):  # nosum: UPPER-BOUND experiment only (l wrong)
+                if const_expr(self.dm_opts.get("exp", "f32") == "h2"):
+                    dm_l = dm_l + dm_bsum[j] * dm_w[j]
+                else:
+                    ps = (tSrS_t2r[32 * j], tSrS_t2r[32 * j + 1])
+                    for i in cutlass.range_constexpr(2, 32, 2):
+                        ps = cute.arch.add_packed_f32x2(ps, (tSrS_t2r[32 * j + i], tSrS_t2r[32 * j + i + 1]))
+                    dm_l = dm_l + (ps[0] + ps[1]) * dm_w[j]
+            if const_expr(self.dm_opts.get("nosum", "0") == "1"):
+                dm_l = dm_l + dm_w[0]
+            softmax.row_sum[0] = dm_l
         # acc_scale = cute.math.exp2(acc_scale_, fastmath=True)
         if const_expr(self.use_s_ping_pong):
             return s_p_o_consumer_count + 1, sm_stats_producer_phase, s0_s1_sequence_phase ^ 1

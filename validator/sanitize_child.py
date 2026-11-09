@@ -39,7 +39,10 @@ for _i, (B, H, Hk, N) in enumerate(SHAPES):
     if _sel is not None and str(_i) != _sel:
         continue
     print(f"shape {_i} start B{B} H{H}/{Hk} N{N} t={_t.time() - _t0:.0f}s", flush=True)
+    _cs = os.environ.get("DMVAL_SAN_CAUSAL")              # finer shard: "1" causal only, "0" non-causal only
     for causal in ((True, False) if sup.get("noncausal", True) else (True,)):
+        if _cs is not None and str(int(causal)) != _cs:
+            continue
         g = torch.Generator(device="cuda").manual_seed(N + H)
         q, k, v, do = [torch.randn(B, N, h, 128, device="cuda", generator=g).bfloat16() for h in (H, Hk, Hk, H)]
         modes = ["matched", "stale"] if causal or sup.get("matched_noncausal") else ["stale"]

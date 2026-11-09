@@ -134,7 +134,10 @@ def main():
     cand = os.path.abspath(tgt) + sep + fn
     env = dict(os.environ, PYTORCH_NO_CUDA_MEMORY_CACHING="1")
     if a.shape is not None:
-        env["DMVAL_SAN_SHAPE"] = str(a.shape)
+        sh, _, cz = str(a.shape).partition("_")             # "i" or "i_c" / "i_n" (causal / non-causal half)
+        env["DMVAL_SAN_SHAPE"] = sh
+        if cz:
+            env["DMVAL_SAN_CAUSAL"] = "1" if cz == "c" else "0"
     lineinfo_dir = None
     if a.tool == "racecheck" and os.environ.get("DMVAL_RACE_LINEINFO", "1") != "0":
         # hazard sites keyed by SOURCE (file:line), not PC (lead 2026-11-09): kernels built with line info, in a fresh

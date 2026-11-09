@@ -86,6 +86,8 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
     for kv in os.environ.get("DM_FWD_OPTS", "").split(","):     # config-level knobs, e.g. ex2_emu_freq=0,kv_stage=6
         if "=" in kv and kv.split("=")[0] in ("ex2_emu_freq", "ex2_emu_start_frg", "kv_stage", "q_stage", "reg_sm", "reg_corr"):
             over[kv.split("=")[0]] = int(kv.split("=")[1])
+        if kv == "s_pp":        # FA4 S ping-pong (both softmax stages share one S slot, exp of tile t overlaps S MMA of t+1)
+            over["use_s_ping_pong"] = True
     if config_override:
         over.update(config_override)
     if "kvpack=0" not in os.environ.get("DM_FWD_OPTS", ""):

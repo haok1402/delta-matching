@@ -4385,619 +4385,647 @@ class DMBackwardSm100:
             if const_expr("spf" in self.dm_opts):
                 dm_Spf = cute.make_rmem_tensor(tScS_t2r.shape, Float32)   # S(t+1) prefetched during dS(t)
             dm_head0 = head_idx
-            for iter_idx in cutlass.range(loop_count, unroll=1):
-                m_block = m_block_min + iter_idx
-                if const_expr(self.dm_gloop):
-                    dm_g = iter_idx // dm_L
-                    m_block = m_block_min + iter_idx - dm_g * dm_L
-                    head_idx = dm_head0 + dm_g
-                m_block_oob = False
-                is_full_block = False
-                if const_expr(self.use_block_sparsity):
-                    m_block, is_full_block = get_m_block_from_iter_bwd(
-                        iter_idx,
-                        curr_q_cnt,
-                        curr_q_idx,
-                        curr_full_cnt,
-                        curr_full_idx,
-                        q_subtile_factor=self.q_subtile_factor,
-                        m_block_max=m_block_max,
-                    )
-                    m_block_oob = m_block >= m_block_max
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s0 = dm_s0 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                # Prefetch 1 stage of LSE
-                pipeline_LSE.consumer_wait(consumer_state_LSE)
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s1 = dm_s1 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                tSrLSE_s2r = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
-                if const_expr(prefetch_LSE and not self.shuffle_LSE):
-                    cute.autovec_copy(tSsLSE[None, 0, 0, 0, consumer_state_LSE.index], tSrLSE_s2r)
-                # DM lseall: LSE for every stage loaded right after the LSE wait (before the S wait)
-                dm_lse_all = [None] * cute.size(tScS_t2r, mode=[1])
-                if const_expr("lseall" in self.dm_opts):
-                    for st_ in cutlass.range_constexpr(cute.size(tScS_t2r, mode=[1])):
-                        dm_lse_all[st_] = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
-                        cute.autovec_copy(tSsLSE[None, st_, 0, 0, consumer_state_LSE.index], dm_lse_all[st_])
+            # DM msplit (default; nomsplit disables; causal, not gloop): split the m-block loop into masked head (diagonal tiles), unmasked middle
+            # and masked tail (partial last m block) phases -> the mask code exists only in the masked copies (the
+            # CTA-uniform mskipu test was if-converted into ~234 predicated-off instructions per warp-tile).
+            dm_split = const_expr("nomsplit" not in self.dm_opts and self.is_causal and not self.is_local and not self.dm_gloop
+                                  and self.mask_mod is None and mask.qhead_per_kvhead_packgqa == 1
+                                  and not self.use_block_sparsity)
+            if const_expr(dm_split):
+                dm_hd = ((work_n + 1) * mask.tile_n + mask.tile_m - 1) // mask.tile_m - m_block_min
+                dm_hd = cutlass.max(cutlass.min(dm_hd, loop_count), 0)
+                dm_tl = Int32(0)
+                if m_block_max * mask.tile_m > seqlen.seqlen_q and loop_count - dm_hd > 0:
+                    dm_tl = Int32(1)
+                dm_lo = (Int32(0), dm_hd, loop_count - dm_tl)
+                dm_hi = (dm_hd, loop_count - dm_tl, loop_count)
+                dm_nph = 3
+            else:
+                dm_lo = (Int32(0),)
+                dm_hi = (loop_count,)
+                dm_nph = 1
+            for dm_ph in cutlass.range_constexpr(dm_nph):
+              for iter_idx in cutlass.range(dm_lo[dm_ph], dm_hi[dm_ph], unroll=1):
+                  m_block = m_block_min + iter_idx
+                  if const_expr(self.dm_gloop):
+                      dm_g = iter_idx // dm_L
+                      m_block = m_block_min + iter_idx - dm_g * dm_L
+                      head_idx = dm_head0 + dm_g
+                  m_block_oob = False
+                  is_full_block = False
+                  if const_expr(self.use_block_sparsity):
+                      m_block, is_full_block = get_m_block_from_iter_bwd(
+                          iter_idx,
+                          curr_q_cnt,
+                          curr_q_idx,
+                          curr_full_cnt,
+                          curr_full_idx,
+                          q_subtile_factor=self.q_subtile_factor,
+                          m_block_max=m_block_max,
+                      )
+                      m_block_oob = m_block >= m_block_max
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s0 = dm_s0 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  # Prefetch 1 stage of LSE
+                  pipeline_LSE.consumer_wait(consumer_state_LSE)
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s1 = dm_s1 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  tSrLSE_s2r = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
+                  if const_expr(prefetch_LSE and not self.shuffle_LSE):
+                      cute.autovec_copy(tSsLSE[None, 0, 0, 0, consumer_state_LSE.index], tSrLSE_s2r)
+                  # DM lseall: LSE for every stage loaded right after the LSE wait (before the S wait)
+                  dm_lse_all = [None] * cute.size(tScS_t2r, mode=[1])
+                  if const_expr("lseall" in self.dm_opts):
+                      for st_ in cutlass.range_constexpr(cute.size(tScS_t2r, mode=[1])):
+                          dm_lse_all[st_] = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
+                          cute.autovec_copy(tSsLSE[None, st_, 0, 0, consumer_state_LSE.index], dm_lse_all[st_])
 
-                if const_expr("spf" in self.dm_opts and not self.split_P_dS):
-                    # spf: S(t) was waited for and TMEM-loaded during dS(t-1) (except the first m_block)
-                    tSrS_t2r = dm_Spf
-                    if iter_idx == 0:
-                        pipeline_S_P.consumer_wait(consumer_state_S_P_dP)
-                        cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
-                    cute.arch.fence_view_async_tmem_load()
-                else:
-                    if const_expr(self.split_P_dS):
-                        pipeline_S_P.consumer_wait(consumer_state_S)
-                    else:
-                        pipeline_S_P.consumer_wait(consumer_state_S_P_dP)
-                    if const_expr(dm_tr is not None):
-                        dm_now = dm_utils.clock32()
-                        dm_s2 = dm_s2 + (dm_now - dm_tprev)
-                        dm_tprev = dm_now
-                    # pipeline_S_P.sync_object_full.wait(0, consumer_phase_S_P_dP)
-                    #### TMEM->RMEM (Load S from TMEM)
-                    tSrS_t2r = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
-                    cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s3 = dm_s3 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
+                  if const_expr("spf" in self.dm_opts and not self.split_P_dS):
+                      # spf: S(t) was waited for and TMEM-loaded during dS(t-1) (except the first m_block)
+                      tSrS_t2r = dm_Spf
+                      if iter_idx == 0:
+                          pipeline_S_P.consumer_wait(consumer_state_S_P_dP)
+                          cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
+                      cute.arch.fence_view_async_tmem_load()
+                  else:
+                      if const_expr(self.split_P_dS):
+                          pipeline_S_P.consumer_wait(consumer_state_S)
+                      else:
+                          pipeline_S_P.consumer_wait(consumer_state_S_P_dP)
+                      if const_expr(dm_tr is not None):
+                          dm_now = dm_utils.clock32()
+                          dm_s2 = dm_s2 + (dm_now - dm_tprev)
+                          dm_tprev = dm_now
+                      # pipeline_S_P.sync_object_full.wait(0, consumer_phase_S_P_dP)
+                      #### TMEM->RMEM (Load S from TMEM)
+                      tSrS_t2r = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
+                      cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s3 = dm_s3 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
 
-                if const_expr(self.split_P_dS):
-                    # S is in registers: release it before the softmax so the MMA warp can
-                    # issue the next QK into the slot
-                    cute.arch.fence_view_async_tmem_load()
-                    cute.arch.sync_warp()
-                    with cute.arch.elect_one():
-                        pipeline_S_P.consumer_release(consumer_state_S)
-                    consumer_state_S.advance()
-                elif const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_SERIAL):
-                    # Signal S tmem load completion using pipeline_S_P: dP overlaps S
-                    cute.arch.fence_view_async_tmem_load()
-                    with cute.arch.elect_one():
-                        pipeline_S_P.consumer_release(consumer_state_S_P_dP)
-                elif const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
-                    # Signal S tmem load completion using pipeline_dS: dQ overlaps S
-                    # DM: the "S read" signal releases dQ(t-1), whose accumulator and scale factors live in the S
-                    # columns, so every warp must have loaded S(t) first. early_dq: barrier right after the S load,
-                    # then install dQ(t-1) scales and signal (FA4's early handoff); else at the stage-0 P barrier.
-                    if const_expr("early_dq" in self.dm_opts):
-                        cute.arch.fence_view_async_tmem_load()
-                        self.compute_sync_barrier.arrive_and_wait()
-                        if iter_idx > 0:
-                            self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
-                            cute.arch.fence_view_async_tmem_store()
-                            with cute.arch.elect_one():
-                                pipeline_dS.producer_commit(producer_state_dS)
-                            producer_state_dS.advance()
+                  if const_expr(self.split_P_dS):
+                      # S is in registers: release it before the softmax so the MMA warp can
+                      # issue the next QK into the slot
+                      cute.arch.fence_view_async_tmem_load()
+                      cute.arch.sync_warp()
+                      with cute.arch.elect_one():
+                          pipeline_S_P.consumer_release(consumer_state_S)
+                      consumer_state_S.advance()
+                  elif const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_SERIAL):
+                      # Signal S tmem load completion using pipeline_S_P: dP overlaps S
+                      cute.arch.fence_view_async_tmem_load()
+                      with cute.arch.elect_one():
+                          pipeline_S_P.consumer_release(consumer_state_S_P_dP)
+                  elif const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
+                      # Signal S tmem load completion using pipeline_dS: dQ overlaps S
+                      # DM: the "S read" signal releases dQ(t-1), whose accumulator and scale factors live in the S
+                      # columns, so every warp must have loaded S(t) first. early_dq: barrier right after the S load,
+                      # then install dQ(t-1) scales and signal (FA4's early handoff); else at the stage-0 P barrier.
+                      if const_expr("early_dq" in self.dm_opts):
+                          cute.arch.fence_view_async_tmem_load()
+                          self.compute_sync_barrier.arrive_and_wait()
+                          if iter_idx > 0:
+                              self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
+                              cute.arch.fence_view_async_tmem_store()
+                              with cute.arch.elect_one():
+                                  pipeline_dS.producer_commit(producer_state_dS)
+                              producer_state_dS.advance()
 
-                if const_expr(self.score_mod_bwd is not None):
-                    tSrS_pre = cute.make_fragment_like(tSrS_t2r)
-                    cute.autovec_copy(tSrS_t2r, tSrS_pre)
+                  if const_expr(self.score_mod_bwd is not None):
+                      tSrS_pre = cute.make_fragment_like(tSrS_t2r)
+                      cute.autovec_copy(tSrS_t2r, tSrS_pre)
 
-                if const_expr(self.score_mod is not None):
-                    # Apply score_mod FIRST -> matches forward
-                    self.apply_score_mod(
-                        tSrS_t2r,
-                        thr_copy_t2r,
-                        thr_mma_S,
-                        batch_idx,
-                        head_idx,
-                        m_block,
-                        work_n,
-                        softmax_scale,
-                        seqlen,
-                        aux_data,
-                        fastdiv_mods,
-                        wg_split=(wg_idx, num_wg) if const_expr(self.acc_m64) else None,
-                    )
+                  if const_expr(self.score_mod is not None):
+                      # Apply score_mod FIRST -> matches forward
+                      self.apply_score_mod(
+                          tSrS_t2r,
+                          thr_copy_t2r,
+                          thr_mma_S,
+                          batch_idx,
+                          head_idx,
+                          m_block,
+                          work_n,
+                          softmax_scale,
+                          seqlen,
+                          aux_data,
+                          fastdiv_mods,
+                          wg_split=(wg_idx, num_wg) if const_expr(self.acc_m64) else None,
+                      )
 
-                #### APPLY MASK (after score_mod, matching forward pass order)
-                check_m_boundary = (m_block + 1) * self.tile_m > seqlen.seqlen_q
-                if const_expr("nomskipu" not in self.dm_opts and self.is_causal and not self.is_local
-                              and self.mask_mod is None and mask.qhead_per_kvhead_packgqa == 1):
-                    # DM mskipu (default; nomskipu disables): CTA-uniform test - every query of the tile is >= every key of the cluster
-                    if m_block * mask.tile_m < (work_n + 1) * mask.tile_n or check_m_boundary:
-                        mask_fn(
-                            tSrS_t2r,
-                            m_block=m_block,
-                            is_full_block=is_full_block,
-                            check_m_boundary=check_m_boundary,
-                        )
-                elif const_expr("mskip" in self.dm_opts and self.is_causal and not self.is_local
-                              and self.mask_mod is None and mask.qhead_per_kvhead_packgqa == 1):
-                    # DM mskip (opt-in; the dynamic branch makes causal ~8% SLOWER than always masking): per-thread causal offset (as in apply_mask_sm100_transposed); <= 0 means no
-                    # element of this thread's rows is above the diagonal -> skip the R2P/SEL mask.
-                    # ROW = query, COL = key coordinate (index 1/0 when swap_AB, as in the mask)
-                    dm_ROW = 0 if const_expr(not mask.swap_AB) else 1
-                    dm_COL = 1 - dm_ROW
-                    dm_col_lim = mask.seqlen_k - work_n * mask.tile_n - tScS_t2r[0][dm_COL]
-                    dm_row_lim = mask.seqlen_q - m_block * mask.tile_m - tScS_t2r[0][dm_ROW]
-                    if dm_row_lim - dm_col_lim > 0 or dm_col_lim <= 0 or check_m_boundary:
-                        mask_fn(
-                            tSrS_t2r,
-                            m_block=m_block,
-                            is_full_block=is_full_block,
-                            check_m_boundary=check_m_boundary,
-                        )
-                else:
-                    mask_fn(
-                        tSrS_t2r,
-                        m_block=m_block,
-                        is_full_block=is_full_block,
-                        check_m_boundary=check_m_boundary,
-                    )
-                num_stages = cute.size(tScS_t2r, mode=[1])
-                # ---------------------------------------------
-                #### P = exp(S - LSE)
-                # ---------------------------------------------
-                lane_idx = cute.arch.lane_idx()
-                if const_expr(not self.acc_m64):
-                    tSrP_r2t_f32 = cute.make_rmem_tensor(tScP_r2t.shape, Float32)  # 64
-                    tSrP_r2t = cute.recast_tensor(tSrP_r2t_f32, self.q_dtype)
-                # DM: per-stage scales (query-block scales prefetched one m_block ahead; key-row scales hoisted)
-                dm_qsv = (dm_qs0, dm_qs1)
-                dm_dosv = (dm_dos0, dm_dos1)
-                dm_mn = cutlass.min(m_block + 1, m_block_max - 1)
-                dm_hn = head_idx
-                if const_expr(self.dm_gloop):
-                    dm_itn = cutlass.min(iter_idx + 1, loop_count - 1)
-                    dm_gn = dm_itn // dm_L
-                    dm_mn = m_block_min + dm_itn - dm_gn * dm_L
-                    dm_hn = dm_head0 + dm_gn
-                dm_qs0 = Float32(aux_data.tensors[0][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[0]])
-                dm_qs1 = Float32(aux_data.tensors[0][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
-                dm_dos0 = Float32(aux_data.tensors[3][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[0]])
-                dm_dos1 = Float32(aux_data.tensors[3][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
-                dm_c = [None] * num_stages
-                dm_a = [None] * num_stages
-                dm_qsb = [None] * num_stages
-                dm_sfa_dv = [None] * num_stages
-                for stage in cutlass.range_constexpr(num_stages):
-                    dm_c[stage] = (dm_ks * dm_qsv[stage]) * Float32(math.log2(math.e))
-                    dm_a[stage] = dm_vs * dm_dosv[stage]
-                    dm_qsb[stage] = dm_utils.pow2_exponent_byte(dm_qsv[stage])
-                    dm_sfa_dv[stage] = dm_utils.pow2_exponent_byte(dm_dosv[stage])
-                for stage in cutlass.range_constexpr(num_stages):
-                    tSrS_cur = tSrS_t2r[None, stage, 0, 0]
-                    tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
-                    if const_expr("lseall" in self.dm_opts):
-                        tSrLSE = dm_lse_all[stage]
-                    elif const_expr(not self.shuffle_LSE and "lse2" in self.dm_opts and stage > 0):
-                        # lse2: a fresh register buffer per stage (no WAR on stage 0's LSE regs -> loads can hoist)
-                        tSrLSE = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
-                        cute.autovec_copy(tSsLSE_cur, tSrLSE)
-                    elif const_expr(not self.shuffle_LSE):
-                        if const_expr(stage > 0 or not prefetch_LSE):
-                            cute.autovec_copy(tSsLSE_cur, tSrLSE_s2r)
-                        tSrLSE = tSrLSE_s2r
-                    else:
-                        tSrLSE = tSsLSE_cur[lane_idx]
-                    for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
-                        if const_expr(not self.shuffle_LSE):
-                            lse_pair = (tSrLSE[2 * v], tSrLSE[2 * v + 1])
-                        else:
-                            lse_pair = (
-                                utils.shuffle_sync(tSrLSE, offset=2 * v),
-                                utils.shuffle_sync(tSrLSE, offset=2 * v + 1),
-                            )
-                        tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
-                            ((tSrS_cur[2 * v], tSrS_cur[2 * v + 1])),
-                            (dm_c[stage], dm_c[stage]),
-                            (-lse_pair[0], -lse_pair[1]),
-                        )
-                        if const_expr("noexp" in self.dm_abl):
-                            pass
-                        elif const_expr("poly3" in self.dm_opts):
-                            # FA4 degree-3 FMA polynomial for every element: bitwise = dm_common.dm_bwd_p_pair_poly in
-                            # pass 0 (own-P delta keeps rowsum(dS)=0 at round-off; P error 8.8e-5 << 2e-3 tolerance)
-                            tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = utils.ex2_emulation_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
-                        elif const_expr(self.dm_p3 is not None and v % self.dm_p3[0] < self.dm_p3[1]):
-                            # FA4 degree-3 FMA polynomial (8.8e-5) for a static subset of pairs (MUFU offload)
-                            tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = utils.ex2_emulation_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
-                        elif const_expr(self.dm_p5 is not None and v % self.dm_p5[0] < self.dm_p5[1]):
-                            # accurate (1.7e-7) degree-5 FMA polynomial for a static subset of pairs (MUFU offload)
-                            tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_utils.ex2_poly5_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
-                        else:
-                            tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
-                            tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
-                    if const_expr(dm_tr is not None):
-                        dm_now = dm_utils.clock32()
-                        dm_s10 = dm_s10 + (dm_now - dm_tprev)
-                        dm_tprev = dm_now
-                    if const_expr(self.acc_m64):
-                        # P^T goes to SMEM; S stays untouched in TMEM until the dS pipeline
-                        # releases it, so no cross-warp barrier is needed before the store.
-                        tSrP_cvt = cute.make_fragment_like(tSrS_cur, self.q_dtype)
-                        utils.cvt_f16(tSrS_cur, tSrP_cvt)
-                        cute.autovec_copy(tSrP_cvt, tRS_sP[None, 0, 0, 0])
-                    else:
-                        # DM: P^T codes with a pow2 scale per (key row, 32-query block); SFA_dV = s * dos
-                        p_amax = Float32(1.0)
-                        if const_expr("pamax" not in self.dm_abl and "amax3" not in self.dm_opts and "amaxt" not in self.dm_opts):
-                            p_amax = Float32(0.0)
-                            for v in cutlass.range_constexpr(cute.size(tSrS_cur)):
-                                p_amax = cute.arch.fmax(p_amax, tSrS_cur[v])
-                        elif const_expr("pamax" not in self.dm_abl):
-                            # 4 independent 3-input max chains (P >= 0)
-                            pm = [utils.fmax(tSrS_cur[2 * t], tSrS_cur[2 * t + 1]) for t in range(4)]
-                            for v in cutlass.range_constexpr(8, cute.size(tSrS_cur), 8):
-                                for t in cutlass.range_constexpr(4):
-                                    pm[t] = utils.fmax(pm[t], tSrS_cur[v + 2 * t], tSrS_cur[v + 2 * t + 1])
-                            p_amax = utils.fmax(utils.fmax(pm[0], pm[1]), pm[2], pm[3])
-                        p_sb = dm_utils.pow2_sb(p_amax)
-                        p_inv = dm_utils.inv_pow2_from_sb(p_sb)
-                        dm_sfa_dv[stage] = dm_utils.add_sb_clamp(p_sb, dm_sfa_dv[stage])
-                        tSrPq = cute.make_fragment_like(tSrS_cur, Float32)
-                        for v in cutlass.range_constexpr(cute.size(tSrS_cur) // 2):
-                            tSrPq[2 * v], tSrPq[2 * v + 1] = cute.arch.mul_packed_f32x2(
-                                (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]), (p_inv, p_inv))
-                        tSrP_r2t[None, stage, 0, 0].store(tSrPq.load().to(self.q_dtype))
-                        if const_expr(dm_tr is not None):
-                            dm_now = dm_utils.clock32()
-                            dm_s11 = dm_s11 + (dm_now - dm_tprev)
-                            dm_tprev = dm_now
-                        if const_expr(stage == 0 and "noilp" in self.dm_opts):
-                            if const_expr(self.split_P_dS):
-                                # wait until the previous pdo UMMA has consumed the P slot
-                                pipeline_P.producer_acquire(producer_state_P)
-                            elif const_expr("early_dq" not in self.dm_opts):
-                                cute.arch.fence_view_async_tmem_load()
-                                # P overwrites S lanes another warp may still be loading, so
-                                # every warp must have loaded S before any stores P.
-                                if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
-                                    # TMEM lanes are warp-quadrant private: only warps w and w+4 share lanes, and the
-                                    # dQ SF columns are written per own lanes; the dQ MMA itself waits for every warp's
-                                    # dS-pipe arrival -> a 64-thread pair barrier is enough
-                                    cute.arch.barrier(
-                                        barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
+                  #### APPLY MASK (after score_mod, matching forward pass order)
+                  check_m_boundary = (m_block + 1) * self.tile_m > seqlen.seqlen_q
+                  if const_expr(dm_split):
+                      if const_expr(dm_ph != 1):
+                          mask_fn(
+                              tSrS_t2r,
+                              m_block=m_block,
+                              is_full_block=is_full_block,
+                              check_m_boundary=check_m_boundary,
+                          )
+                  elif const_expr("nomskipu" not in self.dm_opts and self.is_causal and not self.is_local
+                                and self.mask_mod is None and mask.qhead_per_kvhead_packgqa == 1):
+                      # DM mskipu (default; nomskipu disables): CTA-uniform test - every query of the tile is >= every key of the cluster
+                      if m_block * mask.tile_m < (work_n + 1) * mask.tile_n or check_m_boundary:
+                          mask_fn(
+                              tSrS_t2r,
+                              m_block=m_block,
+                              is_full_block=is_full_block,
+                              check_m_boundary=check_m_boundary,
+                          )
+                  elif const_expr("mskip" in self.dm_opts and self.is_causal and not self.is_local
+                                and self.mask_mod is None and mask.qhead_per_kvhead_packgqa == 1):
+                      # DM mskip (opt-in; the dynamic branch makes causal ~8% SLOWER than always masking): per-thread causal offset (as in apply_mask_sm100_transposed); <= 0 means no
+                      # element of this thread's rows is above the diagonal -> skip the R2P/SEL mask.
+                      # ROW = query, COL = key coordinate (index 1/0 when swap_AB, as in the mask)
+                      dm_ROW = 0 if const_expr(not mask.swap_AB) else 1
+                      dm_COL = 1 - dm_ROW
+                      dm_col_lim = mask.seqlen_k - work_n * mask.tile_n - tScS_t2r[0][dm_COL]
+                      dm_row_lim = mask.seqlen_q - m_block * mask.tile_m - tScS_t2r[0][dm_ROW]
+                      if dm_row_lim - dm_col_lim > 0 or dm_col_lim <= 0 or check_m_boundary:
+                          mask_fn(
+                              tSrS_t2r,
+                              m_block=m_block,
+                              is_full_block=is_full_block,
+                              check_m_boundary=check_m_boundary,
+                          )
+                  else:
+                      mask_fn(
+                          tSrS_t2r,
+                          m_block=m_block,
+                          is_full_block=is_full_block,
+                          check_m_boundary=check_m_boundary,
+                      )
+                  num_stages = cute.size(tScS_t2r, mode=[1])
+                  # ---------------------------------------------
+                  #### P = exp(S - LSE)
+                  # ---------------------------------------------
+                  lane_idx = cute.arch.lane_idx()
+                  if const_expr(not self.acc_m64):
+                      tSrP_r2t_f32 = cute.make_rmem_tensor(tScP_r2t.shape, Float32)  # 64
+                      tSrP_r2t = cute.recast_tensor(tSrP_r2t_f32, self.q_dtype)
+                  # DM: per-stage scales (query-block scales prefetched one m_block ahead; key-row scales hoisted)
+                  dm_qsv = (dm_qs0, dm_qs1)
+                  dm_dosv = (dm_dos0, dm_dos1)
+                  dm_mn = cutlass.min(m_block + 1, m_block_max - 1)
+                  dm_hn = head_idx
+                  if const_expr(self.dm_gloop):
+                      dm_itn = cutlass.min(iter_idx + 1, loop_count - 1)
+                      dm_gn = dm_itn // dm_L
+                      dm_mn = m_block_min + dm_itn - dm_gn * dm_L
+                      dm_hn = dm_head0 + dm_gn
+                  dm_qs0 = Float32(aux_data.tensors[0][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[0]])
+                  dm_qs1 = Float32(aux_data.tensors[0][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
+                  dm_dos0 = Float32(aux_data.tensors[3][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[0]])
+                  dm_dos1 = Float32(aux_data.tensors[3][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
+                  dm_c = [None] * num_stages
+                  dm_a = [None] * num_stages
+                  dm_qsb = [None] * num_stages
+                  dm_sfa_dv = [None] * num_stages
+                  for stage in cutlass.range_constexpr(num_stages):
+                      dm_c[stage] = (dm_ks * dm_qsv[stage]) * Float32(math.log2(math.e))
+                      dm_a[stage] = dm_vs * dm_dosv[stage]
+                      dm_qsb[stage] = dm_utils.pow2_exponent_byte(dm_qsv[stage])
+                      dm_sfa_dv[stage] = dm_utils.pow2_exponent_byte(dm_dosv[stage])
+                  for stage in cutlass.range_constexpr(num_stages):
+                      tSrS_cur = tSrS_t2r[None, stage, 0, 0]
+                      tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
+                      if const_expr("lseall" in self.dm_opts):
+                          tSrLSE = dm_lse_all[stage]
+                      elif const_expr(not self.shuffle_LSE and "lse2" in self.dm_opts and stage > 0):
+                          # lse2: a fresh register buffer per stage (no WAR on stage 0's LSE regs -> loads can hoist)
+                          tSrLSE = cute.make_rmem_tensor(tScS_t2r[None, 0, 0, 0].shape, Float32)
+                          cute.autovec_copy(tSsLSE_cur, tSrLSE)
+                      elif const_expr(not self.shuffle_LSE):
+                          if const_expr(stage > 0 or not prefetch_LSE):
+                              cute.autovec_copy(tSsLSE_cur, tSrLSE_s2r)
+                          tSrLSE = tSrLSE_s2r
+                      else:
+                          tSrLSE = tSsLSE_cur[lane_idx]
+                      for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
+                          if const_expr(not self.shuffle_LSE):
+                              lse_pair = (tSrLSE[2 * v], tSrLSE[2 * v + 1])
+                          else:
+                              lse_pair = (
+                                  utils.shuffle_sync(tSrLSE, offset=2 * v),
+                                  utils.shuffle_sync(tSrLSE, offset=2 * v + 1),
+                              )
+                          tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
+                              ((tSrS_cur[2 * v], tSrS_cur[2 * v + 1])),
+                              (dm_c[stage], dm_c[stage]),
+                              (-lse_pair[0], -lse_pair[1]),
+                          )
+                          if const_expr("noexp" in self.dm_abl):
+                              pass
+                          elif const_expr("poly3" in self.dm_opts):
+                              # FA4 degree-3 FMA polynomial for every element: bitwise = dm_common.dm_bwd_p_pair_poly in
+                              # pass 0 (own-P delta keeps rowsum(dS)=0 at round-off; P error 8.8e-5 << 2e-3 tolerance)
+                              tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = utils.ex2_emulation_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
+                          elif const_expr(self.dm_p3 is not None and v % self.dm_p3[0] < self.dm_p3[1]):
+                              # FA4 degree-3 FMA polynomial (8.8e-5) for a static subset of pairs (MUFU offload)
+                              tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = utils.ex2_emulation_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
+                          elif const_expr(self.dm_p5 is not None and v % self.dm_p5[0] < self.dm_p5[1]):
+                              # accurate (1.7e-7) degree-5 FMA polynomial for a static subset of pairs (MUFU offload)
+                              tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_utils.ex2_poly5_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
+                          else:
+                              tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
+                              tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
+                      if const_expr(dm_tr is not None):
+                          dm_now = dm_utils.clock32()
+                          dm_s10 = dm_s10 + (dm_now - dm_tprev)
+                          dm_tprev = dm_now
+                      if const_expr(self.acc_m64):
+                          # P^T goes to SMEM; S stays untouched in TMEM until the dS pipeline
+                          # releases it, so no cross-warp barrier is needed before the store.
+                          tSrP_cvt = cute.make_fragment_like(tSrS_cur, self.q_dtype)
+                          utils.cvt_f16(tSrS_cur, tSrP_cvt)
+                          cute.autovec_copy(tSrP_cvt, tRS_sP[None, 0, 0, 0])
+                      else:
+                          # DM: P^T codes with a pow2 scale per (key row, 32-query block); SFA_dV = s * dos
+                          p_amax = Float32(1.0)
+                          if const_expr("pamax" not in self.dm_abl and "amax3" not in self.dm_opts and "amaxt" not in self.dm_opts):
+                              p_amax = Float32(0.0)
+                              for v in cutlass.range_constexpr(cute.size(tSrS_cur)):
+                                  p_amax = cute.arch.fmax(p_amax, tSrS_cur[v])
+                          elif const_expr("pamax" not in self.dm_abl):
+                              # 4 independent 3-input max chains (P >= 0)
+                              pm = [utils.fmax(tSrS_cur[2 * t], tSrS_cur[2 * t + 1]) for t in range(4)]
+                              for v in cutlass.range_constexpr(8, cute.size(tSrS_cur), 8):
+                                  for t in cutlass.range_constexpr(4):
+                                      pm[t] = utils.fmax(pm[t], tSrS_cur[v + 2 * t], tSrS_cur[v + 2 * t + 1])
+                              p_amax = utils.fmax(utils.fmax(pm[0], pm[1]), pm[2], pm[3])
+                          p_sb = dm_utils.pow2_sb(p_amax)
+                          p_inv = dm_utils.inv_pow2_from_sb(p_sb)
+                          dm_sfa_dv[stage] = dm_utils.add_sb_clamp(p_sb, dm_sfa_dv[stage])
+                          tSrPq = cute.make_fragment_like(tSrS_cur, Float32)
+                          for v in cutlass.range_constexpr(cute.size(tSrS_cur) // 2):
+                              tSrPq[2 * v], tSrPq[2 * v + 1] = cute.arch.mul_packed_f32x2(
+                                  (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]), (p_inv, p_inv))
+                          tSrP_r2t[None, stage, 0, 0].store(tSrPq.load().to(self.q_dtype))
+                          if const_expr(dm_tr is not None):
+                              dm_now = dm_utils.clock32()
+                              dm_s11 = dm_s11 + (dm_now - dm_tprev)
+                              dm_tprev = dm_now
+                          if const_expr(stage == 0 and "noilp" in self.dm_opts):
+                              if const_expr(self.split_P_dS):
+                                  # wait until the previous pdo UMMA has consumed the P slot
+                                  pipeline_P.producer_acquire(producer_state_P)
+                              elif const_expr("early_dq" not in self.dm_opts):
+                                  cute.arch.fence_view_async_tmem_load()
+                                  # P overwrites S lanes another warp may still be loading, so
+                                  # every warp must have loaded S before any stores P.
+                                  if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
+                                      # TMEM lanes are warp-quadrant private: only warps w and w+4 share lanes, and the
+                                      # dQ SF columns are written per own lanes; the dQ MMA itself waits for every warp's
+                                      # dS-pipe arrival -> a 64-thread pair barrier is enough
+                                      cute.arch.barrier(
+                                          barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
+                                          number_of_threads=64)
+                                  else:
+                                      self.compute_sync_barrier.arrive_and_wait()
+                                  if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
+                                      if iter_idx > 0:
+                                          self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
+                                          cute.arch.fence_view_async_tmem_store()
+                                          with cute.arch.elect_one():
+                                              pipeline_dS.producer_commit(producer_state_dS)
+                                          producer_state_dS.advance()
+                          if const_expr("noilp" in self.dm_opts):
+                              cute.copy(
+                                  thr_copy_r2t,
+                                  tSrP_r2t_f32[None, stage, None, None],
+                                  tStP_r2t[None, stage, None, None],
+                              )
+                  if const_expr("noilp" not in self.dm_opts and not self.acc_m64):
+                      # ilp: exps / P quantization of every stage first (no barrier between stages), then the S-read
+                      # barrier, dQ SFs and the P TMEM stores
+                      if const_expr(self.split_P_dS):
+                          # wait until the previous pdo UMMA has consumed the P slot
+                          pipeline_P.producer_acquire(producer_state_P)
+                      elif const_expr("early_dq" not in self.dm_opts):
+                          cute.arch.fence_view_async_tmem_load()
+                          # P overwrites S lanes another warp may still be loading, so
+                          # every warp must have loaded S before any stores P.
+                          if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
+                              # TMEM lanes are warp-quadrant private: only warps w and w+4 share lanes, and the
+                              # dQ SF columns are written per own lanes; the dQ MMA itself waits for every warp's
+                              # dS-pipe arrival -> a 64-thread pair barrier is enough
+                              cute.arch.barrier(
+                                  barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
+                                  number_of_threads=64)
+                          else:
+                              self.compute_sync_barrier.arrive_and_wait()
+                          if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
+                              if iter_idx > 0:
+                                  self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
+                                  cute.arch.fence_view_async_tmem_store()
+                                  with cute.arch.elect_one():
+                                      pipeline_dS.producer_commit(producer_state_dS)
+                                  producer_state_dS.advance()
+                      for stage in cutlass.range_constexpr(num_stages):
+                          cute.copy(
+                              thr_copy_r2t,
+                              tSrP_r2t_f32[None, stage, None, None],
+                              tStP_r2t[None, stage, None, None],
+                          )
+
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s4 = dm_s4 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  # DM: dV SFA (per key row, per 32-query k-step) and constant SFB
+                  dm_lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+                  for stage in cutlass.range_constexpr(num_stages):
+                      dm_k = dm_qoff[stage]
+                      dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32,
+                                          dm_utils.bytes4_same(dm_sfa_dv[stage]))
+                  dm_one = Int32(0x7F7F7F7F)
+                  dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dv_col, dm_one, dm_one, dm_one, dm_one)
+                  if const_expr(not self.acc_m64):
+                      cute.arch.fence_view_async_tmem_store()
+                  cute.arch.fence_view_async_shared()
+                  # The P (or S_P) and LSE mbarriers expect one arrival per compute warp
+                  if const_expr(self.split_P_dS or "bar2" not in self.dm_opts):
+                      # nobar2: per-warp arrivals suffice (consumer groups count compute warps; each warp fenced its
+                      # own TMEM stores above), so no all-compute-warps barrier is needed before the S_P release
+                      cute.arch.sync_warp()
+                  else:
+                      self.compute_sync_barrier.arrive_and_wait()
+                  if const_expr(self.split_P_dS):
+                      with cute.arch.elect_one():
+                          pipeline_P.producer_commit(producer_state_P)
+                      producer_state_P.advance()
+                  elif const_expr(self.cta_schedule != CtaSchedule.TWO_CTA_SERIAL):
+                      # Signal tmem store P completion with pipeline_S_P
+                      with cute.arch.elect_one():
+                          pipeline_S_P.consumer_release(consumer_state_S_P_dP)
+                          # pipeline_S_P.sync_object_empty.arrive(0, pipeline_S_P.consumer_mask)
+                  # Normally we'd need syncwarp here since only 1 thread will signal in
+                  # consumer_release, but we already have the barrier or sync_warp before this
+                  pipeline_LSE.consumer_release(consumer_state_LSE)
+                  consumer_state_LSE.advance()
+                  # ---------------------------------------------
+                  # dS.T = P.T * (dP.T - D)
+                  # ---------------------------------------------
+                  pipeline_dPsum.consumer_wait(consumer_state_dPsum)
+                  # DM dpsearly: delta (dPsum) smem loads issued before the dP wait (LDS latency hidden by the wait)
+                  dm_dps_all = [None] * num_stages
+                  if const_expr("dpsearly" in self.dm_opts):
+                      dm_dps_all = [None] * num_stages
+                      for stage in cutlass.range_constexpr(num_stages):
+                          tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
+                          dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
+                          cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
+                  pipeline_dP.consumer_wait(consumer_state_S_P_dP)
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s5 = dm_s5 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  # pipeline_dP.sync_object_full.wait(0, consumer_phase_S_P_dP)
+                  ### Now delayed to after loop
+                  # consumer_state_S_P_dP.advance()
+                  # consumer_phase_S_P_dP ^= 1
+
+                  ##### DM: dS.T = P.T * (dP.T * (vs*dos) - delta), all stages first (tile-wide dS scale)
+                  # delta (dPsum) smem loads for all stages issued before the TMEM dP loads (latency overlap)
+                  if const_expr("dpsearly" not in self.dm_opts):
+                      dm_dps_all = [None] * num_stages
+                      for stage in cutlass.range_constexpr(num_stages):
+                          tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
+                          dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
+                          cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
+                  tdPrdP_all = [None] * num_stages
+                  ds_amax = Float32(0.0)
+                  for stage in cutlass.range_constexpr(num_stages):
+                      tdPrdP_t2r = cute.make_rmem_tensor(tScS_t2r[None, 0, None, None].shape, Float32)
+                      cute.copy(thr_copy_t2r, tdPtdP_t2r[None, stage, None, None], tdPrdP_t2r)
+                      tdPrdP_all[stage] = tdPrdP_t2r
+                  cute.arch.fence_view_async_tmem_load()
+                  dm_dsm = [Float32(0.0), Float32(0.0), Float32(0.0), Float32(0.0)]   # amaxt: 4 independent chains
+                  for stage in cutlass.range_constexpr(num_stages):
+                      tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
+                      tSrS_cur = tSrS_t2r[None, stage, 0, 0]
+                      tSrdPsum = dm_dps_all[stage]
+                      for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
+                          tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
+                              (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
+                              (dm_a[stage], dm_a[stage]),
+                              (-tSrdPsum[2 * v], -tSrdPsum[2 * v + 1]),
+                          )
+                          tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.mul_packed_f32x2(
+                              (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]),
+                              (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
+                          )
+                          if const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
+                              dm_dsm[v % 4] = utils.fmax(
+                                  dm_dsm[v % 4], dm_utils.absf(tdPrdP_cur[2 * v]), dm_utils.absf(tdPrdP_cur[2 * v + 1]))
+                          elif const_expr("dsamax" not in self.dm_abl and "amax3" not in self.dm_opts):
+                              ds_amax = cute.arch.fmax(
+                                  ds_amax, cute.arch.fmax(utils_abs(tdPrdP_cur[2 * v]), utils_abs(tdPrdP_cur[2 * v + 1]))
+                              )
+                          elif const_expr("dsamax" not in self.dm_abl):
+                              ds_amax = utils.fmax(
+                                  ds_amax, dm_utils.absf(tdPrdP_cur[2 * v]), dm_utils.absf(tdPrdP_cur[2 * v + 1])
+                              )
+                  if const_expr("spf" in self.dm_opts and not self.split_P_dS):
+                      # P(t) (in tSrS) is dead now: wait for S(t+1) (issued after P(t) was stored) and start its TMEM load
+                      if iter_idx + 1 < loop_count:
+                          pipeline_S_P.sync_object_full.wait(0, consumer_state_S_P_dP.phase ^ 1)
+                          cute.copy(thr_copy_t2r, tStS_t2r, dm_Spf)
+                  if const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
+                      ds_amax = utils.fmax(utils.fmax(dm_dsm[0], dm_dsm[1]), dm_dsm[2], dm_dsm[3])
+                  # scale per (32 keys = this warp's lanes) x (128-query tile = both warpgroups)
+                  ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s6 = dm_s6 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  dm_cw = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0])
+                  if cute.arch.lane_idx() == 0:
+                      sDm[dm_cw] = ds_amax
+                  # every warp has loaded dP (dS overwrites dP lanes of the other warpgroup) and published its max
+                  if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
+                      # dP/dS lanes and the dS scale block (32 keys x 128 queries) belong to warps w and w+4 only
+                      cute.arch.barrier(barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
                                         number_of_threads=64)
-                                else:
-                                    self.compute_sync_barrier.arrive_and_wait()
-                                if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
-                                    if iter_idx > 0:
-                                        self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
-                                        cute.arch.fence_view_async_tmem_store()
-                                        with cute.arch.elect_one():
-                                            pipeline_dS.producer_commit(producer_state_dS)
-                                        producer_state_dS.advance()
-                        if const_expr("noilp" in self.dm_opts):
-                            cute.copy(
-                                thr_copy_r2t,
-                                tSrP_r2t_f32[None, stage, None, None],
-                                tStP_r2t[None, stage, None, None],
-                            )
-                if const_expr("noilp" not in self.dm_opts and not self.acc_m64):
-                    # ilp: exps / P quantization of every stage first (no barrier between stages), then the S-read
-                    # barrier, dQ SFs and the P TMEM stores
-                    if const_expr(self.split_P_dS):
-                        # wait until the previous pdo UMMA has consumed the P slot
-                        pipeline_P.producer_acquire(producer_state_P)
-                    elif const_expr("early_dq" not in self.dm_opts):
-                        cute.arch.fence_view_async_tmem_load()
-                        # P overwrites S lanes another warp may still be loading, so
-                        # every warp must have loaded S before any stores P.
-                        if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
-                            # TMEM lanes are warp-quadrant private: only warps w and w+4 share lanes, and the
-                            # dQ SF columns are written per own lanes; the dQ MMA itself waits for every warp's
-                            # dS-pipe arrival -> a 64-thread pair barrier is enough
-                            cute.arch.barrier(
-                                barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
-                                number_of_threads=64)
-                        else:
-                            self.compute_sync_barrier.arrive_and_wait()
-                        if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
-                            if iter_idx > 0:
-                                self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
-                                cute.arch.fence_view_async_tmem_store()
-                                with cute.arch.elect_one():
-                                    pipeline_dS.producer_commit(producer_state_dS)
-                                producer_state_dS.advance()
-                    for stage in cutlass.range_constexpr(num_stages):
-                        cute.copy(
-                            thr_copy_r2t,
-                            tSrP_r2t_f32[None, stage, None, None],
-                            tStP_r2t[None, stage, None, None],
-                        )
+                  else:
+                      self.compute_sync_barrier.arrive_and_wait()
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s7 = dm_s7 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  for dm_j in cutlass.range_constexpr(1, len(self.compute_warp_ids) // 4):
+                      ds_amax = cute.arch.fmax(ds_amax, sDm[(dm_cw + 4 * dm_j) % len(self.compute_warp_ids)])
+                  ds_sb = dm_utils.pow2_sb(ds_amax)
+                  ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
+                  dm_sfa_dk = [dm_utils.add_sb_clamp(ds_sb, dm_qsb[st]) for st in range(num_stages)]
+                  dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
+                  if dm_cw < 4:
+                      if cute.arch.lane_idx() == 0:
+                          dm_utils.st_shared_b32(dm_sdm + 4 * (16 + dm_cw), dm_sfb_dq)
+                  if const_expr("ilp2" in self.dm_opts and not self.acc_m64 and not self.dm_cwg4
+                                and self.use_2cta_instrs):
+                      # ilp2: quantize every stage, store dS to TMEM (no sdS dependency), then wait for the sdS slot
+                      # and write the smem copies
+                      dm_cvt = [None] * num_stages
+                      for stage in cutlass.range_constexpr(num_stages):
+                          tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
+                          tdPrdSq = cute.make_fragment_like(tdPrdP_cur, Float32)
+                          for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
+                              tdPrdSq[2 * v], tdPrdSq[2 * v + 1] = cute.arch.mul_packed_f32x2(
+                                  (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_inv, ds_inv))
+                          dm_cvt[stage] = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
+                          dm_cvt[stage].store(tdPrdSq.load().to(self.ds_dtype))
+                          cute.copy(thr_copy_r2t, cute.recast_tensor(dm_cvt[stage], Float32), tdPtdS_r2t[None, stage, 0, 0])
+                      pipeline_dS.producer_acquire(producer_state_dS)
+                      tdPrdS_xchg = cute.make_fragment_like(dm_cvt[0], self.ds_dtype)
+                      for stage in cutlass.range_constexpr(num_stages):
+                          if exchange_stage == stage:
+                              cute.autovec_copy(dm_cvt[stage], tdPrdS_xchg)
+                          else:
+                              cute.autovec_copy(dm_cvt[stage], tRS_sdS[None, stage])
+                  for stage in cutlass.range_constexpr(num_stages if const_expr(not ("ilp2" in self.dm_opts
+                          and not self.acc_m64 and not self.dm_cwg4 and self.use_2cta_instrs)) else 0):
+                      tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
+                      tdPrdSq = cute.make_fragment_like(tdPrdP_cur, Float32)
+                      for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
+                          tdPrdSq[2 * v], tdPrdSq[2 * v + 1] = cute.arch.mul_packed_f32x2(
+                              (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_inv, ds_inv))
+                      tdPrdS_cvt = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
+                      tdPrdS_cvt.store(tdPrdSq.load().to(self.ds_dtype))
+                      if const_expr(stage == 0):
+                          if const_expr(dm_tr is not None):
+                              dm_now = dm_utils.clock32()
+                              dm_s8 = dm_s8 + (dm_now - dm_tprev)
+                              dm_tprev = dm_now
+                          pipeline_dS.producer_acquire(producer_state_dS)
+                          if const_expr(dm_tr is not None):
+                              dm_now = dm_utils.clock32()
+                              dm_s12 = dm_s12 + (dm_now - dm_tprev)
+                              dm_tprev = dm_now
+                          if const_expr(self.use_2cta_instrs and not self.acc_m64):
+                              tdPrdS_xchg = cute.make_fragment_like(tdPrdS_cvt, self.ds_dtype)
 
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s4 = dm_s4 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                # DM: dV SFA (per key row, per 32-query k-step) and constant SFB
-                dm_lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
-                for stage in cutlass.range_constexpr(num_stages):
-                    dm_k = dm_qoff[stage]
-                    dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32,
-                                        dm_utils.bytes4_same(dm_sfa_dv[stage]))
-                dm_one = Int32(0x7F7F7F7F)
-                dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dv_col, dm_one, dm_one, dm_one, dm_one)
-                if const_expr(not self.acc_m64):
-                    cute.arch.fence_view_async_tmem_store()
-                cute.arch.fence_view_async_shared()
-                # The P (or S_P) and LSE mbarriers expect one arrival per compute warp
-                if const_expr(self.split_P_dS or "bar2" not in self.dm_opts):
-                    # nobar2: per-warp arrivals suffice (consumer groups count compute warps; each warp fenced its
-                    # own TMEM stores above), so no all-compute-warps barrier is needed before the S_P release
-                    cute.arch.sync_warp()
-                else:
-                    self.compute_sync_barrier.arrive_and_wait()
-                if const_expr(self.split_P_dS):
-                    with cute.arch.elect_one():
-                        pipeline_P.producer_commit(producer_state_P)
-                    producer_state_P.advance()
-                elif const_expr(self.cta_schedule != CtaSchedule.TWO_CTA_SERIAL):
-                    # Signal tmem store P completion with pipeline_S_P
-                    with cute.arch.elect_one():
-                        pipeline_S_P.consumer_release(consumer_state_S_P_dP)
-                        # pipeline_S_P.sync_object_empty.arrive(0, pipeline_S_P.consumer_mask)
-                # Normally we'd need syncwarp here since only 1 thread will signal in
-                # consumer_release, but we already have the barrier or sync_warp before this
-                pipeline_LSE.consumer_release(consumer_state_LSE)
-                consumer_state_LSE.advance()
-                # ---------------------------------------------
-                # dS.T = P.T * (dP.T - D)
-                # ---------------------------------------------
-                pipeline_dPsum.consumer_wait(consumer_state_dPsum)
-                # DM dpsearly: delta (dPsum) smem loads issued before the dP wait (LDS latency hidden by the wait)
-                dm_dps_all = [None] * num_stages
-                if const_expr("dpsearly" in self.dm_opts):
-                    dm_dps_all = [None] * num_stages
-                    for stage in cutlass.range_constexpr(num_stages):
-                        tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
-                        dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
-                        cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
-                pipeline_dP.consumer_wait(consumer_state_S_P_dP)
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s5 = dm_s5 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                # pipeline_dP.sync_object_full.wait(0, consumer_phase_S_P_dP)
-                ### Now delayed to after loop
-                # consumer_state_S_P_dP.advance()
-                # consumer_phase_S_P_dP ^= 1
+                      if const_expr(self.acc_m64):
+                          # dS^T for the dK MMA: this CTA's rows, both Q-column halves; the half
+                          # the peer needs for its dQ MMA is exchanged straight from here.
+                          cute.autovec_copy(tdPrdS_cvt, tRS_sdS_dK[None, 0, 0, 0])
+                          # dS for this CTA's own dQ MMA: the Q-column half it owns.
+                          if q_half == cta_rank_in_cluster:
+                              cute.autovec_copy(tdPrdS_cvt, tRS_sdS[None, 0, 0, 0])
+                      else:
+                          # RMEM->TMEM: always write to TMEM for MMA
+                          if const_expr(not self.use_smem_dS_for_mma_dK or self.use_2cta_instrs):
+                              tdPrdS_r2t_f32 = cute.recast_tensor(tdPrdS_cvt, Float32)
+                              cute.copy(thr_copy_r2t, tdPrdS_r2t_f32, tdPtdS_r2t[None, stage, 0, 0])
 
-                ##### DM: dS.T = P.T * (dP.T * (vs*dos) - delta), all stages first (tile-wide dS scale)
-                # delta (dPsum) smem loads for all stages issued before the TMEM dP loads (latency overlap)
-                if const_expr("dpsearly" not in self.dm_opts):
-                    dm_dps_all = [None] * num_stages
-                    for stage in cutlass.range_constexpr(num_stages):
-                        tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
-                        dm_dps_all[stage] = cute.make_fragment_like(tSsdPsum_cur, Float32)
-                        cute.autovec_copy(tSsdPsum_cur, dm_dps_all[stage])
-                tdPrdP_all = [None] * num_stages
-                ds_amax = Float32(0.0)
-                for stage in cutlass.range_constexpr(num_stages):
-                    tdPrdP_t2r = cute.make_rmem_tensor(tScS_t2r[None, 0, None, None].shape, Float32)
-                    cute.copy(thr_copy_t2r, tdPtdP_t2r[None, stage, None, None], tdPrdP_t2r)
-                    tdPrdP_all[stage] = tdPrdP_t2r
-                cute.arch.fence_view_async_tmem_load()
-                dm_dsm = [Float32(0.0), Float32(0.0), Float32(0.0), Float32(0.0)]   # amaxt: 4 independent chains
-                for stage in cutlass.range_constexpr(num_stages):
-                    tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
-                    tSrS_cur = tSrS_t2r[None, stage, 0, 0]
-                    tSrdPsum = dm_dps_all[stage]
-                    for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
-                        tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
-                            (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
-                            (dm_a[stage], dm_a[stage]),
-                            (-tSrdPsum[2 * v], -tSrdPsum[2 * v + 1]),
-                        )
-                        tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.mul_packed_f32x2(
-                            (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]),
-                            (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
-                        )
-                        if const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
-                            dm_dsm[v % 4] = utils.fmax(
-                                dm_dsm[v % 4], dm_utils.absf(tdPrdP_cur[2 * v]), dm_utils.absf(tdPrdP_cur[2 * v + 1]))
-                        elif const_expr("dsamax" not in self.dm_abl and "amax3" not in self.dm_opts):
-                            ds_amax = cute.arch.fmax(
-                                ds_amax, cute.arch.fmax(utils_abs(tdPrdP_cur[2 * v]), utils_abs(tdPrdP_cur[2 * v + 1]))
-                            )
-                        elif const_expr("dsamax" not in self.dm_abl):
-                            ds_amax = utils.fmax(
-                                ds_amax, dm_utils.absf(tdPrdP_cur[2 * v]), dm_utils.absf(tdPrdP_cur[2 * v + 1])
-                            )
-                if const_expr("spf" in self.dm_opts and not self.split_P_dS):
-                    # P(t) (in tSrS) is dead now: wait for S(t+1) (issued after P(t) was stored) and start its TMEM load
-                    if iter_idx + 1 < loop_count:
-                        pipeline_S_P.sync_object_full.wait(0, consumer_state_S_P_dP.phase ^ 1)
-                        cute.copy(thr_copy_t2r, tStS_t2r, dm_Spf)
-                if const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
-                    ds_amax = utils.fmax(utils.fmax(dm_dsm[0], dm_dsm[1]), dm_dsm[2], dm_dsm[3])
-                # scale per (32 keys = this warp's lanes) x (128-query tile = both warpgroups)
-                ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s6 = dm_s6 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                dm_cw = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0])
-                if cute.arch.lane_idx() == 0:
-                    sDm[dm_cw] = ds_amax
-                # every warp has loaded dP (dS overwrites dP lanes of the other warpgroup) and published its max
-                if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
-                    # dP/dS lanes and the dS scale block (32 keys x 128 queries) belong to warps w and w+4 only
-                    cute.arch.barrier(barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
-                                      number_of_threads=64)
-                else:
-                    self.compute_sync_barrier.arrive_and_wait()
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s7 = dm_s7 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                for dm_j in cutlass.range_constexpr(1, len(self.compute_warp_ids) // 4):
-                    ds_amax = cute.arch.fmax(ds_amax, sDm[(dm_cw + 4 * dm_j) % len(self.compute_warp_ids)])
-                ds_sb = dm_utils.pow2_sb(ds_amax)
-                ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
-                dm_sfa_dk = [dm_utils.add_sb_clamp(ds_sb, dm_qsb[st]) for st in range(num_stages)]
-                dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
-                if dm_cw < 4:
-                    if cute.arch.lane_idx() == 0:
-                        dm_utils.st_shared_b32(dm_sdm + 4 * (16 + dm_cw), dm_sfb_dq)
-                if const_expr("ilp2" in self.dm_opts and not self.acc_m64 and not self.dm_cwg4
-                              and self.use_2cta_instrs):
-                    # ilp2: quantize every stage, store dS to TMEM (no sdS dependency), then wait for the sdS slot
-                    # and write the smem copies
-                    dm_cvt = [None] * num_stages
-                    for stage in cutlass.range_constexpr(num_stages):
-                        tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
-                        tdPrdSq = cute.make_fragment_like(tdPrdP_cur, Float32)
-                        for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
-                            tdPrdSq[2 * v], tdPrdSq[2 * v + 1] = cute.arch.mul_packed_f32x2(
-                                (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_inv, ds_inv))
-                        dm_cvt[stage] = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
-                        dm_cvt[stage].store(tdPrdSq.load().to(self.ds_dtype))
-                        cute.copy(thr_copy_r2t, cute.recast_tensor(dm_cvt[stage], Float32), tdPtdS_r2t[None, stage, 0, 0])
-                    pipeline_dS.producer_acquire(producer_state_dS)
-                    tdPrdS_xchg = cute.make_fragment_like(dm_cvt[0], self.ds_dtype)
-                    for stage in cutlass.range_constexpr(num_stages):
-                        if exchange_stage == stage:
-                            cute.autovec_copy(dm_cvt[stage], tdPrdS_xchg)
-                        else:
-                            cute.autovec_copy(dm_cvt[stage], tRS_sdS[None, stage])
-                for stage in cutlass.range_constexpr(num_stages if const_expr(not ("ilp2" in self.dm_opts
-                        and not self.acc_m64 and not self.dm_cwg4 and self.use_2cta_instrs)) else 0):
-                    tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
-                    tdPrdSq = cute.make_fragment_like(tdPrdP_cur, Float32)
-                    for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
-                        tdPrdSq[2 * v], tdPrdSq[2 * v + 1] = cute.arch.mul_packed_f32x2(
-                            (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_inv, ds_inv))
-                    tdPrdS_cvt = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
-                    tdPrdS_cvt.store(tdPrdSq.load().to(self.ds_dtype))
-                    if const_expr(stage == 0):
-                        if const_expr(dm_tr is not None):
-                            dm_now = dm_utils.clock32()
-                            dm_s8 = dm_s8 + (dm_now - dm_tprev)
-                            dm_tprev = dm_now
-                        pipeline_dS.producer_acquire(producer_state_dS)
-                        if const_expr(dm_tr is not None):
-                            dm_now = dm_utils.clock32()
-                            dm_s12 = dm_s12 + (dm_now - dm_tprev)
-                            dm_tprev = dm_now
-                        if const_expr(self.use_2cta_instrs and not self.acc_m64):
-                            tdPrdS_xchg = cute.make_fragment_like(tdPrdS_cvt, self.ds_dtype)
+                          # RMEM->SMEM: For 2-CTA, keep exchange stage in registers, write
+                          # non-exchange to sdS
+                          if const_expr(self.use_2cta_instrs):
+                              # cwg4: one 32-query stage per thread; its query half (k-step // 2) decides
+                              if exchange_stage == (dm_qoff[stage] // 2 if const_expr(self.dm_cwg4) else stage):
+                                  cute.autovec_copy(tdPrdS_cvt, tdPrdS_xchg)
+                              else:
+                                  cute.autovec_copy(tdPrdS_cvt, tRS_sdS[None, stage])
+                          else:
+                              cute.autovec_copy(tdPrdS_cvt, tRS_sdS[None, stage])
 
-                    if const_expr(self.acc_m64):
-                        # dS^T for the dK MMA: this CTA's rows, both Q-column halves; the half
-                        # the peer needs for its dQ MMA is exchanged straight from here.
-                        cute.autovec_copy(tdPrdS_cvt, tRS_sdS_dK[None, 0, 0, 0])
-                        # dS for this CTA's own dQ MMA: the Q-column half it owns.
-                        if q_half == cta_rank_in_cluster:
-                            cute.autovec_copy(tdPrdS_cvt, tRS_sdS[None, 0, 0, 0])
-                    else:
-                        # RMEM->TMEM: always write to TMEM for MMA
-                        if const_expr(not self.use_smem_dS_for_mma_dK or self.use_2cta_instrs):
-                            tdPrdS_r2t_f32 = cute.recast_tensor(tdPrdS_cvt, Float32)
-                            cute.copy(thr_copy_r2t, tdPrdS_r2t_f32, tdPtdS_r2t[None, stage, 0, 0])
+                  if const_expr(self.acc_m64):
+                      # dS^T is in SMEM: make this warp's stores visible to the async proxy before
+                      # the per-warp arrival the MMA warp waits on.
+                      cute.arch.fence_view_async_shared()
+                  elif const_expr(not self.use_smem_dS_for_mma_dK):
+                      # DM: dK SFA (per key row, per 32-query k-step) and constant SFB
+                      for stage in cutlass.range_constexpr(num_stages):
+                          dm_k = dm_qoff[stage]
+                          dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dk_col + dm_k * 4 + dm_lane // 32,
+                                              dm_utils.bytes4_same(dm_sfa_dk[stage]))
+                      dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dk_col, dm_one, dm_one, dm_one, dm_one)
+                      cute.arch.fence_view_async_tmem_store()
 
-                        # RMEM->SMEM: For 2-CTA, keep exchange stage in registers, write
-                        # non-exchange to sdS
-                        if const_expr(self.use_2cta_instrs):
-                            # cwg4: one 32-query stage per thread; its query half (k-step // 2) decides
-                            if exchange_stage == (dm_qoff[stage] // 2 if const_expr(self.dm_cwg4) else stage):
-                                cute.autovec_copy(tdPrdS_cvt, tdPrdS_xchg)
-                            else:
-                                cute.autovec_copy(tdPrdS_cvt, tRS_sdS[None, stage])
-                        else:
-                            cute.autovec_copy(tdPrdS_cvt, tRS_sdS[None, stage])
+                  if const_expr(self.use_2cta_instrs):
+                      # use pipeline_dP to signal the dS store (TMEM, or SMEM with acc_m64)
+                      with cute.arch.elect_one():
+                          pipeline_dP.consumer_release(consumer_state_S_P_dP)
+                  consumer_state_S_P_dP.advance()
 
-                if const_expr(self.acc_m64):
-                    # dS^T is in SMEM: make this warp's stores visible to the async proxy before
-                    # the per-warp arrival the MMA warp waits on.
-                    cute.arch.fence_view_async_shared()
-                elif const_expr(not self.use_smem_dS_for_mma_dK):
-                    # DM: dK SFA (per key row, per 32-query k-step) and constant SFB
-                    for stage in cutlass.range_constexpr(num_stages):
-                        dm_k = dm_qoff[stage]
-                        dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dk_col + dm_k * 4 + dm_lane // 32,
-                                            dm_utils.bytes4_same(dm_sfa_dk[stage]))
-                    dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dk_col, dm_one, dm_one, dm_one, dm_one)
-                    cute.arch.fence_view_async_tmem_store()
+                  # After the loop: copy exchange registers to sdS_xchg buffer
+                  if const_expr(sdS_xchg is not None):
+                      # sdS_xchg aliases sdQaccum: wait until the dQ reduce has read it
+                      if const_expr(dQaccum_empty_mbar_ptr is not None):
+                          cute.arch.mbarrier_wait(
+                              dQaccum_empty_mbar_ptr, phase=producer_state_dS.phase
+                          )
+                      if const_expr(self.dm_cwg4):
+                          if dm_qoff[0] // 2 == exchange_stage:
+                              cute.autovec_copy(tdPrdS_xchg, tRS_sdS_xchg[None, 0])
+                      else:
+                          cute.autovec_copy(tdPrdS_xchg, tRS_sdS_xchg[None, 0])
 
-                if const_expr(self.use_2cta_instrs):
-                    # use pipeline_dP to signal the dS store (TMEM, or SMEM with acc_m64)
-                    with cute.arch.elect_one():
-                        pipeline_dP.consumer_release(consumer_state_S_P_dP)
-                consumer_state_S_P_dP.advance()
+                  cute.arch.fence_view_async_shared()
+                  # The dS and dPsum mbarriers expect one arrival per compute warp
+                  if const_expr(self.split_P_dS or "bar4" in self.dm_abl):
+                      cute.arch.sync_warp()
+                  else:
+                      if const_expr(dm_tr is not None):
+                          dm_now = dm_utils.clock32()
+                          dm_s8 = dm_s8 + (dm_now - dm_tprev)
+                          dm_tprev = dm_now
+                      self.compute_sync_barrier.arrive_and_wait()
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s13 = dm_s13 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  # DM: this CTA's 4 key-block dQ scale bytes -> one word, to self and to the peer CTA
+                  if dm_tid == 0:
+                      dm_slot = dm_t & 1
+                      dm_word = dm_utils.pack_bytes4(
+                          dm_utils.ld_shared_b32(dm_sdm + 4 * 16), dm_utils.ld_shared_b32(dm_sdm + 4 * 17),
+                          dm_utils.ld_shared_b32(dm_sdm + 4 * 18), dm_utils.ld_shared_b32(dm_sdm + 4 * 19))
+                      dm_utils.st_shared_b32(dm_sdm + 4 * (24 + dm_slot), dm_word)
+                      dm_utils.st_async_peer_b32(dm_sdm + 4 * (32 + dm_slot), dm_mbar + 8 * dm_slot,
+                                                 peer_cta_rank_in_cluster, dm_word)
+                      dm_utils.mbar_arrive_expect_tx(dm_mbar + 8 * dm_slot, 4)
+                  dm_t = dm_t + 1
+                  # Normally we'd need syncwarp here since only 1 thread will signal in
+                  # consumer_release, but we already have the barrier or sync_warp before this
+                  pipeline_dPsum.consumer_release(consumer_state_dPsum)
+                  if const_expr(dm_tr is not None):
+                      dm_now = dm_utils.clock32()
+                      dm_s9 = dm_s9 + (dm_now - dm_tprev)
+                      dm_tprev = dm_now
+                  consumer_state_dPsum.advance()
+                  # pipelined 2CTA schedule: pipeline_dS also signals S tmem load completion so is deferred
+                  if const_expr(self.cta_schedule != CtaSchedule.TWO_CTA_PIPELINED):
+                      with cute.arch.elect_one():
+                          pipeline_dS.producer_commit(producer_state_dS)
+                      producer_state_dS.advance()
 
-                # After the loop: copy exchange registers to sdS_xchg buffer
-                if const_expr(sdS_xchg is not None):
-                    # sdS_xchg aliases sdQaccum: wait until the dQ reduce has read it
-                    if const_expr(dQaccum_empty_mbar_ptr is not None):
-                        cute.arch.mbarrier_wait(
-                            dQaccum_empty_mbar_ptr, phase=producer_state_dS.phase
-                        )
-                    if const_expr(self.dm_cwg4):
-                        if dm_qoff[0] // 2 == exchange_stage:
-                            cute.autovec_copy(tdPrdS_xchg, tRS_sdS_xchg[None, 0])
-                    else:
-                        cute.autovec_copy(tdPrdS_xchg, tRS_sdS_xchg[None, 0])
-
-                cute.arch.fence_view_async_shared()
-                # The dS and dPsum mbarriers expect one arrival per compute warp
-                if const_expr(self.split_P_dS or "bar4" in self.dm_abl):
-                    cute.arch.sync_warp()
-                else:
-                    if const_expr(dm_tr is not None):
-                        dm_now = dm_utils.clock32()
-                        dm_s8 = dm_s8 + (dm_now - dm_tprev)
-                        dm_tprev = dm_now
-                    self.compute_sync_barrier.arrive_and_wait()
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s13 = dm_s13 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                # DM: this CTA's 4 key-block dQ scale bytes -> one word, to self and to the peer CTA
-                if dm_tid == 0:
-                    dm_slot = dm_t & 1
-                    dm_word = dm_utils.pack_bytes4(
-                        dm_utils.ld_shared_b32(dm_sdm + 4 * 16), dm_utils.ld_shared_b32(dm_sdm + 4 * 17),
-                        dm_utils.ld_shared_b32(dm_sdm + 4 * 18), dm_utils.ld_shared_b32(dm_sdm + 4 * 19))
-                    dm_utils.st_shared_b32(dm_sdm + 4 * (24 + dm_slot), dm_word)
-                    dm_utils.st_async_peer_b32(dm_sdm + 4 * (32 + dm_slot), dm_mbar + 8 * dm_slot,
-                                               peer_cta_rank_in_cluster, dm_word)
-                    dm_utils.mbar_arrive_expect_tx(dm_mbar + 8 * dm_slot, 4)
-                dm_t = dm_t + 1
-                # Normally we'd need syncwarp here since only 1 thread will signal in
-                # consumer_release, but we already have the barrier or sync_warp before this
-                pipeline_dPsum.consumer_release(consumer_state_dPsum)
-                if const_expr(dm_tr is not None):
-                    dm_now = dm_utils.clock32()
-                    dm_s9 = dm_s9 + (dm_now - dm_tprev)
-                    dm_tprev = dm_now
-                consumer_state_dPsum.advance()
-                # pipelined 2CTA schedule: pipeline_dS also signals S tmem load completion so is deferred
-                if const_expr(self.cta_schedule != CtaSchedule.TWO_CTA_PIPELINED):
-                    with cute.arch.elect_one():
-                        pipeline_dS.producer_commit(producer_state_dS)
-                    producer_state_dS.advance()
-
-                # 2-CTA: DSMEM copy of the exchanged dS half to the peer's sdS buffer
-                if const_expr(self.use_2cta_instrs):
-                    stage_copy_bytes = const_expr(self.tma_copy_bytes["dS"] // 2)
-                    stage_copy_elems = const_expr(stage_copy_bytes // (self.ds_dtype.width // 8))
-                    if tidx == 0:
-                        smem_src_ptr = sdS_xchg_src.iterator
-                        # Destination is peer's sdS at our CTA's offset (exchange_stage position)
-                        smem_dst_ptr = sdS.iterator + cta_rank_in_cluster * stage_copy_elems
-                        cute.arch.mbarrier_arrive_and_expect_tx(
-                            dS_cluster_full_mbar_ptr,
-                            stage_copy_bytes,
-                            peer_cta_rank_in_cluster=peer_cta_rank_in_cluster,
-                        )
-                        copy_utils.cpasync_bulk_s2cluster(
-                            smem_src_ptr,
-                            smem_dst_ptr,
-                            dS_cluster_full_mbar_ptr,
-                            stage_copy_bytes,
-                            peer_cta_rank_in_cluster=peer_cta_rank_in_cluster,
-                        )
+                  # 2-CTA: DSMEM copy of the exchanged dS half to the peer's sdS buffer
+                  if const_expr(self.use_2cta_instrs):
+                      stage_copy_bytes = const_expr(self.tma_copy_bytes["dS"] // 2)
+                      stage_copy_elems = const_expr(stage_copy_bytes // (self.ds_dtype.width // 8))
+                      if tidx == 0:
+                          smem_src_ptr = sdS_xchg_src.iterator
+                          # Destination is peer's sdS at our CTA's offset (exchange_stage position)
+                          smem_dst_ptr = sdS.iterator + cta_rank_in_cluster * stage_copy_elems
+                          cute.arch.mbarrier_arrive_and_expect_tx(
+                              dS_cluster_full_mbar_ptr,
+                              stage_copy_bytes,
+                              peer_cta_rank_in_cluster=peer_cta_rank_in_cluster,
+                          )
+                          copy_utils.cpasync_bulk_s2cluster(
+                              smem_src_ptr,
+                              smem_dst_ptr,
+                              dS_cluster_full_mbar_ptr,
+                              stage_copy_bytes,
+                              peer_cta_rank_in_cluster=peer_cta_rank_in_cluster,
+                          )
 
             # Final signal for dS smem store completion
             if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):

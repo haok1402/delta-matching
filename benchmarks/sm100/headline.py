@@ -5,6 +5,7 @@ same-run ratio, and a spread table (min..max over GPUs) follows.
 Per-length table of fwd+bwd (and fwd, bwd) speedup = FA4_ms / arm_ms, same-run pairs, for N in 8k/32k/64k and both head
 configs, causal and non-causal, plus the geomean over the 6 shapes (2 head configs x 3 N) per causal flag."""
 import glob, json, math, statistics, sys
+TARGET_SPEEDUP = 1.10   # user (2026-11-09): "aim for 10% faster" than FA4 bf16
 
 
 import os as _os
@@ -25,6 +26,7 @@ Ns = sorted({x["N"] for x in json.load(open(__import__("os").path.join(__import_
 spread = {}
 hosts = sorted({r["host"] for r in d.values()})
 print(f"arm={arm}  files=results/{pre}.[sg]*.jsonl  host={','.join(hosts)}")
+tgt_rows, tgt_gm = [], []
 for base in ("fa4_bf16", "fa4_bf16_det"):
     print(f"\nvs {base}  (speedup = {base}_ms / {arm}_ms)\n")
     print("| causal | pass | H/Hk | " + " | ".join(f"{n//1024}k" for n in Ns) + f" | geomean ({2*len(Ns)} shapes) |")
@@ -49,6 +51,19 @@ for base in ("fa4_bf16", "fa4_bf16_det"):
             for i, (H, Hk, cells) in enumerate(rows):
                 g = f"**{gm(allx):.3f}**" if (i == 0 and c and p == "fwd_bwd") else (f"{gm(allx):.3f}" if i == 0 else "")
                 print(f"| {int(c)} | {p} | {H}/{Hk} | " + " | ".join(cells) + f" | {g} |")
+                if base == "fa4_bf16" and c and p == "fwd_bwd":
+                    tgt_rows.append((H, Hk, cells))
+            if base == "fa4_bf16" and c and p == "fwd_bwd" and allx:
+                tgt_gm.append(gm(allx))
+
+if tgt_rows:
+    print(f"\ngap to the {TARGET_SPEEDUP:.2f}x target (causal fwd+bwd vs fa4_bf16): speedup still needed = {TARGET_SPEEDUP:.2f} / current\n")
+    print("| H/Hk | " + " | ".join(f"{n//1024}k" for n in Ns) + " | geomean |")
+    print("|" + "---|" * (2 + len(Ns)))
+    for i, (H, Hk, cells) in enumerate(tgt_rows):
+        gaps = [("+%.1f%%" % (100 * (TARGET_SPEEDUP / float(x) - 1)) if x != "-" else "-") for x in cells]
+        g = ("+%.1f%%" % (100 * (TARGET_SPEEDUP / tgt_gm[0] - 1))) if (i == 0 and tgt_gm) else ""
+        print(f"| {H}/{Hk} | " + " | ".join(gaps) + f" | {g} |")
 
 nmax = max((v[2] for v in spread.values()), default=0)
 if nmax > 1:

@@ -5859,10 +5859,17 @@ class DMBackwardSm100:
                 else:
                     cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
         cute.arch.fence_view_async_shared()
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 52, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq2 = dm_utils.clock64()
         if const_expr(self.dm_dsqw):
             self.dsq_sync_barrier.arrive_and_wait()
         else:
             self.reduce_sync_barrier.arrive_and_wait()
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 53, Int64(dm_utils.clock64() - dm_tq2))
         peer = cta_rank ^ 1
         if tidx == 0:
             slot = dsq_j & 1

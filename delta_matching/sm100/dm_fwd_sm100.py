@@ -410,7 +410,10 @@ class DMForwardSm100:
         # (an explicit pipe=1 debug variant keeps the old path: pipe=1 bypasses the SS-PV P/SF protocol)
         if (self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1
                 and self.dm_opts.get("pipe", "0") != "1"):
-            for _k, _v in (("ss_pv", "1"), ("kvs", "6"), ("lean", "1")):
+            # kda-sm100-sspv2: ss_pv default OFF. Every race-free sScale hand-off measured +34..45% fwd (crd, dbs, late;
+            # fwdrw-design 6.9), and racy ss_pv was only 0.1-0.6% faster than the old path with lean=1,kvs=6 (bitwise, no
+            # new hand-off). dbs (+2 KB SMEM) needs one K/V ring stage less: kvs=5.
+            for _k, _v in (("ss_pv", "0"), ("kvs", "5" if self.dm_opts.get("dbs", "0") == "1" else "6"), ("lean", "1")):
                 self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
         if "split" in self.dm_opts:
@@ -428,6 +431,15 @@ class DMForwardSm100:
         # with q_stage == 1) the knob falls back to the old path, exactly like the former default block did
         self.dm_sspv = (self.dm_opts.get("ss_pv", "0") == "1" and self.q_stage == 2 and not self.use_s_ping_pong
                         and self.cta_group_size == 1)
+        # dbs (opt-in with ss_pv=1): double-buffered sScale per stage (2 slots by event parity) handed off with per-warp
+        # full/empty mbarriers instead of the sm_stats named barrier + single-slot cread handshake (which serialized the
+        # softmax behind the correction: +35% fwd). dbs=0 restores the crd protocol.
+        self.dm_dbs = self.dm_sspv and self.dm_opts.get("dbs", "0") == "1"
+        # late (ss_pv default protocol): sScale write + stats arrival moved after the softmax's pvdone_s(k-1) wait, so the slot reuse is
+        # ordered by the existing chain read(k-1) -> O-rescaled(k-1) -> PV(k-1) -> pvdone; no extra handshake (fwdrw-design 6.9)
+        self.dm_late = self.dm_sspv and not self.dm_dbs and self.dm_opts.get("late", "1") == "1"
+        self.dm_crd = self.dm_sspv and not self.dm_dbs and not self.dm_late and self.dm_opts.get("crd", "1") == "1"
+        self.dm_trc = int(self.dm_opts.get("trc", "0"))   # DEBUG ONLY: LSE <- correction clock counters (1 stats sync, 2 pvdone wait, 3 loop total)
         if self.dm_sspv:
             assert self.n_block_size == 128 and self.head_dim_v_padded == 128
             # the pipe=1 softmax branch stores P to TMEM and bypasses the SS-PV P/SF/pvdone protocol (Codex review)
@@ -776,7 +788,8 @@ class DMForwardSm100:
         load_epi_mbar_size = 2 if const_expr(self.overlap_sO_sQ) else 0
 
         dm_nb1, dm_nb2 = (1, 3) if self.dm_sspv else (0, 0)   # 4 x 8 B keeps the following smem 16-B aligned
-        dm_nb3 = 2 if self.dm_sspv else 0   # sScale read handshake (correction -> softmax), one per stage (16 B)
+        dm_nb3 = (32 if self.dm_dbs else 2) if self.dm_sspv else 0   # crd: 2 (one per stage); dbs: [full|empty][stage][slot][warp]
+        dm_sc = 2 if self.dm_dbs else 1   # dbs: two sScale slots
         dm_sP_size = cute.cosize(self.dm_sP_layout) if self.dm_sspv else 0
 
         @cute.struct
@@ -801,7 +814,7 @@ class DMForwardSm100:
             tmem_holding_buf: Int32
             # Smem tensors
             # store row max and row sum
-            sScale: cute.struct.MemRange[Float32, self.s_p_o_stage * self.m_block_size * 2]
+            sScale: cute.struct.MemRange[Float32, self.s_p_o_stage * self.m_block_size * 2 * dm_sc]
             # Scheduler buffers placed here to utilize padding before sO's 1024-byte
             # alignment. This avoids adding bytes at the end when we're at the smem limit.
             # PipelineClcFetchAsync / PipelineAsync both expect
@@ -847,7 +860,7 @@ class DMForwardSm100:
             tmem_holding_buf: Int32
             # Smem tensors
             # store row max and row sum
-            sScale: cute.struct.MemRange[Float32, self.s_p_o_stage * self.m_block_size * 2]
+            sScale: cute.struct.MemRange[Float32, self.s_p_o_stage * self.m_block_size * 2 * dm_sc]
             # Scheduler buffers placed here to utilize padding before sO's 1024-byte
             # alignment. This avoids adding bytes at the end when we're at the smem limit.
             # PipelineClcFetchAsync / PipelineAsync both expect
@@ -1221,8 +1234,11 @@ class DMForwardSm100:
                 dm_utils.mbar_init(self.dm_sfree, 4 * cute.arch.WARP_SIZE)
                 dm_utils.mbar_init(self.dm_pvdone, 1)
                 dm_utils.mbar_init(self.dm_pvdone + 8, 1)
-                dm_utils.mbar_init(self.dm_cread, 4 * cute.arch.WARP_SIZE)
-                dm_utils.mbar_init(self.dm_cread + 8, 4 * cute.arch.WARP_SIZE)
+                if const_expr(self.dm_dbs):
+                    _ = [dm_utils.mbar_init(self.dm_cread + 8 * _b, cute.arch.WARP_SIZE) for _b in range(32)]   # per warp: 32 arrivals
+                else:
+                    dm_utils.mbar_init(self.dm_cread, 4 * cute.arch.WARP_SIZE)
+                    dm_utils.mbar_init(self.dm_cread + 8, 4 * cute.arch.WARP_SIZE)
                 cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
@@ -1239,7 +1255,7 @@ class DMForwardSm100:
         else:
             sO = cute.make_tensor(cute.recast_ptr(sQ.iterator, sO_layout.inner, self.o_dtype), sO_layout.outer)
 
-        sScale = storage.sScale.get_tensor(cute.make_layout(self.s_p_o_stage * self.m_block_size * 2))
+        sScale = storage.sScale.get_tensor(cute.make_layout(self.s_p_o_stage * self.m_block_size * 2 * (2 if self.dm_dbs else 1)))
         if const_expr(self.dm_sspv):
             # rebuild the SS-PV MMA atom / sP layout inside the kernel region (static metadata)
             self.dm_tiled_mma_pv_ss = sm100_utils_basic.make_trivial_tiled_mma(
@@ -2507,6 +2523,10 @@ class DMForwardSm100:
         dm_wcnt = cute.make_rmem_tensor((1,), Int32)
         dm_wcnt[0] = Int32(0)
         self._dm_wcnt = dm_wcnt   # set once before the tile loop (softmax_step reads it)
+        # DM dbs: per-WG count of sScale EVENTS (initial notification, n-1 scale writes, final stats; persists across tiles)
+        dm_ecnt = cute.make_rmem_tensor((1,), Int32)
+        dm_ecnt[0] = Int32(0)
+        self._dm_ecnt = dm_ecnt
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             work_m, head_idx, batch_idx, split_idx = work_tile.tile_idx
@@ -2679,22 +2699,39 @@ class DMForwardSm100:
                     self.kv_subtile_factor,
                 )
                 if not empty_tile:
-                    if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
-                        # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
-                        dm_wc = dm_wcnt[0]
-                        if dm_wc > 0:
-                            dm_utils.mbar_wait_parity(self.dm_cread + 8 * (stage), (dm_wc - 1) & 1)
-                        dm_wcnt[0] = dm_wc + 1
-                    sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
-                    if const_expr(mLSE is not None or learnable_sink is not None):
-                        sScale[
-                            tidx + stage * self.m_block_size + self.q_stage * self.m_block_size
-                        ] = softmax.row_max[0]
-                    # if tidx == 0:
-                    #     cute.printf("softmax row sum stage %d: %f, row_max = %f\n", stage, softmax.row_sum[0], softmax.row_max[0])
-                    # See block_sparse_utils.py NOTE [SM100 block-sparse empty tiles: mbarrier contract].
-                    # pipeline_sm_stats.producer_commit_w_index(stage)
-                    sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
+                    if const_expr(self.dm_dbs):
+                        # dbs final-stats event (row_sum, row_max) into slot e & 1 (see softmax_step)
+                        dm_e = dm_ecnt[0]
+                        dm_slot = dm_e & 1
+                        if dm_e >= 2:
+                            self._dm_wait(self._dm_sb(1, stage, dm_slot, warp_idx), ((dm_e >> 1) - 1) & 1)
+                        dm_so = dm_slot * (2 * self.s_p_o_stage * self.m_block_size)
+                        sScale[tidx + stage * self.m_block_size + dm_so] = softmax.row_sum[0]
+                        if const_expr(mLSE is not None or learnable_sink is not None):
+                            sScale[tidx + stage * self.m_block_size + self.s_p_o_stage * self.m_block_size + dm_so] = softmax.row_max[0]
+                        dm_utils.mbar_arrive(self._dm_sb(0, stage, dm_slot, warp_idx))
+                        dm_ecnt[0] = dm_e + 1
+                    else:
+                        if const_expr(self.dm_crd):
+                            # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
+                            dm_wc = dm_wcnt[0]
+                            if dm_wc > 0:
+                                dm_utils.mbar_wait_parity(self.dm_cread + 8 * (stage), (dm_wc - 1) & 1)
+                            dm_wcnt[0] = dm_wc + 1
+                        if const_expr(self.dm_late):
+                            # late final stats: PV_s(K-1) complete => the correction read scale_s(K-1) (and, across tiles, its previous
+                            # final-stats read preceded its O release that PV_s(0) of this tile waited for); exact: completions in {K-1, K}
+                            dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, s_p_o_consumer_count)
+                        sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
+                        if const_expr(mLSE is not None or learnable_sink is not None):
+                            sScale[
+                                tidx + stage * self.m_block_size + self.q_stage * self.m_block_size
+                            ] = softmax.row_max[0]
+                        # if tidx == 0:
+                        #     cute.printf("softmax row sum stage %d: %f, row_max = %f\n", stage, softmax.row_sum[0], softmax.row_max[0])
+                        # See block_sparse_utils.py NOTE [SM100 block-sparse empty tiles: mbarrier contract].
+                        # pipeline_sm_stats.producer_commit_w_index(stage)
+                        sm_stats_barrier.arrive_w_index(index=stage * 4 + warp_idx)
                     # if tidx == 0: cute.printf("softmax row sum stage %d: %f\n", stage, softmax.row_sum[0])
             else:
                 if has_work:
@@ -2760,19 +2797,36 @@ class DMForwardSm100:
                         sm_stats_index = (s_p_o_consumer_count - 1) & 1
                     else:
                         sm_stats_index = stage
-                    if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
-                        # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
-                        dm_wc = dm_wcnt[0]
-                        if dm_wc > 0:
-                            dm_utils.mbar_wait_parity(self.dm_cread + 8 * (sm_stats_index), (dm_wc - 1) & 1)
-                        dm_wcnt[0] = dm_wc + 1
-                    sScale[tidx + sm_stats_index * self.m_block_size] = softmax.row_sum[0]
-                    if const_expr(mLSE is not None or learnable_sink is not None):
-                        sScale[
-                            tidx + sm_stats_index * self.m_block_size + self.s_p_o_stage * self.m_block_size
-                        ] = softmax.row_max[0]
-                    # pipeline_sm_stats.producer_commit_w_index(stage)
-                    sm_stats_barrier.arrive_w_index(index=sm_stats_index * 4 + warp_idx)
+                    if const_expr(self.dm_dbs):
+                        # dbs final-stats event (row_sum, row_max) into slot e & 1 (see softmax_step)
+                        dm_e = dm_ecnt[0]
+                        dm_slot = dm_e & 1
+                        if dm_e >= 2:
+                            self._dm_wait(self._dm_sb(1, sm_stats_index, dm_slot, warp_idx), ((dm_e >> 1) - 1) & 1)
+                        dm_so = dm_slot * (2 * self.s_p_o_stage * self.m_block_size)
+                        sScale[tidx + sm_stats_index * self.m_block_size + dm_so] = softmax.row_sum[0]
+                        if const_expr(mLSE is not None or learnable_sink is not None):
+                            sScale[tidx + sm_stats_index * self.m_block_size + self.s_p_o_stage * self.m_block_size + dm_so] = softmax.row_max[0]
+                        dm_utils.mbar_arrive(self._dm_sb(0, sm_stats_index, dm_slot, warp_idx))
+                        dm_ecnt[0] = dm_e + 1
+                    else:
+                        if const_expr(self.dm_crd):
+                            # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
+                            dm_wc = dm_wcnt[0]
+                            if dm_wc > 0:
+                                dm_utils.mbar_wait_parity(self.dm_cread + 8 * (sm_stats_index), (dm_wc - 1) & 1)
+                            dm_wcnt[0] = dm_wc + 1
+                        if const_expr(self.dm_late):
+                            # late final stats: PV_s(K-1) complete => the correction read scale_s(K-1) (and, across tiles, its previous
+                            # final-stats read preceded its O release that PV_s(0) of this tile waited for); exact: completions in {K-1, K}
+                            dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, s_p_o_consumer_count)
+                        sScale[tidx + sm_stats_index * self.m_block_size] = softmax.row_sum[0]
+                        if const_expr(mLSE is not None or learnable_sink is not None):
+                            sScale[
+                                tidx + sm_stats_index * self.m_block_size + self.s_p_o_stage * self.m_block_size
+                            ] = softmax.row_max[0]
+                        # pipeline_sm_stats.producer_commit_w_index(stage)
+                        sm_stats_barrier.arrive_w_index(index=sm_stats_index * 4 + warp_idx)
 
             # # Write LSE to gmem
             # if const_expr(mLSE is not None):
@@ -2808,6 +2862,16 @@ class DMForwardSm100:
         if const_expr(self.s0_s1_barrier):
             if stage == 0:
                 pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0_s1_sequence_phase)
+
+    def _dm_wait(self, mbar, phase):
+        if const_expr(self.dm_opts.get("wnh", "1") == "1"):
+            dm_utils.mbar_wait_parity_nh(mbar, phase)
+        else:
+            dm_utils.mbar_wait_parity(mbar, phase)
+
+    def _dm_sb(self, kind, stage, slot, warp):
+        """dbs mbarrier address: kind 0 = full (softmax -> correction), 1 = empty (correction -> softmax)."""
+        return self.dm_cread + 8 * (((kind * 2 + stage) * 2 + slot) * 4 + warp)
 
     @cute.jit
     def softmax_step(
@@ -3009,18 +3073,31 @@ class DMForwardSm100:
             sm_stats_index = (s_p_o_consumer_count - 1) & 1
         else:
             sm_stats_index = s_p_o_index
-        if const_expr(not is_first):
-            thread_idx = thr_tmem_load.thr_idx
-            if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
-                # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
-                dm_wcnt_l = self._dm_wcnt
-                dm_wc = dm_wcnt_l[0]
-                if dm_wc > 0:
-                    dm_utils.mbar_wait_parity(self.dm_cread + 8 * (sm_stats_index), (dm_wc - 1) & 1)
-                dm_wcnt_l[0] = dm_wc + 1
-            sScale[thread_idx + sm_stats_index * self.m_block_size] = acc_scale
-        if const_expr(not self.use_s_ping_pong or not is_first):
-            sm_stats_barrier.arrive_w_index(index=sm_stats_index * 4 + warp_idx)
+        if const_expr(self.dm_dbs):
+            # dbs event e: slot e & 1; reuse of a slot waits until the correction released event e-2 (empty #(e/2 - 1))
+            dm_ecnt_l = self._dm_ecnt
+            dm_e = dm_ecnt_l[0]
+            dm_slot = dm_e & 1
+            if dm_e >= 2:
+                self._dm_wait(self._dm_sb(1, sm_stats_index, dm_slot, warp_idx), ((dm_e >> 1) - 1) & 1)
+            if const_expr(not is_first):
+                sScale[thr_tmem_load.thr_idx + sm_stats_index * self.m_block_size
+                       + dm_slot * (2 * self.s_p_o_stage * self.m_block_size)] = acc_scale
+            dm_utils.mbar_arrive(self._dm_sb(0, sm_stats_index, dm_slot, warp_idx))
+            dm_ecnt_l[0] = dm_e + 1
+        elif const_expr(not self.dm_late):
+            if const_expr(not is_first):
+                thread_idx = thr_tmem_load.thr_idx
+                if const_expr(self.dm_crd):
+                    # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
+                    dm_wcnt_l = self._dm_wcnt
+                    dm_wc = dm_wcnt_l[0]
+                    if dm_wc > 0:
+                        dm_utils.mbar_wait_parity(self.dm_cread + 8 * (sm_stats_index), (dm_wc - 1) & 1)
+                    dm_wcnt_l[0] = dm_wc + 1
+                sScale[thread_idx + sm_stats_index * self.m_block_size] = acc_scale
+            if const_expr(not self.use_s_ping_pong or not is_first):
+                sm_stats_barrier.arrive_w_index(index=sm_stats_index * 4 + warp_idx)
 
         # x = S * c_b + (7 - kb)
         for j in cutlass.range_constexpr(4):
@@ -3121,6 +3198,13 @@ class DMForwardSm100:
                     dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, s_p_o_consumer_count)
                 if const_expr(self.dm_opts.get("tcf", "1") == "1"):
                     dm_utils.tc_fence_after()   # SF tcgen05.st must not be ordered before PV_s(k-1)'s completion
+                if const_expr(self.dm_late):
+                    # late: PV_s(k-1) complete => the correction already read scale_s(k-1) (it read it before its
+                    # O-rescaled(k-1) arrival, which PV_s(k-1) waited for) => the single sScale_s slot is free
+                    if const_expr(not is_first):
+                        sScale[thr_tmem_load.thr_idx + sm_stats_index * self.m_block_size] = acc_scale
+                    if const_expr(not self.use_s_ping_pong or not is_first):
+                        sm_stats_barrier.arrive_w_index(index=sm_stats_index * 4 + warp_idx)
                 cute.copy(thr_tmem_store_sf, tSrSF, tStSF_r2t)
                 # P codes -> sP[stage] (K-major SW128: row r at r*128 B, 16-B chunk c at (c ^ (r & 7)) * 16)
                 tidx_row = Int32(thr_tmem_load.thr_idx)
@@ -3227,6 +3311,11 @@ class DMForwardSm100:
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
         dm_ck = Int32(0)  # fwdrw ss_pv: global softmax-step index k (pvdone completion #k precedes step k)
+        # DM dbs: per-stage count of consumed sScale events (pairs with the softmax WG's dm_ecnt; persists across tiles)
+        dm_trt = cute.make_rmem_tensor((8,), Float32)
+        dm_rcnt = cute.make_rmem_tensor((2,), Int32)
+        dm_rcnt[0] = Int32(0)
+        dm_rcnt[1] = Int32(0)
         if const_expr(self.use_s_ping_pong):
             o_acc_consumer_count = Int32(0)
         load_epi_producer_state = pipeline.make_pipeline_state(
@@ -3289,33 +3378,73 @@ class DMForwardSm100:
             if has_work:
                 # Ignore first signal from softmax as no correction is required
                 # pipeline_sm_stats.consumer_wait_w_index_phase(0, sm_stats_consumer_phase)
-                if const_expr(not self.use_s_ping_pong):
-                    sm_stats_barrier.arrive_and_wait_w_index(index=0 * 4 + warp_idx)
+                if const_expr(self.dm_dbs):
+                    # dbs: consume the initial (data-less) event of each stage: wait full, release empty
+                    dm_r = dm_rcnt[0]
+                    self._dm_wait(self._dm_sb(0, 0, dm_r & 1, warp_idx), (dm_r >> 1) & 1)
+                    dm_utils.mbar_arrive(self._dm_sb(1, 0, dm_r & 1, warp_idx))
+                    dm_rcnt[0] = dm_r + 1
                     pipeline_sm_stats.consumer_release_w_index(0)
-                if const_expr(self.q_stage == 2):
-                    # pipeline_sm_stats.consumer_wait_w_index_phase(1, sm_stats_consumer_phase)
-                    sm_stats_barrier.arrive_and_wait_w_index(index=1 * 4 + warp_idx)
+                    dm_r = dm_rcnt[1]
+                    self._dm_wait(self._dm_sb(0, 1, dm_r & 1, warp_idx), (dm_r >> 1) & 1)
+                    dm_utils.mbar_arrive(self._dm_sb(1, 1, dm_r & 1, warp_idx))
+                    dm_rcnt[1] = dm_r + 1
+                else:
+                    if const_expr(not self.use_s_ping_pong):
+                        sm_stats_barrier.arrive_and_wait_w_index(index=0 * 4 + warp_idx)
+                        pipeline_sm_stats.consumer_release_w_index(0)
+                    if const_expr(self.q_stage == 2):
+                        # pipeline_sm_stats.consumer_wait_w_index_phase(1, sm_stats_consumer_phase)
+                        sm_stats_barrier.arrive_and_wait_w_index(index=1 * 4 + warp_idx)
                 sm_stats_consumer_phase ^= 1
 
                 tSrScale_t2r = cute.make_rmem_tensor(tSrScale_t2r_shape, Float32)
                 if const_expr(self.dm_sspv):
                     dm_ck += 1  # the work tile's first step needs no correction
+                if const_expr(self.dm_trc > 0):
+                    dm_trt[0] = Float32(0.0)
+                    dm_trt[1] = Float32(0.0)
+                    dm_trt[3] = Float32(0.0)
+                    dm_trt[4] = Float32(0.0)
+                    dm_trt[5] = Float32(0.0)
+                    dm_trt[6] = Float32(0.0)
+                    dm_trt[7] = Float32(0.0)
+                    dm_trt0 = dm_utils.clock64()
                 for i in cutlass.range(total_block_count - 1, unroll=1):
                     for stage in cutlass.range_constexpr(self.q_stage):
                         if const_expr(self.use_s_ping_pong):
                             sm_stats_index = o_acc_consumer_count & 1
                         else:
                             sm_stats_index = stage
+                        if const_expr(self.dm_trc > 0):
+                            dm_trb = dm_utils.clock64()
                         # wait for S0 / S1
                         # pipeline_sm_stats.consumer_wait_w_index_phase(stage, sm_stats_consumer_phase)
-                        sm_stats_barrier.arrive_and_wait_w_index(index=sm_stats_index * 4 + warp_idx)
-                        # cute.copy(tiled_tmem_load_vec, tStScales_t2r[stage], tSrScale_t2r)
-                        # cute.arch.fence_view_async_tmem_load()
-                        # scale = tSrScale_t2r[0]
-                        scale = sScale[tidx + sm_stats_index * self.m_block_size]
-                        if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
-                            dm_utils.mbar_arrive(self.dm_cread + 8 * sm_stats_index)   # read done -> softmax may overwrite
+                        if const_expr(self.dm_dbs):
+                            dm_r = dm_rcnt[stage]
+                            self._dm_wait(self._dm_sb(0, stage, dm_r & 1, warp_idx), (dm_r >> 1) & 1)
+                            scale = sScale[tidx + stage * self.m_block_size
+                                           + (dm_r & 1) * (2 * self.s_p_o_stage * self.m_block_size)]
+                            dm_utils.mbar_arrive(self._dm_sb(1, stage, dm_r & 1, warp_idx))   # slot free for event r+2
+                            dm_rcnt[stage] = dm_r + 1
+                        else:
+                            if const_expr(self.dm_trc > 0):
+                                dm_tra = dm_utils.clock64()
+                            sm_stats_barrier.arrive_and_wait_w_index(index=sm_stats_index * 4 + warp_idx)
+                            if const_expr(self.dm_trc > 0):
+                                dm_trc_s = dm_utils.clock64()
+                                dm_trt[0] = dm_trt[0] + Float32(dm_trc_s - dm_tra)
+                            # cute.copy(tiled_tmem_load_vec, tStScales_t2r[stage], tSrScale_t2r)
+                            # cute.arch.fence_view_async_tmem_load()
+                            # scale = tSrScale_t2r[0]
+                            scale = sScale[tidx + sm_stats_index * self.m_block_size]
+                            if const_expr(self.dm_opts.get("nsr", "0") == "1"):
+                                scale = Float32(1.0)   # DEBUG ONLY (wrong when a rescale is due): no sScale read
+                            if const_expr(self.dm_crd):
+                                dm_utils.mbar_arrive(self.dm_cread + 8 * sm_stats_index)   # read done -> softmax may overwrite
                         should_rescale = cute.arch.vote_ballot_sync(scale < 1.0) != 0
+                        if const_expr(self.dm_trc > 0 and not self.dm_dbs):
+                            dm_trt[6] = dm_trt[6] + Float32(dm_utils.clock64() - dm_trc_s)
                         # should_rescale = True
                         # if tidx == 0: cute.printf("Correction scale i = %d, for stage %d: %f, should_rescale = %d\n", i, stage, scale, should_rescale)
                         # Don't need O_full anymore, since by the time softmax has signaled the correction
@@ -3327,7 +3456,11 @@ class DMForwardSm100:
                             # s_p_o.empty[s] until phase k-1 completed (PV_s(k-1) issued => phase k-1 done). Without
                             # it a non-rescaling correction warp can arrive twice in one phase and complete it before
                             # a slow softmax warp released its P/SF rows (Codex review 3, fwdrw-design 6.4).
+                            if const_expr(self.dm_trc > 0):
+                                dm_tra = dm_utils.clock64()
                             dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, dm_ck & 1)
+                            if const_expr(self.dm_trc > 0):
+                                dm_trt[1] = dm_trt[1] + Float32(dm_utils.clock64() - dm_tra)
                             if const_expr(self.dm_opts.get("tcf", "1") == "1"):
                                 dm_utils.tc_fence_after()   # O rescale (tcgen05.ld/st) after PV_s(k-1) completes
                         if should_rescale:
@@ -3342,23 +3475,36 @@ class DMForwardSm100:
                                 pipeline_o_acc.consumer_wait_w_index_phase(
                                     o_acc_consumer_count & 1, (o_acc_consumer_count >> 1) & 1
                                 )
+                            if const_expr(self.dm_trc > 0):
+                                dm_tra = dm_utils.clock64()
                             self.correction_rescale(thr_mma_pv, tOtO[None, None, None, stage], tidx, scale)
+                            if const_expr(self.dm_trc > 0):
+                                dm_trt[3] = dm_trt[3] + Float32(dm_utils.clock64() - dm_tra)
+                                dm_trt[4] = dm_trt[4] + Float32(1.0)
                         # Notify mma warp that O has been rescaled
                         if const_expr(self.use_s_ping_pong):
                             pipeline_s_p_o.consumer_release_w_index((o_acc_consumer_count + 1) & 1)
                             pipeline_sm_stats.consumer_release_w_index(sm_stats_index)
                             o_acc_consumer_count += 1
                         else:
+                            if const_expr(self.dm_trc > 0):
+                                dm_trr = dm_utils.clock64()
                             if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
                                 dm_utils.tc_fence_before()   # O rescale tcgen05.st ordered before the release
                             pipeline_s_p_o.consumer_release_w_index(stage)
                             pipeline_sm_stats.consumer_release_w_index(self.q_stage - 1 - stage)
+                            if const_expr(self.dm_trc > 0):
+                                dm_tre = dm_utils.clock64()
+                                dm_trt[7] = dm_trt[7] + Float32(dm_tre - dm_trr)
+                                dm_trt[5] = dm_trt[5] + Float32(dm_tre - dm_trb)
                     sm_stats_consumer_phase ^= 1
                     if const_expr(self.dm_sspv):
                         dm_ck += 1
                     # o_corr_consumer_phase ^= 1
                 if const_expr(self.q_stage == 2):
                     pipeline_sm_stats.consumer_release_w_index(1)
+                if const_expr(self.dm_trc > 0):
+                    dm_trt[2] = Float32(dm_utils.clock64() - dm_trt0)
                 # End of seqlen_corr_loop_steps
 
                 # Even in the case of self.overlap_sO_sQ, we can write to stage 0 of sO without
@@ -3382,17 +3528,29 @@ class DMForwardSm100:
                     else:
                         sm_stats_index = stage
                     # pipeline_sm_stats.consumer_wait_w_index_phase(stage, sm_stats_consumer_phase)
-                    sm_stats_barrier.arrive_and_wait_w_index(index=sm_stats_index * 4 + warp_idx)
-                    # cute.copy(tiled_tmem_load_vec, tStScales_t2r[stage], tSrScale_t2r)
-                    # cute.arch.fence_view_async_tmem_load()
-                    # scale = tSrScale_t2r[0]
-                    row_sum = sScale[tidx + sm_stats_index * self.m_block_size]
-                    if const_expr(mLSE is not None or learnable_sink is not None):
-                        row_max = sScale[tidx + sm_stats_index * self.m_block_size + self.s_p_o_stage * self.m_block_size]
+                    if const_expr(self.dm_dbs):
+                        dm_r = dm_rcnt[stage]
+                        self._dm_wait(self._dm_sb(0, stage, dm_r & 1, warp_idx), (dm_r >> 1) & 1)
+                        dm_so = (dm_r & 1) * (2 * self.s_p_o_stage * self.m_block_size)
+                        row_sum = sScale[tidx + stage * self.m_block_size + dm_so]
+                        if const_expr(mLSE is not None or learnable_sink is not None):
+                            row_max = sScale[tidx + stage * self.m_block_size + self.s_p_o_stage * self.m_block_size + dm_so]
+                        else:
+                            row_max = None
+                        dm_utils.mbar_arrive(self._dm_sb(1, stage, dm_r & 1, warp_idx))
+                        dm_rcnt[stage] = dm_r + 1
                     else:
-                        row_max = None
-                    if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
-                        dm_utils.mbar_arrive(self.dm_cread + 8 * sm_stats_index)
+                        sm_stats_barrier.arrive_and_wait_w_index(index=sm_stats_index * 4 + warp_idx)
+                        # cute.copy(tiled_tmem_load_vec, tStScales_t2r[stage], tSrScale_t2r)
+                        # cute.arch.fence_view_async_tmem_load()
+                        # scale = tSrScale_t2r[0]
+                        row_sum = sScale[tidx + sm_stats_index * self.m_block_size]
+                        if const_expr(mLSE is not None or learnable_sink is not None):
+                            row_max = sScale[tidx + sm_stats_index * self.m_block_size + self.s_p_o_stage * self.m_block_size]
+                        else:
+                            row_max = None
+                        if const_expr(self.dm_crd):
+                            dm_utils.mbar_arrive(self.dm_cread + 8 * sm_stats_index)
                     pipeline_sm_stats.consumer_release_w_index(sm_stats_index)
                     if const_expr(learnable_sink is not None):
                         # Only the first split owns the sink column; empty rows occur with splitKV.
@@ -3523,6 +3681,8 @@ class DMForwardSm100:
                         if not acc_O_mn_row_is_zero_or_nan
                         else -Float32.inf
                     )
+                    if const_expr(self.dm_trc > 0):
+                        lse = dm_trt[self.dm_trc - 1]
                     seqlen_q = (
                         seqlen.seqlen_q
                         if const_expr(not self.pack_gqa)

@@ -107,7 +107,14 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
             k["leading_dim"] = 2
         return orig[4](t, *a, **k)
 
+    from flash_attn.cute import utils as _fu
+    _emu0 = _fu.ex2_emulation_2
     with _LOCK:
+        if "poly6" in os.environ.get("DM_FWD_OPTS", "").split(","):
+            # poly6: the FA4 ex2-emulation slots (ex2_emu_freq / ex2_emu_start_frg) use the degree-6 polynomial
+            # (dm_utils.ex2_poly6_2: at least as accurate as ex2.approx.ftz on every element metric) - trace-time only
+            from . import dm_utils as _du
+            _fu.ex2_emulation_2 = lambda x, y, **kw: _du.ex2_poly6_2(x, y)
         fi.FlashAttentionForwardSm100 = DMForwardSm100
         fi._validate_tensor = validate
         fi._flash_attn_fwd.compile_cache = _cache()
@@ -118,6 +125,7 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
                 q8, k8, v8, softmax_scale=1.0, causal=causal, return_lse=True,
                 q_descale=qsc, k_descale=ksc, v_descale=vsc, pack_gqa=False)
         finally:
+            _fu.ex2_emulation_2 = _emu0
             (fi.FlashAttentionForwardSm100, fi._validate_tensor, fi._flash_attn_fwd.compile_cache,
              fi.select_fwd_config, fi.to_cute_tensor) = orig
     return out, lse

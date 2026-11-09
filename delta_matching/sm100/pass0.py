@@ -9,6 +9,7 @@ import os
 import threading
 
 import torch
+from . import dm_common
 import flash_attn.cute.interface as fi
 from flash_attn.cute import cache_utils
 
@@ -57,6 +58,8 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
              exp_variant: str | None = None):
     if exp_variant is None:
         exp_variant = os.environ.get("DM_P0_EXP", "p3_16_0+ma+h2+f64k4")   # P0-v7 (acc): + fp32 partials over 4 tiles, summed in fp64, delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
+    if dm_common.b6_m() > 0 and "+b6_" not in exp_variant:
+        exp_variant = exp_variant + f"+b6_{dm_common.b6_m()}"
     over = dict(FORCE)
     if config_override:
         over.update(config_override)

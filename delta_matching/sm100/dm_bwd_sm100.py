@@ -537,6 +537,15 @@ class DMBackwardSm100:
         self.dm_dqstream = "dqstream" in _o
         self.dm_dsqsr = "dsqsr" in _o   # signal S-read to the dS helper right after the S load
         self.dm_dsqdv = "dsqdv" in _o   # MMA issue order: dV(t+1) before dQ(t)
+        # planted-bug POSITIVE CONTROLS (accuracy-audit 17:45 item 2; outputs wrong by design):
+        #   dsqbadraw : helper skips the fp32-dS-full wait (RAW: may read dS(t) before every compute warp stored it)
+        #   dsqbadwar : helper releases dP -> dS before its pass-2 reads (WAR: dP(t+1) may overwrite fp32 dS(t) first)
+        #   dsqdly=N  : helper spins N clk before pass 2 (widens the WAR window); dsqcdly=N: compute spins N clk before
+        #               its fp32 dS store (widens the RAW window)
+        self.dm_dsqbadraw = "dsqbadraw" in _o
+        self.dm_dsqbadwar = "dsqbadwar" in _o
+        self.dm_dsqdly = int(next((o[7:] for o in _o if o.startswith("dsqdly=")), "0"))
+        self.dm_dsqcdly = int(next((o[8:] for o in _o if o.startswith("dsqcdly=")), "0"))
         self.dsq_warp_ids = (16, 17, 18, 19) if self.dm_dsqw else ()
         if self.dm_dsqw:
             r_ = [int(x) for x in next((o[5:] for o in _o if o.startswith("dsqr=")), "80:120:72:88").split(":")]
@@ -5454,6 +5463,10 @@ class DMBackwardSm100:
                   else:
                       # DM dsq: exact fp32 dS (same packed FMA / multiply as above) stored in place over dP; the reduce warps do the
                       # tile amax, scale, e4m3 codes (TMEM + SMEM), dK/dQ SFs, the peer exchange, the dP release and the dS commit
+                      if const_expr(self.dm_dsqcdly > 0):
+                          dm_t_end = dm_utils.clock64() + Int64(self.dm_dsqcdly)
+                          while dm_utils.clock64() < dm_t_end:
+                              pass
                       for stage in cutlass.range_constexpr(num_stages):
                           cute.copy(dm_thr_copy_r2t_f32, tdPrdP_all[stage], dm_tdPtdP_r2t_f32[None, stage, None, None])
                       cute.arch.fence_view_async_tmem_store()
@@ -5753,7 +5766,8 @@ class DMBackwardSm100:
         if const_expr(dm_tr is not None):
             dm_tq = dm_utils.clock64()
         # fp32 dS of this tile stored by every compute warp
-        dm_utils.mbar_wait_parity(dm_mbar + 8 * 9, dsq_j & 1)
+        if const_expr(not self.dm_dsqbadraw):
+            dm_utils.mbar_wait_parity(dm_mbar + 8 * 9, dsq_j & 1)
         dm_utils.tc_fence_after()
         if const_expr(dm_tr is not None):
             if tidx == 0:
@@ -5781,6 +5795,14 @@ class DMBackwardSm100:
         dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
         if cute.arch.lane_idx() == 0:
             dm_utils.st_shared_b32(dm_sdm + 4 * (16 + q), dm_sfb_dq)
+        if const_expr(self.dm_dsqbadwar):
+            cute.arch.sync_warp()
+            with cute.arch.elect_one():
+                pipeline_dP.consumer_release(dsq_dP_state)   # PLANTED WAR BUG (control only)
+        if const_expr(self.dm_dsqdly > 0):
+            dm_t_end = dm_utils.clock64() + Int64(self.dm_dsqdly)
+            while dm_utils.clock64() < dm_t_end:
+                pass
         # pass 2: re-load, scale, e4m3 (codes kept in registers until every fp32 read of the dP region is done)
         codes = [[None] * nst, [None] * nst]
         for h in cutlass.range_constexpr(2):
@@ -5816,8 +5838,9 @@ class DMBackwardSm100:
         dm_utils.tc_fence_before()
         cute.arch.sync_warp()
         dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
-        with cute.arch.elect_one():
-            pipeline_dP.consumer_release(dsq_dP_state)
+        if const_expr(not self.dm_dsqbadwar):
+            with cute.arch.elect_one():
+                pipeline_dP.consumer_release(dsq_dP_state)
         if const_expr(dm_tr is not None):
             if tidx == 0:
                 dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 46, Int64(dm_utils.clock64() - dm_tq))

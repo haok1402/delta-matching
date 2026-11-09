@@ -267,6 +267,9 @@ class DMPass0Sm100:
         # 35-51 regs with it at any softmax budget 208-224 and gets ~5% slower); +maa: always
         _fl0 = self.dm_exp_variant.split("+")[1:]
         self.dm_ma = ("ma" in _fl0 and self.is_causal) or "maa" in _fl0
+        self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
+        self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
+        self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         self.dm_nd = "nd" in _fl0   # no denominator: sum_j P := 1 (P is normalized by the forward LSE)
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
@@ -2172,135 +2175,70 @@ class DMPass0Sm100:
             qsv = Float32(aux[0][batch_idx, head_idx, rowc // 32])
             dosv = Float32(aux[3][batch_idx, head_idx, rowc // 32])
             l2 = Float32(aux[5][batch_idx, head_idx, rowc]) * Float32(dm_common.LOG2E)
+            if const_expr(self.dm_tr):
+                tr_s = [Int32(0) for _ in range(6)]
+                tr_prev = dm_utils.clock32()
             num = (Float32(0.0), Float32(0.0))
             den = (Float32(0.0), Float32(0.0))
             den1 = (Float32(0.0), Float32(0.0))
             den2 = (Float32(0.0), Float32(0.0))
             den3 = (Float32(0.0), Float32(0.0))
+            if const_expr(self.dm_pf):
+                nb0 = cutlass.max(n_block_max - 1, 0) * (self.n_block_size // 32)
+                pks = tuple(Float32(aux[1][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
+                pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
             if has_work:
                 for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
                     n_block = n_block_max - 1 - n_tile
                     # per-chunk scales first (gmem/L2 latency overlaps the S wait)
                     cs = [None] * n_chunks
                     as_ = [None] * n_chunks
-                    for j in cutlass.range_constexpr(nc):
-                        kb = n_block * (self.n_block_size // 32) + ((j + rot) % n_chunks if const_expr(_r3m(self.dm_exp_variant) > 0) else j)
-                        cs[j] = dm_common.dm_bwd_c(Float32(aux[1][batch_idx, kv_head_idx, kb]), qsv)
-                        as_[j] = dm_common.dm_bwd_dp_scale(Float32(aux[2][batch_idx, kv_head_idx, kb]), dosv)
+                    if const_expr(self.dm_pf):
+                        # +pf: this tile's raw scales were loaded one iteration ago; issue the next tile's now
+                        for j in cutlass.range_constexpr(nc):
+                            cs[j] = dm_common.dm_bwd_c(pks[j], qsv)
+                            as_[j] = dm_common.dm_bwd_dp_scale(pvs[j], dosv)
+                        nbn = cutlass.max(n_block - 1, n_block_min) * (self.n_block_size // 32)
+                        pks = tuple(Float32(aux[1][batch_idx, kv_head_idx, nbn + j]) for j in range(4))
+                        pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nbn + j]) for j in range(4))
+                    else:
+                        for j in cutlass.range_constexpr(nc):
+                            kb = n_block * (self.n_block_size // 32) + ((j + rot) % n_chunks if const_expr(_r3m(self.dm_exp_variant) > 0) else j)
+                            cs[j] = dm_common.dm_bwd_c(Float32(aux[1][batch_idx, kv_head_idx, kb]), qsv)
+                            as_[j] = dm_common.dm_bwd_dp_scale(Float32(aux[2][batch_idx, kv_head_idx, kb]), dosv)
+                    if const_expr(self.dm_tr):
+                        tr_now = dm_utils.clock32()
+                        tr_s[0] = tr_s[0] + (tr_now - tr_prev)
+                        tr_prev = tr_now
                     pipeline_s_p_o.consumer_wait_w_index_phase(stage, s_full_phase)
+                    if const_expr(self.dm_tr):
+                        tr_now = dm_utils.clock32()
+                        tr_s[1] = tr_s[1] + (tr_now - tr_prev)
+                        tr_prev = tr_now
                     tSrS = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS).shape, self.qk_acc_dtype)
-                    if const_expr(_r3m(self.dm_exp_variant) > 0):
-                        for j in cutlass.range_constexpr(n_chunks):
-                            cute.copy(thr_tmem_load, tStS_t2r[None, None, (j + rot) % n_chunks], tSrS[None, None, j])
-                    elif const_expr(self.dm_c3):
-                        for j in cutlass.range_constexpr(nc):
-                            cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
-                    else:
-                        cute.copy(thr_tmem_load, tStS_t2r, tSrS)
-                    cute.arch.fence_view_async_tmem_load()
-                    pipeline_s_p_o.consumer_release_w_index(stage)  # next S can be issued now
-                    if const_expr(self.is_causal):
-                        # keys past this row: S = -inf -> P = 0 (same as the main backward's mask)
-                        if (n_block + 1) * self.n_block_size > m_block * self.m_block_size:
-                            kbase = n_block * self.n_block_size
-                            if const_expr(_r3m(self.dm_exp_variant) > 0):
-                                # 32x32b TMEM load: register 32*j + w holds column 32*chunk + w
-                                for i in cutlass.range_constexpr(cute.size(tSrS)):
-                                    kcol = kbase + ((i // 32 + rot) % n_chunks) * 32 + (i % 32)
-                                    tSrS[i] = -Float32.inf if kcol > row else tSrS[i]
-                            else:
-                                for i in cutlass.range_constexpr(32 * nc):
-                                    tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
-                    if const_expr("fu" in self.dm_exp_variant.split("+")[1:]):
-                        # fused: dP waited up front, then per 32-column chunk exp + den + num in one basic block,
-                        # so ptxas can interleave MUFU (exp) with FMA-pipe work (num, poly)
-                        pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
-                        for j in cutlass.range_constexpr(n_chunks):
-                            tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, j].shape, self.qk_acc_dtype)
-                            cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], tdPr)
-                            if const_expr(j == n_chunks - 1):
+                    if const_expr(self.dm_h2):
+                        diag = False
+                        if const_expr(self.is_causal):
+                            diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
+                        kbase = n_block * self.n_block_size
+                        for h in cutlass.range_constexpr(2):
+                            for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                                cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
+                            if const_expr(h == 1):
                                 cute.arch.fence_view_async_tmem_load()
-                                pipeline_dp.consumer_release_w_index(stage)
-                            acc0 = (Float32(0.0), Float32(0.0))
-                            acc1 = (Float32(0.0), Float32(0.0))
-                            if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
-                                # 32x32-block MUFU/deg-3 mix, bitwise-mirrorable in the KV-stationary backward:
-                                # element (q, k) uses FA4's deg-3 polynomial iff ((q >> 5) + (k >> 5)) % m == 0.
-                                # q >> 5 is warp-uniform here (32 consecutive rows per warp), so the branch is uniform.
-                                b3_m = int(self.dm_exp_variant.split("+")[0].split("_")[1])
-                                kb32 = n_block * (self.n_block_size // 32) + j
-                                if ((row >> 5) + kb32) % b3_m == 0:
-                                    for v in cutlass.range_constexpr(16):
-                                        i0 = 32 * j + 2 * v
-                                        tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                else:
-                                    for v in cutlass.range_constexpr(16):
-                                        i0 = 32 * j + 2 * v
-                                        tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                            for v in cutlass.range_constexpr(16):
-                                i0 = 32 * j + 2 * v
-                                if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
-                                    p = (tSrS[i0], tSrS[i0 + 1])
-                                elif const_expr(self.dm_exp_variant.split("+")[0] == "mix"):
-                                    p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
-                                elif const_expr(dm_common.is_static_mix(self.dm_exp_variant.split("+")[0])):
-                                    if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
-                                        if const_expr(self.dm_exp_variant.startswith("p5_")):
-                                            p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                        else:
-                                            p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                    else:
-                                        p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                else:
-                                    p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant.split("+")[0]](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                if const_expr(v % 2 == 0):
-                                    den = cute.arch.add_packed_f32x2(den, p)
-                                    acc0 = cute.arch.fma_packed_f32x2(p, (tdPr[2 * v], tdPr[2 * v + 1]), acc0)
-                                else:
-                                    den1 = cute.arch.add_packed_f32x2(den1, p)
-                                    acc1 = cute.arch.fma_packed_f32x2(p, (tdPr[2 * v], tdPr[2 * v + 1]), acc1)
-                            acc0 = cute.arch.add_packed_f32x2(acc0, acc1)
-                            num = cute.arch.fma_packed_f32x2(acc0, (as_[j], as_[j]), num)
-                    else:
-                        if const_expr(self.s0_s1_barrier):
-                            pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0s1_phase)
-                        # P in place
-                        for j in cutlass.range_constexpr(nc):
-                            if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
-                                b3_m = int(self.dm_exp_variant.split("+")[0].split("_")[1])
-                                kb32 = n_block * (self.n_block_size // 32) + j
-                                if ((row >> 5) + kb32) % b3_m == 0:
-                                    for v in cutlass.range_constexpr(16):
-                                        i0 = 32 * j + 2 * v
-                                        tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                else:
-                                    for v in cutlass.range_constexpr(16):
-                                        i0 = 32 * j + 2 * v
-                                        tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                pipeline_s_p_o.consumer_release_w_index(stage)
+                            if const_expr(self.is_causal):
+                                if diag:
+                                    for i in cutlass.range_constexpr(64 * h, 64 * h + 64):
+                                        tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
+                            for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
                                 for v in cutlass.range_constexpr(16):
-                                    den = cute.arch.add_packed_f32x2(den, (tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]))
-                            for v in cutlass.range_constexpr(16 if const_expr(not self.dm_exp_variant.split("+")[0].startswith("b3_")) else 0):
-                                i0 = 32 * j + 2 * v
-                                if const_expr(_r3m(self.dm_exp_variant) > 0):
-                                    if const_expr(j % _r3m(self.dm_exp_variant) == 0):
+                                    i0 = 32 * j + 2 * v
+                                    if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
                                         p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                     else:
                                         p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                elif const_expr(self.dm_exp_variant.split("+")[0] == "mix"):
-                                    p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
-                                elif const_expr(dm_common.is_static_mix(self.dm_exp_variant.split("+")[0])):
-                                    if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
-                                        if const_expr(self.dm_exp_variant.startswith("p5_")):
-                                            p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                        else:
-                                            p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                    else:
-                                        p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                else:
-                                    p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant.split("+")[0]](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
-                                tSrS[i0], tSrS[i0 + 1] = p
-                                if const_expr(self.dm_ma):
-                                    # 4 independent accumulators (breaks the serial FADD2 chain)
+                                    tSrS[i0], tSrS[i0 + 1] = p
                                     if const_expr(v % 4 == 0):
                                         den = cute.arch.add_packed_f32x2(den, p)
                                     elif const_expr(v % 4 == 1):
@@ -2309,21 +2247,14 @@ class DMPass0Sm100:
                                         den2 = cute.arch.add_packed_f32x2(den2, p)
                                     else:
                                         den3 = cute.arch.add_packed_f32x2(den3, p)
-                                else:
-                                    den = cute.arch.add_packed_f32x2(den, p)
-                        if const_expr(self.s0_s1_barrier):
-                            pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
-                            s0s1_phase ^= 1
-                        # dP streamed in 32-column chunks; the slot is released after the last load
-                        pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
-                        for j in cutlass.range_constexpr(nc):
-                            tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, j].shape, self.qk_acc_dtype)
-                            cute.copy(thr_tmem_load, tdPt_t2r[None, None, (j + rot) % n_chunks if const_expr(_r3m(self.dm_exp_variant) > 0) else j], tdPr)
-                            if const_expr(j == nc - 1):
-                                cute.arch.fence_view_async_tmem_load()
-                                pipeline_dp.consumer_release_w_index(stage)
-                            if const_expr(self.dm_ma):
-                                # 4 independent sum P*dP_acc chains per 32-column chunk, then num += a * acc
+                            if const_expr(h == 0):
+                                pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                            for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                                tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, j].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], tdPr)
+                                if const_expr(j == 3):
+                                    cute.arch.fence_view_async_tmem_load()
+                                    pipeline_dp.consumer_release_w_index(stage)
                                 acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
                                 for v in cutlass.range_constexpr(16):
                                     acc[v % 4] = cute.arch.fma_packed_f32x2(
@@ -2331,19 +2262,181 @@ class DMPass0Sm100:
                                 acc01 = cute.arch.add_packed_f32x2(acc[0], acc[1])
                                 acc23 = cute.arch.add_packed_f32x2(acc[2], acc[3])
                                 num = cute.arch.fma_packed_f32x2(cute.arch.add_packed_f32x2(acc01, acc23), (as_[j], as_[j]), num)
-                            elif const_expr("fa" in self.dm_exp_variant.split("+")[1:]):
-                                # a factored out of the 32-column chunk: acc = sum P * dP_acc, num += a * acc
-                                acc = (Float32(0.0), Float32(0.0))
+                    else:
+                        pass
+                        if const_expr(_r3m(self.dm_exp_variant) > 0):
+                            for j in cutlass.range_constexpr(n_chunks):
+                                cute.copy(thr_tmem_load, tStS_t2r[None, None, (j + rot) % n_chunks], tSrS[None, None, j])
+                        elif const_expr(self.dm_c3):
+                            for j in cutlass.range_constexpr(nc):
+                                cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
+                        else:
+                            cute.copy(thr_tmem_load, tStS_t2r, tSrS)
+                        cute.arch.fence_view_async_tmem_load()
+                        pipeline_s_p_o.consumer_release_w_index(stage)  # next S can be issued now
+                        if const_expr(self.is_causal):
+                            # keys past this row: S = -inf -> P = 0 (same as the main backward's mask)
+                            if (n_block + 1) * self.n_block_size > m_block * self.m_block_size:
+                                kbase = n_block * self.n_block_size
+                                if const_expr(_r3m(self.dm_exp_variant) > 0):
+                                    # 32x32b TMEM load: register 32*j + w holds column 32*chunk + w
+                                    for i in cutlass.range_constexpr(cute.size(tSrS)):
+                                        kcol = kbase + ((i // 32 + rot) % n_chunks) * 32 + (i % 32)
+                                        tSrS[i] = -Float32.inf if kcol > row else tSrS[i]
+                                else:
+                                    for i in cutlass.range_constexpr(32 * nc):
+                                        tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
+                        if const_expr("fu" in self.dm_exp_variant.split("+")[1:]):
+                            # fused: dP waited up front, then per 32-column chunk exp + den + num in one basic block,
+                            # so ptxas can interleave MUFU (exp) with FMA-pipe work (num, poly)
+                            pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                            for j in cutlass.range_constexpr(n_chunks):
+                                tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, j].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], tdPr)
+                                if const_expr(j == n_chunks - 1):
+                                    cute.arch.fence_view_async_tmem_load()
+                                    pipeline_dp.consumer_release_w_index(stage)
+                                acc0 = (Float32(0.0), Float32(0.0))
+                                acc1 = (Float32(0.0), Float32(0.0))
+                                if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
+                                    # 32x32-block MUFU/deg-3 mix, bitwise-mirrorable in the KV-stationary backward:
+                                    # element (q, k) uses FA4's deg-3 polynomial iff ((q >> 5) + (k >> 5)) % m == 0.
+                                    # q >> 5 is warp-uniform here (32 consecutive rows per warp), so the branch is uniform.
+                                    b3_m = int(self.dm_exp_variant.split("+")[0].split("_")[1])
+                                    kb32 = n_block * (self.n_block_size // 32) + j
+                                    if ((row >> 5) + kb32) % b3_m == 0:
+                                        for v in cutlass.range_constexpr(16):
+                                            i0 = 32 * j + 2 * v
+                                            tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    else:
+                                        for v in cutlass.range_constexpr(16):
+                                            i0 = 32 * j + 2 * v
+                                            tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                 for v in cutlass.range_constexpr(16):
-                                    acc = cute.arch.fma_packed_f32x2(
-                                        (tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), (tdPr[2 * v], tdPr[2 * v + 1]), acc)
-                                num = cute.arch.fma_packed_f32x2(acc, (as_[j], as_[j]), num)
-                            else:
-                                for v in cutlass.range_constexpr(16):
-                                    dpv = cute.arch.mul_packed_f32x2((tdPr[2 * v], tdPr[2 * v + 1]), (as_[j], as_[j]))
-                                    num = cute.arch.fma_packed_f32x2((tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), dpv, num)
+                                    i0 = 32 * j + 2 * v
+                                    if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
+                                        p = (tSrS[i0], tSrS[i0 + 1])
+                                    elif const_expr(self.dm_exp_variant.split("+")[0] == "mix"):
+                                        p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
+                                    elif const_expr(dm_common.is_static_mix(self.dm_exp_variant.split("+")[0])):
+                                        if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
+                                            if const_expr(self.dm_exp_variant.startswith("p5_")):
+                                                p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                            else:
+                                                p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        else:
+                                            p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    else:
+                                        p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant.split("+")[0]](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    if const_expr(v % 2 == 0):
+                                        den = cute.arch.add_packed_f32x2(den, p)
+                                        acc0 = cute.arch.fma_packed_f32x2(p, (tdPr[2 * v], tdPr[2 * v + 1]), acc0)
+                                    else:
+                                        den1 = cute.arch.add_packed_f32x2(den1, p)
+                                        acc1 = cute.arch.fma_packed_f32x2(p, (tdPr[2 * v], tdPr[2 * v + 1]), acc1)
+                                acc0 = cute.arch.add_packed_f32x2(acc0, acc1)
+                                num = cute.arch.fma_packed_f32x2(acc0, (as_[j], as_[j]), num)
+                        else:
+                            if const_expr(self.s0_s1_barrier):
+                                pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0s1_phase)
+                            # P in place
+                            for j in cutlass.range_constexpr(nc):
+                                if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
+                                    b3_m = int(self.dm_exp_variant.split("+")[0].split("_")[1])
+                                    kb32 = n_block * (self.n_block_size // 32) + j
+                                    if ((row >> 5) + kb32) % b3_m == 0:
+                                        for v in cutlass.range_constexpr(16):
+                                            i0 = 32 * j + 2 * v
+                                            tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    else:
+                                        for v in cutlass.range_constexpr(16):
+                                            i0 = 32 * j + 2 * v
+                                            tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    for v in cutlass.range_constexpr(16):
+                                        den = cute.arch.add_packed_f32x2(den, (tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]))
+                                for v in cutlass.range_constexpr(16 if const_expr(not self.dm_exp_variant.split("+")[0].startswith("b3_")) else 0):
+                                    i0 = 32 * j + 2 * v
+                                    if const_expr(_r3m(self.dm_exp_variant) > 0):
+                                        if const_expr(j % _r3m(self.dm_exp_variant) == 0):
+                                            p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        else:
+                                            p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    elif const_expr(self.dm_exp_variant.split("+")[0] == "mix"):
+                                        p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
+                                    elif const_expr(dm_common.is_static_mix(self.dm_exp_variant.split("+")[0])):
+                                        if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
+                                            if const_expr(self.dm_exp_variant.startswith("p5_")):
+                                                p = dm_common.dm_bwd_p_pair_poly5(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                            else:
+                                                p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        else:
+                                            p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    else:
+                                        p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant.split("+")[0]](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    tSrS[i0], tSrS[i0 + 1] = p
+                                    if const_expr(self.dm_ma):
+                                        # 4 independent accumulators (breaks the serial FADD2 chain)
+                                        if const_expr(v % 4 == 0):
+                                            den = cute.arch.add_packed_f32x2(den, p)
+                                        elif const_expr(v % 4 == 1):
+                                            den1 = cute.arch.add_packed_f32x2(den1, p)
+                                        elif const_expr(v % 4 == 2):
+                                            den2 = cute.arch.add_packed_f32x2(den2, p)
+                                        else:
+                                            den3 = cute.arch.add_packed_f32x2(den3, p)
+                                    else:
+                                        den = cute.arch.add_packed_f32x2(den, p)
+                            if const_expr(self.s0_s1_barrier):
+                                pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
+                                s0s1_phase ^= 1
+                            if const_expr(self.dm_tr):
+                                tr_now = dm_utils.clock32()
+                                tr_s[2] = tr_s[2] + (tr_now - tr_prev)
+                                tr_prev = tr_now
+                            # dP streamed in 32-column chunks; the slot is released after the last load
+                            pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                            if const_expr(self.dm_tr):
+                                tr_now = dm_utils.clock32()
+                                tr_s[3] = tr_s[3] + (tr_now - tr_prev)
+                                tr_prev = tr_now
+                            for j in cutlass.range_constexpr(nc):
+                                tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, j].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tdPt_t2r[None, None, (j + rot) % n_chunks if const_expr(_r3m(self.dm_exp_variant) > 0) else j], tdPr)
+                                if const_expr(j == nc - 1):
+                                    cute.arch.fence_view_async_tmem_load()
+                                    pipeline_dp.consumer_release_w_index(stage)
+                                if const_expr(self.dm_ma):
+                                    # 4 independent sum P*dP_acc chains per 32-column chunk, then num += a * acc
+                                    acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
+                                    for v in cutlass.range_constexpr(16):
+                                        acc[v % 4] = cute.arch.fma_packed_f32x2(
+                                            (tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), (tdPr[2 * v], tdPr[2 * v + 1]), acc[v % 4])
+                                    acc01 = cute.arch.add_packed_f32x2(acc[0], acc[1])
+                                    acc23 = cute.arch.add_packed_f32x2(acc[2], acc[3])
+                                    num = cute.arch.fma_packed_f32x2(cute.arch.add_packed_f32x2(acc01, acc23), (as_[j], as_[j]), num)
+                                elif const_expr("fa" in self.dm_exp_variant.split("+")[1:]):
+                                    # a factored out of the 32-column chunk: acc = sum P * dP_acc, num += a * acc
+                                    acc = (Float32(0.0), Float32(0.0))
+                                    for v in cutlass.range_constexpr(16):
+                                        acc = cute.arch.fma_packed_f32x2(
+                                            (tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), (tdPr[2 * v], tdPr[2 * v + 1]), acc)
+                                    num = cute.arch.fma_packed_f32x2(acc, (as_[j], as_[j]), num)
+                                else:
+                                    for v in cutlass.range_constexpr(16):
+                                        dpv = cute.arch.mul_packed_f32x2((tdPr[2 * v], tdPr[2 * v + 1]), (as_[j], as_[j]))
+                                        num = cute.arch.fma_packed_f32x2((tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), dpv, num)
+                    if const_expr(self.dm_tr):
+                        tr_now = dm_utils.clock32()
+                        tr_s[4] = tr_s[4] + (tr_now - tr_prev)
+                        tr_prev = tr_now
+                    if const_expr(self.dm_tr):
+                        tr_s[5] = tr_s[5] + Int32(1)
                     s_full_phase ^= 1
             den = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
+            if const_expr(self.dm_tr):
+                if tidx == 0:
+                    for k_ in cutlass.range_constexpr(6):
+                        dm_utils.red_add_u64(aux[6].iterator.toint() + 8 * (8 * stage + k_), Int64(tr_s[k_]))
             num_t = num[0] + num[1]
             den_t = den[0] + den[1]
             if const_expr(self.dm_c3):

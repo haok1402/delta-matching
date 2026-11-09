@@ -630,6 +630,12 @@ class DMBackwardSm100:
         # TMEM lanes 32q..32q+31 = 32 keys = exactly one dS scale block (32 keys x 128 queries): no cross-WG amax exchange.
         # The compute warps store the exact fp32 dS in place over dP and arrive. Same values bitwise.
         self.dm_dsq = "dsq" in self.dm_opts or "dsqw" in self.dm_opts
+        # abl:dqdrop1=KB:MB:H (POSITIVE CONTROL for the nd/det dQ stress detectors, accuracy-audit 21:20; numerically WRONG):
+        # drop exactly ONE (cluster key tile KB = work_n, 256 keys) x (query tile MB = m_block, 128 rows) dQ contribution of
+        # q-head H, batch 0, by zeroing that partial in the reduce warps (both CTAs of the pair) before staging. det + nd.
+        _dqd = next((x[8:] for x in self.dm_abl if x.startswith("dqdrop1=")), None)
+        self.dm_dqdrop = tuple(int(t) for t in _dqd.split(":")) if _dqd else None
+        assert not (self.dm_dqdrop is not None and getattr(self, "dm_dqstream", False)), "abl:dqdrop1 needs the non-dqstream drain"
         _p5 = next((x[3:] for x in self.dm_opts if x.startswith("p5=")), None)   # p5=freq:res
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
@@ -6122,6 +6128,14 @@ class DMBackwardSm100:
                     if const_expr(not self.dm_dqstream):
                         cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
                         cute.arch.fence_view_async_tmem_load()
+                        if const_expr(self.dm_dqdrop is not None):
+                            # abl:dqdrop1 positive control: this (key tile, query tile, head) dQ partial contributes 0
+                            if work_n == Int32(self.dm_dqdrop[0]):
+                                if m_block == Int32(self.dm_dqdrop[1]):
+                                    if head_idx == Int32(self.dm_dqdrop[2]):
+                                        if batch_idx == Int32(0):
+                                            for dm_z in cutlass.range_constexpr(cute.size(tdQrdQ_t2r)):
+                                                tdQrdQ_t2r[dm_z] = Float32(0.0)
                         cute.arch.sync_warp()
                         dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                         with cute.arch.elect_one():

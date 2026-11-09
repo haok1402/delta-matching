@@ -83,10 +83,12 @@ BIND_ABS, BIND_REL = 3e-3, 0.05
 # zero-sum invariant at fp32 round-off (user rule): per case, the candidate's identity residual may exceed the exact
 # emulation's own residual (fp32 arithmetic, same P for delta and dS) by at most this factor; floor for cases at ~1e-7
 ROUNDOFF_MULT, ID_FLOOR = 4.0, 1e-5
+ID_MEAN_FLOOR = 2e-7          # mean over rows (accuracy-audit 03:05: a partial approximation can hide under the max floor)
 # no accuracy regression (user rule) vs the frozen baseline kernel, per case (full / bench: fixed seeds): measured
 # summation-order noise between validated commits is <= 3.4e-4 relative; allowed 5e-3 relative + 1e-5 absolute
 BASELINE = os.environ.get("DMVAL_BASELINE", os.path.expanduser("~/workspace/haok1402/sm100/validate/baseline.json"))
 REG_REL, REG_ABS = 5e-3, 1e-5
+REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / baseline err <= 1 + this (measured noise)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 
@@ -199,7 +201,7 @@ def cached_refs(case, preset, q, k, v, do, exact, qbk, dev):
     path = _cache_path(case, preset) if (CACHE and case.get("cached")) else None
     if path and os.path.exists(path):
         d = torch.load(path, weights_only=False)
-        if "em_matched" not in d or "id_roundoff" in d:      # entries without the round-off identity level: recompute
+        if "em_matched" not in d or ("id_roundoff" in d and "mean" in d["id_roundoff"]):   # else recompute
             return {kk: {n: (t.to(dev) if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in d.items()}
     keep = ("O", "LSE", "dQ", "dK", "dV", "delta", "rowsum_dS", "colsum_dK", "sum_PdP", "sum_P", "sum_absPdP")
     out = {"ex": exact(q, k, v, do, causal)}
@@ -212,7 +214,8 @@ def cached_refs(case, preset, q, k, v, do, exact, qbk, dev):
                             delta_override=em["delta"].float(), q_block=qbk)
         r = ((em["delta"].double() * es["sum_P"] - es["sum_PdP"]).abs() / es["sum_absPdP"].clamp_min(1e-300))
         r = r[es["sum_absPdP"] > 0]
-        out["id_roundoff"] = {"value": torch.tensor(r.max().item() if r.numel() else 0.0)}
+        out["id_roundoff"] = {"value": torch.tensor(r.max().item() if r.numel() else 0.0),
+                              "mean": torch.tensor(r.mean().item() if r.numel() else 0.0)}
         out["eb_matched"] = R.dm_reference(q, k, v, do, causal, "matched", "bf16", q_block=qbk)
     out["eb_stale"] = R.dm_reference(q, k, v, do, causal, "stale", "bf16", q_block=qbk)
     if path:
@@ -431,7 +434,23 @@ def check_case(case, cr, preset, dev, verbose):
                     f"candidate LSE vs the {preset} emulation: max |diff| {m['lse_maxabs']:.3e}")
                 # fp32 round-off level of THIS case (cached with the references): the exact emulation's own residual
                 m["emul_rowsum_rel_max"] = float(refs["id_roundoff"]["value"]) if "id_roundoff" in refs else 0.0
+                m["emul_rowsum_rel_mean"] = float(refs["id_roundoff"]["mean"]) if "id_roundoff" in refs else 0.0
                 id_tol = min(ID_TOL, max(ROUNDOFF_MULT * m["emul_rowsum_rel_max"], ID_FLOOR))
+                if "rowsum_dS" in dbg and "sum_abs_PdP" in dbg:
+                    # kernel-side identity (preferred, accuracy-audit 03:15): the backward's own fp32 per-row sum_j dS_ij
+                    # (before quantization) and sum_j |P dP|; independent of the emulation's dP accumulation order
+                    kr = (dbg["rowsum_dS"].double().abs() / dbg["sum_abs_PdP"].double().clamp_min(1e-300))[
+                        dbg["sum_abs_PdP"] > 0]
+                    m["kernel_rowsum_rel_max"] = kr.max().item() if kr.numel() else 0.0
+                    m["kernel_rowsum_rel_mean"] = kr.mean().item() if kr.numel() else 0.0
+                    chk("matched:rowsum_dS_kernel_roundoff", m["kernel_rowsum_rel_max"] <= ID_FLOOR
+                        and m["kernel_rowsum_rel_mean"] <= ID_MEAN_FLOOR,
+                        f"backward's own |sum_j dS| / sum_j |P dP|: max {m['kernel_rowsum_rel_max']:.2e} (<= {ID_FLOOR:.0e}), "
+                        f"mean {m['kernel_rowsum_rel_mean']:.2e} (<= {ID_MEAN_FLOOR:.0e})")
+                chk("matched:rowsum_dS_roundoff_mean",
+                    m["rowsum_rel_mean"] <= max(ROUNDOFF_MULT * m["emul_rowsum_rel_mean"], ID_MEAN_FLOOR),
+                    f"mean identity {m['rowsum_rel_mean']:.2e} > {ROUNDOFF_MULT} x the emulation's mean "
+                    f"{m['emul_rowsum_rel_mean']:.2e} (floor {ID_MEAN_FLOOR:.0e})")
                 chk("matched:rowsum_dS_roundoff", m["rowsum_rel_max"] <= id_tol,
                     f"identity {m['rowsum_rel_max']:.2e} > {ROUNDOFF_MULT} x the exact emulation's own residual "
                     f"{m['emul_rowsum_rel_max']:.2e} (floor {ID_FLOOR:.0e}): rowsum(dS)=0 is not at fp32 round-off - "
@@ -464,7 +483,7 @@ def check_case(case, cr, preset, dev, verbose):
                 chk(f"{key}:no_regression", m["err"] <= b["err"] * (1 + REG_REL) + REG_ABS,
                     f"error {m['err']:.5f} vs baseline {BASE_ID} {b['err']:.5f} (allowed +{REG_REL:.1%} + {REG_ABS:.0e})")
             if key == "matched:debug_delta" and "lse_maxabs" in b:
-                chk("matched:lse_no_regression", m.get("lse_maxabs", 0) <= b["lse_maxabs"] * 1.25 + 1e-6,
+                chk("matched:lse_no_regression", m.get("lse_maxabs", 0) <= b["lse_maxabs"] * (1 + 1e-3) + 1e-6,
                     f"LSE error {m.get('lse_maxabs', 0):.2e} vs baseline {b['lse_maxabs']:.2e}")
     for key, out in runs.items():
         mode, kind = key.split("/")
@@ -612,6 +631,21 @@ def main():
         gpupool_done()
     except ImportError:
         pass
+    # paired no-regression (accuracy-audit 03:05): a systematic small loss on every case must not hide under the per-case cap
+    if BASE_METRICS and a.tier in CACHED_TIERS:
+        ratios = {}
+        for rec, case in zip(results, cases):
+            if case["kind"] in ("lowrank_v", "zero_do") or case["name"] not in BASE_METRICS:
+                continue
+            for key, m in rec["metrics"].items():
+                b = BASE_METRICS[case["name"]].get(key)
+                if b and "err" in m and "err" in b and b["err"] > 1e-6:
+                    ratios.setdefault(key.split(":")[0] + ":" + key.split(":")[1], []).append(m["err"] / b["err"])
+        for key, rs in sorted(ratios.items()):
+            med = sorted(rs)[len(rs) // 2]
+            if med > 1 + REG_MEDIAN:
+                all_ok = False
+                print(f"FAIL: paired no-regression {key}: median err/baseline over {len(rs)} cases = {med:.6f} > 1 + {REG_MEDIAN}")
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     if leaked and not os.environ.get("DMVAL_SELFTEST"):
@@ -628,7 +662,7 @@ def main():
         with open(a.json, "w") as f:
             json.dump(summary, f, indent=1)
     print("SUMMARY_JSON " + json.dumps(_one_line(summary)))
-    print(f"\n{'PASS' if all_ok else 'FAIL'}: {summary['n_cases'] - summary['n_failed']}/{summary['n_cases']} cases "
+    print(f"\n{'PASS' if all_ok else 'FAIL'}: {summary['n_cases'] - summary['n_failed']}/{summary['n_cases']} cases passed "
           f"(tier {a.tier}, preset {preset}, seed {seed}, {summary['seconds']} s)")
     sys.exit(0 if all_ok else 1)
 

@@ -249,7 +249,11 @@ def run_case(mod, fn, case, dev):
                                 b_ = torch.nn.functional.pad(b_, (0, 0, 0, 0, 0, pad))
                             da = (a_ - b_).reshape(B_, nb, 128, H_, D_).pow(2).sum((2, 4)).sqrt()
                             db = b_.reshape(B_, nb, 128, H_, D_).pow(2).sum((2, 4)).sqrt()
-                            br = torch.where(db > 0, da / db.clamp_min(1e-30), torch.zeros_like(da))
+                            # accuracy-audit 18:25: normalize by max(block norm, head-wide RMS of the block norms), so blocks
+                            # whose values nearly cancel (growmax) do not look like races; a lost tile is still ~100x above
+                            rms = db.pow(2).mean(dim=1, keepdim=True).sqrt()           # (B, 1, H)
+                            den_ = torch.maximum(db, rms)
+                            br = torch.where(den_ > 0, da / den_.clamp_min(1e-30), torch.zeros_like(da))
                             bv = br.max().item()
                             if bv > bmax:
                                 ix = int(br.argmax())

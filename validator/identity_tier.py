@@ -29,7 +29,7 @@ BASE = os.path.expanduser("~/workspace/haok1402/sm100/validate/identity_baseline
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("candidate")
-    ap.add_argument("--lengths", default="8192,32768,65536")
+    ap.add_argument("--lengths", default="8192,32768,65536,131072")   # user 2026-11-09: + 128k
     ap.add_argument("--json", default=None)
     ap.add_argument("--freeze", action="store_true", help="write the measured values as the identity baseline")
     a = ap.parse_args()
@@ -43,7 +43,7 @@ def main():
     fams = ["randn", "outliers", "nearsat", "scaled3", "scaled10", "peaked", "bigmag"]
     out, ok, opened = {}, True, []
     for N in (int(x) for x in a.lengths.split(",")):
-        for (H, Hk) in ((16, 16), (32, 8)):
+        for (H, Hk) in ((32, 4), (16, 4)):     # user 2026-11-09: headline GQA 32/4 + 16/4 (MHA and 32/8 dropped)
             B = max(1, 32768 // N)
             for fam in fams:
                 name = f"B{B}_H{H}_Hk{Hk}_N{N}_c_{fam}"
@@ -73,7 +73,11 @@ def main():
                 del leaves, o, d
                 torch.cuda.empty_cache()
     if a.freeze:
-        json.dump({kk: {"max": vv["max"], "mean": vv["mean"]} for kk, vv in out.items()}, open(BASE, "w"), indent=1)
+        # merge (lengths may be frozen in separate runs); existing entries for other shapes are kept
+        old = json.load(open(BASE)) if os.path.exists(BASE) else {}
+        old.update({kk: {"max": vv["max"], "mean": vv["mean"]} for kk, vv in out.items()})
+        json.dump(old, open(BASE + ".tmp", "w"), indent=1)
+        os.replace(BASE + ".tmp", BASE)
     if a.json:
         json.dump(out, open(a.json, "w"), indent=1)
     print("SUMMARY_JSON " + json.dumps({"pass": ok, "open": opened, "n": len(out)}))

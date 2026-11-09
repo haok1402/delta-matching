@@ -99,7 +99,7 @@ REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / b
 # (GQA 32/8 8k, 10 calls; bf16 rounding flips); limits ~10x the measured worst (accuracy-audit 05:35). Deterministic
 # kernels measure exactly 0, so their binding stays effectively bitwise.
 NONDET_REL = 2e-4             # whole tensor
-SPREAD_BLK = 5e-4             # per (batch, 128-row block, head)
+SPREAD_BLK = 1e-3   # accuracy-audit 19:05: under the max(block, head-RMS) normalization; honest worst 4.6e-4, lost tile >= 3%             # per (batch, 128-row block, head)
 SPREAD_ELEM = 1.6e-2          # per element, relative to its row's max |x|: 2 bf16 ulp (1 ulp flip can be 2^-7 = 7.8e-3)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
@@ -225,6 +225,29 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     return [x.to(BF) for x in (q, k, v, do)]
 
 
+INPUT_CACHE = os.environ.get("DMVAL_INPUT_CACHE", os.path.expanduser("~/workspace/haok1402/sm100/validate/inputcache"))
+
+
+def case_inputs(case, cpu):
+    """make_inputs for a case, cached on disk for long fixed-seed cases (N >= 32k): generating 128k inputs on the CPU took
+    tens of seconds inside GPU leases (gpu-keeper: idle gaps); `--prep-only` fills the cache in a --gpus 0 run."""
+    import hashlib
+    import inspect
+    big = case["N"] >= 32768
+    if big:
+        h = hashlib.sha256(inspect.getsource(make_inputs).encode()).hexdigest()[:12]
+        path = os.path.join(INPUT_CACHE, h, f"{case['name']}_s{case['seed']}.pt")
+        if os.path.exists(path):
+            return torch.load(path)
+    gen = torch.Generator(device=cpu).manual_seed(case["seed"])
+    ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
+    if big:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(ins, path + ".tmp")
+        os.replace(path + ".tmp", path)
+    return ins
+
+
 FWD_ONLY = False
 CACHE = os.environ.get("DMVAL_CACHE", "1") == "1"
 CACHED_TIERS = ("full", "bench")
@@ -329,7 +352,13 @@ def build_cases(tier, supports, seed):
     stress_n = 8
     # accuracy-audit 05:30 (4): >= 20 repeats on small, odd and GQA shapes (races show up as spread, not bitwise diffs)
     shapes += [(1, 2, 2, up(128), True, ["stress20"]), (1, 4, 1, up(256), True, ["stress20"]),
-               (1, 4, 1, up(384), True, ["stress20"]), (1, 8, 2, up(1152), True, ["stress20"])]
+               (1, 4, 1, up(384), True, ["stress20"]), (1, 8, 2, up(1152), True, ["stress20"]),
+               (1, 8, 1, up(640), True, ["stress20"])]          # GQA 8:1 (user 2026-11-09: headline = 32/4 + 16/4)
+    # user 2026-11-09: headline shapes are GQA 32/4 (8:1) and 16/4 (4:1): cover the 8:1 ratio in quick, odd + even blocks
+    shapes += [(1, 8, 1, up(1152), True, base_kinds + ["outliers"]), (2, 16, 2, up(1408), True, base_kinds),
+               (1, 32, 4, up(2048), True, ["randn", "peaked", "bigmag"])]
+    if nc:
+        shapes += [(1, 8, 1, up(1152), False, base_kinds), (1, 32, 4, up(1024), False, ["randn"])]
     shapes += [(1, 16, 16, up(4096), True, ["stress"]),
                # odd numbers of 128-row blocks, with the allocator state cycled between calls (out-of-bounds reads)
                (1, 4, 4, up(1152), True, ["stress"]), (1, 4, 1, up(384), True, ["stress"]), (1, 8, 2, up(1408), True, ["stress"])]
@@ -339,21 +368,30 @@ def build_cases(tier, supports, seed):
         shapes += [(1, 16, 16, up(8192), True, ["stress"]), (1, 4, 4, up(4096), True, ["stress"])]
         if nc:
             shapes += [(1, 16, 16, up(8192), False, ["stress"])]
-    if tier == "bench":   # races at the longest headline length
-        shapes.append((1, 16, 16, up(65536), True, ["stress"]))
+    if tier != "quick":   # accuracy-audit 15:50 (2): rep-8 (32/4) at odd N, causal + non-causal, incl. the GQA gloop path
+        shapes += [(1, 32, 4, up(1408), True, base_kinds + ["outliers"]), (1, 32, 4, up(1152), True, ["ramp", "audit_growmax"])]
+        if nc:
+            shapes += [(1, 32, 4, up(1408), False, base_kinds)]
+    if tier != "quick":   # headline GQA shapes at full size (accuracy + identity hooks)
+        shapes += [(1, 32, 4, up(8192), True, base_kinds + ["outliers"]), (1, 16, 4, up(8192), True, ["randn", "scaled3", "peaked"])]
+    if tier == "bench":   # races at the longest headline length, both headline GQA ratios
+        shapes += [(1, 32, 4, up(65536), True, ["stress"]), (1, 16, 4, up(65536), True, ["stress"]),
+                   (1, 32, 4, up(131072), True, ["stress"]), (1, 16, 4, up(131072), True, ["stress"])]   # user: + 128k
     if tier != "quick":
         # 6a313b0's forward race (ss_pv defaults) changed one O tile on ~1% of calls at B8 H32/8 N4096 and was invisible
         # to 8-call stress: many calls on a multi-batch GQA shape with several CTAs per SM, causal and non-causal
         # kda-sm100-sspv2: also on rescale-triggering inputs (ramp / growing-max rows), and the rescale families in accuracy
-        shapes += [(8, 32, 8, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"])]
+        # user 2026-11-09: headline GQA 32/4 (8:1) replaces 32/8; 16/4 (4:1) added
+        shapes += [(8, 32, 4, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"]),
+                   (8, 16, 4, up(4096), True, ["stress60", "stress60_growmax"])]
         if nc:
-            shapes += [(8, 32, 8, up(4096), False, ["stress60", "stress60_ramp", "stress60_growmax"])]
+            shapes += [(8, 32, 4, up(4096), False, ["stress60", "stress60_ramp", "stress60_growmax"])]
         RESC = ["ramp", "growmax", "audit_ramp", "audit_ramp_th", "audit_ramp_sm", "audit_growmax", "audit_ramp_up"]
-        shapes += [(1, 8, 2, up(1152), True, RESC), (2, 16, 16, up(4096), True, RESC)]
+        shapes += [(1, 8, 2, up(1152), True, RESC), (2, 16, 4, up(4096), True, RESC), (1, 32, 4, up(4096), True, RESC)]
         if nc:
             shapes += [(1, 8, 2, up(1408), False, RESC)]
         # accuracy-audit 11:25 (3): alternate randn and rescale-family calls in one stress sequence
-        shapes += [(8, 32, 8, up(4096), True, ["stress60mix_audit_ramp", "stress60mix_audit_growmax"])]
+        shapes += [(8, 32, 4, up(4096), True, ["stress60mix_audit_ramp", "stress60mix_audit_growmax"])]
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
             if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
@@ -523,15 +561,42 @@ def check_case(case, cr, preset, dev, verbose):
                 dl_c = dbg["delta"].reshape(B, H, N).float()
                 lse_err = (lse_c.double() - em["LSE"].double()).abs()
                 lse_tol = 1e-3 + 1e-5 * em["LSE"].double().abs()
+                km_c = dbg.get("kmean")
+                if km_c is not None:
+                    # the candidate's K-centering mean vs the EXACT (fp64) mean of the same bf16 K (accuracy-audit 17:35):
+                    # <= 4e-9 * max|k| per element (2x the worst fp32 fold measured; today's producer <= 9.9e-10), and its
+                    # median error in fp32 ulps of the mean is reported (producer 1.9-2.9 today)
+                    km_x = k.double().mean(dim=1)                                        # (B, Hk, D)
+                    km_d = (km_c.reshape(km_x.shape).double() - km_x).abs()
+                    ulp = torch.where(km_x != 0, km_x.abs().float().double() * 2.0 ** -23, torch.ones_like(km_x) * 2.0 ** -149)
+                    # per element: 4e-9 max|k| (fold error, accuracy-audit 17:35) + 2 fp32 ulps of the mean itself (its own
+                    # representation; large-mean families such as nearsat / audit ramps exceed the fixed term alone)
+                    # + 2^-25 x the per-(head, d) mean |k| (a quarter ulp of the typical magnitude): families whose values all
+                    # sit near max|k| (nearsat) have a larger honest fp32-fold error; a bf16 or broken fold is still ~1e3x above
+                    km_abs = k.double().abs().mean(dim=1)
+                    km_tolv = 4e-9 * k.float().abs().amax().item() + 2 * ulp + 2.0 ** -25 * km_abs
+                    km_err = (km_d / km_tolv).max().item()                   # <= 1 passes
+                    km_ulp = (km_d / ulp).median().item()
+                    rec["metrics"]["matched:kmean"] = {"max_over_tol": km_err, "maxabs": km_d.max().item(), "median_ulp": km_ulp}
+                    chk("matched:kmean_roundoff", km_err <= 1.0 and km_ulp <= 4.0,
+                        f"candidate K-centering mean vs exact fp64 mean: worst element at {km_err:.2f} x its limit "
+                        f"(4e-9 max|k| + 2 ulp + 2^-25 mean|k|), median {km_ulp:.1f} fp32 ulps (limit 4)")
                 emc = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, lse_override=lse_c,
-                                     delta_override=dl_c, q_block=qbk)
+                                     delta_override=dl_c, q_block=qbk, k_mean=km_c)
                 den = emc["sum_absPdP"]
                 live = den > 0
-                r = ((dl_c.double() * emc["sum_P"] - emc["sum_PdP"]).abs() / den.clamp_min(1e-300))[live]
+                res = (dl_c.double() * emc["sum_P"] - emc["sum_PdP"]).abs()
+                r_raw = (res / den.clamp_min(1e-300))[live]
+                # dP's own fp32 accumulation order (tensor-core MMA vs emulation) is not modelled: allow 4 fp32 ulps of the
+                # size of dP's terms, sum_j P (|dO| . |V_j|), per row. Matters only for rows whose dP cancels inside its own dot
+                # product (32/4 peaked: one row at 4.4e-5 raw with kernel identity 1e-8, delta off by 5e-7 abs)
+                r = ((res - 2.0 ** -21 * emc["sum_PdPterms"]).clamp_min(0) / den.clamp_min(1e-300))[live] \
+                    if "sum_PdPterms" in emc else r_raw
                 bind = max(rel(cand[1], emc["dQ"]), rel(cand[2], emc["dK"]))
                 bind_tol = BIND_ABS + BIND_REL * max(rel(em["dQ"], ex["dQ"]), rel(em["dK"], ex["dK"]))
                 m = {"lse_maxabs": lse_err.max().item(), "rowsum_rel_max": r.max().item() if r.numel() else 0.0,
-                     "rowsum_rel_mean": r.mean().item() if r.numel() else 0.0, "bind_dist": bind}
+                     "rowsum_rel_mean": r_raw.mean().item() if r_raw.numel() else 0.0, "bind_dist": bind,
+                     "rowsum_rel_max_raw": r_raw.max().item() if r_raw.numel() else 0.0}
                 rec["metrics"]["matched:debug_delta"] = m
                 rep_l = (cr.get("debug_repeat") or {}).get("lse")
                 if rep_l is not None:
@@ -656,6 +721,8 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="default: random (printed)")
     ap.add_argument("--json", default=None)
     ap.add_argument("--only", default=None, help="substring filter on case names")
+    ap.add_argument("--prep-only", action="store_true", help="only generate + cache the long-case inputs (CPU; run it in a --gpus 0 job)")
+    ap.add_argument("--skip", default=None, help="drop cases whose name contains this substring (e.g. N131072: 128k in its own run)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--shard", default=None, help="i/n: run every n-th case starting at i (split a tier across GPUs)")
     ap.add_argument("--fwd-only", action="store_true", help="validate the forward (O) only; never a promotion PASS")
@@ -666,8 +733,9 @@ def main():
     if tgt.endswith(".py"):
         a.candidate = os.path.abspath(tgt) + sep + fn_
     dev = torch.device(a.device)
-    torch.cuda.set_device(dev)
-    torch.zeros(1, device=dev)
+    if not a.prep_only:                    # prep-only is CPU work (a --gpus 0 run): no CUDA context
+        torch.cuda.set_device(dev)
+        torch.zeros(1, device=dev)
     _hook("gpupool_done")                  # after context creation: validation is untimed and shares the GPU with the filler
     seed = a.seed if a.seed is not None else secrets.randbits(31)
     t0 = time.time()
@@ -694,6 +762,16 @@ def main():
     cases = build_cases(a.tier, supports, seed)
     if a.only:
         cases = [c for c in cases if a.only in c["name"]]
+    if a.skip:
+        cases = [c for c in cases if a.skip not in c["name"]]
+    if a.prep_only:
+        cpu_ = torch.device("cpu")
+        for c in cases:
+            if c["N"] >= 32768 and a.tier in CACHED_TIERS:
+                case_inputs(c, cpu_)
+                print("cached inputs", c["name"], flush=True)
+        print("PASS: prep-only (inputs cached)")
+        sys.exit(0)
     if a.shard:
         si, sn = (int(x) for x in a.shard.split("/"))
         cases = cases[si::sn]
@@ -711,8 +789,11 @@ def main():
     cpu = torch.device("cpu")
     for i, case in enumerate(cases):
         gen = torch.Generator(device=cpu).manual_seed(case["seed"])
-        case["q"], case["k"], case["v"], case["do"] = make_inputs(case["kind"], case["B"], case["N"], case["H"],
-                                                                  case["Hk"], gen, cpu)
+        if case["N"] >= 32768 and a.tier in CACHED_TIERS:
+            case["q"], case["k"], case["v"], case["do"] = case_inputs(case, cpu)
+        else:
+            case["q"], case["k"], case["v"], case["do"] = make_inputs(case["kind"], case["B"], case["N"], case["H"],
+                                                                      case["Hk"], gen, cpu)
         if any(r[1] == "mutate" for r in case["runs"]):
             case["q2"], case["k2"], case["v2"], _ = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"],
                                                                 gen, cpu)
@@ -756,7 +837,10 @@ def main():
         full = torch.load(files[i] + ".out", weights_only=False) if os.path.exists(files[i] + ".out") else \
             {"name": case["name"], "error": "the runner produced no output for this case"}
         gen = torch.Generator(device=cpu).manual_seed(case["seed"])
-        ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
+        if case["N"] >= 32768 and a.tier in CACHED_TIERS:
+            ins = case_inputs(case, cpu)
+        else:
+            ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
         ins2 = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"], gen, cpu)[:3] \
             if any(r[1] == "mutate" for r in case["runs"]) else None
         return full, ins, ins2

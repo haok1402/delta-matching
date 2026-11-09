@@ -1,5 +1,47 @@
 # FA4 baseline on GB200 (sm100), head dim 128 — the target to beat
 
+**2026-11-09: causal only (user). Non-causal rows below are reference only.**
+
+## FOCUS (user, 2026-11-08 23:50): N = 8k, 32k, 64k only. The headline is the geomean over these 6 shapes.
+
+Suite `focus` (attnbench.py --suite focus, the default of run_ab.sh / run_suite4.sh): H/Hk in {16/16, 32/8},
+N in {8k, 32k, 64k}, B = max(1, 32768 // N) = 4 / 1 / 1, causal and non-causal. 64k is a single 64k-token sequence:
+the long-context training case. At B=1 it still has 512 128-row tiles x H heads (>= 8192 CTA tiles), so all 148 SMs
+are busy. Memory: q/k/v/o/dO/grads at 64k H32 is ~3.5 GB, which fits easily. FA4, cuDNN and FA4-fp8 all run at 64k.
+Sanity at N > 8k (new): O and dQ are checked exactly in fp32 on the last 512 query rows (the full context), and dK / dV
+against FA4 bf16 (FA4's own O/dQ error there is 2.4e-3; FA4-fp8 O 5.4e-2).
+Measured nvl72052-T18 GPUs 2-3 with the filler on the other GPUs (results/focus_baseline.s*.jsonl), ms (TFLOPS):
+
+| H/Hk | N | B | causal | FA4 fwd | FA4 bwd | **FA4 fwd+bwd** | FA4-det fwd+bwd | cuDNN fwd+bwd | FA4-fp8 fwd (kernel only) |
+|---|---|---|---|---|---|---|---|---|---|
+| 16/16 | 8k | 4 | 1 | 0.688 (1599) | 2.014 (1365) | 2.714 (1418) | 2.823 (1363) | 2.722 (1414) | 0.629 (1747) |
+| 16/16 | 32k | 1 | 1 | 2.499 (1760) | 8.215 (1338) | 11.327 (1359) | 11.704 (1315) | 11.851 (1299) | 2.241 (1962) |
+| 16/16 | 64k | 1 | 1 | 11.757 (1496) | 34.682 (1268) | 47.867 (1286) | 48.532 (1269) | 48.780 (1262) | 8.814 (1996) |
+| 32/8 | 8k | 4 | 1 | 1.289 (1706) | 4.342 (1266) | 5.899 (1305) | 6.140 (1253) | 6.122 (1257) | 1.205 (1826) |
+| 32/8 | 32k | 1 | 1 | 5.483 (1604) | 17.442 (1261) | 23.863 (1290) | 24.312 (1266) | 24.745 (1244) | 4.407 (1996) |
+| 32/8 | 64k | 1 | 1 | 24.253 (1451) | 70.024 (1256) | 94.507 (1303) | 97.978 (1257) | 97.971 (1257) | 17.986 (1956) |
+| 16/16 | 8k | 4 | 0 | 1.401 (1569) | 3.875 (1419) | 5.377 (1431) | 5.741 (1341) | 5.751 (1338) | 1.350 (1629) |
+| 16/16 | 32k | 1 | 0 | 5.487 (1603) | 16.669 (1319) | 24.277 (1268) | 24.404 (1262) | 24.787 (1242) | 4.997 (1760) |
+| 16/16 | 64k | 1 | 0 | 24.722 (1423) | 69.237 (1270) | 96.785 (1272) | 100.504 (1225) | 101.538 (1213) | 18.814 (1870) |
+| 32/8 | 8k | 4 | 0 | 2.665 (1650) | 8.242 (1334) | 11.639 (1323) | 11.940 (1289) | 12.370 (1244) | 2.594 (1695) |
+| 32/8 | 32k | 1 | 0 | 11.812 (1489) | 36.470 (1206) | 49.875 (1235) | 50.541 (1218) | 51.018 (1207) | 9.641 (1825) |
+| 32/8 | 64k | 1 | 0 | 50.996 (1380) | 139.715 (1259) | 192.939 (1277) | 200.650 (1227) | 203.538 (1210) | 37.982 (1853) |
+
+- At 64k, FA4 bf16 falls to 1.45-1.50 PF fwd and 1.25-1.27 PF bwd (SM clock 1.33-1.43 GHz under the power cap).
+  FA4's fp8 fwd is 1.34x its bf16 fwd at 64k, against 1.07-1.10x at 8k. The longer the sequence, the more power-bound
+  the kernel, and the more a lower-energy fp8 kernel gains.
+- cuDNN is 0.96-0.97x FA4 on fwd+bwd, and FA4-det is 0.97x. FA4 default stays the baseline.
+
+**4k added (user, 2026-11-09).** N=4096, B=8, measured on GPUs 1-2 (median of 2), causal / non-causal, ms (TFLOPS):
+| H/Hk | FA4 fwd | FA4 fwd+bwd | FA4-det fwd+bwd | cuDNN fwd+bwd | FA4-fp8 fwd |
+|---|---|---|---|---|---|
+| 16/16 causal | 0.399 (1378) | 1.567 (1228) | 1.628 (1182) | 1.534 (1254) | 0.348 (1581) |
+| 32/8 causal | 0.699 (1573) | 2.989 (1288) | 3.115 (1236) | 3.144 (1224) | 0.641 (1717) |
+| 16/16 non-causal | 0.691 (1591) | 2.626 (1466) | 2.739 (1405) | 2.693 (1429) | 0.696 (1579) |
+| 32/8 non-causal | 1.284 (1713) | 5.353 (1438) | 5.487 (1403) | 5.827 (1321) | 1.382 (1591) |
+
+---
+
 Owner: fa4-bench. Measured 2026-11-08 on nvl72063-T13 (gpupool node), torch 2.14.1+cu130, FA4 = flash-attn-4 @ b2edfab9
 (Dao-AILab main, CuTe DSL, cutlass-dsl 4.8.1), cuDNN 9.24. Raw: results/baseline_exclusive.jsonl, results/baseline_filler-on.jsonl.
 

@@ -7,7 +7,7 @@ import collections, glob, json, math, sys
 
 def load(tag):
     d = {}
-    for f in glob.glob(f"results/{tag}.s*.jsonl" if tag.startswith("ab_") else f"results/full_{tag}.s*.jsonl"):
+    for f in glob.glob(f"results/{tag}.s*.jsonl" if tag.startswith(("ab_", "focus_")) else f"results/full_{tag}.s*.jsonl"):
         for l in open(f):
             r = json.loads(l)
             if "pass_" in r and "error" not in r:

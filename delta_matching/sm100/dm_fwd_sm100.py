@@ -949,6 +949,9 @@ class DMForwardSm100:
             head_divmod = FastDivmodDivisorV2(self.qhead_per_kvhead)
 
         self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
+        # slice=1 implements the dense iteration and no learnable sink (Codex r3 findings 2-3): refuse rather than mis-run
+        assert not (self.dm_slice and (blocksparse_tensors is not None or learnable_sink is not None)), \
+            "DM_FWD_OPTS slice=1 does not support block sparsity or a learnable sink"
         if cutlass.const_expr(self.use_block_sparsity and self.use_s_ping_pong):
             raise NotImplementedError("Block sparsity + S ping-pong not supported on SM100")
         if cutlass.const_expr(self.use_block_sparsity and mPageTable is not None):
@@ -3016,7 +3019,7 @@ class DMForwardSm100:
                            descale_tensors=descale_tensors, batch_idx=batch_idx, kv_head_idx=kv_head_idx,
                            work_m=work_m, seqlen=seqlen)
             if has_work:
-                st[2] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * (n_block_max - 1)])
+                st[2] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * cutlass.max(n_block_max - 1, 0)])
                 step(n_block_max - 1, mask_seqlen=True, mask_causal=self.is_causal)
                 n_block_max -= 1
                 if const_expr(self.is_causal):
@@ -3054,9 +3057,10 @@ class DMForwardSm100:
             cute.copy(thr_ld, cute.make_tensor(tSt_ld.iterator + col, tSt_ld.layout), rS)
             if const_expr(mask_seqlen or mask_causal):
                 # = AttentionMask.apply_mask_sm100 (non-pack-GQA, 1-CTA) restricted to columns [32 q, 32 q + 32)
-                seqlenk_col_limit = seqlen.seqlen_k - n_block * self.n_block_size
+                n_blk = cutlass.max(n_block, 0)   # apply_mask_sm100 treats negative n_blocks as block 0 (empty KV range)
+                seqlenk_col_limit = seqlen.seqlen_k - n_blk * self.n_block_size
                 if const_expr(mask_causal):
-                    causal_row_offset = seqlen.seqlen_k - n_block * self.n_block_size - seqlen.seqlen_q
+                    causal_row_offset = seqlen.seqlen_k - n_blk * self.n_block_size - seqlen.seqlen_q
                     row_idx = tidx + self._q_block(work_m, s) * self.m_block_size
                     col_limit = row_idx + causal_row_offset + 1
                     if const_expr(mask_seqlen):
@@ -3169,8 +3173,9 @@ class DMForwardSm100:
             total_block_count = n_block_max - n_block_min
             has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
             if has_work:
-                cnt[1] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * (n_block_max - 1) + 1])
-                for k in cutlass.range(total_block_count, unroll=1):
+                cnt[1] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * cutlass.max(n_block_max - 1, 0) + 1])
+                # one step even when the range is empty (seqlen_k == 0): slices and MMA always run the first step (Codex r3 #1)
+                for k in cutlass.range(cutlass.max(total_block_count, 1), unroll=1):
                     n_block = n_block_max - 1 - k
                     sfb_word = dm_utils.bitcast_i32_f32(cnt[1])   # V scale word of n_block (prefetched one step ahead)
                     cnt[1] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * cutlass.max(n_block - 1, 0) + 1])

@@ -215,7 +215,7 @@ def headline_shapes():
     if os.path.exists(HEADLINE):
         return json.load(open(HEADLINE))["shapes"]
     return [{"B": max(1, 32768 // N), "H": H, "Hk": Hk, "N": N, "causal": c}
-            for (H, Hk) in ((16, 16), (32, 8)) for N in (8192, 65536) for c in (True,)]
+            for (H, Hk) in ((16, 16), (32, 8)) for N in (4096, 8192, 32768, 65536) for c in (True,)]
 
 
 def build_cases(tier, supports, seed):

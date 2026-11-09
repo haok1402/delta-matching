@@ -225,6 +225,29 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     return [x.to(BF) for x in (q, k, v, do)]
 
 
+INPUT_CACHE = os.environ.get("DMVAL_INPUT_CACHE", os.path.expanduser("~/workspace/haok1402/sm100/validate/inputcache"))
+
+
+def case_inputs(case, cpu):
+    """make_inputs for a case, cached on disk for long fixed-seed cases (N >= 32k): generating 128k inputs on the CPU took
+    tens of seconds inside GPU leases (gpu-keeper: idle gaps); `--prep-only` fills the cache in a --gpus 0 run."""
+    import hashlib
+    import inspect
+    big = case["N"] >= 32768
+    if big:
+        h = hashlib.sha256(inspect.getsource(make_inputs).encode()).hexdigest()[:12]
+        path = os.path.join(INPUT_CACHE, h, f"{case['name']}_s{case['seed']}.pt")
+        if os.path.exists(path):
+            return torch.load(path)
+    gen = torch.Generator(device=cpu).manual_seed(case["seed"])
+    ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
+    if big:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(ins, path + ".tmp")
+        os.replace(path + ".tmp", path)
+    return ins
+
+
 FWD_ONLY = False
 CACHE = os.environ.get("DMVAL_CACHE", "1") == "1"
 CACHED_TIERS = ("full", "bench")
@@ -679,6 +702,7 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="default: random (printed)")
     ap.add_argument("--json", default=None)
     ap.add_argument("--only", default=None, help="substring filter on case names")
+    ap.add_argument("--prep-only", action="store_true", help="only generate + cache the long-case inputs (CPU; run it in a --gpus 0 job)")
     ap.add_argument("--skip", default=None, help="drop cases whose name contains this substring (e.g. N131072: 128k in its own run)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--shard", default=None, help="i/n: run every n-th case starting at i (split a tier across GPUs)")
@@ -690,8 +714,9 @@ def main():
     if tgt.endswith(".py"):
         a.candidate = os.path.abspath(tgt) + sep + fn_
     dev = torch.device(a.device)
-    torch.cuda.set_device(dev)
-    torch.zeros(1, device=dev)
+    if not a.prep_only:                    # prep-only is CPU work (a --gpus 0 run): no CUDA context
+        torch.cuda.set_device(dev)
+        torch.zeros(1, device=dev)
     _hook("gpupool_done")                  # after context creation: validation is untimed and shares the GPU with the filler
     seed = a.seed if a.seed is not None else secrets.randbits(31)
     t0 = time.time()
@@ -720,6 +745,14 @@ def main():
         cases = [c for c in cases if a.only in c["name"]]
     if a.skip:
         cases = [c for c in cases if a.skip not in c["name"]]
+    if a.prep_only:
+        cpu_ = torch.device("cpu")
+        for c in cases:
+            if c["N"] >= 32768 and a.tier in CACHED_TIERS:
+                case_inputs(c, cpu_)
+                print("cached inputs", c["name"], flush=True)
+        print("PASS: prep-only (inputs cached)")
+        sys.exit(0)
     if a.shard:
         si, sn = (int(x) for x in a.shard.split("/"))
         cases = cases[si::sn]
@@ -737,8 +770,11 @@ def main():
     cpu = torch.device("cpu")
     for i, case in enumerate(cases):
         gen = torch.Generator(device=cpu).manual_seed(case["seed"])
-        case["q"], case["k"], case["v"], case["do"] = make_inputs(case["kind"], case["B"], case["N"], case["H"],
-                                                                  case["Hk"], gen, cpu)
+        if case["N"] >= 32768 and a.tier in CACHED_TIERS:
+            case["q"], case["k"], case["v"], case["do"] = case_inputs(case, cpu)
+        else:
+            case["q"], case["k"], case["v"], case["do"] = make_inputs(case["kind"], case["B"], case["N"], case["H"],
+                                                                      case["Hk"], gen, cpu)
         if any(r[1] == "mutate" for r in case["runs"]):
             case["q2"], case["k2"], case["v2"], _ = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"],
                                                                 gen, cpu)
@@ -782,7 +818,10 @@ def main():
         full = torch.load(files[i] + ".out", weights_only=False) if os.path.exists(files[i] + ".out") else \
             {"name": case["name"], "error": "the runner produced no output for this case"}
         gen = torch.Generator(device=cpu).manual_seed(case["seed"])
-        ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
+        if case["N"] >= 32768 and a.tier in CACHED_TIERS:
+            ins = case_inputs(case, cpu)
+        else:
+            ins = make_inputs(case["kind"], case["B"], case["N"], case["H"], case["Hk"], gen, cpu)
         ins2 = make_inputs("randn", case["B"], case["N"], case["H"], case["Hk"], gen, cpu)[:3] \
             if any(r[1] == "mutate" for r in case["runs"]) else None
         return full, ins, ins2

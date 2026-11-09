@@ -64,11 +64,14 @@ def main():
     ap.add_argument("candidate")
     ap.add_argument("--tool", default="memcheck")
     ap.add_argument("--log", default=None)
-    ap.add_argument("--timeout", type=float, default=600.0, help="seconds; a hang under the sanitizer is a FAIL")
+    ap.add_argument("--timeout", type=float, default=600.0, help="seconds; a hang under the sanitizer is a FAIL "
+                    "(racecheck with lineinfo: 1500 by default, the small q_stage-1 shapes compile under the sanitizer)")
     ap.add_argument("--accept-sites", default=None, metavar="NOTE",
                     help="racecheck: add the measured sites to the baseline site set of this mode with a written "
                          "explanation (which mbarrier / TMA / tcgen05 sync orders them); only after review")
     a = ap.parse_args()
+    if a.tool == "racecheck" and a.timeout == 600.0 and os.environ.get("DMVAL_RACE_LINEINFO", "1") != "0":
+        a.timeout = 1500.0
     tgt, sep, fn = a.candidate.partition(":")
     cand = os.path.abspath(tgt) + sep + fn
     env = dict(os.environ, PYTORCH_NO_CUDA_MEMORY_CACHING="1")

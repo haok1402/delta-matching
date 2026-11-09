@@ -571,13 +571,16 @@ def check_case(case, cr, preset, dev, verbose):
                     ulp = torch.where(km_x != 0, km_x.abs().float().double() * 2.0 ** -23, torch.ones_like(km_x) * 2.0 ** -149)
                     # per element: 4e-9 max|k| (fold error, accuracy-audit 17:35) + 2 fp32 ulps of the mean itself (its own
                     # representation; large-mean families such as nearsat / audit ramps exceed the fixed term alone)
-                    km_tolv = 4e-9 * k.float().abs().amax().item() + 2 * ulp
+                    # + 2^-25 x the per-(head, d) mean |k| (a quarter ulp of the typical magnitude): families whose values all
+                    # sit near max|k| (nearsat) have a larger honest fp32-fold error; a bf16 or broken fold is still ~1e3x above
+                    km_abs = k.double().abs().mean(dim=1)
+                    km_tolv = 4e-9 * k.float().abs().amax().item() + 2 * ulp + 2.0 ** -25 * km_abs
                     km_err = (km_d / km_tolv).max().item()                   # <= 1 passes
                     km_ulp = (km_d / ulp).median().item()
                     rec["metrics"]["matched:kmean"] = {"max_over_tol": km_err, "maxabs": km_d.max().item(), "median_ulp": km_ulp}
                     chk("matched:kmean_roundoff", km_err <= 1.0 and km_ulp <= 4.0,
                         f"candidate K-centering mean vs exact fp64 mean: worst element at {km_err:.2f} x its limit "
-                        f"(4e-9 max|k| + 2 ulp), median {km_ulp:.1f} fp32 ulps (limit 4)")
+                        f"(4e-9 max|k| + 2 ulp + 2^-25 mean|k|), median {km_ulp:.1f} fp32 ulps (limit 4)")
                 emc = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, lse_override=lse_c,
                                      delta_override=dl_c, q_block=qbk, k_mean=km_c)
                 den = emc["sum_absPdP"]

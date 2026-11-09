@@ -11,6 +11,8 @@ from flash_attn.cute import cache_utils
 
 from .dm_bwd_sm100 import DMBackwardSm100
 from .fwd import _fingerprint
+from . import fastpath
+_env = fastpath.env
 
 LOG2E = math.log2(math.e)
 
@@ -21,13 +23,14 @@ _CACHES = {}
 def _dm_bwd_cache():
     """One compile cache per DM_BWD_OPTS string (kernel variant knobs read in DMBackwardSm100.__init__), so A/B
     variants can run in one process."""
-    opts = os.environ.get("DM_BWD_OPTS", "")
+    opts = _env("DM_BWD_OPTS", "")
     if opts not in _CACHES:
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
             _CACHES[opts] = cache_utils.JITPersistentCache(
                 cache_utils.get_cache_path() / "dm_sm100" / _fingerprint(opts) / "bwd")
         else:
             _CACHES[opts] = cache_utils.JITCache()
+        _CACHES[opts] = fastpath.RecCache(_CACHES[opts])
     return _CACHES[opts]
 
 
@@ -39,6 +42,7 @@ _CTX = {}
 # re-created and zeroed on a side stream while pass 0 runs, so only the delta copy stays on the critical path.
 _REC = {}          # key -> [(kind, shape, dtype)] of torch.empty / torch.zeros calls in the host (recorded once)
 _SIDE = {}
+_PFAST = {}       # host fast path: (key, raw stream) -> re-initialiser of a persistent prestaged scratch pool
 
 
 def _dm_alloc(kind, *shape, dtype=None, device=None, **kw):
@@ -67,7 +71,7 @@ def _dm_empty(*a, **k):
 
 def _fws(deterministic):
     """dQ first-writer-stores in the kernel (DMBackwardSm100.dm_fws): dq_accum needs no zero-fill."""
-    return bool(deterministic) and "nofws" not in os.environ.get("DM_BWD_OPTS", "").split(",")
+    return bool(deterministic) and "nofws" not in _env("DM_BWD_OPTS", "").split(",")
 
 
 _AUTO_MEMO = {}
@@ -75,7 +79,7 @@ _AUTO_MEMO = {}
 
 def _auto_opts(q8, k8, causal=False):
     """Memoized _auto_opts_impl (host-overhead cut, kda-sm100-host): pure function of the env knobs and the shape."""
-    mk = (os.environ.get("DM_BWD_OPTS", ""), os.environ.get("DM_B6", ""), os.environ.get("DM_NSM", ""),
+    mk = (_env("DM_BWD_OPTS", ""), _env("DM_B6", ""), _env("DM_NSM", ""),
           q8.shape[1], q8.shape[2], k8.shape[2], bool(causal), q8.device.index)
     r = _AUTO_MEMO.get(mk)
     if r is None:
@@ -88,7 +92,7 @@ def _auto_opts_impl(q8, k8, causal=False):
     fp32 dK/dV accumulation across the qh query-head CTAs + postprocess; loop the group inside one CTA instead (dK/dV
     in TMEM, stored once). Long causal sequences lose (4x longer tiles -> tail), so only N <= gloopN (default 4096).
     'nogloop' disables, 'gloop' forces."""
-    ol = [o for o in os.environ.get("DM_BWD_OPTS", "").split(",") if o]
+    ol = [o for o in _env("DM_BWD_OPTS", "").split(",") if o]
     from . import dm_common
     if dm_common.b6_m() > 0 and not any(o.startswith("b6=") for o in ol):
         ol = ol + [f"b6={dm_common.b6_m()}"]   # same DM_B6 as pass 0 (bitwise-identical P)
@@ -114,7 +118,7 @@ _NSM_MEMO = {}
 
 
 def _num_sms(q8):
-    n = int(os.environ.get("DM_NSM", "0"))
+    n = int(_env("DM_NSM", "0"))
     if n:
         return n
     try:
@@ -136,12 +140,18 @@ def dm_bwd_prestage(q8, k8, lse, causal: bool, deterministic=True):
     pass's scratch and compute lse_log2 on a side stream; dm_bwd_main then waits on it. Bitwise identical."""
     key = _key(q8, k8, causal, deterministic)
     rec = _REC.get(key)
-    if rec is None or os.environ.get("DM_E2E", "1") == "0":
+    if rec is None or _env("DM_E2E", "1") == "0":
         return False
-    main = torch.cuda.current_stream()
-    side = _SIDE.get(q8.device.index)
+    dev = q8.device.index
+    if fastpath.ENABLED:
+        f = _PFAST.get((key, torch._C._cuda_getCurrentRawStream(dev)))
+        if f is not None:
+            f(lse)
+            return True
+    main = torch.cuda.current_stream(dev)
+    side = _SIDE.get(dev)
     if side is None:
-        side = _SIDE[q8.device.index] = torch.cuda.Stream(device=q8.device)
+        side = _SIDE[dev] = torch.cuda.Stream(device=q8.device)
     side.wait_stream(main)          # lse ready; memory freed on main is reusable
     N = lse.shape[-1]
     with torch.cuda.stream(side):
@@ -157,8 +167,41 @@ def dm_bwd_prestage(q8, k8, lse, causal: bool, deterministic=True):
         ev.record(side)
     for t in pool:
         t.record_stream(main)
-    _CTX["staged"] = (key, pool, ev)
+    _CTX["staged"] = (key, pool, ev, main)
+    if fastpath.ENABLED:
+        _PFAST[(key, main.cuda_stream)] = _reuse_fn(key, rec, pool, main, side, N, deterministic)
     return True
+
+
+def _reuse_fn(key, rec, pool, main, side, N, deterministic):
+    """Host fast path: persistent scratch per (shape, stream) re-initialised on the side stream with the same ops as a
+    fresh prestage (fresh zeros -> zero_()), events reused (each wait is enqueued before the next record)."""
+    zs = [t for (kind, _, _), t in zip(rec, pool) if kind == "z"]
+    dq_accum, dpsum, lse_log2 = pool[0], pool[1], pool[2]
+    if not _fws(deterministic):
+        zs.append(dq_accum)
+    zs.append(dpsum[..., N:])
+    lse_dst, lse_pad = lse_log2[..., :N], lse_log2[..., N:]
+    ev_in, ev = torch.cuda.Event(), torch.cuda.Event()
+    setst = torch._C._cuda_setStream
+    sa = dict(stream_id=side.stream_id, device_index=side.device_index, device_type=side.device_type)
+    ma = dict(stream_id=main.stream_id, device_index=main.device_index, device_type=main.device_type)
+    staged = (key, pool, ev, main)
+
+    def f(lse):
+        ev_in.record(main)
+        side.wait_event(ev_in)        # = side.wait_stream(main)
+        setst(**sa)
+        try:
+            for t in zs:
+                t.zero_()
+            torch.mul(lse, LOG2E, out=lse_dst)
+            lse_pad.zero_()
+            ev.record(side)
+        finally:
+            setst(**ma)
+        _CTX["staged"] = staged
+    return f
 
 
 def _dm_bwd_preprocess(out, dout, dpsum, lse, lse_log2, dq_accum, *args, fake_mode=False, **kw):
@@ -220,7 +263,7 @@ def _dm_cfg(config):
     """bwd config overrides: no pack_gqa; DM_BWD_OPTS spt0 / spt1 force the deterministic dQ lock order."""
     import dataclasses
     over = dict(pack_gqa=False)
-    opts = os.environ.get("DM_BWD_OPTS", "").split(",")
+    opts = _env("DM_BWD_OPTS", "").split(",")
     if "spt0" in opts:
         over["spt"] = False
     if "spt1" in opts:
@@ -245,7 +288,7 @@ _ORIG_POST = fi._bwd_postprocess_convert
 _ns.update(_bwd_postprocess_convert=_dm_post_convert, _CTX=_CTX)
 def _dm_gloop():
     """DM_BWD_OPTS gloop (GQA): dK/dV kept in TMEM across the query-head group, stored directly (no dKV postprocess)."""
-    return "gloop" in os.environ.get("DM_BWD_OPTS", "").split(",")
+    return "gloop" in _env("DM_BWD_OPTS", "").split(",")
 
 
 _ns.update(_dm_gloop=_dm_gloop)
@@ -260,7 +303,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
-    if "lwc" in os.environ.get("DM_BWD_OPTS", "").split(","):
+    if "lwc" in _env("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
         aux.append(_CTX["dq"])
@@ -268,7 +311,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     if "pdyn" in _ao.split(","):
         # DM pdyn: claim counter for the dynamic persistent scheduler (last aux tensor), zeroed per launch
         _CTX["pdyn_ctr"] = torch.zeros(1, dtype=torch.int32, device=q8.device)
-    if trace is not None and "rsdbg" in os.environ.get("DM_BWD_OPTS", ""):
+    if trace is not None and "rsdbg" in _env("DM_BWD_OPTS", ""):
         if isinstance(trace, (tuple, list)):   # (rs, pdump (B, H, N, N) fp32) with DM_BWD_OPTS=rsdbg,pdump
             aux.extend(trace)
         else:
@@ -280,10 +323,40 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         aux.append(_CTX.pop("pdyn_ctr"))
     _CTX["delta"] = delta
     _CTX["deterministic"] = deterministic
-    opts0 = os.environ.get("DM_BWD_OPTS", "")
-    os.environ["DM_BWD_OPTS"] = _ao     # kernel knobs + compile cache follow the effective opts
     key = _key(q8, k8, causal, deterministic)
     st = _CTX.pop("staged", None)
+    lse_c = lse.contiguous()
+    if (st is not None and st[0] == key and trace is None and fastpath.ENABLED and "lwc" not in _ao.split(",")
+            and "pdyn" not in _ao.split(",")):
+        pool, ev, mst = st[1], st[2], st[3]
+        N = lse.shape[-1]
+
+        def pre():          # = _dm_bwd_preprocess in prestaged mode
+            mst.wait_event(ev)
+            pool[1][..., :N].copy_(delta)
+
+        inp = dict(q8=q8, k8=k8, v8=v8, do8=do8, lse=lse_c, delta=delta,
+                   **{f"aux{i}": t for i, t in enumerate(aux)}, **{f"pool{i}": t for i, t in enumerate(pool)})
+
+        def slow():
+            _CTX["pool"], _CTX["prestaged"] = list(pool), ev
+            opts0_ = _env("DM_BWD_OPTS", "")
+            os.environ["DM_BWD_OPTS"] = _ao
+            pc = fi._bwd_postprocess_convert.compile_cache
+            fi._bwd_postprocess_convert.compile_cache = fastpath.RecCache(pc)
+            try:
+                r = _dm_flash_attn_bwd(q8, k8, v8, do8, do8, lse_c, softmax_scale=sm, causal=causal,
+                                       deterministic=deterministic, aux_tensors=aux)[:3]
+                assert not _CTX.get("pool"), "prestaged scratch not fully consumed"
+                return tuple(r)
+            finally:
+                fi._bwd_postprocess_convert.compile_cache = pc
+                os.environ["DM_BWD_OPTS"] = opts0_
+                _CTX.pop("pool", None)
+                _CTX.pop("prestaged", None)
+        return fastpath.call("bwd", inp, (key, _ao, float(sm), bool(deterministic)), slow, pre=pre)
+    opts0 = _env("DM_BWD_OPTS", "")
+    os.environ["DM_BWD_OPTS"] = _ao     # kernel knobs + compile cache follow the effective opts
     if st is not None and st[0] == key and trace is None:
         _CTX["pool"], _CTX["prestaged"] = list(st[1]), st[2]
     elif key not in _REC and not isinstance(q8, torch._subclasses.fake_tensor.FakeTensor):

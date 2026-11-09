@@ -21,7 +21,7 @@ import cuda.bindings.driver as cuda
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Float32, Int32, Int64, Boolean, const_expr
+from cutlass import Float32, Float64, Int32, Int64, Boolean, const_expr
 from cutlass.cute.nvgpu import cpasync
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
@@ -270,6 +270,11 @@ class DMPass0Sm100:
         self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
+        # +f64: per-tile fp32 partial sums (short chains), accumulated across tiles in fp64; delta = num / den in fp64,
+        # rounded once to fp32. P and dP are untouched (bitwise the backward's), only the row-sum round-off shrinks.
+        self.dm_f64 = "f64" in _fl0 or any(f.startswith("f64k") for f in _fl0)
+        # +f64k<K>: flush the fp32 partials into the fp64 sums only every K tiles (and on the last tile)
+        self.dm_f64k = next((int(f[4:]) for f in _fl0 if f.startswith("f64k")), 1)
         self.dm_nd = "nd" in _fl0   # no denominator: sum_j P := 1 (P is normalized by the forward LSE)
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
@@ -2187,9 +2192,18 @@ class DMPass0Sm100:
                 nb0 = cutlass.max(n_block_max - 1, 0) * (self.n_block_size // 32)
                 pks = tuple(Float32(aux[1][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
                 pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
+            num64 = Float64(0.0)
+            den64 = Float64(0.0)
             if has_work:
                 for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
                     n_block = n_block_max - 1 - n_tile
+                    if const_expr(self.dm_f64 and self.dm_f64k == 1):
+                        # tile-local fp32 partials (reset every tile)
+                        num = (Float32(0.0), Float32(0.0))
+                        den = (Float32(0.0), Float32(0.0))
+                        den1 = (Float32(0.0), Float32(0.0))
+                        den2 = (Float32(0.0), Float32(0.0))
+                        den3 = (Float32(0.0), Float32(0.0))
                     # per-chunk scales first (gmem/L2 latency overlaps the S wait)
                     cs = [None] * n_chunks
                     as_ = [None] * n_chunks
@@ -2455,6 +2469,20 @@ class DMPass0Sm100:
                         tr_prev = tr_now
                     if const_expr(self.dm_tr):
                         tr_s[5] = tr_s[5] + Int32(1)
+                    if const_expr(self.dm_f64 and self.dm_f64k == 1):
+                        dent = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
+                        num64 = num64 + (Float64(num[0]) + Float64(num[1]))
+                        den64 = den64 + (Float64(dent[0]) + Float64(dent[1]))
+                    elif const_expr(self.dm_f64):
+                        if (n_tile + 1) % self.dm_f64k == 0 or n_tile == n_block_max - n_block_min - 1:
+                            dent = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
+                            num64 = num64 + Float64(num[0] + num[1])
+                            den64 = den64 + Float64(dent[0] + dent[1])
+                            num = (Float32(0.0), Float32(0.0))
+                            den = (Float32(0.0), Float32(0.0))
+                            den1 = (Float32(0.0), Float32(0.0))
+                            den2 = (Float32(0.0), Float32(0.0))
+                            den3 = (Float32(0.0), Float32(0.0))
                     s_full_phase ^= 1
             den = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
             if const_expr(self.dm_tr):
@@ -2469,6 +2497,8 @@ class DMPass0Sm100:
                 num_t = num_t + sScale[stage * 256 + 2 * tidx]
                 den_t = den_t + sScale[stage * 256 + 2 * tidx + 1]
             delta = num_t / den_t if den_t != Float32(0.0) else Float32(0.0)
+            if const_expr(self.dm_f64):
+                delta = Float32(num64 / den64) if den64 != Float64(0.0) else Float32(0.0)
             if const_expr(self.dm_nd):
                 # +nd: sum_j P = 1 to the forward's exp accuracy (P is normalized by the forward LSE) -> delta = sum P dP
                 delta = num_t

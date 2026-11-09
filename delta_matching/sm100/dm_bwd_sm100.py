@@ -628,6 +628,13 @@ class DMBackwardSm100:
         self.dm_sfb_dv_col = self.dm_sfa_dv_col + 16                         # 4 cols (const 1.0)
         self.dm_sfa_dq_col = self.dm_sfb_dv_col + 4                          # 2 cols (const 1.0)
         self.dm_sfb_dq_col = self.dm_sfa_dq_col + 2                          # 2 groups x 2 cols
+        if not self.use_2cta_instrs:
+            # DM nd1 (1-CTA): dQ M=128 x N=hd, K=128 own keys (4 k-steps): SFA 4 cols (row r -> lane r, col + r/32),
+            # SFB 4 cols (N=128 replicated per quadrant); in the S columns after the P codes + dV SFs (free once S(t+1)
+            # has been loaded by every compute warp, which is when they are written).
+            self.dm_sfa_dq_col = self.dm_sfb_dv_col + 8
+            self.dm_sfb_dq_col = self.dm_sfa_dq_col + 4
+            assert self.dm_sfb_dq_col + 4 <= self.tmem_S_offset + self.tmem_cols_S
         self.dm_sfa_dk_col = self.tmem_dS_offset + self.tmem_cols_dS         # 4 groups x 4 cols
         self.dm_sfb_dk_col = self.dm_sfa_dk_col + 16                         # 4 cols (const 1.0)
         assert self.dm_sfb_dq_col + 4 <= self.tmem_S_offset + self.tmem_cols_S - self.tmem_cols_dQ or not self.use_2cta_instrs
@@ -912,6 +919,8 @@ class DMBackwardSm100:
             1,
         )
         self.sdS_layout = cute.slice_(sdS_layout, (None, None, None, 0))
+        if os.environ.get("DM_PRINT_LAYOUT"):
+            print("DM sdS_layout", self.use_2cta_instrs, self.sdS_layout, "sKt", flush=True)
         if self.acc_m64:
             self._check_dS_exchange_layouts()
         sKt_layout = sm100_utils_basic.make_smem_layout_b(
@@ -1476,6 +1485,8 @@ class DMBackwardSm100:
                 ]
                 tmem_holding_buf: Int32
                 tmem_dealloc_mbar: Int64
+                # DM 1-CTA (nd1): [0] dQ(t) scale factors written (arrive per compute warp), [2] kvfree (pers)
+                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 9]
 
                 sQ: cute.struct.Align[
                     cute.struct.MemRange[cute.Uint8, sQ_alloc_bytes],
@@ -1758,6 +1769,10 @@ class DMBackwardSm100:
             dQaccum_empty_mbar_ptr = None
 
         # Barrier initialization
+        if const_expr(not self.use_2cta_instrs):
+            if warp_idx == 4:
+                cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr(), len(self.compute_warp_ids))
+                cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 2, 1)
         if const_expr(self.use_2cta_instrs):
             if const_expr(dQaccum_empty_mbar_ptr is not None):
                 if warp_idx == 2:
@@ -2087,6 +2102,7 @@ class DMBackwardSm100:
 
         AttentionMaskCls = self._generate_attention_mask_cls(window_size_left, window_size_right)
         self.dm_kvfree_mbar = storage.dm_xchg_mbar.data_ptr() + 2
+        self.dm_dqsf_mbar = storage.dm_xchg_mbar.data_ptr()
         self.dm_prog_addr = None
         if const_expr("prog" in self.dm_opts):
             self.dm_prog_addr = aux_data.tensors[4].iterator.toint() + 2048
@@ -2284,7 +2300,7 @@ class DMBackwardSm100:
                 blocksparse_tensors,
                 sDm=sDm,
                 dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts and ("trace" in self.dm_opts or "prog" in self.dm_opts)) else None,
-                dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.use_2cta_instrs) else None,
+                dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr(),
             )
             tmem_alloc_barrier.arrive()
 
@@ -3527,6 +3543,7 @@ class DMBackwardSm100:
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         dm_pt = Int32(0)
+        dm_qph = Int32(0)  # nd1: phase of the dQ scale-factor-ready mbarrier
         while work_tile.is_valid_tile:
             self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(1))
             _, kv_block, head_idx, _, batch_idx, _, m_block_min, m_block_max, process_tile = (
@@ -3909,7 +3926,10 @@ class DMBackwardSm100:
                         accumulate_dK = True
                         handle_Q.release()
 
-                        # (3) dQ = dS @ K
+                        # (3) dQ = dS @ K   (DM: after the compute warps installed dQ(t)'s scale factors)
+                        if const_expr("nd1sf" not in self.dm_abl):
+                            cute.arch.mbarrier_wait(self.dm_dqsf_mbar, phase=dm_qph)
+                        dm_qph = dm_qph ^ 1
                         mma_dsk_fn()
                         pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
                         pipeline_dS.consumer_release(consumer_state_dS)
@@ -3966,6 +3986,8 @@ class DMBackwardSm100:
                     producer_phase_dKV ^= 1
 
                     # 2) dQ = dS @ K
+                    cute.arch.mbarrier_wait(self.dm_dqsf_mbar, phase=dm_qph)
+                    dm_qph = dm_qph ^ 1
                     mma_dsk_fn()
                     pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
                     handle_Q.release()
@@ -4108,6 +4130,18 @@ class DMBackwardSm100:
         cS = cute.make_identity_tensor((self.cluster_tile_n, self.tile_m))
         cS = cute.domain_offset((work_n * self.cluster_tile_n, m_block * self.tile_m), cS)
         return thr_mma_S.partition_C(cS)
+
+    @cute.jit
+    def _dm_write_dq_sf1(self, dm_sdm: Int32):
+        """DM nd1 (1-CTA dQ, M=128 x N=hd, K=128 own keys): SFA const 1.0 (4 cols), SFB = this CTA's 4 key-block bytes
+        (ds_sb + ks byte per 32 keys, smem slots 16..19 of the tile just finished), replicated over N and quadrants."""
+        w = dm_utils.pack_bytes4(
+            dm_utils.ld_shared_b32(dm_sdm + 4 * 16), dm_utils.ld_shared_b32(dm_sdm + 4 * 17),
+            dm_utils.ld_shared_b32(dm_sdm + 4 * 18), dm_utils.ld_shared_b32(dm_sdm + 4 * 19))
+        lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+        one = Int32(0x7F7F7F7F)
+        dm_utils.tmem_st_x4((lane << 16) + self.dm_sfa_dq_col, one, one, one, one)
+        dm_utils.tmem_st_x4((lane << 16) + self.dm_sfb_dq_col, w, w, w, w)
 
     @cute.jit
     def _dm_write_dq_sf(self, t: Int32, dm_sdm: Int32, dm_mbar: Int32, cta_rank: Int32):
@@ -4386,10 +4420,17 @@ class DMBackwardSm100:
                 # query half is one 128-key x 64-query block of 8 KiB (findings 2026-11-08). The bf16 epilogue
                 # layout FA4 reuses here (SW128 row-major) does not match it for 8-bit types.
                 half_elems = (self.tile_m // 2) * self.tile_n
-                sdS_layout = cute.make_layout(
-                    ((8, self.tile_n // 8), (self.tile_m // 2, 2)),
-                    stride=((self.tile_m // 2, 8 * (self.tile_m // 2)), (1, half_elems)),
-                )
+                if const_expr(self.use_2cta_instrs):
+                    sdS_layout = cute.make_layout(
+                        ((8, self.tile_n // 8), (self.tile_m // 2, 2)),
+                        stride=((self.tile_m // 2, 8 * (self.tile_m // 2)), (1, half_elems)),
+                    )
+                else:
+                    # nd1 (1-CTA, M=128 dQ A operand MN-major SW128): offset m + tile_m * key (S<3,4,3> on the pointer)
+                    sdS_layout = cute.make_layout(
+                        ((8, self.tile_n // 8), (self.tile_m // 2, 2)),
+                        stride=((self.tile_m, 8 * self.tile_m), (1, self.tile_m // 2)),
+                    )
             # Need to group into 1 mode to be compatible w thr_copy_r2s
             sdS_layout = cute.make_layout((sdS_layout.shape,), stride=(sdS_layout.stride,))
             sdS_epi = cute.make_tensor(sdS.iterator, sdS_layout)
@@ -4498,7 +4539,7 @@ class DMBackwardSm100:
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
-        assert self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED, "DM bwd: 2-CTA pipelined schedule only"
+        assert self.cta_schedule in (CtaSchedule.TWO_CTA_PIPELINED, CtaSchedule.ONE_CTA), "DM bwd: 2-CTA pipelined or 1-CTA"
         dm_t = Int32(0)  # tiles whose dQ scale word has been sent
         dm_sdm = sDm.iterator.toint()
         dm_mbar = dm_xchg_mbar.toint()
@@ -4933,6 +4974,13 @@ class DMBackwardSm100:
                                           with cute.arch.elect_one():
                                               pipeline_dS.producer_commit(producer_state_dS)
                                           producer_state_dS.advance()
+                                  elif const_expr(self.cta_schedule == CtaSchedule.ONE_CTA):
+                                      if iter_idx > 0:
+                                          self._dm_write_dq_sf1(dm_sdm)
+                                          cute.arch.fence_view_async_tmem_store()
+                                          cute.arch.sync_warp()
+                                          with cute.arch.elect_one():
+                                              cute.arch.mbarrier_arrive(dm_xchg_mbar)
                           if const_expr("noilp" in self.dm_opts):
                               cute.copy(
                                   thr_copy_r2t,
@@ -4965,6 +5013,14 @@ class DMBackwardSm100:
                                   with cute.arch.elect_one():
                                       pipeline_dS.producer_commit(producer_state_dS)
                                   producer_state_dS.advance()
+                          elif const_expr(self.cta_schedule == CtaSchedule.ONE_CTA):
+                              if iter_idx > 0:
+                                  # nd1: dQ(t-1) scale factors into the S columns (S(t) loaded by this warp pair)
+                                  self._dm_write_dq_sf1(dm_sdm)
+                                  cute.arch.fence_view_async_tmem_store()
+                                  cute.arch.sync_warp()
+                                  with cute.arch.elect_one():
+                                      cute.arch.mbarrier_arrive(dm_xchg_mbar)
                       for stage in cutlass.range_constexpr(num_stages):
                           cute.copy(
                               thr_copy_r2t,
@@ -5247,9 +5303,10 @@ class DMBackwardSm100:
                           dm_utils.ld_shared_b32(dm_sdm + 4 * 16), dm_utils.ld_shared_b32(dm_sdm + 4 * 17),
                           dm_utils.ld_shared_b32(dm_sdm + 4 * 18), dm_utils.ld_shared_b32(dm_sdm + 4 * 19))
                       dm_utils.st_shared_b32(dm_sdm + 4 * (24 + dm_slot), dm_word)
-                      dm_utils.st_async_peer_b32(dm_sdm + 4 * (32 + dm_slot), dm_mbar + 8 * dm_slot,
-                                                 peer_cta_rank_in_cluster, dm_word)
-                      dm_utils.mbar_arrive_expect_tx(dm_mbar + 8 * dm_slot, 4)
+                      if const_expr(self.use_2cta_instrs):
+                          dm_utils.st_async_peer_b32(dm_sdm + 4 * (32 + dm_slot), dm_mbar + 8 * dm_slot,
+                                                     peer_cta_rank_in_cluster, dm_word)
+                          dm_utils.mbar_arrive_expect_tx(dm_mbar + 8 * dm_slot, 4)
                   dm_t = dm_t + 1
                   # Normally we'd need syncwarp here since only 1 thread will signal in
                   # consumer_release, but we already have the barrier or sync_warp before this
@@ -5287,6 +5344,13 @@ class DMBackwardSm100:
                           )
 
             # Final signal for dS smem store completion
+            if const_expr(self.cta_schedule == CtaSchedule.ONE_CTA):
+                if process_tile:
+                    self._dm_write_dq_sf1(dm_sdm)
+                    cute.arch.fence_view_async_tmem_store()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        cute.arch.mbarrier_arrive(dm_xchg_mbar)
             if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
                 if process_tile:
                     self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)

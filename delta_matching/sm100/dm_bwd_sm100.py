@@ -3491,6 +3491,30 @@ class DMBackwardSm100:
                 sfb_map=tuple((0, 0) for k in range(self.tile_m // 32)),
                 cta_group=self.cta_group_size,
             )
+        # DM mmaiss timing-only ablations (outputs WRONG): skip issuing MMA groups, keep every commit/arrive.
+        # abl:nodk / abl:nodq / abl:nodv / abl:nos / abl:nodp ; abl:noacc = nodk+nodq+nodv
+        # abl:pace=<P>: each skipped dK / dQ / dV group is replaced by a ~P/4 / P/2 / P/4 clock spin on the issuer
+        # (Codex "paced skip" control: separates issue/control timing from MMA execution/contention).
+        _pace = int(next((x[9:] for x in self.dm_opts if x.startswith("abl:pace=")), "0"))
+
+        def _dm_noop_w(n):
+            def f(*_a, **_k):
+                if const_expr(n > 0):
+                    dm_utils.spin_clk(n)
+                return None
+            return f
+        _abl = set(self.dm_opts)
+        if const_expr("abl:noacc" in _abl or "abl:nodk" in _abl):
+            mma_dsq_fn = _dm_noop_w(_pace // 4)
+        if const_expr("abl:noacc" in _abl or "abl:nodq" in _abl):
+            mma_dsk_fn = _dm_noop_w(_pace // 2)
+        if const_expr("abl:noacc" in _abl or "abl:nodv" in _abl):
+            mma_pdo_fn = _dm_noop_w(_pace // 4)
+        _dm_noop = _dm_noop_w(0)
+        if const_expr("abl:nos" in _abl):
+            mma_qk_fn = _dm_noop
+        if const_expr("abl:nodp" in _abl):
+            mma_dov_fn = _dm_noop
 
         pipeline_Q_consumer = pipeline_Q.make_consumer()
 

@@ -276,6 +276,11 @@ def _prod_b_kernel(K, K8, KS, KVWB, PART, MEAN, N, Hk, skb, skn, skh, ROWS: tl.c
     tl.store(KVWB + (bh * (N // 64) + 2 * (blk // 4)) * 4 + blk % 4, eb.to(tl.uint8))
 
 
+def _tl(jf):
+    from .fastpath import TLaunch
+    return TLaunch(jf)
+
+
 def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: int = 2, tr: int = 32):
     """Two-launch fused producer.  Returns (q8, qs, k8, ks, v8, vs, kvw, mean); kvw (B, Hk, N/64) int32 packed UE8M0
     words ([2t] K bytes of 128-key tile t, [2t+1] V bytes).  The K mean is (sequential sum of ROWS-row fp32 partial
@@ -300,11 +305,11 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: 
     mean = torch.empty(B, Hk, D, device=dev, dtype=torch.float32)
     NT = N // tr
     kvwb = kvw.view(torch.uint8)
-    _prod_a_kernel[(B * H * NT + B * Hk * NT + B * Hk * S,)](
+    _PROD_A((B * H * NT + B * Hk * NT + B * Hk * S,),
         q, k, v, q8, v8, qs, vs, kvwb, part, N, H, Hk, B,
         q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
         v.stride(0), v.stride(1), v.stride(2), float(sm), ROWS=ROWS, TR=tr, D=D, num_warps=warps_a)
-    _prod_b_kernel[(NT, B * Hk)](k, k8, ks, kvwb, part, mean, N, Hk, k.stride(0), k.stride(1), k.stride(2),
+    _PROD_B((NT, B * Hk), k, k8, ks, kvwb, part, mean, N, Hk, k.stride(0), k.stride(1), k.stride(2),
                                  ROWS=ROWS, TR=tr, D=D, num_warps=warps_b)
     return q8, qs, k8, ks, v8, vs, kvw, mean
 
@@ -340,6 +345,9 @@ def _quant_do_delta_kernel(X, O, Y, S, DL, N, H, sxb, sxn, sxh, sob, son, soh,
             tl.store(DL + pid_bh * N + rows, tl.sum((y.to(tl.float32) * scale) * o, axis=1))
 
 
+_PROD_A, _PROD_B, _QDD = _tl(_prod_a_kernel), _tl(_prod_b_kernel), _tl(_quant_do_delta_kernel)
+
+
 def quant_do_delta(do: torch.Tensor, o: torch.Tensor | None, obar: torch.Tensor | None = None):
     """obar (B, N, H, D) fp32 given -> delta = dequant(dO8) . obar (pass-0-free matched delta); else as below."""
     if obar is not None:
@@ -347,7 +355,7 @@ def quant_do_delta(do: torch.Tensor, o: torch.Tensor | None, obar: torch.Tensor 
         y = torch.empty(B, N, H, D, device=do.device, dtype=torch.float8_e4m3fn)
         s = torch.empty(B, H, N // BLK, device=do.device, dtype=torch.float32)
         dl = torch.empty(B, H, N, device=do.device, dtype=torch.float32)
-        _quant_do_delta_kernel[(N // BLK, B * H)](do, obar, y, s, dl, N, H, do.stride(0), do.stride(1), do.stride(2),
+        _QDD((N // BLK, B * H), do, obar, y, s, dl, N, H, do.stride(0), do.stride(1), do.stride(2),
                                                   obar.stride(0), obar.stride(1), obar.stride(2),
                                                   WANT_DELTA=True, DEQ_DELTA=True, D=D, BLK=BLK, num_warps=2)
         return y, s, dl
@@ -362,7 +370,7 @@ def _quant_do_delta_stale(do: torch.Tensor, o: torch.Tensor | None):
     s = torch.empty(B, H, N // BLK, device=do.device, dtype=torch.float32)
     dl = torch.empty(B, H, N, device=do.device, dtype=torch.float32) if o is not None else s
     oo = o if o is not None else do
-    _quant_do_delta_kernel[(N // BLK, B * H)](do, oo, y, s, dl, N, H, do.stride(0), do.stride(1), do.stride(2),
+    _QDD((N // BLK, B * H), do, oo, y, s, dl, N, H, do.stride(0), do.stride(1), do.stride(2),
                                               oo.stride(0), oo.stride(1), oo.stride(2),
                                               WANT_DELTA=o is not None, D=D, BLK=BLK, num_warps=2)
     return y, s, (dl if o is not None else None)

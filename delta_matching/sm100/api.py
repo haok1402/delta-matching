@@ -13,13 +13,14 @@ from .quant import quant_qkv2, quant_do_delta
 from .fwd import dm_fwd
 from .bwd import dm_bwd_main, dm_bwd_prestage
 from .pass0 import dm_delta
+from .fastpath import env as _env
 
 D = 128
 
 
 def _det():
     """DM_BWD_DET=0 or DM_DETERMINISTIC=0: non-deterministic backward (FA4-style unordered dQ / GQA dK,dV accumulation). Default 1."""
-    return os.environ.get("DM_BWD_DET", os.environ.get("DM_DETERMINISTIC", "1")) != "0"
+    return _env("DM_BWD_DET", _env("DM_DETERMINISTIC", "1")) != "0"
 
 
 class _DMAttnSm100(torch.autograd.Function):
@@ -83,11 +84,11 @@ def dm_attn_debug(q, k, v, do, causal=True, mode="matched", identity=None, deter
         delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
     out = {"delta": delta.float().contiguous(), "lse": lse.float().contiguous()}
     if identity is None:
-        identity = os.environ.get("DM_DEBUG_IDENTITY", "0") == "1"
+        identity = _env("DM_DEBUG_IDENTITY", "0") == "1"
     if identity and mode == "matched":
         B, N, H, _ = q8.shape
         rs = torch.zeros(B, H, N, 2, device=q8.device, dtype=torch.float64)
-        old = os.environ.get("DM_BWD_OPTS", "")
+        old = _env("DM_BWD_OPTS", "")
         os.environ["DM_BWD_OPTS"] = ",".join([o for o in old.split(",") if o] + ["rsdbg"])
         try:
             dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm, trace=rs,

@@ -15,12 +15,14 @@ from flash_attn.cute import cache_utils
 
 from .dm_pass0_sm100 import DMPass0Sm100
 from .fwd import _fingerprint
+from . import fastpath
+_env = fastpath.env
 
 _LOCK = threading.Lock()
 FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, use_tma_o=False,
              overlap_sO_sQ=False, kv_stage=4)
 REGS = dict(softmax=208, correction=32, other=64)  # P0: correction warps idle -> registers to softmax
-_c3r = os.environ.get("DM_P0_C3REGS", "168,96,64").split(",")   # +c3: correction WG computes chunk 3
+_c3r = _env("DM_P0_C3REGS", "168,96,64").split(",")   # +c3: correction WG computes chunk 3
 REGS_C3 = dict(softmax=int(_c3r[0]), correction=int(_c3r[1]), other=int(_c3r[2]))
 
 
@@ -60,7 +62,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = os.environ.get("DM_P0_EXP", "p3_16_0+ma+h2+pf+sq+ts")   # P0-v9 (small): +ts double-float TwoSum cross-tile sums replace the per-tile fp64 flush (identity equal to +f64 on 49 cases, pass 0 +2-3%). P0-v8 (p0floor): +pf scale prefetch, +sq per-stage specialized code (both bitwise). P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
+        exp_variant = _env("DM_P0_EXP", "p3_16_0+ma+h2+pf+sq+ts")   # P0-v9 (small): +ts double-float TwoSum cross-tile sums replace the per-tile fp64 flush (identity equal to +f64 on 49 cases, pass 0 +2-3%). P0-v8 (p0floor): +pf scale prefetch, +sq per-stage specialized code (both bitwise). P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
     if dm_common.b6_m() > 0 and "+b6_" not in exp_variant:
         exp_variant = exp_variant + f"+b6_{dm_common.b6_m()}"
     over = dict(FORCE)
@@ -76,6 +78,16 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
         global PDUMP
         aux.append(_aux(PDUMP, 3))
         aux.append(_aux(DPDUMP, 3))
+    if any(f in exp_variant.split("+")[1:] for f in ("tr", "pd")):
+        return _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant)[1]
+    names = ["qs", "ks", "vs", "dos", "do8", "lse"]
+    inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
+    # the O output of pass 0 is an unused scratch buffer: returned to the fast path (as an output) and dropped here
+    return fastpath.call("pass0", inp, (bool(causal), exp_variant, repr(sorted(over.items()))),
+                         lambda: _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant), cmp=[1])[1]
+
+
+def _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant):
     orig = (fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config)
 
     def select(inputs):
@@ -106,11 +118,11 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
     with _LOCK:
         cls, cache = _variant(exp_variant)
         fi.FlashAttentionForwardSm100 = cls
-        fi._flash_attn_fwd.compile_cache = cache
+        fi._flash_attn_fwd.compile_cache = fastpath.RecCache(cache)
         fi.select_fwd_config = select
         try:
-            _, delta, *_ = fi._flash_attn_fwd(q8, k8, v8, softmax_scale=1.0, causal=causal, return_lse=True,
+            o_unused, delta, *_ = fi._flash_attn_fwd(q8, k8, v8, softmax_scale=1.0, causal=causal, return_lse=True,
                                               pack_gqa=False, aux_tensors=aux)
         finally:
             fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config = orig
-    return delta
+    return (o_unused, delta)

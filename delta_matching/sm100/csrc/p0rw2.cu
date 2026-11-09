@@ -26,7 +26,7 @@ constexpr int NWARPS = 20, NTHR = NWARPS * 32;
 constexpr int CR = 104, OR = 64;            // compute / other registers (CTA pool 20 x 96: 16*104 + 4*64 = 1920)
 
 struct __align__(8) Bars {
-  uint64_t qfull, kvfull[KVS], kvempty[KVS], sfull[2], sempty[2], dfull[2], dempty[2];
+  uint64_t qfull, kvfull[KVS], kvempty[KVS], sfull[2], sempty[2], dfull[2], dempty[2], vfull[KVS];
 };
 constexpr int SMEM_Q = 0, SMEM_DO = 32768, SMEM_KV = 65536, KV_STRIDE = 32768;   // K at +0, V at +16384 of a slot
 constexpr int SMEM_BYTES = SMEM_KV + KVS * KV_STRIDE + 1024;                      // + 1024 alignment slack
@@ -328,40 +328,60 @@ __global__ void __launch_bounds__(NTHR, 1) k_p0rw2(const __grid_constant__ CUten
 constexpr int T_NWARPS = P0RW2_TW, T_NTHR = T_NWARPS * 32;
 constexpr int T_OR = T_NWARPS == 16 ? 48 : 64;
 
+// pair-typed TMEM load: 32 columns -> 16 packed f32x2 registers (mov.b64 inside the asm so ptxas keeps aligned pairs)
+#define LDP16(addr, q) asm volatile("{\n.reg .b32 t<32>;\n" \
+  "tcgen05.ld.sync.aligned.32x32b.x32.b32 {t0,t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28,t29,t30,t31}, [%16];\n" \
+  "mov.b64 %0, {t0,t1};\nmov.b64 %1, {t2,t3};\nmov.b64 %2, {t4,t5};\nmov.b64 %3, {t6,t7};\nmov.b64 %4, {t8,t9};\nmov.b64 %5, {t10,t11};\n" \
+  "mov.b64 %6, {t12,t13};\nmov.b64 %7, {t14,t15};\nmov.b64 %8, {t16,t17};\nmov.b64 %9, {t18,t19};\nmov.b64 %10, {t20,t21};\n" \
+  "mov.b64 %11, {t22,t23};\nmov.b64 %12, {t24,t25};\nmov.b64 %13, {t26,t27};\nmov.b64 %14, {t28,t29};\nmov.b64 %15, {t30,t31};\n}" \
+  : "=l"(q[0]),"=l"(q[1]),"=l"(q[2]),"=l"(q[3]),"=l"(q[4]),"=l"(q[5]),"=l"(q[6]),"=l"(q[7]),"=l"(q[8]),"=l"(q[9]),"=l"(q[10]),"=l"(q[11]),"=l"(q[12]),"=l"(q[13]),"=l"(q[14]),"=l"(q[15]) \
+  : "r"(addr))
+// (P0, P1) = (ex2(x0), ex2(x1)) on a packed pair, result packed (ex2.approx.ftz.f32 each half)
+__device__ __forceinline__ unsigned long long ex2p(unsigned long long x) {
+  unsigned long long y;
+  asm("{\n.reg .f32 a, b;\nmov.b64 {a, b}, %1;\nex2.approx.ftz.f32 a, a;\nex2.approx.ftz.f32 b, b;\nmov.b64 %0, {a, b};\n}" : "=l"(y) : "l"(x));
+  return y;
+}
+// causal mask on a packed pair: element e (column col + e) -> -inf if col + e > row
+__device__ __forceinline__ unsigned long long maskp(unsigned long long x, int col, int row) {
+  float a, b; upk(x, a, b);
+  if (col > row) a = -__int_as_float(0x7f800000);
+  if (col + 1 > row) b = -__int_as_float(0x7f800000);
+  return pk(a, b);
+}
+
 template <bool MASK>
-__device__ __forceinline__ void tile_today(Bars& bars, float* r, const float* cj, const float* aj, uint32_t cS, uint32_t cD,
+__device__ __forceinline__ void tile_today(Bars& bars, unsigned long long* r2, const float* cj, const float* aj, uint32_t cS, uint32_t cD,
                                            int s, int it, int lane, int kbase, int row, unsigned long long nl,
                                            unsigned long long* den, unsigned long long& num) {
   TACQ(&bars.sfull[s], it & 1, 1);
 #pragma unroll
   for (int hf = 0; hf < 2; ++hf) {
-    LD32X32(cS + 64 * hf, (&r[64 * hf])); LD32X32(cS + 64 * hf + 32, (&r[64 * hf + 32]));
+    LDP16(cS + 64 * hf, (&r2[32 * hf])); LDP16(cS + 64 * hf + 32, (&r2[32 * hf + 16]));
     wait_ld();
     if (hf == 1) rel(&bars.sempty[s], lane);
-    if (MASK) {
-#pragma unroll
-      for (int i = 64 * hf; i < 64 * hf + 64; ++i) if (kbase + i > row) r[i] = -__int_as_float(0x7f800000);
-    }
 #pragma unroll
     for (int j = 2 * hf; j < 2 * hf + 2; ++j) {
+      const unsigned long long cc = pk(cj[j], cj[j]);
 #pragma unroll
       for (int v = 0; v < 16; ++v) {
-        float x0, x1;
-        upk(ffma2(pk(r[32 * j + 2 * v], r[32 * j + 2 * v + 1]), pk(cj[j], cj[j]), nl), x0, x1);
-        r[32 * j + 2 * v] = ex2(x0); r[32 * j + 2 * v + 1] = ex2(x1);
-        den[v % 4] = fadd2(den[v % 4], pk(r[32 * j + 2 * v], r[32 * j + 2 * v + 1]));
+        unsigned long long x = r2[16 * j + v];
+        if (MASK) x = maskp(x, kbase + 32 * j + 2 * v, row);
+        x = ex2p(ffma2(x, cc, nl));
+        r2[16 * j + v] = x;
+        den[v % 4] = fadd2(den[v % 4], x);
       }
     }
     if (hf == 0) TACQ(&bars.dfull[s], it & 1, 2);
 #pragma unroll
     for (int j = 2 * hf; j < 2 * hf + 2; ++j) {
-      float d[32];
-      LD32X32(cD + 32 * j, d);
+      unsigned long long d2[16];
+      LDP16(cD + 32 * j, d2);
       wait_ld();
       if (j == 3) rel(&bars.dempty[s], lane);
       unsigned long long acc[4] = {0, 0, 0, 0};
 #pragma unroll
-      for (int v = 0; v < 16; ++v) acc[v % 4] = ffma2(pk(r[32 * j + 2 * v], r[32 * j + 2 * v + 1]), pk(d[2 * v], d[2 * v + 1]), acc[v % 4]);
+      for (int v = 0; v < 16; ++v) acc[v % 4] = ffma2(r2[16 * j + v], d2[v], acc[v % 4]);
       num = ffma2(fadd2(fadd2(acc[0], acc[1]), fadd2(acc[2], acc[3])), pk(aj[j], aj[j]), num);
     }
   }
@@ -387,7 +407,11 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
   }
   if (tid == 0) {
     mbar_init(&bars.qfull, 1);
-    for (int i = 0; i < KVS; ++i) { mbar_init(&bars.kvfull[i], 1); mbar_init(&bars.kvempty[i], 1); }
+#ifdef P0RW2_TWOISS
+    for (int i = 0; i < KVS; ++i) { mbar_init(&bars.kvfull[i], 1); mbar_init(&bars.kvempty[i], 2); mbar_init(&bars.vfull[i], 1); }
+#else
+    for (int i = 0; i < KVS; ++i) { mbar_init(&bars.kvfull[i], 1); mbar_init(&bars.kvempty[i], 1); mbar_init(&bars.vfull[i], 1); }
+#endif
     for (int s = 0; s < 2; ++s) { mbar_init(&bars.sfull[s], 1); mbar_init(&bars.sempty[s], 4); mbar_init(&bars.dfull[s], 1); mbar_init(&bars.dempty[s], 4); }
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
@@ -416,7 +440,7 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
     float pks[4], pvs[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) { pks[j] = ksr[4 * (n_max - 1) + j]; pvs[j] = vsr[4 * (n_max - 1) + j]; }
-    float r[128];
+    unsigned long long r[64];
     for (int it = 0; it < n_max; ++it) {
       const int n = n_max - 1 - it;
       float cj[4], aj[4];
@@ -427,6 +451,10 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
       for (int j = 0; j < 4; ++j) { pks[j] = ksr[4 * nn + j]; pvs[j] = vsr[4 * nn + j]; }
       const bool diag = p.causal && (n + 1) * 128 > m_block * 128;
       unsigned long long den[4] = {0, 0, 0, 0}, num = 0;
+#ifdef P0RW2_NOCOMP
+      TACQ(&bars.sfull[s], it & 1, 1); rel(&bars.sempty[s], lane); TACQ(&bars.dfull[s], it & 1, 2); rel(&bars.dempty[s], lane);
+      if (it < 0)
+#endif
       if (diag) tile_today<true>(bars, r, cj, aj, cS, cD, s, it, lane, n * 128, row, nl, den, num);
       else tile_today<false>(bars, r, cj, aj, cS, cD, s, it, lane, n * 128, row, nl, den, num);
       two_sum2(sn, en, num);
@@ -447,11 +475,38 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
       for (int it = 0; it < n_max; ++it) {
         const int n = n_max - 1 - it, slot = it % KVS;
         if (it >= KVS) TWAIT(&bars.kvempty[slot], ((it / KVS) - 1) & 1, 5);
-        mbar_expect_tx(&bars.kvfull[slot], 32768);
+        mbar_expect_tx(&bars.kvfull[slot], 16384);
         tma4(sbase + SMEM_KV + KV_STRIDE * slot, &tmK, 0, n * 128, hk, b, &bars.kvfull[slot]);
-        tma4(sbase + SMEM_KV + KV_STRIDE * slot + 16384, &tmV, 0, n * 128, hk, b, &bars.kvfull[slot]);
+        mbar_expect_tx(&bars.vfull[slot], 16384);
+        tma4(sbase + SMEM_KV + KV_STRIDE * slot + 16384, &tmV, 0, n * 128, hk, b, &bars.vfull[slot]);
       }
     }
+#ifdef P0RW2_TWOISS
+    // two issuers: warp 8 issues S (K slots), warp 10 issues dP (V slots); each commits the slot's empty barrier (count 2)
+    if ((warp == 8 || warp == 10) && lane == 0) {
+      const bool isS = warp == 8;
+      TWAIT(&bars.qfull, 0, 7);
+      tc_after();
+      for (int it = 0; it < n_max; ++it) {
+        const int slot = it % KVS;
+        if (isS) TWAIT(&bars.kvfull[slot], (it / KVS) & 1, 3); else TWAIT(&bars.vfull[slot], (it / KVS) & 1, 3);
+        tc_after();
+        const uint32_t sK = sbase + SMEM_KV + KV_STRIDE * slot, sV = sK + 16384;
+        for (int s = 0; s < 2; ++s) {
+          if (isS) {
+            if (it > 0) TACQ(&bars.sempty[s], (it - 1) & 1, 4);
+            mma_128(tb + 128u * s, sbase + SMEM_Q + 16384 * s, sK);
+            commit(&bars.sfull[s]);
+          } else {
+            if (it > 0) TACQ(&bars.dempty[s], (it - 1) & 1, 4);
+            mma_128(tb + 256u + 128u * s, sbase + SMEM_DO + 16384 * s, sV);
+            commit(&bars.dfull[s]);
+          }
+        }
+        commit(&bars.kvempty[slot]);
+      }
+    }
+#else
     if (warp == 8 && lane == 0) {
       TWAIT(&bars.qfull, 0, 7);
       tc_after();
@@ -465,6 +520,8 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
           mma_128(tb + 128u * s, sbase + SMEM_Q + 16384 * s, sK);
           commit(&bars.sfull[s]);
         }
+        TWAIT(&bars.vfull[slot], (it / KVS) & 1, 3);
+        tc_after();
         for (int s = 0; s < 2; ++s) {
           if (it > 0) TACQ(&bars.dempty[s], (it - 1) & 1, 4);
           mma_128(tb + 256u + 128u * s, sbase + SMEM_DO + 16384 * s, sV);
@@ -473,6 +530,7 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
         commit(&bars.kvempty[slot]);
       }
     }
+#endif
   }
 #if defined(P0RW2_TRACE) || defined(P0RW2_CYC)
   if (tid == 0) atomicAdd(&p.trace[0], clock64() - tcta0);

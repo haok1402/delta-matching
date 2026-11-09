@@ -233,7 +233,7 @@ def gemm_ptx_bs(
     start_b = Int32(b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
     if is_ts:
         tCrA_layout = cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
-        offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)] if offs_a is None else list(offs_a)
+        offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)]
         a_arg = Int32(cute.arch.make_warp_uniform(tA_addr))
         a_hi = None
     else:

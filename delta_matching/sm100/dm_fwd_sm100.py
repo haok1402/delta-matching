@@ -3214,6 +3214,8 @@ class DMForwardSm100:
                         if k > 0:
                             # S_s(k) complete (seen through the slices' kb arrivals) => PV_s(k-1) complete
                             should_rescale = cute.arch.vote_ballot_sync(acc_scale < 1.0) != 0
+                            if const_expr(self.dm_opts.get("slnr", "0") == "1"):
+                                should_rescale = False   # DEBUG ONLY (positive control): planted bug, O never rescaled
                             if should_rescale:
                                 self.correction_rescale(thr_mma_pv, tOtO[None, None, None, s], tidx, acc_scale)
                         cute.arch.fence_view_async_tmem_store()

@@ -2390,10 +2390,10 @@ class DMForwardSm100:
                             if const_expr(self.uneven_kv_smem):
                                 sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
                             # gemm_Si[stage](tCrB=tSrK[None, None, None, Ki_index], sB=sK_cur)
-                            gemm_Si[stage](
-                                smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
-                            )
-                            # gemm_Si[stage](tCrB=tSrK[None, None, None, Ki_index])
+                            if const_expr(self.dm_opts.get("afqk", "0") != "1"):   # afqk=1: TIMING-ONLY, no in-loop QK MMA
+                                gemm_Si[stage](
+                                    smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
+                                )
                             # 3. release S0 / S1
                             pipeline_s_p_o.producer_commit_w_index(stage)
                             # End of GEMM_QK0i (Q0 * Ki -> S0)

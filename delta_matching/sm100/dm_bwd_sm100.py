@@ -5708,7 +5708,7 @@ class DMBackwardSm100:
                                 m_block,
                                 work_n,
                             )
-                            if const_expr("dqearly" not in self.dm_opts):
+                            if const_expr("dqearly" not in self.dm_opts and "dqnone" not in self.dm_abl):
                                 barrier.wait_eq(
                                     mdQ_semaphore_cur[(m_block, None)].iterator,
                                     tidx,
@@ -5753,7 +5753,7 @@ class DMBackwardSm100:
                     )
                     tdQrdQ = cute.make_tensor(tdQrdQ_t2r.iterator, tdQrdQ_shape)
 
-                    for stage in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1])):
+                    for stage in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1]) if const_expr("dqnone" not in self.dm_abl) else 0):
                         smem_idx = dQ_tma_store_producer_state.index
                         tdQsdQ_r2s = tdQsdQ[None, None, smem_idx]
                         tdQrdQ_r2s = cute.make_tensor(tdQrdQ[None, stage].iterator, tdQsdQ_r2s.shape)

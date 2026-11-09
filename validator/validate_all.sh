@@ -13,6 +13,7 @@ run() { local gpu=$1 name=$2; shift 2
 rm -f "$OUT/rc.txt"
 (run ${G[0]} quick $HERE/validate.py "$CAND" --shapes quick --json "$OUT/quick.json"
  run ${G[0]} sanitize $HERE/sanitize.py "$CAND" --log "$OUT/sanitize_memcheck.txt"
+ run ${G[0]} racecheck $HERE/sanitize.py "$CAND" --tool racecheck --log "$OUT/sanitize_racecheck.txt"
  run ${G[0]} full $HERE/validate.py "$CAND" --shapes full --json "$OUT/full.json"
  if [ "$NG" -eq 1 ]; then run ${G[0]} bench $HERE/validate.py "$CAND" --shapes bench --json "$OUT/bench.json"; fi) &
 if [ "$NG" -gt 1 ]; then

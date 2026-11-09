@@ -94,7 +94,7 @@ REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / b
 # user rule (2026-11-09): "i don't find the particular need for any part to force deterministic ... the zero-sum
 # invariant, and the accuracy, however, must be preserved": no output must be bitwise run-to-run deterministic; repeat /
 # view / stress calls must be finite and within this relative distance of the first call (fp32 summation-order noise)
-NONDET_REL = 1e-4
+NONDET_REL = 1e-5             # accuracy-audit 05:30: run-to-run spread must stay at fp32 reassociation level (~1e-6)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 
@@ -142,7 +142,7 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     def rn(*s):
         return torch.randn(*s, generator=gen, device=dev, dtype=torch.float32)
     q, k, v, do = rn(B, N, H, D), rn(B, N, Hk, D), rn(B, N, Hk, D), rn(B, N, H, D)
-    if kind in ("randn", "stress"):
+    if kind in ("randn", "stress", "stress20"):
         pass
     elif kind.startswith("scaled"):                   # larger logit range: q, k * s
         s = float(kind[6:])
@@ -279,6 +279,9 @@ def build_cases(tier, supports, seed):
             shapes += [(1, 8, 2, up(2048), False, adv[:5]), (1, 16, 4, up(8192), False, base_kinds)]
     # stress: repeated calls on large MHA shapes (many CTAs in flight) catch races that a single call misses
     stress_n = 8
+    # accuracy-audit 05:30 (4): >= 20 repeats on small, odd and GQA shapes (races show up as spread, not bitwise diffs)
+    shapes += [(1, 2, 2, up(128), True, ["stress20"]), (1, 4, 1, up(256), True, ["stress20"]),
+               (1, 4, 1, up(384), True, ["stress20"]), (1, 8, 2, up(1152), True, ["stress20"])]
     shapes += [(1, 16, 16, up(4096), True, ["stress"]),
                # odd numbers of 128-row blocks, with the allocator state cycled between calls (out-of-bounds reads)
                (1, 4, 4, up(1152), True, ["stress"]), (1, 4, 1, up(384), True, ["stress"]), (1, 8, 2, up(1408), True, ["stress"])]
@@ -303,12 +306,16 @@ def build_cases(tier, supports, seed):
                 modes = modes[:1]
             runs = [(md, "plain") for md in modes]
             big = B * H * N * N > 2 ** 33
+            if not big and kind not in ("stress", "stress20"):
+                runs += [(modes[0], "repeat")]          # run-to-run spread per case (binding envelope, race detection)
             if kind == "randn" and not big:
-                runs += [(modes[0], "repeat"), (modes[0], "views")]
+                runs += [(modes[0], "views")]
             if kind == "randn" and i == 1:
                 runs += [(modes[0], "mutate")]
             if kind == "stress":
                 runs = [(md, f"stress:{stress_n}") for md in modes]
+            if kind == "stress20":
+                runs = [(md, "stress:20") for md in modes]
             # full / bench: a fixed seed per case name, so the reference outputs can be cached and reused across candidates;
             # quick: fresh random inputs on every run (no candidate can be tuned to fixed inputs without failing quick)
             cseed = (zlib.crc32(name.encode()) & 0x7FFFFFFF) if (tier in CACHED_TIERS and CACHE) else seed * 1000003 + len(cases)
@@ -337,7 +344,7 @@ def check_case(case, cr, preset, dev, verbose):
         chk("runs", False, cr["error"][-1500:])
         rec["fails"] = fails
         return False, rec
-    if case["kind"] == "stress":
+    if case["kind"] in ("stress", "stress20"):
         for key, st in cr.get("stress", {}).items():
             rec["metrics"][f"{key}"] = st
             chk(f"{key}:finite_every_call", st["nonfinite_calls"] == 0,
@@ -461,11 +468,16 @@ def check_case(case, cr, preset, dev, verbose):
                 if kernel_side:
                     # accuracy-audit ruling 03:45 (1): the identity comes from a debug build -> its grads must be BITWISE
                     # the production grads, or the clean identity could come from a build that does not ship
+                    spread = 0.0             # this case's run-to-run spread of production (repeat run), per accuracy-audit (2)
+                    if "matched/repeat" in runs:
+                        spread = max(rel(x, y) for x, y in zip(runs["matched/repeat"][1:4], cand[1:4]))
+                    bind_env = min(NONDET_REL, max(2 * spread, 1e-7))
+                    m["prod_spread"] = spread
                     ok_bind = all(kk in dbg for kk in ("dbg_dq", "dbg_dk", "dbg_dv")) and all(
-                        rel(dbg[kk].reshape(t.shape).to(t.dtype), t) <= NONDET_REL
+                        rel(dbg[kk].reshape(t.shape).to(t.dtype), t) <= bind_env
                         for kk, t in (("dbg_dq", cand[1]), ("dbg_dk", cand[2]), ("dbg_dv", cand[3])))
                     chk("matched:identity_build_matches", ok_bind,
-                        f"debug(identity) build's dQ/dK/dV missing or not within {NONDET_REL:.0e} of the production grads")
+                        f"debug(identity) build's dQ/dK/dV missing or outside 2 x production's run-to-run spread ({bind_env:.1e})")
                     rep = {kk: vv.to(dev) for kk, vv in (cr.get("debug_repeat") or {}).items()}
                     if "rowsum_dS" in rep:        # the identity must hold on every run, not just one
                         kr2 = (rep["rowsum_dS"].double().abs() / rep["sum_abs_PdP"].double().clamp_min(1e-300))[

@@ -55,7 +55,7 @@ def main():
                 d = C.debug(q, k, v, do, True, "matched")
                 # no bitwise determinism required (user rule): the debug build's grads must be within 1e-4 rel of production
                 bind = all(((d[kk].reshape(t.shape).double() - t.double()).norm()
-                            / t.double().norm().clamp_min(1e-300)).item() <= 1e-4
+                            / t.double().norm().clamp_min(1e-300)).item() <= 1e-5
                            for kk, t in (("dbg_dq", leaves[0].grad), ("dbg_dk", leaves[1].grad), ("dbg_dv", leaves[2].grad)))
                 r = (d["rowsum_dS"].double().abs() / d["sum_abs_PdP"].double().clamp_min(1e-300))[d["sum_abs_PdP"] > 0]
                 mx, mn = r.max().item(), r.mean().item()

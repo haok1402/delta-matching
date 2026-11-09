@@ -405,9 +405,11 @@ class DMForwardSm100:
         # det2 defaults (bitwise, fwdrw R6): ss_pv=1 (P codes in SMEM, SS PV), kvs=6 (smem budget), lean=1; an explicit
         # DM_FWD_OPTS value overrides (e.g. "ss_pv=0,lean=0,kvs=99" = the previous forward)
         # (only where ss_pv is supported: q_stage == 2, 1-CTA, no S ping-pong; short N picks q_stage = 1 -> old path)
-        # REVERTED 2026-11-09 (dm-validator: ss_pv/kvs6/lean default races, ~1% of repeated det calls corrupt one O tile):
-        # defaults OFF again = the 43db3c7 forward; the knobs stay opt-in via DM_FWD_OPTS for debugging.
-        if False and self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1:
+        # Re-enabled 2026-11-09 after the kda-sm100-sspvfix fix (b5bcce3: sScale read/write handshake mbar_dm_cread +
+        # tcgen05 thread-sync fences); the 07:10 revert was for the sScale WAR race. Ordering argument: kda/docs/fwdrw-design.md.
+        # (an explicit pipe=1 debug variant keeps the old path: pipe=1 bypasses the SS-PV P/SF protocol)
+        if (self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1
+                and self.dm_opts.get("pipe", "0") != "1"):
             for _k, _v in (("ss_pv", "1"), ("kvs", "6"), ("lean", "1")):
                 self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
@@ -2892,6 +2894,8 @@ class DMForwardSm100:
         else:
             s_p_o_index = stage
             pipeline_s_p_o.consumer_wait_w_index_phase(stage, s_p_o_consumer_count)
+            if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                dm_utils.tc_fence_after()   # QK_s commit (S full) -> this WG's S tcgen05.ld (Codex 6.1)
         tSrS_t2r = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS).shape, self.qk_acc_dtype)
         hw_row_max = Float32(-Float32.inf)
         if const_expr(self.use_ldred_rowmax):
@@ -3317,12 +3321,22 @@ class DMForwardSm100:
                         # Don't need O_full anymore, since by the time softmax has signaled the correction
                         # warps, S_i must have been done, so O_i-1 must have been done as well.
                         # pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
+                        if const_expr(self.dm_sspv and self.dm_opts.get("cwu", "1") == "1"):
+                            # ss_pv: wait for PV_s(k-1) UNCONDITIONALLY (also when this warp skips the rescale). It
+                            # orders the rescale after PV_s(k-1) and gates this warp's "O rescaled" arrival on
+                            # s_p_o.empty[s] until phase k-1 completed (PV_s(k-1) issued => phase k-1 done). Without
+                            # it a non-rescaling correction warp can arrive twice in one phase and complete it before
+                            # a slow softmax warp released its P/SF rows (Codex review 3, fwdrw-design 6.4).
+                            dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, dm_ck & 1)
+                            if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                                dm_utils.tc_fence_after()   # O rescale (tcgen05.ld/st) after PV_s(k-1) completes
                         if should_rescale:
-                            if const_expr(self.dm_sspv and self.dm_opts.get("nocw", "0") != "1"):
-                                # the next QK no longer orders after the previous PV: wait for PV_s(k-1) explicitly
+                            if const_expr(self.dm_sspv and self.dm_opts.get("cwu", "1") != "1"
+                                          and self.dm_opts.get("nocw", "0") != "1"):
+                                # (debug cwu=0: the former conditional wait)
                                 dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, dm_ck & 1)
                                 if const_expr(self.dm_opts.get("tcf", "1") == "1"):
-                                    dm_utils.tc_fence_after()   # O rescale (tcgen05.ld/st) after PV_s(k-1) completes
+                                    dm_utils.tc_fence_after()
                             if const_expr(self.use_s_ping_pong):
                                 # Ping-pong issues QK(i+1) before PV(i), so S_i+1 does not imply O_i is done
                                 pipeline_o_acc.consumer_wait_w_index_phase(
@@ -3402,6 +3416,8 @@ class DMForwardSm100:
                         )
                     else:
                         pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
+                        if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                            dm_utils.tc_fence_after()   # last PV_s commit -> epilogue O tcgen05.ld (Codex 6.4a)
                     if const_expr(not self.use_correction_warps_for_epi):
                         pipeline_o_epi.producer_acquire_w_index_phase(stage, corr_epi_producer_phase)
                     gO_stage = gO[None, None, stage] if const_expr(gO is not None) else None
@@ -3426,6 +3442,11 @@ class DMForwardSm100:
                         pipeline_s_p_o.consumer_release_w_index((o_acc_consumer_count + 1) & 1)
                         o_acc_consumer_count += 1
                     else:
+                        if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                            # epilogue O tcgen05.ld complete + ordered before the release that lets the next
+                            # work tile's PV_s (zero-init) overwrite O_s (Codex 6.4b)
+                            cute.arch.fence_view_async_tmem_load()
+                            dm_utils.tc_fence_before()
                         pipeline_s_p_o.consumer_release_w_index(stage)
                     if const_expr(not self.use_correction_warps_for_epi):
                         pipeline_o_epi.producer_commit_w_index(stage)

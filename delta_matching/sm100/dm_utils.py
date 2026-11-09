@@ -650,7 +650,8 @@ def mbar_arrive(mbar: Int32, *, loc=None, ip=None):
 
 @dsl_user_op
 def tc_commit(mbar: Int32, *, loc=None, ip=None):
-    """tcgen05.commit (cta_group::1): mbarrier arrives once all prior tcgen05 ops of this thread have completed."""
+    """tcgen05.commit (cta_group::1): mbarrier arrives once all prior async tcgen05 ops of this thread (mma / cp / shift)
+    have completed; tcgen05.ld / st are NOT tracked (they use tcgen05.wait::ld / ::st)."""
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
                     "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [$0];", "r",
                     has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)

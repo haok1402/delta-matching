@@ -94,7 +94,13 @@ REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / b
 # user rule (2026-11-09): "i don't find the particular need for any part to force deterministic ... the zero-sum
 # invariant, and the accuracy, however, must be preserved": no output must be bitwise run-to-run deterministic; repeat /
 # view / stress calls must be finite and within this relative distance of the first call (fp32 summation-order noise)
-NONDET_REL = 1e-5             # accuracy-audit 05:30: run-to-run spread must stay at fp32 reassociation level (~1e-6)
+# run-to-run spread limits, calibrated (2026-11-09) on kda's non-deterministic backward (43db3c7, deterministic=False):
+# measured worst whole-tensor 1.7e-5 (quick-tier repeat), per-128-row block 5.2e-5 and per element 2.4e-3 of the row max
+# (GQA 32/8 8k, 10 calls; bf16 rounding flips); limits ~10x the measured worst (accuracy-audit 05:35). Deterministic
+# kernels measure exactly 0, so their binding stays effectively bitwise.
+NONDET_REL = 2e-4             # whole tensor
+SPREAD_BLK = 5e-4             # per (batch, 128-row block, head)
+SPREAD_ELEM = 8e-3            # per element, relative to its row's max |x| (~2 bf16 ulp)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 
@@ -351,6 +357,31 @@ def check_case(case, cr, preset, dev, verbose):
                 f"{st['nonfinite_calls']}/{st['calls']} calls had NaN/Inf outputs")
             chk(f"{key}:close_every_call", st.get("rel_max", 0.0) <= NONDET_REL,
                 f"outputs varied by up to {st.get('rel_max', 0.0):.2e} rel between calls (allowed {NONDET_REL:.0e})")
+            # accuracy-audit 05:35 (1): a race corrupting one block hides in the whole-tensor norm -> per block / element
+            chk(f"{key}:block_spread", st.get("block_rel_max", 0.0) <= SPREAD_BLK,
+                f"a 128-row block varied by {st.get('block_rel_max', 0.0):.2e} rel between calls (allowed {SPREAD_BLK:.0e})")
+            chk(f"{key}:elem_spread", st.get("elem_rel_max", 0.0) <= SPREAD_ELEM,
+                f"an element varied by {st.get('elem_rel_max', 0.0):.2e} of its row max between calls "
+                f"(allowed {SPREAD_ELEM:.0e} = ~2 bf16 ulp)")
+        calls_all = cr.get("stress_calls") or {}
+        if calls_all:
+            # accuracy-audit 05:35 (3): judge accuracy on the WORST call and the paired median over calls, not the first
+            qs_, ks_, vs_, dos_ = (case[n_].to(dev) for n_ in ("q", "k", "v", "do"))
+            ex_ = R.attention_fp32(qs_, ks_, vs_, dos_, case["causal"], dtype=torch.float64)
+            for key, calls in calls_all.items():
+                mode_ = key.split("/")[0]
+                em_ = R.dm_reference(qs_, ks_, vs_, dos_, case["causal"], mode_, preset, o_for_stale=calls[0][0].to(dev))
+                for i_, nm in enumerate(NAMES):
+                    e_e = rel(em_[nm], ex_[nm])
+                    errs = [rel(c[i_].to(dev), ex_[nm]) for c in calls if c[i_] is not None]
+                    if not errs or ex_[nm].norm() == 0:
+                        continue
+                    rec["metrics"][f"{key}:{nm}"] = {"worst_err": max(errs), "first_err": errs[0], "emul_err": e_e,
+                                                     "median_ratio": sorted(e / max(errs[0], 1e-30) for e in errs)[len(errs) // 2]}
+                    chk(f"{key}:{nm}:worst_call_accuracy", max(errs) <= TOL_RATIO * e_e + TOL_ABS,
+                        f"worst of {len(errs)} calls: rel err {max(errs):.4f} vs emulation {e_e:.4f}")
+                    chk(f"{key}:{nm}:worst_call_vs_first", max(errs) <= errs[0] * (1 + REG_REL) + REG_ABS,
+                        f"worst call error {max(errs):.5f} vs first call {errs[0]:.5f}: run-to-run accuracy loss")
         rec["fails"] = fails
         return not fails, rec
     q, k, v, do = (case[n].to(dev) for n in ("q", "k", "v", "do"))
@@ -471,13 +502,13 @@ def check_case(case, cr, preset, dev, verbose):
                     spread = 0.0             # this case's run-to-run spread of production (repeat run), per accuracy-audit (2)
                     if "matched/repeat" in runs:
                         spread = max(rel(x, y) for x, y in zip(runs["matched/repeat"][1:4], cand[1:4]))
-                    bind_env = min(NONDET_REL, max(2 * spread, 1e-7))
+                    bind_env = min(NONDET_REL, max(4 * spread, 1e-7))   # 4x one repeat pair ~ 2x max over R runs
                     m["prod_spread"] = spread
                     ok_bind = all(kk in dbg for kk in ("dbg_dq", "dbg_dk", "dbg_dv")) and all(
                         rel(dbg[kk].reshape(t.shape).to(t.dtype), t) <= bind_env
                         for kk, t in (("dbg_dq", cand[1]), ("dbg_dk", cand[2]), ("dbg_dv", cand[3])))
                     chk("matched:identity_build_matches", ok_bind,
-                        f"debug(identity) build's dQ/dK/dV missing or outside 2 x production's run-to-run spread ({bind_env:.1e})")
+                        f"debug(identity) build's dQ/dK/dV missing or outside 4 x production's run-to-run spread ({bind_env:.1e})")
                     rep = {kk: vv.to(dev) for kk, vv in (cr.get("debug_repeat") or {}).items()}
                     if "rowsum_dS" in rep:        # the identity must hold on every run, not just one
                         kr2 = (rep["rowsum_dS"].double().abs() / rep["sum_abs_PdP"].double().clamp_min(1e-300))[

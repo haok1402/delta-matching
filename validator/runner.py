@@ -206,27 +206,44 @@ def run_case(mod, fn, case, dev):
                 if kind == "views":
                     out = fwd_bwd_views(fn, q, k, v, do, case["causal"], mode)
                 elif kind.startswith("stress"):
-                    # repeated calls on the same inputs: every call finite and bitwise equal to the first (races)
+                    # repeated calls on the same inputs (races): no bitwise requirement (user rule); record per call the
+                    # whole-tensor, per-128-row-block and per-element deviation from the first call, and keep every
+                    # call's outputs for small cases so the parent can judge accuracy on the WORST call
                     n = int(kind.split(":")[1])
                     POISON_MODE[0] = "none"
                     out = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
-                    nonfin = mism = 0
-                    dq_max = 0.0
+                    keep = q.shape[0] * q.shape[2] * q.shape[1] ** 2 <= 2 ** 28
+                    calls = [[None if t is None else t.cpu() for t in out]] if keep else None
+                    nonfin, gmax, bmax, emax = 0, 0.0, 0.0, 0.0
                     for it in range(n - 1):
                         POISON_MODE[0] = ("ff", "zero", "rand", "none")[it % 4]
                         o2 = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
                         nonfin += any(t is not None and not torch.isfinite(t).all() for t in o2)
-                        # user rule (2026-11-09): no output must be bitwise deterministic; every output must stay
-                        # within summation-order noise of the first call (and finite) - record the largest deviation
                         for t, t0 in zip(o2, out):
-                            if t is not None and t0 is not None:
-                                dq_max = max(dq_max, ((t.double() - t0.double()).norm()
-                                                      / t0.double().norm().clamp_min(1e-300)).item())
+                            if t is None or t0 is None:
+                                continue
+                            a_, b_ = t.double(), t0.double()
+                            gmax = max(gmax, ((a_ - b_).norm() / b_.norm().clamp_min(1e-300)).item())
+                            B_, N_, H_, D_ = b_.shape
+                            nb = (N_ + 127) // 128
+                            pad = nb * 128 - N_
+                            if pad:
+                                a_ = torch.nn.functional.pad(a_, (0, 0, 0, 0, 0, pad))
+                                b_ = torch.nn.functional.pad(b_, (0, 0, 0, 0, 0, pad))
+                            da = (a_ - b_).reshape(B_, nb, 128, H_, D_).pow(2).sum((2, 4)).sqrt()
+                            db = b_.reshape(B_, nb, 128, H_, D_).pow(2).sum((2, 4)).sqrt()
+                            bmax = max(bmax, (da / db.clamp_min(1e-30))[db > 0].max().item() if (db > 0).any() else 0.0)
+                            rowmax = b_.abs().amax(-1, keepdim=True).clamp_min(1e-30)
+                            emax = max(emax, ((a_ - b_).abs() / rowmax).max().item())
+                        if keep:
+                            calls.append([None if t is None else t.cpu() for t in o2])
                         del o2
                     POISON_MODE[0] = "none"
                     nonfin += any(t is not None and not torch.isfinite(t).all() for t in out)
-                    r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin,
-                                                                 "mismatch_calls": 0, "rel_max": dq_max}
+                    r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin, "mismatch_calls": 0,
+                                                                 "rel_max": gmax, "block_rel_max": bmax, "elem_rel_max": emax}
+                    if keep:
+                        r.setdefault("stress_calls", {})["%s/%s" % run] = calls
                 elif kind == "mutate":
                     # caching probe: run on buffers, overwrite them in place with the case's second input set, run again
                     bufs = [x.clone() for x in (q, k, v)]

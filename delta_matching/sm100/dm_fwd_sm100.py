@@ -3065,6 +3065,10 @@ class DMForwardSm100:
         stream: cutlass.Constexpr = 0,
     ):
         """One n_block for both Q stages (stage 0 then stage 1) of this slice warp's key block q."""
+        if const_expr(self.dm_opts.get("scar", "0") == "1" and not swap):
+            rPc = cute.make_rmem_tensor(rP.shape, Float32)
+            rPc8 = cute.make_tensor(cute.recast_ptr(rPc.iterator, dtype=self.q_dtype), rS.layout)
+        dm_carry = [None, None]
         if const_expr(self.dm_opts.get("pf", "1") == "1"):
             dm_kw = st[2]
             # next n_block's K scale word (loaded now, consumed next step; clamped index on the last step)
@@ -3139,34 +3143,59 @@ class DMForwardSm100:
                 for i in cutlass.range_constexpr(0, 32, 2):
                     rS[i] = cute.math.exp2(rS[i], fastmath=True)
                     rS[i + 1] = cute.math.exp2(rS[i + 1], fastmath=True)
-            rP8.store(rS.load().to(self.q_dtype))
-            if const_expr(self.dm_opts.get("afs", "0") != "1"):   # afs=1: TIMING-ONLY ablation, no P tcgen05.st
-                cute.copy(thr_st, rP, cute.make_tensor(tSt_st.iterator + col, tSt_st.layout))
-            cute.arch.fence_view_async_tmem_store()
-            dm_utils.tc_fence_before()     # P tcgen05.st ordered before the P-full arrival (PV reads it)
-            if const_expr(self.dm_opts.get("warr", "0") == "1"):
+            dm_scar = const_expr(self.dm_opts.get("scar", "0") == "1" and not swap)
+            if const_expr(dm_scar and s == 0):
+                # scar=1: carry stage 0's P store / release / row-sum publication into stage 1 (after stage 1's exps);
+                # same values, only the program order of independent work changes -> bitwise
+                rPc8.store(rS.load().to(self.q_dtype))
+                psc = (rS[0], rS[1])
+                for i in cutlass.range_constexpr(2, 32, 2):
+                    psc = cute.arch.add_packed_f32x2(psc, (rS[i], rS[i + 1]))
+                dm_carry[0] = psc[0] + psc[1]
+                dm_carry[1] = col
+            else:
+                if const_expr(dm_scar and s == 1):
+                    cute.copy(thr_st, rPc, cute.make_tensor(tSt_st.iterator + dm_carry[1], tSt_st.layout))
+                    cute.arch.fence_view_async_tmem_store()
+                    dm_utils.tc_fence_before()
+                    pipeline_s_p_o.consumer_release_w_index(0)
+                    bsum = dm_carry[0]
+                    if nstep > 0:
+                        dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * 0, (nstep - 1) & 1)
+                    dm_utils.st_shared_b32(self.dm_slbuf + 4 * (1024 + (0 * 4 + q) * self.m_block_size + tidx),
+                                           dm_utils.bitcast_f32_i32(bsum))
+                    dm_utils.tcf_relay()
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        dm_utils.mbar_arrive(self.dm_slbar + 16 + 8 * 0)
+                rP8.store(rS.load().to(self.q_dtype))
+                if const_expr(self.dm_opts.get("afs", "0") != "1"):   # afs=1: TIMING-ONLY ablation, no P tcgen05.st
+                    cute.copy(thr_st, rP, cute.make_tensor(tSt_st.iterator + col, tSt_st.layout))
+                cute.arch.fence_view_async_tmem_store()
+                dm_utils.tc_fence_before()     # P tcgen05.st ordered before the P-full arrival (PV reads it)
+                if const_expr(self.dm_opts.get("warr", "0") == "1"):
+                    dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
+                    cute.arch.sync_warp()
+                    with cute.arch.elect_one():
+                        pipeline_s_p_o.consumer_release_w_index(s)
+                else:
+                    pipeline_s_p_o.consumer_release_w_index(s)
+                if const_expr(stream > 0 and self.dm_opts.get("afx", "0") != "1"):
+                    ps = dm_ps_streamed
+                else:
+                    ps = (rS[0], rS[1])
+                    for i in cutlass.range_constexpr(2, 32, 2):
+                        ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
+                bsum = ps[0] + ps[1]
+                if nstep > 0:
+                    if const_expr(self.dm_opts.get("slnobe", "0") != "1"):   # slnobe=1: DEBUG planted WAR bug (no bsempty wait)
+                        dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * s, (nstep - 1) & 1)
+                dm_utils.st_shared_b32(self.dm_slbuf + 4 * (1024 + (s * 4 + q) * self.m_block_size + tidx),
+                                       dm_utils.bitcast_f32_i32(bsum))
                 dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
                 cute.arch.sync_warp()
                 with cute.arch.elect_one():
-                    pipeline_s_p_o.consumer_release_w_index(s)
-            else:
-                pipeline_s_p_o.consumer_release_w_index(s)
-            if const_expr(stream > 0 and self.dm_opts.get("afx", "0") != "1"):
-                ps = dm_ps_streamed
-            else:
-                ps = (rS[0], rS[1])
-                for i in cutlass.range_constexpr(2, 32, 2):
-                    ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
-            bsum = ps[0] + ps[1]
-            if nstep > 0:
-                if const_expr(self.dm_opts.get("slnobe", "0") != "1"):   # slnobe=1: DEBUG planted WAR bug (no bsempty wait)
-                    dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * s, (nstep - 1) & 1)
-            dm_utils.st_shared_b32(self.dm_slbuf + 4 * (1024 + (s * 4 + q) * self.m_block_size + tidx),
-                                   dm_utils.bitcast_f32_i32(bsum))
-            dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
-            cute.arch.sync_warp()
-            with cute.arch.elect_one():
-                dm_utils.mbar_arrive(self.dm_slbar + 16 + 8 * s)
+                    dm_utils.mbar_arrive(self.dm_slbar + 16 + 8 * s)
         st[0] = ph ^ 1
         st[1] = nstep + 1
 

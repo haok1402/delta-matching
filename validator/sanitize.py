@@ -15,6 +15,28 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RACE_BASE = os.path.expanduser("~/workspace/haok1402/sm100/validate/racecheck_baseline.json")
+RACE_SITES = os.path.expanduser("~/workspace/haok1402/sm100/validate/racecheck_sites.json")
+_KER = r"kernel_cutlass_kernel_([A-Za-z0-9_]+?)_object_at\S*\+(0x[0-9a-f]+)"
+
+
+def race_sites(out):
+    """Hazard sites {kernel|Access@pc|Access@pc}: one per (first access, conflicting access) pair of every race record."""
+    s, cur = set(), None
+    for ln in out.splitlines():
+        m = re.search(r"Race reported between (\w+) access at " + _KER, ln)
+        if m:
+            cur = (m.group(2), m.group(1), m.group(3))
+            continue
+        m = re.search(r"and (\w+) access at " + _KER, ln)
+        if m and cur:
+            s.add(f"{cur[0]}|{cur[1]}@{cur[2]}|{m.group(1)}@{m.group(3)}")
+    return s
+
+
+def cand_mode(path):
+    """'nd' if the candidate declares DETERMINISTIC = False (a different backward binary, its own site set), else 'det'."""
+    src = open(path.partition(":")[0]).read()
+    return "nd" if re.search(r"^DETERMINISTIC\s*=\s*False", src, re.M) else "det"
 CS = os.environ.get("DMVAL_SANITIZER",
                     os.path.expanduser("~/workspace/haok1402/sm100/env/cuda-13.0/bin/compute-sanitizer"))
 
@@ -25,13 +47,16 @@ def main():
     ap.add_argument("--tool", default="memcheck")
     ap.add_argument("--log", default=None)
     ap.add_argument("--timeout", type=float, default=600.0, help="seconds; a hang under the sanitizer is a FAIL")
+    ap.add_argument("--accept-sites", default=None, metavar="NOTE",
+                    help="racecheck: add the measured sites to the baseline site set of this mode with a written "
+                         "explanation (which mbarrier / TMA / tcgen05 sync orders them); only after review")
     a = ap.parse_args()
     tgt, sep, fn = a.candidate.partition(":")
     cand = os.path.abspath(tgt) + sep + fn
     env = dict(os.environ, PYTORCH_NO_CUDA_MEMORY_CACHING="1")
     # API-error reports are off: the CuTe DSL runtime probes optional driver entry points (cuGetProcAddress ->
     # CUDA_ERROR_INVALID_VALUE) during arch detection; those are not memory errors.  Memory errors are counted below.
-    cmd = [CS, "--tool", a.tool, "--report-api-errors", "no", "--print-limit", "50", "--error-exitcode", "9", sys.executable,
+    cmd = [CS, "--tool", a.tool, "--report-api-errors", "no", "--print-limit", "0" if a.tool == "racecheck" else "50", "--error-exitcode", "9", sys.executable,
            os.path.join(HERE, "sanitize_child.py"), cand]
     import tempfile
     log = a.log or tempfile.mktemp(prefix="dmval_san_", suffix=".txt")
@@ -55,17 +80,36 @@ def main():
         races[k] = races.get(k, 0) + 1
     if a.tool == "racecheck":
         # compute-sanitizer racecheck does not model sm100 mbarrier / TMA / tcgen05 pipeline synchronization: the validated
-        # 0c3f69d (bitwise-deterministic over every stress repeat) reports 50 hazard pairs in its backward and FA4's own
-        # bf16 backward 24. So racecheck gates as NO INCREASE vs the baseline counts per kernel (racecheck_baseline.json);
-        # races are primarily caught by the run-to-run spread and 20-rep stress tiers.
-        base = json.load(open(RACE_BASE)) if os.path.exists(RACE_BASE) else {}
-        worse = {k: (n, base.get(k)) for k, n in races.items() if base.get(k) is None or n > base[k]}
-        ok = (not timed_out) and done and not worse
-        print("SUMMARY_JSON " + json.dumps({"pass": ok, "tool": "racecheck", "races": races, "baseline": base,
-                                            "worse_than_baseline": worse, "child_done": done, "timed_out": timed_out,
-                                            "log": log}))
-        print(("PASS" if ok else "FAIL") + f": racecheck {sum(races.values())} hazard pairs, "
-              f"{len(worse)} kernel(s) above the baseline count")
+        # backward (bitwise-deterministic over every stress repeat) and FA4's own bf16 backward report hazards.  Gate (per
+        # accuracy-audit 2026-11-09): the SET of hazard sites (kernel, access@pc, access@pc) must be a subset of the
+        # reviewed baseline site set of the same mode (racecheck_sites.json).  Count-only gating let a new real race through
+        # when an old artefact vanished, and was capped by --print-limit 50 (every "50 pairs" so far was that cap; the
+        # limit is now off for racecheck).  PCs are stable for an unchanged kernel binary; a changed kernel shows new
+        # sites and needs a written explanation before they are accepted (--accept-sites "NOTE").
+        mode = cand_mode(tgt)
+        sites = race_sites(out)
+        allb = json.load(open(RACE_SITES)) if os.path.exists(RACE_SITES) else {}
+        base = allb.get(mode, {"sites": [], "notes": []})
+        new = sorted(sites - set(base["sites"]))
+        if a.accept_sites and done and not timed_out:
+            base["sites"] = sorted(set(base["sites"]) | sites)
+            base["notes"].append({"note": a.accept_sites, "added": len(new), "candidate": cand})
+            allb[mode] = base
+            tmp = RACE_SITES + ".tmp"
+            json.dump(allb, open(tmp, "w"), indent=1)
+            os.replace(tmp, RACE_SITES)
+            print(f"accepted {len(new)} new site(s) into the {mode} baseline ({len(base['sites'])} total)")
+            new = []
+        by_k = {}
+        for x in new:
+            by_k[x.split("|")[0]] = by_k.get(x.split("|")[0], 0) + 1
+        ok = (not timed_out) and done and not new
+        print("SUMMARY_JSON " + json.dumps({"pass": ok, "tool": "racecheck", "mode": mode, "race_records": races,
+                                            "sites": len(sites), "baseline_sites": len(base["sites"]),
+                                            "new_sites_by_kernel": by_k, "new_sites": new[:200], "child_done": done,
+                                            "timed_out": timed_out, "log": log}))
+        print(("PASS" if ok else "FAIL") + f": racecheck ({mode}) {sum(races.values())} race records, {len(sites)} hazard "
+              f"sites, {len(new)} not in the reviewed baseline" + (f" {by_k}" if by_k else ""))
         sys.exit(0 if ok else 1)
     ok = (not timed_out) and p.returncode == 0 and nerr == 0 and ninv == 0 and done
     first = next((ln for ln in out.splitlines() if "Invalid" in ln or "Error" in ln or "Traceback" in ln), None)

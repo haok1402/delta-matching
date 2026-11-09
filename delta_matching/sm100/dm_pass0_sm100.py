@@ -2239,6 +2239,12 @@ class DMPass0Sm100:
                                     else:
                                         p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                     tSrS[i0], tSrS[i0 + 1] = p
+                                    if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                        # DEBUG (kda-sm100-fix0): P dump, h2 (production) path
+                                        if row < seqlen.seqlen_q:
+                                            for e_ in cutlass.range_constexpr(2):
+                                                aux[len(aux) - 2][batch_idx, head_idx, row,
+                                                                  n_block * self.n_block_size + tScS_t2r[i0 + e_][1]] = tSrS[i0 + e_]
                                     if const_expr(v % 4 == 0):
                                         den = cute.arch.add_packed_f32x2(den, p)
                                     elif const_expr(v % 4 == 1):
@@ -2255,6 +2261,12 @@ class DMPass0Sm100:
                                 if const_expr(j == 3):
                                     cute.arch.fence_view_async_tmem_load()
                                     pipeline_dp.consumer_release_w_index(stage)
+                                if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                    # DEBUG (kda-sm100-fix0): raw dP accumulator dump, h2 (production) path
+                                    if row < seqlen.seqlen_q:
+                                        for i_ in cutlass.range_constexpr(32):
+                                            aux[len(aux) - 1][batch_idx, head_idx, row,
+                                                              n_block * self.n_block_size + tScS_t2r[32 * j + i_][1]] = tdPr[i_]
                                 acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
                                 for v in cutlass.range_constexpr(16):
                                     acc[v % 4] = cute.arch.fma_packed_f32x2(
@@ -2374,6 +2386,12 @@ class DMPass0Sm100:
                                     else:
                                         p = dm_common.P_PAIR_VARIANTS[self.dm_exp_variant.split("+")[0]](tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                     tSrS[i0], tSrS[i0 + 1] = p
+                                    if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                        # DEBUG (kda-sm100-fix0): dump this kernel's P for bitwise comparison
+                                        if row < seqlen.seqlen_q:
+                                            for e_ in cutlass.range_constexpr(2):
+                                                aux[len(aux) - 2][batch_idx, head_idx, row,
+                                                                  n_block * self.n_block_size + tScS_t2r[i0 + e_][1]] = tSrS[i0 + e_]
                                     if const_expr(self.dm_ma):
                                         # 4 independent accumulators (breaks the serial FADD2 chain)
                                         if const_expr(v % 4 == 0):
@@ -2424,6 +2442,12 @@ class DMPass0Sm100:
                                 else:
                                     for v in cutlass.range_constexpr(16):
                                         dpv = cute.arch.mul_packed_f32x2((tdPr[2 * v], tdPr[2 * v + 1]), (as_[j], as_[j]))
+                                        if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                            # DEBUG (kda-sm100-fix0): raw dP accumulator dump
+                                            if row < seqlen.seqlen_q:
+                                                for e_ in cutlass.range_constexpr(2):
+                                                    aux[len(aux) - 1][batch_idx, head_idx, row,
+                                                                      n_block * self.n_block_size + tScS_t2r[32 * j + 2 * v + e_][1]] = tdPr[2 * v + e_]
                                         num = cute.arch.fma_packed_f32x2((tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), dpv, num)
                     if const_expr(self.dm_tr):
                         tr_now = dm_utils.clock32()

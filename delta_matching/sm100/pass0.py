@@ -111,6 +111,11 @@ def _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant):
             if fl.startswith("r") and "_" in fl and fl[1:].split("_")[0].isdigit():
                 r_ = [int(x) for x in fl[1:].split("_")]
                 regs = dict(softmax=r_[0], correction=r_[1], other=r_[2] if len(r_) > 2 else 64)
+                # per-SMSP register file: each SMSP holds one warp of each role (softmax0, softmax1, correction, other),
+                # so 2*softmax + correction + other must be <= 512 or setmaxnreg.inc never completes (+r216_24 hung).
+                if 2 * regs["softmax"] + regs["correction"] + regs["other"] > 512:
+                    raise ValueError(f"DM_P0_EXP +{fl}: 2*softmax+correction+other = "
+                                     f"{2 * regs['softmax'] + regs['correction'] + regs['other']} > 512 (deadlocks)")
         if regs is not None:
             cfg = dataclasses.replace(cfg, registers=dataclasses.replace(cfg.registers, **regs))
         return cfg

@@ -417,7 +417,8 @@ class DMForwardSm100:
                 self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
         if "split" in self.dm_opts:
-            self.split_P_arrive = int(self.dm_opts["split"])
+            # FA4 split_P_arrive hangs with the DM forward (track F screen 2026-11-09: split=1 held a lease to the timeout)
+            raise ValueError("DM_FWD_OPTS split= hangs the DM forward (unsupported); removed")
         # fwdrw: s01=1 -> FA4's S0/S1 exp-sequencing barrier (softmax WG1 exps wait for WG0's, alternating) to keep the
         # two softmax warpgroups out of phase so one's non-exp work overlaps the other's MUFU exps (bitwise: order only)
         if self.dm_opts.get("s01", "0") == "1":

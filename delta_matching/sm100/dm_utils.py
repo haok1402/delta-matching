@@ -12,6 +12,9 @@ def _f32_unary(asm, x, loc=None, ip=None):
                                    asm_dialect=llvm.AsmDialect.AD_ATT))
 
 
+import os as _os_impl
+_TCF_IMPL = _os_impl.environ.get("DM_TCF_IMPL", "asm")   # asm | nvvm (tcgen05 fence emission)
+
 @dsl_user_op
 def floor_f32(x: Float32, *, loc=None, ip=None) -> Float32:
     return _f32_unary("cvt.rmi.f32.f32 $0, $1;", x, loc, ip)
@@ -133,7 +136,7 @@ def gemm_ptx_bs_ts(
         wait_str = (".reg .pred P1; \n\tLAB_WAIT: \n\t"
                     "mbarrier.try_wait.parity.shared::cta.b64 P1, [$6], $7, 10000000; \n\t"
                     "@P1 bra DONE; \n\tbra     LAB_WAIT; \n\tDONE: \n\t"
-                    + ("tcgen05.fence::after_thread_sync; \n\t" if TCF[0] else ""))
+                    + ("tcgen05.fence::after_thread_sync; \n\t" if TCF[0] >= 1 else ""))
     instr = f"tcgen05.mma.cta_group::{cta_group}.kind::mxf8f6f4.block_scale.scale_vec::1X"
 
     def one(k, pred):
@@ -704,6 +707,10 @@ def fence_acq_rel_gpu(*, loc=None, ip=None):
 @dsl_user_op
 def tc_fence_after(*, loc=None, ip=None):
     """tcgen05.fence::after_thread_sync: order later tcgen05 ops after a preceding thread sync (mbarrier wait)."""
+    if _TCF_IMPL == "nvvm":
+        from cutlass._mlir.dialects import nvvm as _nv
+        _nv.tcgen05_fence(_nv.Tcgen05FenceKind.AFTER_THREAD_SYNC, loc=loc, ip=ip)
+        return
     llvm.inline_asm(None, [], "tcgen05.fence::after_thread_sync;", "", has_side_effects=True, is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT)
 
@@ -711,6 +718,10 @@ def tc_fence_after(*, loc=None, ip=None):
 @dsl_user_op
 def tc_fence_before(*, loc=None, ip=None):
     """tcgen05.fence::before_thread_sync: order earlier tcgen05 ops before a following thread sync (mbarrier arrive)."""
+    if _TCF_IMPL == "nvvm":
+        from cutlass._mlir.dialects import nvvm as _nv
+        _nv.tcgen05_fence(_nv.Tcgen05FenceKind.BEFORE_THREAD_SYNC, loc=loc, ip=ip)
+        return
     llvm.inline_asm(None, [], "tcgen05.fence::before_thread_sync;", "", has_side_effects=True, is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT)
 
@@ -723,25 +734,29 @@ def tc_fence_before(*, loc=None, ip=None):
 # On sm_100a (CUDA 13.0) both fences emit no SASS: they only forbid ptxas from moving tcgen05 ops across the sync
 # (kda/docs/fence-audit.md). Knobs: fwd DM_FWD_OPTS tcf=0, bwd DM_BWD_OPTS notcf, pass0 exp variant +ntcf.
 TCF = [False]
+import os as _os_tcf
+_TCF_MASK = int(_os_tcf.environ.get("DM_TCF_MASK", "15"))   # DEBUG bisect: 1 waits(after) 2 releases(before) 4 relay 8 bars
 
 
 def tcf_begin(on):
-    TCF[0] = bool(on)
+    """0 = off (94ec380 code), 1 = minimal (default: tcgen05 pipelines / barriers marked with tcf_mark, explicit
+    relay sites), 2 = blanket (every mbarrier / named-barrier wait and arrive, every sync_warp / elect_one)."""
+    TCF[0] = int(on)
 
 
 def tcf_end():
     TCF[0] = False
 
 
-def _tcf_wrap(f, before, after):
+def _tcf_wrap(f, before, after, mode=2):
     if getattr(f, "_dm_tcf", False):
         return f
 
     def w(*a, **kw):
-        if TCF[0] and before:
+        if TCF[0] >= mode and before:
             tc_fence_before()
         r = f(*a, **kw)
-        if TCF[0] and after:
+        if TCF[0] >= mode and after:
             tc_fence_after()
         return r
     w._dm_tcf = True
@@ -769,11 +784,12 @@ def _tcf_install():
     # leader's later arrive publishes the whole warp's ops. elect.sync already requires the full warp, so the added
     # bar.warp.sync is legal wherever elect_one is.
     _sw = _A.sync_warp
+    _tcf_raw_sync_warp[0] = _sw
     _A.sync_warp = _tcf_wrap(_sw, True, True)
     _el = _A.elect_one
     if not getattr(_el, "_dm_tcf", False):
         def elect_one(*a, **kw):
-            if TCF[0]:
+            if TCF[0] >= 2:
                 tc_fence_before()
                 _sw()
             return _el(*a, **kw)
@@ -792,4 +808,104 @@ def _tcf_install():
         pass
 
 
+# ---- minimal mode (TCF == 1): fences only on objects marked by tcf_mark (tcgen05 pipelines + barriers that relay
+# tcgen05 state). Marking swaps the instance's class to a subclass (like flash_attn's create()); the wrappers check it.
+# kinds: "ua" = PipelineUmmaAsync (MMA producer via tcgen05.commit -> thread consumer), "au" = PipelineAsyncUmma
+# (thread producer -> MMA consumer, released via tcgen05.commit), "bar" = named barrier.
+_TCF_SUB = {}
+
+
+def tcf_mark(kind, *objs):
+    for o in objs:
+        if o is None:
+            continue
+        c = type(o)
+        k = (c, kind)
+        if k not in _TCF_SUB:
+            _TCF_SUB[k] = type(c.__name__, (c,), {"_dm_tcf": kind})
+        object.__setattr__(o, "__class__", _TCF_SUB[k])
+    return objs
+
+
+def _tcf_mwrap(f, role):
+    if getattr(f, "_dm_tcfm", False):
+        return f
+
+    def w(self, *a, **kw):
+        k = getattr(type(self), "_dm_tcf", None) if TCF[0] == 1 and not _TCF_SKIP[0] else None
+        if k == "bar" and not (_TCF_MASK & 8):
+            k = None
+        before = after = False
+        if k is not None:
+            if role == "wait":
+                after = True
+            elif role == "rel":     # thread arrive; tcgen05.commit arrives need no before-fence
+                before = not ((k == "ua" and f.__name__.startswith("producer_commit"))
+                              or (k == "au" and f.__name__.startswith("consumer_release")))
+            elif role == "both":
+                before = after = True
+        if before and k != "bar" and _TCF_MASK & 16 and k == "au":
+            before = False   # DEBUG bisect: no before-fence on thread->MMA commits
+        if before and k != "bar" and _TCF_MASK & 32 and k == "ua":
+            before = False   # DEBUG bisect: no before-fence on thread releases of MMA-produced buffers
+        if before and (_TCF_MASK & 2 or k == "bar"):
+            tc_fence_before()
+        r = f(self, *a, **kw)
+        if after and (_TCF_MASK & 1 or k == "bar"):
+            tc_fence_after()
+        return r
+    w._dm_tcfm = True
+    w.__name__ = f.__name__
+    return w
+
+
+def _tcf_install_min():
+    import cutlass.pipeline as _cp
+    import flash_attn.cute.pipeline as _fp
+    roles = {"consumer_wait": "wait", "producer_acquire": "wait", "consumer_release": "rel", "producer_commit": "rel",
+             "arrive": "rel", "arrive_unaligned": "rel", "arrive_w_index": "rel", "wait": "wait",
+             "wait_unaligned": "wait", "arrive_and_wait": "both", "arrive_and_wait_unaligned": "both",
+             "arrive_and_wait_w_index": "both", "sync": "both"}
+    seen = set()
+    for mod in (_cp, _fp):
+        for n in dir(mod):
+            c = getattr(mod, n)
+            if not isinstance(c, type) or c in seen:
+                continue
+            seen.add(c)
+            if not (n.startswith("Pipeline") or n == "NamedBarrier"):
+                continue
+            for m, r in roles.items():
+                f = c.__dict__.get(m)
+                if f is not None and callable(f):
+                    setattr(c, m, _tcf_mwrap(f, r))
+
+
+_TCF_SKIP = [False]
+
+
+class tcf_site:
+    """DEBUG bisect: `with tcf_site("id"):` suppresses minimal-mode fences inside if id is in env DM_TCF_SKIP."""
+    def __init__(self, sid):
+        self.on = sid in _os_tcf.environ.get("DM_TCF_SKIP", "").split(",")
+
+    def __enter__(self):
+        if self.on:
+            _TCF_SKIP[0] = True
+
+    def __exit__(self, *a):
+        _TCF_SKIP[0] = False
+
+
+def tcf_relay():
+    """Minimal mode: every lane fences its tcgen05 ops, then the warp syncs, before an elected leader's arrive."""
+    if TCF[0] == 1 and _TCF_MASK & 4:
+        tc_fence_before()
+        _tcf_raw_sync_warp[0]()
+
+
+_tcf_raw_sync_warp = [None]
+
+
 _tcf_install()
+_tcf_install_min()

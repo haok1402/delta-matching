@@ -5823,7 +5823,7 @@ class DMBackwardSm100:
                                         self.tma_copy_bytes["dQ"] // 1,
                                     )
                             cute.arch.cp_async_bulk_commit_group()
-                            if const_expr("dqrd" in self.dm_opts and self.deterministic):
+                            if const_expr("dqrd" in self.dm_opts and self.deterministic and self.sdQaccum_stage > 1):
                                 # DM dqrd: staging-buffer reuse only needs the older bulk adds to have READ smem;
                                 # completion (visibility in global) is needed only before the semaphore release of
                                 # the previous m_block (below, stage 0) and at tile end. Same adds, same order: bitwise.

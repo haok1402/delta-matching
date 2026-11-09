@@ -1571,10 +1571,29 @@ class DMForwardSm100:
                     cute.arch.setmaxregister_decrease(self.num_regs_softmax)
                 tmem_alloc_barrier.arrive_and_wait_unaligned()
                 tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
-                self.slice_softmax_loop(
-                    thr_mma_qk, tStS, descale_tensors, pipeline_s_p_o, block_info, num_splits, SeqlenInfoCls,
-                    tile_scheduler=tile_scheduler,
-                )
+                dm_sls = int(self.dm_opts.get("sls", "0"))     # sls=CH: cohort-B slice warps stream exps in CH-value chunks
+                dm_slx = self.dm_opts.get("slx", "0") == "1"
+                if const_expr(dm_sls > 0 or dm_slx):
+                    # cohort B = odd key-block warpgroups (slc=wg, default) or lane quadrants 2,3 (slc=q)
+                    if const_expr(self.dm_opts.get("slc", "wg") == "q"):
+                        dm_cb = warp_idx % 4 >= 2
+                    else:
+                        dm_cb = (warp_idx // 4) % 2 == 1
+                    if dm_cb:
+                        self.slice_softmax_loop(
+                            thr_mma_qk, tStS, descale_tensors, pipeline_s_p_o, block_info, num_splits, SeqlenInfoCls,
+                            tile_scheduler=tile_scheduler, swap=dm_slx, stream=dm_sls,
+                        )
+                    else:
+                        self.slice_softmax_loop(
+                            thr_mma_qk, tStS, descale_tensors, pipeline_s_p_o, block_info, num_splits, SeqlenInfoCls,
+                            tile_scheduler=tile_scheduler, swap=False, stream=0,
+                        )
+                else:
+                    self.slice_softmax_loop(
+                        thr_mma_qk, tStS, descale_tensors, pipeline_s_p_o, block_info, num_splits, SeqlenInfoCls,
+                        tile_scheduler=tile_scheduler,
+                    )
                 tmem_alloc_barrier.arrive_unaligned()
         elif (
             (const_expr(self.q_stage == 2) and warp_idx <= self.softmax1_warp_ids[-1]) or
@@ -2981,6 +3000,8 @@ class DMForwardSm100:
         num_splits: Int32,
         SeqlenInfoCls: Callable,
         tile_scheduler=None,
+        swap: cutlass.Constexpr = False,
+        stream: cutlass.Constexpr = 0,
     ):
         tidx = cute.arch.thread_idx()[0] % (4 * cute.arch.WARP_SIZE)   # row; warp % 4 = TMEM lane quadrant
         q = cute.arch.make_warp_uniform(cute.arch.warp_idx()) // 4     # key block owned by this slice warpgroup
@@ -3019,7 +3040,7 @@ class DMForwardSm100:
             step = partial(self._slice_step, q=q, tidx=tidx, st=st, qsc=qsc, rS=rS, rP=rP, rP8=rP8, tSt_ld=tSt_ld,
                            tSt_st=tSt_st, thr_ld=thr_ld, thr_st=thr_st, dm_lean=dm_lean, pipeline_s_p_o=pipeline_s_p_o,
                            descale_tensors=descale_tensors, batch_idx=batch_idx, kv_head_idx=kv_head_idx,
-                           work_m=work_m, seqlen=seqlen)
+                           work_m=work_m, seqlen=seqlen, swap=swap, stream=stream)
             if has_work:
                 st[2] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * cutlass.max(n_block_max - 1, 0)])
                 step(n_block_max - 1, mask_seqlen=True, mask_causal=self.is_causal)
@@ -3040,7 +3061,8 @@ class DMForwardSm100:
         self, n_block: Int32, mask_seqlen: cutlass.Constexpr, mask_causal: cutlass.Constexpr, q: Int32, tidx: Int32,
         st: cute.Tensor, qsc, rS: cute.Tensor, rP: cute.Tensor, rP8: cute.Tensor, tSt_ld: cute.Tensor,
         tSt_st: cute.Tensor, thr_ld, thr_st, dm_lean: cutlass.Constexpr, pipeline_s_p_o, descale_tensors,
-        batch_idx: Int32, kv_head_idx: Int32, work_m: Int32, seqlen,
+        batch_idx: Int32, kv_head_idx: Int32, work_m: Int32, seqlen, swap: cutlass.Constexpr = False,
+        stream: cutlass.Constexpr = 0,
     ):
         """One n_block for both Q stages (stage 0 then stage 1) of this slice warp's key block q."""
         if const_expr(self.dm_opts.get("pf", "1") == "1"):
@@ -3052,7 +3074,7 @@ class DMForwardSm100:
         dm_ks = dm_utils.byte_pow2_f32_rt(dm_kw, q * 8)
         ph = st[0]
         nstep = st[1]
-        for s in cutlass.range_constexpr(2):
+        for s in ((1, 0) if const_expr(swap) else (0, 1)):
             c = qsc[s] * dm_ks
             pipeline_s_p_o.consumer_wait_w_index_phase(s, ph)
             col = Int32(self.tmem_s_offset[s]) + q * 32
@@ -3099,6 +3121,20 @@ class DMForwardSm100:
             if const_expr(self.dm_opts.get("afx", "0") == "1"):   # afx=1: TIMING-ONLY ablation, exp2 -> FMA (no MUFU)
                 for i in cutlass.range_constexpr(0, 32, 2):
                     rS[i], rS[i + 1] = cute.arch.fma_packed_f32x2((rS[i], rS[i + 1]), (Float32(0.25), Float32(0.25)), (Float32(0.5), Float32(0.5)))
+            elif const_expr(stream > 0):
+                # streamed: exps in `stream`-value chunks, each followed by its row-sum updates in the ORIGINAL order
+                # (two chains even/odd, increasing index) -> bitwise-identical P and bsum
+                ps = (Float32(0.0), Float32(0.0))
+                for k in cutlass.range_constexpr(0, 32, stream):
+                    for i in cutlass.range_constexpr(k, k + stream, 2):
+                        rS[i] = cute.math.exp2(rS[i], fastmath=True)
+                        rS[i + 1] = cute.math.exp2(rS[i + 1], fastmath=True)
+                    for i in cutlass.range_constexpr(k, k + stream, 2):
+                        if const_expr(i == 0):
+                            ps = (rS[0], rS[1])
+                        else:
+                            ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
+                dm_ps_streamed = ps
             else:
                 for i in cutlass.range_constexpr(0, 32, 2):
                     rS[i] = cute.math.exp2(rS[i], fastmath=True)
@@ -3115,9 +3151,12 @@ class DMForwardSm100:
                     pipeline_s_p_o.consumer_release_w_index(s)
             else:
                 pipeline_s_p_o.consumer_release_w_index(s)
-            ps = (rS[0], rS[1])
-            for i in cutlass.range_constexpr(2, 32, 2):
-                ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
+            if const_expr(stream > 0 and self.dm_opts.get("afx", "0") != "1"):
+                ps = dm_ps_streamed
+            else:
+                ps = (rS[0], rS[1])
+                for i in cutlass.range_constexpr(2, 32, 2):
+                    ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
             bsum = ps[0] + ps[1]
             if nstep > 0:
                 if const_expr(self.dm_opts.get("slnobe", "0") != "1"):   # slnobe=1: DEBUG planted WAR bug (no bsempty wait)

@@ -712,3 +712,12 @@ def tc_fence_before(*, loc=None, ip=None):
     """tcgen05.fence::before_thread_sync: order earlier tcgen05 ops before a following thread sync (mbarrier arrive)."""
     llvm.inline_asm(None, [], "tcgen05.fence::before_thread_sync;", "", has_side_effects=True, is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def spin_clk(n: int, *, loc=None, ip=None):
+    """Busy-wait about n SM clocks on the calling thread (clock64 loop, no memory traffic). Timing-only ablations."""
+    llvm.inline_asm(None, [], "{\n\t.reg .u64 t0, t1;\n\t.reg .pred p;\n\tmov.u64 t0, %clock64;\n\t"
+                    "spin${:uid}:\n\tmov.u64 t1, %clock64;\n\tsub.u64 t1, t1, t0;\n\t"
+                    f"setp.lt.u64 p, t1, {int(n)};\n\t@p bra spin${{:uid}};\n\t}}", "",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)

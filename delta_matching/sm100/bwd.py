@@ -240,6 +240,9 @@ FORCE = dict(pack_gqa=False)
 def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=True, trace=None):
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
+    if not deterministic and os.environ.get("DM_ALLOW_NONDET_DEBUG", "0") != "1":
+        raise RuntimeError("dm_bwd_main(deterministic=False) is VETOED by accuracy-audit (rare lost/doubled dQ tile "
+                           "contribution under investigation, kda-sm100-ndrace). Set DM_ALLOW_NONDET_DEBUG=1 only for debugging.")
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
     if "lwc" in os.environ.get("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"

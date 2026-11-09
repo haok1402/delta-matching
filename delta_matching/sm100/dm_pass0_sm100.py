@@ -272,6 +272,10 @@ class DMPass0Sm100:
         self.dm_ma = ("ma" in _fl0 and self.is_causal) or "maa" in _fl0
         self.dm_b6 = next((int(t[3:]) for t in _fl0 if t.startswith("b6_")), 0)   # deg-6 poly exp on (qb+kb)%m==0 blocks
         self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
+        # +fz (kda-sm100-p0rw2): h2 arithmetic fused per 32-column chunk: S and dP waited up front, then per chunk j
+        # [S_j, dP_j loads -> mask -> exp/den (v%4 chains) -> acc (v%4) -> num]. Same per-element ops, same den/num chain
+        # order as h2 (chunks 0..3), so delta is bitwise h2's; S/dP released after the chunk-3 loads.
+        self.dm_fz = "fz" in _fl0
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         # +f64: per-tile fp32 partial sums (short chains), accumulated across tiles in fp64; delta = num / den in fp64,
@@ -2261,7 +2265,42 @@ class DMPass0Sm100:
                         tr_s[1] = tr_s[1] + (tr_now - tr_prev)
                         tr_prev = tr_now
                     tSrS = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS).shape, self.qk_acc_dtype)
-                    if const_expr(self.dm_h2):
+                    if const_expr(self.dm_h2 and self.dm_fz):
+                        diag = False
+                        if const_expr(self.is_causal):
+                            diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
+                        kbase = n_block * self.n_block_size
+                        pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                        for j in cutlass.range_constexpr(4):
+                            tdPr = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, j].shape, self.qk_acc_dtype)
+                            cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
+                            cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], tdPr)
+                            cute.arch.fence_view_async_tmem_load()
+                            if const_expr(j == 3):
+                                pipeline_s_p_o.consumer_release_w_index(stage)
+                                pipeline_dp.consumer_release_w_index(stage)
+                            if const_expr(self.is_causal):
+                                if diag:
+                                    for i in cutlass.range_constexpr(32 * j, 32 * j + 32):
+                                        tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
+                            acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
+                            for v in cutlass.range_constexpr(16):
+                                i0 = 32 * j + 2 * v
+                                p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                tSrS[i0], tSrS[i0 + 1] = p
+                                if const_expr(v % 4 == 0):
+                                    den = cute.arch.add_packed_f32x2(den, p)
+                                elif const_expr(v % 4 == 1):
+                                    den1 = cute.arch.add_packed_f32x2(den1, p)
+                                elif const_expr(v % 4 == 2):
+                                    den2 = cute.arch.add_packed_f32x2(den2, p)
+                                else:
+                                    den3 = cute.arch.add_packed_f32x2(den3, p)
+                                acc[v % 4] = cute.arch.fma_packed_f32x2(p, (tdPr[2 * v], tdPr[2 * v + 1]), acc[v % 4])
+                            acc01 = cute.arch.add_packed_f32x2(acc[0], acc[1])
+                            acc23 = cute.arch.add_packed_f32x2(acc[2], acc[3])
+                            num = cute.arch.fma_packed_f32x2(cute.arch.add_packed_f32x2(acc01, acc23), (as_[j], as_[j]), num)
+                    elif const_expr(self.dm_h2):
                         diag = False
                         if const_expr(self.is_causal):
                             diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size

@@ -507,3 +507,24 @@ def mbar_wait_parity_cluster(mbar: Int32, phase: Int32, *, loc=None, ip=None):
                     "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
                     "@P1 bra DM_DONEC;\n\tbra DM_WAITC;\n\tDM_DONEC:\n\t}",
                     "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def red_add_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
+    """red.global.add.v4.f32 (sm_90+): 4 contiguous fp32 adds, 16-byte aligned address."""
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+                    "red.relaxed.gpu.global.add.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f", has_side_effects=True,
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def st_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+                    "st.global.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f", has_side_effects=True,
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def fence_acq_rel_gpu(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "fence.acq_rel.gpu;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)

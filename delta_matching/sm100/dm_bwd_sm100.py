@@ -1991,7 +1991,7 @@ class DMBackwardSm100:
                     num_stages=self.Q_stage,
                     producer_group=pipeline_producer_group,
                     consumer_group=pipeline_consumer_group,
-                    tx_count=self.tma_copy_bytes["Q"],
+                    tx_count=0 if const_expr("noqt" in self.dm_abl) else self.tma_copy_bytes["Q"],   # abl:noqt (timing-only)
                     cta_layout_vmnk=cluster_layout_vmnk,
                     defer_sync=True,
                 )
@@ -2800,7 +2800,7 @@ class DMBackwardSm100:
                             if dm_g == 0:
                                 pipeline_dO.producer_acquire(
                                     producer_state_dO_dPsum,
-                                    extra_tx_count=self.tma_copy_bytes["V"] + self.tma_copy_bytes["dO"]
+                                    extra_tx_count=self.tma_copy_bytes["V"] + (0 if const_expr("nodot" in self.dm_abl) else self.tma_copy_bytes["dO"])
                                     if const_expr(load_dOt is not None)
                                     else self.tma_copy_bytes["V"],
                                 )
@@ -2812,13 +2812,14 @@ class DMBackwardSm100:
                             else:
                                 pipeline_dO.producer_acquire(
                                     producer_state_dO_dPsum,
-                                    extra_tx_count=self.tma_copy_bytes["dO"]
+                                    extra_tx_count=(0 if const_expr("nodot" in self.dm_abl) else self.tma_copy_bytes["dO"])
                                     if const_expr(load_dOt is not None)
                                     else 0,
                                 )
                             load_dO(first_m_block, producer_state=producer_state_dO_dPsum)
                             if const_expr(load_dOt is not None):
-                                load_dOt(first_m_block, producer_state=producer_state_dO_dPsum)
+                                if const_expr("nodot" not in self.dm_abl):  # abl:nodot (timing-only: skip the dOt TMA; stale sdOt)
+                                    load_dOt(first_m_block, producer_state=producer_state_dO_dPsum)
                             pipeline_dO.producer_commit(producer_state_dO_dPsum)
 
                             # dPsum
@@ -2844,7 +2845,8 @@ class DMBackwardSm100:
                             if const_expr(should_load_Q):
                                 if const_expr(load_Qt is not None):
                                     pipeline_Qt.producer_acquire(producer_state_Qt)
-                                    load_Qt(m_block - 1, producer_state=producer_state_Qt)
+                                    if const_expr("noqt" not in self.dm_abl):  # abl:noqt (timing-only: skip the Qt TMA; stale sQt)
+                                        load_Qt(m_block - 1, producer_state=producer_state_Qt)
                                     pipeline_Qt.producer_commit(producer_state_Qt)
                                     producer_state_Qt.advance()
 
@@ -2868,13 +2870,14 @@ class DMBackwardSm100:
                             if const_expr(should_load_dO):
                                 pipeline_dO.producer_acquire(
                                     producer_state_dO_dPsum,
-                                    extra_tx_count=self.tma_copy_bytes["dO"]
+                                    extra_tx_count=(0 if const_expr("nodot" in self.dm_abl) else self.tma_copy_bytes["dO"])
                                     if const_expr(load_dOt is not None)
                                     else 0,
                                 )
                                 load_dO(m_block, producer_state=producer_state_dO_dPsum)
                                 if const_expr(load_dOt is not None):
-                                    load_dOt(m_block, producer_state=producer_state_dO_dPsum)
+                                    if const_expr("nodot" not in self.dm_abl):  # abl:nodot (timing-only: skip the dOt TMA; stale sdOt)
+                                        load_dOt(m_block, producer_state=producer_state_dO_dPsum)
                                 pipeline_dO.producer_commit(producer_state_dO_dPsum)
 
                                 # dPsum
@@ -2892,7 +2895,8 @@ class DMBackwardSm100:
                         if const_expr(should_load_Q):
                             if const_expr(load_Qt is not None):
                                 pipeline_Qt.producer_acquire(producer_state_Qt)
-                                load_Qt(m_block_max - 1, producer_state=producer_state_Qt)
+                                if const_expr("noqt" not in self.dm_abl):  # abl:noqt (timing-only: skip the Qt TMA; stale sQt)
+                                    load_Qt(m_block_max - 1, producer_state=producer_state_Qt)
                                 pipeline_Qt.producer_commit(producer_state_Qt)
                                 producer_state_Qt.advance()
 

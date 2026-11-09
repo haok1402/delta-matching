@@ -112,6 +112,21 @@ def _key(q8, k8, causal, deterministic):
             q8.device.index)
 
 
+
+_ZB = {}
+
+
+def _ce_zero(t, chunk=64 << 20):
+    """Zero a contiguous tensor with cudaMemcpyAsync D2D (copy engine) from a cached zero buffer, chunk by chunk."""
+    zb = _ZB.get(t.device.index)
+    if zb is None:
+        zb = _ZB[t.device.index] = torch.zeros(chunk, dtype=torch.uint8, device=t.device)
+    b = t.view(-1).view(torch.uint8)
+    n = b.numel()
+    for o in range(0, n, chunk):
+        m = min(chunk, n - o)
+        b[o:o + m].copy_(zb[:m])
+
 def dm_bwd_prestage(q8, k8, lse, causal: bool, deterministic=True):
     """Call BEFORE pass 0 (current stream = the backward's stream): if this shape was seen, allocate + zero the main
     pass's scratch and compute lse_log2 on a side stream; dm_bwd_main then waits on it. Bitwise identical."""
@@ -126,10 +141,19 @@ def dm_bwd_prestage(q8, k8, lse, causal: bool, deterministic=True):
     side.wait_stream(main)          # lse ready; memory freed on main is reusable
     N = lse.shape[-1]
     with torch.cuda.stream(side):
-        pool = [(torch.zeros if kind == "z" else torch.empty)(*shape, dtype=dt, device=q8.device)
+        ce = os.environ.get("DM_ZERO", "") == "ce"
+        pool = [((torch.empty if ce else torch.zeros) if kind == "z" else torch.empty)(*shape, dtype=dt, device=q8.device)
                 for kind, shape, dt in rec]
         dq_accum, dpsum, lse_log2 = pool[0], pool[1], pool[2]
-        if not _fws(deterministic):
+        if ce:
+            # bwd8k: zero the fp32 accumulators with copy-engine D2D copies from a small cached zero buffer, so the
+            # zero-fill overlaps pass 0 without needing SMs (fill kernels can't co-run with a full-occupancy pass 0)
+            for (kind, _, _), t in zip(rec, pool):
+                if kind == "z":
+                    _ce_zero(t)
+            if not _fws(deterministic):
+                _ce_zero(dq_accum)
+        elif not _fws(deterministic):
             dq_accum.zero_()
         dpsum[..., N:].zero_()
         torch.mul(lse, LOG2E, out=lse_log2[..., :N])

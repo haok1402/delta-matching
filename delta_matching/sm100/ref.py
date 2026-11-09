@@ -75,7 +75,7 @@ def _q_blocks(x, bm, bn):
     return ((xb / s).to(torch.float8_e4m3fn).float() * s).reshape(*lead, M, N)
 
 
-def bwd_ref(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm):
+def bwd_ref(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm, ds_q=128):
     """sm100-mx backward (dev reference). Inputs: codes/scales as produced by quant.py (q8 has sm baked, k8 centered),
     lse (B,H,N) natural, delta (B,H,N) in dP units (or None -> matched delta_norm computed here).
     Returns dq, dk, dv (B,N,H,D)/(B,N,Hk,D) fp32 and the delta used, rowsum(dS) residual."""
@@ -97,7 +97,7 @@ def bwd_ref(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm):
     dS = P * (dP - delta[..., None])
     rowsum = dS.sum(-1)
     PT = _q_blocks(P.transpose(-1, -2), 1, 32)          # per key, per 32-query block
-    dSq = _q_blocks(dS, 128, 32)                         # per (128-query tile x 32 keys), shared by dK and dQ
+    dSq = _q_blocks(dS, ds_q, 32)                        # per (ds_q queries x 32 keys): 128 = sm100-mx, 32 = dS32
     dV = torch.matmul(PT, dO)
     dK = torch.matmul(dSq.transpose(-1, -2), Q)
     dQ = torch.matmul(dSq, K) * sm

@@ -623,6 +623,8 @@ class DMBackwardSm100:
         self.dm_G = self.qhead_per_kvhead if self.dm_gloop else 1
         _p3 = next((x[3:] for x in self.dm_opts if x.startswith("p3=")), None)   # p3=freq:res (deg-3)
         self.dm_p3 = tuple(int(t) for t in _p3.split(":")) if _p3 else None
+        # ds32 (sm100-mx-ds32): one dS pow2 scale per (32 keys x 32 queries) block -> no cross-WG amax exchange
+        self.dm_ds32 = "ds32" in self.dm_opts
         self.dm_sfa_dv_col = self.tmem_P_offset + self.tmem_cols_P            # 4 groups x 4 cols
         self.dm_sfb_dv_col = self.dm_sfa_dv_col + 16                         # 4 cols (const 1.0)
         self.dm_sfa_dq_col = self.dm_sfb_dv_col + 4                          # 2 cols (const 1.0)
@@ -1440,7 +1442,7 @@ class DMBackwardSm100:
                     cute.struct.MemRange[self.dpsum_dtype, cute.cosize(self.sdPsum_layout)],
                     128,
                 ]
-                sDm: cute.struct.Align[cute.struct.MemRange[Float32, 64], 128]
+                sDm: cute.struct.Align[cute.struct.MemRange[Float32, 96], 128]
                 sdQaccum: cute.struct.Align[
                     cute.struct.MemRange[self.dqaccum_dtype, cute.cosize(self.sdQaccum_layout)],
                     self.buffer_align_bytes if sdS_xchg_size == 0 else 128,
@@ -1497,7 +1499,7 @@ class DMBackwardSm100:
                     cute.struct.MemRange[self.dpsum_dtype, cute.cosize(self.sdPsum_layout)],
                     128,
                 ]
-                sDm: cute.struct.Align[cute.struct.MemRange[Float32, 64], 128]
+                sDm: cute.struct.Align[cute.struct.MemRange[Float32, 96], 128]
                 sdQaccum: cute.struct.Align[
                     cute.struct.MemRange[self.dqaccum_dtype, cute.cosize(self.sdQaccum_layout)],
                     self.buffer_align_bytes,
@@ -1984,7 +1986,7 @@ class DMBackwardSm100:
 
         sLSE = storage.sLSE.get_tensor(sLSE_layout)
         sdPsum = storage.sdPsum.get_tensor(sdPsum_layout)
-        sDm = storage.sDm.get_tensor(cute.make_layout(64))
+        sDm = storage.sDm.get_tensor(cute.make_layout(96))
         if const_expr(self.use_2cta_instrs):
             if const_expr(not self.dKV_postprocess):
                 sdV = storage.sV.get_tensor(
@@ -3445,9 +3447,12 @@ class DMBackwardSm100:
             sKt,
             zero_init=True,
             sfa_base=self.dm_sfa_dq_col,
-            sfb_base=self.dm_sfb_dq_col,
-            sfa_map=tuple((0, 0) for k in range(dm_nk_dq)),
-            sfb_map=tuple((2 * (k // 4), k % 4) for k in range(dm_nk_dq)),
+            # ds32: per-row dS scale -> SFA groups (cols +0..1 / +2..3, byte k % 4), SFB const 1.0 at cols +4..5
+            sfb_base=self.dm_sfa_dq_col + 4 if const_expr(self.dm_ds32) else self.dm_sfb_dq_col,
+            sfa_map=(tuple((2 * (k // 4), k % 4) for k in range(dm_nk_dq)) if const_expr(self.dm_ds32)
+                     else tuple((0, 0) for k in range(dm_nk_dq))),
+            sfb_map=(tuple((0, 0) for k in range(dm_nk_dq)) if const_expr(self.dm_ds32)
+                     else tuple((2 * (k // 4), k % 4) for k in range(dm_nk_dq))),
             cta_group=self.cta_group_size,
         )
         # mma_dsk_fn = partial(
@@ -4108,17 +4113,32 @@ class DMBackwardSm100:
         slot = t & 1
         if const_expr("dqx" not in self.dm_abl):
             dm_utils.mbar_wait_parity(dm_mbar + 8 * slot, (t >> 1) & 1)
-        own = dm_utils.ld_shared_b32(dm_sdm + 4 * (24 + slot))
-        peer = dm_utils.ld_shared_b32(dm_sdm + 4 * (32 + slot))
-        w0 = own
-        w1 = peer
-        if cta_rank != 0:
-            w0 = peer
-            w1 = own
         lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
         one = Int32(0x7F7F7F7F)
-        dm_utils.tmem_st_x4((lane << 16) + self.dm_sfa_dq_col, one, one, w0, w0)
-        dm_utils.tmem_st_x4((lane << 16) + self.dm_sfa_dq_col + 4, w1, w1, one, one)
+        if const_expr(self.dm_ds32):
+            # dQ (M=128 2-CTA: CTA c's A rows = queries 64c..64c+63, K = 256 cluster keys): the dS scale varies per
+            # query row -> carry ds_sb + ks in SFA (per row, k-step), SFB const 1.0. Row r of CTA c is read by lanes
+            # r and r+64 (quadrant q -> query block G = 2c + q % 2); SFA group g (= CTA g's 4 key blocks) at cols 2g..2g+1.
+            G = 2 * cta_rank + (lane // 32) % 2
+            own = dm_utils.ld_shared_b32(dm_sdm + 4 * (56 + 4 * slot + G))
+            peer = dm_utils.ld_shared_b32(dm_sdm + 4 * (64 + 4 * slot + G))
+            a0 = own
+            a1 = peer
+            if cta_rank != 0:
+                a0 = peer
+                a1 = own
+            dm_utils.tmem_st_x4((lane << 16) + self.dm_sfa_dq_col, a0, a0, a1, a1)
+            dm_utils.tmem_st_x4((lane << 16) + self.dm_sfa_dq_col + 4, one, one, one, one)
+        else:
+            own = dm_utils.ld_shared_b32(dm_sdm + 4 * (24 + slot))
+            peer = dm_utils.ld_shared_b32(dm_sdm + 4 * (32 + slot))
+            w0 = own
+            w1 = peer
+            if cta_rank != 0:
+                w0 = peer
+                w1 = own
+            dm_utils.tmem_st_x4((lane << 16) + self.dm_sfa_dq_col, one, one, w0, w0)
+            dm_utils.tmem_st_x4((lane << 16) + self.dm_sfa_dq_col + 4, w1, w1, one, one)
 
     @cute.jit
     def split_wg(
@@ -4960,12 +4980,13 @@ class DMBackwardSm100:
                       dm_tprev = dm_now
                   # DM: dV SFA (per key row, per 32-query k-step) and constant SFB
                   dm_lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
-                  for stage in cutlass.range_constexpr(num_stages):
+                  for stage in cutlass.range_constexpr(num_stages if const_expr("sfst" not in self.dm_abl) else 0):
                       dm_k = dm_qoff[stage]
                       dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32,
                                           dm_utils.bytes4_same(dm_sfa_dv[stage]))
                   dm_one = Int32(0x7F7F7F7F)
-                  dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dv_col, dm_one, dm_one, dm_one, dm_one)
+                  if const_expr("sfst" not in self.dm_abl):
+                      dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dv_col, dm_one, dm_one, dm_one, dm_one)
                   if const_expr(not self.acc_m64):
                       cute.arch.fence_view_async_tmem_store()
                   cute.arch.fence_view_async_shared()
@@ -5027,6 +5048,7 @@ class DMBackwardSm100:
                       tdPrdP_all[stage] = tdPrdP_t2r
                   cute.arch.fence_view_async_tmem_load()
                   dm_dsm = [Float32(0.0), Float32(0.0), Float32(0.0), Float32(0.0)]   # amaxt: 4 independent chains
+                  dm_dsa = [Float32(0.0) for _ in range(num_stages)]                 # ds32: per-stage amax
                   for stage in cutlass.range_constexpr(num_stages):
                       tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
                       tSrS_cur = tSrS_t2r[None, stage, 0, 0]
@@ -5041,7 +5063,10 @@ class DMBackwardSm100:
                               (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]),
                               (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                           )
-                          if const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
+                          if const_expr("dsamax" not in self.dm_abl and self.dm_ds32):
+                              dm_dsa[stage] = cute.arch.fmax(
+                                  dm_dsa[stage], cute.arch.fmax(utils_abs(tdPrdP_cur[2 * v]), utils_abs(tdPrdP_cur[2 * v + 1])))
+                          elif const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
                               dm_dsm[v % 4] = utils.fmax(
                                   dm_dsm[v % 4], dm_utils.absf(tdPrdP_cur[2 * v]), dm_utils.absf(tdPrdP_cur[2 * v + 1]))
                           elif const_expr("dsamax" not in self.dm_abl and "amax3" not in self.dm_opts):
@@ -5060,16 +5085,22 @@ class DMBackwardSm100:
                   if const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
                       ds_amax = utils.fmax(utils.fmax(dm_dsm[0], dm_dsm[1]), dm_dsm[2], dm_dsm[3])
                   # scale per (32 keys = this warp's lanes) x (128-query tile = both warpgroups)
-                  ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
+                  if const_expr(self.dm_ds32):
+                      dm_dsa = [dm_utils.redux_max_abs_f32(dm_dsa[st]) for st in range(num_stages)]
+                  else:
+                      ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
                   if const_expr(dm_tr is not None):
                       dm_now = dm_utils.clock32()
                       dm_s6 = dm_s6 + (dm_now - dm_tprev)
                       dm_tprev = dm_now
                   dm_cw = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0])
-                  if cute.arch.lane_idx() == 0:
-                      sDm[dm_cw] = ds_amax
+                  if const_expr(not self.dm_ds32):
+                      if cute.arch.lane_idx() == 0:
+                          sDm[dm_cw] = ds_amax
                   # every warp has loaded dP (dS overwrites dP lanes of the other warpgroup) and published its max
-                  if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
+                  if const_expr("dsx" in self.dm_abl or (self.dm_ds32 and "ds32late" in self.dm_opts)):
+                      pass   # dsx ablation (wrong + racy) / ds32late: pair barrier moved to just before the dS TMEM store
+                  elif const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
                       # dP/dS lanes and the dS scale block (32 keys x 128 queries) belong to warps w and w+4 only
                       cute.arch.barrier(barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
                                         number_of_threads=64)
@@ -5079,15 +5110,27 @@ class DMBackwardSm100:
                       dm_now = dm_utils.clock32()
                       dm_s7 = dm_s7 + (dm_now - dm_tprev)
                       dm_tprev = dm_now
-                  for dm_j in cutlass.range_constexpr(1, len(self.compute_warp_ids) // 4):
-                      ds_amax = cute.arch.fmax(ds_amax, sDm[(dm_cw + 4 * dm_j) % len(self.compute_warp_ids)])
-                  ds_sb = dm_utils.pow2_sb(ds_amax)
-                  ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
-                  dm_sfa_dk = [dm_utils.add_sb_clamp(ds_sb, dm_qsb[st]) for st in range(num_stages)]
-                  dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
-                  if dm_cw < 4:
+                  if const_expr(self.dm_ds32):
+                      # ds32: scale per (this warp's 32 keys) x (this stage's 32 queries); dQ SFB bytes per
+                      # (query block G = dm_qoff, key block kb = warp % 4) -> sDm[40 + 4 G + kb]
+                      ds_sbs = [dm_utils.pow2_sb(dm_dsa[st]) for st in range(num_stages)]
+                      ds_invs = [dm_utils.inv_pow2_from_sb(ds_sbs[st]) for st in range(num_stages)]
+                      dm_sfa_dk = [dm_utils.add_sb_clamp(ds_sbs[st], dm_qsb[st]) for st in range(num_stages)]
                       if cute.arch.lane_idx() == 0:
-                          dm_utils.st_shared_b32(dm_sdm + 4 * (16 + dm_cw), dm_sfb_dq)
+                          for st in cutlass.range_constexpr(num_stages):
+                              dm_utils.st_shared_b32(dm_sdm + 4 * (40 + 4 * dm_qoff[st] + dm_cw % 4),
+                                                     dm_utils.add_sb_clamp(ds_sbs[st], dm_ksb))
+                  else:
+                      for dm_j in cutlass.range_constexpr(1, len(self.compute_warp_ids) // 4 if const_expr("dsx" not in self.dm_abl) else 1):
+                          ds_amax = cute.arch.fmax(ds_amax, sDm[(dm_cw + 4 * dm_j) % len(self.compute_warp_ids)])
+                      ds_sb = dm_utils.pow2_sb(ds_amax)
+                      ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
+                      ds_invs = [ds_inv for _ in range(num_stages)]
+                      dm_sfa_dk = [dm_utils.add_sb_clamp(ds_sb, dm_qsb[st]) for st in range(num_stages)]
+                      dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
+                      if dm_cw < 4:
+                          if cute.arch.lane_idx() == 0:
+                              dm_utils.st_shared_b32(dm_sdm + 4 * (16 + dm_cw), dm_sfb_dq)
                   if const_expr("ilp2" in self.dm_opts and not self.acc_m64 and not self.dm_cwg4
                                 and self.use_2cta_instrs):
                       # ilp2: quantize every stage, store dS to TMEM (no sdS dependency), then wait for the sdS slot
@@ -5098,7 +5141,7 @@ class DMBackwardSm100:
                           tdPrdSq = cute.make_fragment_like(tdPrdP_cur, Float32)
                           for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
                               tdPrdSq[2 * v], tdPrdSq[2 * v + 1] = cute.arch.mul_packed_f32x2(
-                                  (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_inv, ds_inv))
+                                  (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_invs[stage], ds_invs[stage]))
                           dm_cvt[stage] = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
                           dm_cvt[stage].store(tdPrdSq.load().to(self.ds_dtype))
                           cute.copy(thr_copy_r2t, cute.recast_tensor(dm_cvt[stage], Float32), tdPtdS_r2t[None, stage, 0, 0])
@@ -5115,10 +5158,14 @@ class DMBackwardSm100:
                       tdPrdSq = cute.make_fragment_like(tdPrdP_cur, Float32)
                       for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
                           tdPrdSq[2 * v], tdPrdSq[2 * v + 1] = cute.arch.mul_packed_f32x2(
-                              (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_inv, ds_inv))
+                              (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), (ds_invs[stage], ds_invs[stage]))
                       tdPrdS_cvt = cute.make_fragment_like(tdPrdP_cur, self.ds_dtype)
                       tdPrdS_cvt.store(tdPrdSq.load().to(self.ds_dtype))
                       if const_expr(stage == 0):
+                          if const_expr(self.dm_ds32 and "ds32late" in self.dm_opts):
+                              # every warp of the pair has loaded dP before dS overwrites the shared TMEM lanes
+                              cute.arch.barrier(barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
+                                                number_of_threads=64)
                           if const_expr(dm_tr is not None):
                               dm_now = dm_utils.clock32()
                               dm_s8 = dm_s8 + (dm_now - dm_tprev)
@@ -5159,6 +5206,8 @@ class DMBackwardSm100:
                       # dS^T is in SMEM: make this warp's stores visible to the async proxy before
                       # the per-warp arrival the MMA warp waits on.
                       cute.arch.fence_view_async_shared()
+                  elif const_expr(not self.use_smem_dS_for_mma_dK and "sfst" in self.dm_abl):
+                      cute.arch.fence_view_async_tmem_store()
                   elif const_expr(not self.use_smem_dS_for_mma_dK):
                       # DM: dK SFA (per key row, per 32-query k-step) and constant SFB
                       for stage in cutlass.range_constexpr(num_stages):
@@ -5202,7 +5251,20 @@ class DMBackwardSm100:
                       dm_s13 = dm_s13 + (dm_now - dm_tprev)
                       dm_tprev = dm_now
                   # DM: this CTA's 4 key-block dQ scale bytes -> one word, to self and to the peer CTA
-                  if dm_tid == 0:
+                  if const_expr(self.dm_ds32):
+                      dm_g = 0
+                      dm_word = Int32(0)
+                      dm_slot = dm_t & 1
+                      if dm_tid == 0:
+                          for dm_g in cutlass.range_constexpr(4):
+                              dm_word = dm_utils.pack_bytes4(
+                                  dm_utils.ld_shared_b32(dm_sdm + 4 * (40 + 4 * dm_g)), dm_utils.ld_shared_b32(dm_sdm + 4 * (41 + 4 * dm_g)),
+                                  dm_utils.ld_shared_b32(dm_sdm + 4 * (42 + 4 * dm_g)), dm_utils.ld_shared_b32(dm_sdm + 4 * (43 + 4 * dm_g)))
+                              dm_utils.st_shared_b32(dm_sdm + 4 * (56 + 4 * dm_slot + dm_g), dm_word)
+                              dm_utils.st_async_peer_b32(dm_sdm + 4 * (64 + 4 * dm_slot + dm_g), dm_mbar + 8 * dm_slot,
+                                                         peer_cta_rank_in_cluster, dm_word)
+                          dm_utils.mbar_arrive_expect_tx(dm_mbar + 8 * dm_slot, 16)
+                  elif dm_tid == 0:
                       dm_slot = dm_t & 1
                       dm_word = dm_utils.pack_bytes4(
                           dm_utils.ld_shared_b32(dm_sdm + 4 * 16), dm_utils.ld_shared_b32(dm_sdm + 4 * 17),

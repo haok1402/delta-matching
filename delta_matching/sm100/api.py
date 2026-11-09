@@ -18,11 +18,11 @@ D = 128
 
 
 def _deterministic():
-    """Backward dQ / dK / dV reduction order. Default non-deterministic (user 2026-11-09: run-to-run variation allowed;
-    rowsum(dS)=0 within a run is unaffected: delta and dS still come from bitwise the same P / dP). DM_DETERMINISTIC=1
-    restores the deterministic semaphore-ordered reductions."""
+    """Backward dQ / dK / dV reduction order. DM_DETERMINISTIC=0 selects the non-deterministic reductions (allowed by
+    the user 2026-11-09; rowsum(dS)=0 within a run is unaffected). Default stays deterministic: on fa4-bench's harness
+    the non-deterministic 2-CTA build is only +0.3% fwd+bwd geomean (kda/runs/nd_bench/r1, kda-sm100-nd1)."""
     import os
-    return os.environ.get("DM_DETERMINISTIC", "0") == "1"
+    return os.environ.get("DM_DETERMINISTIC", "1") == "1"
 
 
 class _DMAttnSm100(torch.autograd.Function):

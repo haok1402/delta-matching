@@ -18,7 +18,11 @@ from .dm_fwd_sm100 import DMForwardSm100
 
 _HERE = Path(__file__).resolve().parent
 _LOCK = threading.Lock()
-FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1)
+# ex2_emu_freq=0: every forward exp on MUFU ex2.approx (no FA4 deg-3 FMA polynomial). Accuracy rule (user: no accuracy
+# trade-offs): vs FA4's causal fp8 emulation (deg-3 on 25% of exps) all-MUFU has 100-1000x fewer P codes differing from
+# RN_e4m3(exact 2^x), ~9x (up to 46x) lower LSE error and no worse O (kda/runs/fwdemu_*; candidate FWD-emu-off).
+# DM_FWD_OPTS=ex2_emu_freq=N re-enables the emulation for experiments only.
+FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, ex2_emu_freq=0)
 
 
 def _fingerprint(opts=""):

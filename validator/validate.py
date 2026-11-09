@@ -84,6 +84,8 @@ BIND_ABS, BIND_REL = 3e-3, 0.05
 # emulation's own residual (fp32 arithmetic, same P for delta and dS) by at most this factor; floor for cases at ~1e-7
 ROUNDOFF_MULT, ID_FLOOR = 4.0, 1e-5
 ID_MEAN_FLOOR = 2e-7          # mean over rows (accuracy-audit 03:05: a partial approximation can hide under the max floor)
+# families where the emulated dP matches the MMA's accumulation (accuracy-audit ruling 03:45 (2)): emulation identity hard
+EMU_ID_FAMILIES = ("randn", "bigmag", "peaked", "uniform")
 # no accuracy regression (user rule) vs the frozen baseline kernel, per case (full / bench: fixed seeds): measured
 # summation-order noise between validated commits is <= 3.4e-4 relative; allowed 5e-3 relative + 1e-5 absolute
 BASELINE = os.environ.get("DMVAL_BASELINE", os.path.expanduser("~/workspace/haok1402/sm100/validate/baseline.json"))
@@ -447,14 +449,31 @@ def check_case(case, cr, preset, dev, verbose):
                         and m["kernel_rowsum_rel_mean"] <= ID_MEAN_FLOOR,
                         f"backward's own |sum_j dS| / sum_j |P dP|: max {m['kernel_rowsum_rel_max']:.2e} (<= {ID_FLOOR:.0e}), "
                         f"mean {m['kernel_rowsum_rel_mean']:.2e} (<= {ID_MEAN_FLOOR:.0e})")
-                chk("matched:rowsum_dS_roundoff_mean",
-                    m["rowsum_rel_mean"] <= max(ROUNDOFF_MULT * m["emul_rowsum_rel_mean"], ID_MEAN_FLOOR),
-                    f"mean identity {m['rowsum_rel_mean']:.2e} > {ROUNDOFF_MULT} x the emulation's mean "
-                    f"{m['emul_rowsum_rel_mean']:.2e} (floor {ID_MEAN_FLOOR:.0e})")
-                chk("matched:rowsum_dS_roundoff", m["rowsum_rel_max"] <= id_tol,
-                    f"identity {m['rowsum_rel_max']:.2e} > {ROUNDOFF_MULT} x the exact emulation's own residual "
-                    f"{m['emul_rowsum_rel_max']:.2e} (floor {ID_FLOOR:.0e}): rowsum(dS)=0 is not at fp32 round-off - "
-                    f"pass 0 must recompute exactly the backward's P / dP")
+                kernel_side = "kernel_rowsum_rel_max" in m
+                if kernel_side:
+                    # accuracy-audit ruling 03:45 (1): the identity comes from a debug build -> its grads must be BITWISE
+                    # the production grads, or the clean identity could come from a build that does not ship
+                    ok_bind = all(kk in dbg for kk in ("dbg_dq", "dbg_dk", "dbg_dv")) and all(
+                        torch.equal(dbg[kk].reshape(t.shape).to(t.dtype), t)
+                        for kk, t in (("dbg_dq", cand[1]), ("dbg_dk", cand[2]), ("dbg_dv", cand[3])))
+                    chk("matched:identity_build_bitwise", ok_bind,
+                        "debug(identity) build's dQ/dK/dV missing or not bitwise equal to the production grads")
+                emu_hard = (not kernel_side) or case["kind"] in EMU_ID_FAMILIES
+                b = (BASE_METRICS.get(case["name"], {}).get("matched:debug_delta") or {}) if case.get("cached") else {}
+                if emu_hard:
+                    chk("matched:rowsum_dS_roundoff_mean",
+                        m["rowsum_rel_mean"] <= max(ROUNDOFF_MULT * m["emul_rowsum_rel_mean"], ID_MEAN_FLOOR),
+                        f"mean identity {m['rowsum_rel_mean']:.2e} > {ROUNDOFF_MULT} x the emulation's mean "
+                        f"{m['emul_rowsum_rel_mean']:.2e} (floor {ID_MEAN_FLOOR:.0e})")
+                    chk("matched:rowsum_dS_roundoff", m["rowsum_rel_max"] <= id_tol,
+                        f"identity {m['rowsum_rel_max']:.2e} > {ROUNDOFF_MULT} x the exact emulation's own residual "
+                        f"{m['emul_rowsum_rel_max']:.2e} (floor {ID_FLOOR:.0e}): rowsum(dS)=0 is not at fp32 round-off - "
+                        f"pass 0 must recompute exactly the backward's P / dP")
+                elif b.get("rowsum_rel_max") is not None:
+                    # outliers / nearsat / scaled*: the emulated dP differs from the MMA's accumulation order, so the
+                    # emulation identity is not a round-off test here; gate it as no-worse than the baseline (x1.25)
+                    chk("matched:rowsum_dS_emul_no_worse", m["rowsum_rel_max"] <= 1.25 * b["rowsum_rel_max"] + 1e-9,
+                        f"emulation identity {m['rowsum_rel_max']:.2e} > 1.25 x baseline {BASE_ID} {b['rowsum_rel_max']:.2e}")
                 chk("matched:rowsum_dS_direct", m["rowsum_rel_max"] <= ID_TOL,
                     f"|delta sum P - sum P dP| / sum |P dP| = {m['rowsum_rel_max']:.2e} (mean {m['rowsum_rel_mean']:.1e}), "
                     f"allowed {ID_TOL:.0e}; stale-mode deltas sit at 1e-2..1")

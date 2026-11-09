@@ -568,14 +568,16 @@ def check_case(case, cr, preset, dev, verbose):
                     # median error in fp32 ulps of the mean is reported (producer 1.9-2.9 today)
                     km_x = k.double().mean(dim=1)                                        # (B, Hk, D)
                     km_d = (km_c.reshape(km_x.shape).double() - km_x).abs()
-                    km_err = km_d.max().item()
-                    km_tol = 4e-9 * k.float().abs().amax().item()
                     ulp = torch.where(km_x != 0, km_x.abs().float().double() * 2.0 ** -23, torch.ones_like(km_x) * 2.0 ** -149)
+                    # per element: 4e-9 max|k| (fold error, accuracy-audit 17:35) + 2 fp32 ulps of the mean itself (its own
+                    # representation; large-mean families such as nearsat / audit ramps exceed the fixed term alone)
+                    km_tolv = 4e-9 * k.float().abs().amax().item() + 2 * ulp
+                    km_err = (km_d / km_tolv).max().item()                   # <= 1 passes
                     km_ulp = (km_d / ulp).median().item()
-                    rec["metrics"]["matched:kmean"] = {"maxabs": km_err, "tol": km_tol, "median_ulp": km_ulp}
-                    chk("matched:kmean_roundoff", km_err <= km_tol,
-                        f"candidate K-centering mean vs exact fp64 mean: max |diff| {km_err:.2e} (limit 4e-9 max|k| = {km_tol:.1e}), "
-                        f"median {km_ulp:.1f} fp32 ulps")
+                    rec["metrics"]["matched:kmean"] = {"max_over_tol": km_err, "maxabs": km_d.max().item(), "median_ulp": km_ulp}
+                    chk("matched:kmean_roundoff", km_err <= 1.0 and km_ulp <= 4.0,
+                        f"candidate K-centering mean vs exact fp64 mean: worst element at {km_err:.2f} x its limit "
+                        f"(4e-9 max|k| + 2 ulp), median {km_ulp:.1f} fp32 ulps (limit 4)")
                 emc = R.dm_reference(q, k, v, do, causal, mode, preset, aux=True, lse_override=lse_c,
                                      delta_override=dl_c, q_block=qbk, k_mean=km_c)
                 den = emc["sum_absPdP"]

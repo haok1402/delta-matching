@@ -987,6 +987,7 @@ class DMPass0Sm100:
         using tensor memory access (TMA) for efficient data loading, warp specialization for different
         computation phases, and optional attention masking.
         """
+        dm_utils.tcf_begin(0 if "ntcf" in self.dm_exp_variant.split("+")[1:] else 2 if "tcfb" in self.dm_exp_variant.split("+")[1:] else 1)   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
@@ -1182,6 +1183,10 @@ class DMPass0Sm100:
             )
 
 
+        # kda-sm100-fwdfence (minimal fences): mark the tcgen05 hand-off pipelines / barriers (dm_utils.tcf_mark)
+        dm_utils.tcf_mark("ua", pipeline_s_p_o, pipeline_o_acc)
+        dm_utils.tcf_mark("au", pipeline_p_lastsplit)
+        dm_utils.tcf_mark("bar", sm_stats_barrier, tmem_alloc_barrier)
         # Cluster arrive after barrier init
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
@@ -1533,6 +1538,7 @@ class DMPass0Sm100:
             )
             tmem_alloc_barrier.arrive_unaligned()
 
+        dm_utils.tcf_end()
         return
 
     @cute.jit
@@ -2273,7 +2279,8 @@ class DMPass0Sm100:
                                 cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
                             if const_expr(h == 1):
                                 cute.arch.fence_view_async_tmem_load()
-                                pipeline_s_p_o.consumer_release_w_index(stage)
+                                with dm_utils.tcf_site("r0"):
+                                    pipeline_s_p_o.consumer_release_w_index(stage)
                             if const_expr(self.is_causal):
                                 if diag:
                                     for i in cutlass.range_constexpr(64 * h, 64 * h + 64):
@@ -2323,7 +2330,8 @@ class DMPass0Sm100:
                                 cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], tdPr)
                                 if const_expr(j == 3):
                                     cute.arch.fence_view_async_tmem_load()
-                                    pipeline_dp.consumer_release_w_index(stage)
+                                    with dm_utils.tcf_site("r1"):
+                                        pipeline_dp.consumer_release_w_index(stage)
                                 if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
                                     # DEBUG (kda-sm100-fix0): raw dP accumulator dump, h2 (production) path
                                     if row < seqlen.seqlen_q:
@@ -2348,7 +2356,8 @@ class DMPass0Sm100:
                         else:
                             cute.copy(thr_tmem_load, tStS_t2r, tSrS)
                         cute.arch.fence_view_async_tmem_load()
-                        pipeline_s_p_o.consumer_release_w_index(stage)  # next S can be issued now
+                        with dm_utils.tcf_site("r2"):
+                            pipeline_s_p_o.consumer_release_w_index(stage)  # next S can be issued now
                         if const_expr(self.is_causal):
                             # keys past this row: S = -inf -> P = 0 (same as the main backward's mask)
                             if (n_block + 1) * self.n_block_size > m_block * self.m_block_size:
@@ -2370,7 +2379,8 @@ class DMPass0Sm100:
                                 cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], tdPr)
                                 if const_expr(j == n_chunks - 1):
                                     cute.arch.fence_view_async_tmem_load()
-                                    pipeline_dp.consumer_release_w_index(stage)
+                                    with dm_utils.tcf_site("r3"):
+                                        pipeline_dp.consumer_release_w_index(stage)
                                 acc0 = (Float32(0.0), Float32(0.0))
                                 acc1 = (Float32(0.0), Float32(0.0))
                                 if const_expr(self.dm_exp_variant.split("+")[0].startswith("b3_")):
@@ -2485,7 +2495,8 @@ class DMPass0Sm100:
                                 cute.copy(thr_tmem_load, tdPt_t2r[None, None, (j + rot) % n_chunks if const_expr(_r3m(self.dm_exp_variant) > 0) else j], tdPr)
                                 if const_expr(j == nc - 1):
                                     cute.arch.fence_view_async_tmem_load()
-                                    pipeline_dp.consumer_release_w_index(stage)
+                                    with dm_utils.tcf_site("r4"):
+                                        pipeline_dp.consumer_release_w_index(stage)
                                 if const_expr(self.dm_ma):
                                     # 4 independent sum P*dP_acc chains per 32-column chunk, then num += a * acc
                                     acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
@@ -2666,7 +2677,8 @@ class DMPass0Sm100:
                         tSrS[st] = cute.make_rmem_tensor(tScS_t2r[None, None, J].shape, self.qk_acc_dtype)
                         cute.copy(thr_tmem_load, tS[st][None, None, J], tSrS[st])
                         cute.arch.fence_view_async_tmem_load()
-                        pipeline_s_p_o.consumer_release_w_index(st)
+                        with dm_utils.tcf_site("r5"):
+                            pipeline_s_p_o.consumer_release_w_index(st)
                     variant = self.dm_exp_variant.split("+")[0]
                     for st in cutlass.range_constexpr(self.q_stage):
                         c = dm_common.dm_bwd_c(ksv, qsv[st])
@@ -2696,7 +2708,8 @@ class DMPass0Sm100:
                         tdPr = cute.make_rmem_tensor(tScS_t2r[None, None, J].shape, self.qk_acc_dtype)
                         cute.copy(thr_tmem_load, tdP[st][None, None, J], tdPr)
                         cute.arch.fence_view_async_tmem_load()
-                        pipeline_dp.consumer_release_w_index(st)
+                        with dm_utils.tcf_site("r6"):
+                            pipeline_dp.consumer_release_w_index(st)
                         if const_expr(self.dm_ma):
                             acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
                             for v in cutlass.range_constexpr(16):
@@ -2907,14 +2920,17 @@ class DMPass0Sm100:
                 split_P_arrive_idx = cute.size(tStP_r2t.shape[2]) * self.split_P_arrive // self.n_block_size
                 if const_expr(i + 1 == split_P_arrive_idx):
                     cute.arch.fence_view_async_tmem_store()
-                    pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
+                    with dm_utils.tcf_site("r7"):
+                        pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
         cute.arch.fence_view_async_tmem_store()
         if const_expr(self.split_P_arrive > 0):
             cute.arch.sync_warp()
+            dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
             with cute.arch.elect_one():
                 pipeline_p_lastsplit.producer_commit_w_index(s_p_o_index)
         else:
-            pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
+            with dm_utils.tcf_site("r8"):
+                pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
         if const_expr(self.use_s_ping_pong):
             pipeline_sm_stats.producer_acquire_w_index_phase(
                 s_p_o_consumer_count & 1, 1 ^ ((s_p_o_consumer_count >> 1) & 1)

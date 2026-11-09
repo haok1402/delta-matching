@@ -506,6 +506,21 @@ def cpasync_bulk_store_s2g(smem_ptr, gmem_ptr, store_bytes, *, loc=None, ip=None
 
 
 @dsl_user_op
+def cpasync_reduce_bulk_add_f32_hint(smem_ptr, gmem_ptr, store_bytes, policy: int, *, loc=None, ip=None):
+    """cp.reduce.async.bulk add.f32 with an L2 cache-policy hint (CUTLASS constants: EVICT_FIRST 0x12F0..., EVICT_LAST 0x14F0...)."""
+    smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
+    llvm.inline_asm(
+        None,
+        [gmem_ptr.llvm_ptr, smem_ptr_i32, Int32(store_bytes).ir_value(), cutlass.Int64(policy).ir_value()],
+        "cp.reduce.async.bulk.global.shared::cta.bulk_group.L2::cache_hint.add.f32 [$0], [$1], $2, $3;",
+        "l,r,r,l",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )
+
+
+@dsl_user_op
 def globaltimer(*, loc=None, ip=None) -> cutlass.Int64:
     return cutlass.Int64(llvm.inline_asm(T.i64(), [], "mov.u64 $0, %globaltimer;", "=l",
                                          has_side_effects=True, is_align_stack=False,

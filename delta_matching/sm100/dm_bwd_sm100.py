@@ -5775,6 +5775,13 @@ class DMBackwardSm100:
                     if m_block_max > 0:
                         m_block = cutlass.min(m_block, m_block_max - 1)
                     gdQaccum_cur = gdQaccum[None, None, m_block]
+                    if const_expr("dqsalt" in self.dm_abl):
+                        # DM abl:dqsalt (timing-only bound for address salting / 2 planes, WRONG dQ): odd kv blocks
+                        # add into the neighbouring m_block (m ^ 1, in range), so concurrent CTAs never share rows
+                        dm_ms = m_block
+                        if (kv_block & 1) == 1 and (m_block ^ 1) < m_block_max:
+                            dm_ms = m_block ^ 1
+                        gdQaccum_cur = gdQaccum[None, None, dm_ms]
 
                     tdQrdQ_shape = (
                         self.dQ_reduce_ncol,
@@ -5837,6 +5844,14 @@ class DMBackwardSm100:
                                         sdQaccum[None, smem_idx].iterator,
                                         gdQaccum_cur[None, stage + stage_offset].iterator,
                                         self.tma_copy_bytes["dQ"] // 1,
+                                    )
+                                elif const_expr("dqhl" in self.dm_opts or "dqhf" in self.dm_opts):
+                                    # DM dqhl / dqhf (kda-sm100-dqnd): L2 EVICT_LAST / EVICT_FIRST hint on the dQ bulk adds
+                                    dm_utils.cpasync_reduce_bulk_add_f32_hint(
+                                        sdQaccum[None, smem_idx].iterator,
+                                        gdQaccum_cur[None, stage + stage_offset].iterator,
+                                        self.tma_copy_bytes["dQ"] // 1,
+                                        0x14F0000000000000 if "dqhl" in self.dm_opts else 0x12F0000000000000,
                                     )
                                 else:
                                     copy_utils.cpasync_reduce_bulk_add_f32(

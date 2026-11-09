@@ -2291,7 +2291,10 @@ class DMBackwardSm100:
         # Reduce
         # (0, 1, 2, 3) - dQ
         if warp_idx >= self.reduce_warp_ids[0] and warp_idx <= self.reduce_warp_ids[-1]:
-            cute.arch.setmaxregister_increase(self.num_regs_reduce)
+            if const_expr(self.num_regs_reduce < 128):   # brain8k: reduce WG lowers (frees regs for compute)
+                cute.arch.setmaxregister_decrease(self.num_regs_reduce)
+            else:
+                cute.arch.setmaxregister_increase(self.num_regs_reduce)
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.dQacc_reduce(

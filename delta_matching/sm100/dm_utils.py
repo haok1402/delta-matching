@@ -408,6 +408,14 @@ def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def red_add_f64_from_f32(addr: cutlass.Int64, val: Float32, *, loc=None, ip=None):
+    """debug: red.global.add.f64 of an fp32 value (exactly widened)."""
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Float32(val).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .f64 d;\n\tcvt.f64.f32 d, $1;\n\tred.global.add.f64 [$0], d;\n\t}", "l,f",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
 def st_sys_u32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
                     "st.relaxed.sys.global.u32 [$0], $1;", "l,r", has_side_effects=True, is_align_stack=False,

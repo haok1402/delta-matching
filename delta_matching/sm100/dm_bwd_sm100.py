@@ -5032,6 +5032,26 @@ class DMBackwardSm100:
                       tSrS_cur = tSrS_t2r[None, stage, 0, 0]
                       tSrdPsum = dm_dps_all[stage]
                       for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
+                          if const_expr("rsdbg" in self.dm_opts):
+                              # DEBUG (kda-sm100-fix0): exact per-query rowsum(dS) and sum |P (dP a)| of THIS kernel's P,
+                              # dS replicated with the same scalar ops (FFMA2 == FFMA rounding), accumulated in f64
+                              for e_ in cutlass.range_constexpr(2):
+                                  i_ = 2 * v + e_
+                                  dm_qg = m_block * self.tile_m + dm_idx0[None, stage, 0, 0][i_][1]
+                                  dm_ds = tSrS_cur[i_] * cute.arch.fma_packed_f32x2(
+                                      (tdPrdP_cur[i_], tdPrdP_cur[i_]), (dm_a[stage], dm_a[stage]),
+                                      (-tSrdPsum[i_], -tSrdPsum[i_]))[0]
+                                  dm_pd = tSrS_cur[i_] * (tdPrdP_cur[i_] * dm_a[stage])
+                                  dm_rs = aux_data.tensors[4]
+                                  dm_off = cute.crd2idx((batch_idx, head_idx, dm_qg, 0), dm_rs.layout)
+                                  dm_ad = dm_rs.iterator.toint() + 8 * dm_off
+                                  dm_utils.red_add_f64_from_f32(dm_ad, dm_ds)
+                                  dm_utils.red_add_f64_from_f32(dm_ad + 8, dm_utils.absf(dm_pd))
+                                  if const_expr("pdump" in self.dm_opts):
+                                      dm_pb = aux_data.tensors[5]
+                                      dm_kg = dm_idx0[None, stage, 0, 0][i_][0]
+                                      dm_pb[batch_idx, head_idx, dm_qg, dm_kg] = tSrS_cur[i_]
+                                      aux_data.tensors[6][batch_idx, head_idx, dm_qg, dm_kg] = tdPrdP_cur[i_]
                           tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
                               (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                               (dm_a[stage], dm_a[stage]),

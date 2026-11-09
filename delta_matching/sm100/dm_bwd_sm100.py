@@ -4823,7 +4823,10 @@ class DMBackwardSm100:
                   for stage in cutlass.range_constexpr(num_stages):
                       tSrS_cur = tSrS_t2r[None, stage, 0, 0]
                       tSsLSE_cur = tSsLSE[None, stage, 0, 0, consumer_state_LSE.index]
-                      if const_expr("lseall" in self.dm_opts):
+                      if const_expr("nometa" in self.dm_abl):
+                          # ABLATION (timing only, outputs wrong): one LSE scalar per thread per stage (pmap #3 ceiling)
+                          tSrLSE = tSsLSE_cur[0]
+                      elif const_expr("lseall" in self.dm_opts):
                           tSrLSE = dm_lse_all[stage]
                       elif const_expr(not self.shuffle_LSE and "lse2" in self.dm_opts and stage > 0):
                           # lse2: a fresh register buffer per stage (no WAR on stage 0's LSE regs -> loads can hoist)
@@ -4836,7 +4839,9 @@ class DMBackwardSm100:
                       else:
                           tSrLSE = tSsLSE_cur[lane_idx]
                       for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
-                          if const_expr(not self.shuffle_LSE):
+                          if const_expr("nometa" in self.dm_abl):
+                              lse_pair = (tSrLSE, tSrLSE)
+                          elif const_expr(not self.shuffle_LSE):
                               lse_pair = (tSrLSE[2 * v], tSrLSE[2 * v + 1])
                           else:
                               lse_pair = (
@@ -5031,7 +5036,11 @@ class DMBackwardSm100:
 
                   ##### DM: dS.T = P.T * (dP.T * (vs*dos) - delta), all stages first (tile-wide dS scale)
                   # delta (dPsum) smem loads for all stages issued before the TMEM dP loads (latency overlap)
-                  if const_expr("dpsearly" not in self.dm_opts):
+                  if const_expr("nometa" in self.dm_abl):
+                      dm_dps_all = [None] * num_stages
+                      for stage in cutlass.range_constexpr(num_stages):
+                          dm_dps_all[stage] = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index][0]
+                  elif const_expr("dpsearly" not in self.dm_opts):
                       dm_dps_all = [None] * num_stages
                       for stage in cutlass.range_constexpr(num_stages):
                           tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
@@ -5071,10 +5080,14 @@ class DMBackwardSm100:
                                       if dm_kg < seqlen.seqlen_k:   # keys past N (empty half of a partial cluster)
                                           dm_pb[batch_idx, head_idx, dm_qg, dm_kg] = tSrS_cur[i_]
                                           aux_data.tensors[6][batch_idx, head_idx, dm_qg, dm_kg] = tdPrdP_cur[i_]
+                          if const_expr("nometa" in self.dm_abl):
+                              dm_dpp = (-tSrdPsum, -tSrdPsum)
+                          else:
+                              dm_dpp = (-tSrdPsum[2 * v], -tSrdPsum[2 * v + 1])
                           tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.fma_packed_f32x2(
                               (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                               (dm_a[stage], dm_a[stage]),
-                              (-tSrdPsum[2 * v], -tSrdPsum[2 * v + 1]),
+                              dm_dpp,
                           )
                           tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1] = cute.arch.mul_packed_f32x2(
                               (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]),

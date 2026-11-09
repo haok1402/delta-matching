@@ -827,6 +827,13 @@ class DMBackwardSm100:
                     self.dQ_reduce_ncol, self.sdQaccum_stage = 32, 2
                 elif "dq32s1" in _dqo:
                     self.dQ_reduce_ncol, self.sdQaccum_stage = 32, 1
+                # DM dqc=<ncol>,dqs=<stages> (kda-sm100-dqnd sweep): explicit staging geometry; same adds per element
+                _dqc = next((int(x[4:]) for x in _dqo if x.startswith("dqc=")), 0)
+                _dqs = next((int(x[4:]) for x in _dqo if x.startswith("dqs=")), 0)
+                if _dqc and not self.deterministic:   # nd only (det's delayed release allows <= 2 stages)
+                    self.dQ_reduce_ncol = _dqc
+                if _dqs and not self.deterministic:
+                    self.sdQaccum_stage = _dqs
             else:
                 self.dQ_reduce_ncol = 32
                 self.sdQaccum_stage = 64 // self.dQ_reduce_ncol

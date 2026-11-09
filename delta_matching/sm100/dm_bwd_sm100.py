@@ -537,6 +537,7 @@ class DMBackwardSm100:
         self.dm_dqstream = "dqstream" in _o
         self.dm_dsqsr = "dsqsr" in _o   # signal S-read to the dS helper right after the S load
         self.dm_dsqdv = "dsqdv" in _o   # MMA issue order: dV(t+1) before dQ(t)
+        self.dm_dsqpm = "dsqpm" in _o   # compute publishes per-warp dS maxima; helper skips its amax pass
         # planted-bug POSITIVE CONTROLS (accuracy-audit 17:45 item 2; outputs wrong by design):
         #   dsqbadraw : helper skips the fp32-dS-full wait (RAW: may read dS(t) before every compute warp stored it)
         #   dsqbadwar : helper releases dP -> dS before its pass-2 reads (WAR: dP(t+1) may overwrite fp32 dS(t) first)
@@ -5250,7 +5251,11 @@ class DMBackwardSm100:
                               (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]),
                               (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]),
                           )
-                          if const_expr(self.dm_dsq):
+                          if const_expr(self.dm_dsq and self.dm_dsqpm):
+                              # DM dsqpm: compute keeps the cheap partial max (it waits for S anyway); the helper skips pass 1
+                              ds_amax = cute.arch.fmax(
+                                  ds_amax, cute.arch.fmax(utils_abs(tdPrdP_cur[2 * v]), utils_abs(tdPrdP_cur[2 * v + 1])))
+                          elif const_expr(self.dm_dsq):
                               pass   # DM dsq: the reduce warps take the tile amax
                           elif const_expr("dsamax" not in self.dm_abl and "amaxt" in self.dm_opts):
                               dm_dsm[v % 4] = utils.fmax(
@@ -5463,6 +5468,11 @@ class DMBackwardSm100:
                   else:
                       # DM dsq: exact fp32 dS (same packed FMA / multiply as above) stored in place over dP; the reduce warps do the
                       # tile amax, scale, e4m3 codes (TMEM + SMEM), dK/dQ SFs, the peer exchange, the dP release and the dS commit
+                      if const_expr(self.dm_dsqpm):
+                          # warp max over its 32 keys x 64 queries -> sDm[cw]; ordered before the fp32-full arrive (release)
+                          dm_pm = dm_utils.redux_max_abs_f32(ds_amax)
+                          if cute.arch.lane_idx() == 0:
+                              sDm[cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0]] = dm_pm
                       if const_expr(self.dm_dsqcdly > 0):
                           dm_t_end = dm_utils.clock64() + Int64(self.dm_dsqcdly)
                           while dm_utils.clock64() < dm_t_end:
@@ -5781,15 +5791,20 @@ class DMBackwardSm100:
         nst = cute.size(dsq[0][2], mode=[1])
         # pass 1: tile amax over this warp's 32 keys x all 128 queries (max is exact: same scale byte as the 2-warp exchange)
         ds_amax = Float32(0.0)
-        for h in cutlass.range_constexpr(2):
-            for st in cutlass.range_constexpr(nst):
-                frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
-                cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
-                cute.arch.fence_view_async_tmem_load()
-                fv = frag[None, 0, 0]
-                for v in cutlass.range_constexpr(cute.size(fv) // 2):
-                    ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
-        ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
+        if const_expr(self.dm_dsqpm):
+            # the two compute warps of this quadrant published their warp maxima (H1 release covers the SMEM stores)
+            ds_amax = cute.arch.fmax(dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(dm_sdm + 4 * q)),
+                                     dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(dm_sdm + 4 * (q + 4))))
+        else:
+            for h in cutlass.range_constexpr(2):
+                for st in cutlass.range_constexpr(nst):
+                    frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
+                    cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
+                    cute.arch.fence_view_async_tmem_load()
+                    fv = frag[None, 0, 0]
+                    for v in cutlass.range_constexpr(cute.size(fv) // 2):
+                        ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
+            ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
         ds_sb = dm_utils.pow2_sb(ds_amax)
         ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
         dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)

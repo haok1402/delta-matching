@@ -17,6 +17,11 @@ from .pass0 import dm_delta
 D = 128
 
 
+def _det():
+    """DM_BWD_DET=0: non-deterministic backward (FA4-style unordered dQ / GQA dK,dV accumulation). Default 1."""
+    return os.environ.get("DM_BWD_DET", "1") != "0"
+
+
 class _DMAttnSm100(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, causal, mode):
@@ -32,11 +37,11 @@ class _DMAttnSm100(torch.autograd.Function):
     def backward(ctx, do):
         q8, qs, k8, ks, v8, vs, o, lse = ctx.saved_tensors
         do = do.contiguous()
-        dm_bwd_prestage(q8, k8, lse, ctx.causal)    # scratch alloc / zero / lse_log2 on a side stream (overlaps pass 0)
+        dm_bwd_prestage(q8, k8, lse, ctx.causal, deterministic=_det())    # scratch alloc / zero / lse_log2 on a side stream (overlaps pass 0)
         do8, dos, delta = quant_do_delta(do, o if ctx.mode == "stale" else None)   # stale delta fused
         if ctx.mode == "matched":
             delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, ctx.causal)
-        dq, dk, dv = dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal, D ** -0.5)
+        dq, dk, dv = dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal, D ** -0.5, deterministic=_det())
         return dq, dk, dv, None, None
 
 

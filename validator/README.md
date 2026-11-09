@@ -86,3 +86,10 @@ precision - the effect Delta-Matching's matched delta removes - not a kernel bug
 Random backward-P error (P_bwd *= 1 + U(-a, a), emulation, 2000 steps): matched trains at bf16 level for a up to 2e-3
 under both sm100-mx and sm100-mx-x (validate/runs/bwdp/). Under sm100-mx-x such noise reads 1e-3..4e-2 on the direct
 identity check, i.e. that check is stricter than training needs for random (non-systematic) error; kept strict by design.
+
+### Training at a target length (N = 8192, batch 2, 2000 steps, kernel 3fec800, GB200, 2026-11-09)
+| seed | bf16 | matched | stale |
+|---|---|---|---|
+| 0 | 0.6710 | 0.6810 (+0.010) | 3.120 (diverged from ~step 400) |
+| 1 | 0.8211 | 0.8281 (+0.007) | 3.199 (diverged from ~step 200) |
+Matched stays within the training-tier budget (max(2%, 0.03)) at 8k; stale diverges earlier than at 2k. (runs/train8k/)

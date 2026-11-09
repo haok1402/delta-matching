@@ -354,7 +354,13 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
                 os.environ["DM_BWD_OPTS"] = opts0_
                 _CTX.pop("pool", None)
                 _CTX.pop("prestaged", None)
-        return fastpath.call("bwd", inp, (key, _ao, float(sm), bool(deterministic)), slow, pre=pre)
+        def reset():        # verification call: re-initialise the scratch pool the slow path consumed (as a prestage)
+            _PFAST[(key, mst.cuda_stream)](lse)
+            s2 = _CTX.pop("staged")
+            mst.wait_event(s2[2])
+
+        return fastpath.call("bwd", inp, (key, _ao, float(sm), bool(deterministic)), slow, pre=pre, reset=reset,
+                             loose=() if deterministic else (0,))
     opts0 = _env("DM_BWD_OPTS", "")
     os.environ["DM_BWD_OPTS"] = _ao     # kernel knobs + compile cache follow the effective opts
     if st is not None and st[0] == key and trace is None:

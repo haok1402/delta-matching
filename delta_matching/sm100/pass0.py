@@ -84,7 +84,7 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
     inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
     # the O output of pass 0 is an unused scratch buffer: returned to the fast path (as an output) and dropped here
     return fastpath.call("pass0", inp, (bool(causal), exp_variant, repr(sorted(over.items()))),
-                         lambda: _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant))[1]
+                         lambda: _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant), cmp=[1])[1]
 
 
 def _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant):

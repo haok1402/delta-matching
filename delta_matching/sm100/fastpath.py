@@ -20,6 +20,7 @@ import torch
 
 ENABLED = os.environ.get("DM_FASTPATH", "1") != "0"
 _TLS = threading.local()
+EPOCH = [0]     # bumped by every compile-cache miss / insert, every cute.compile and every Triton specialization miss
 
 try:                        # os.environ.get without the Mapping machinery (same lookup + decode; ~10x cheaper)
     _ED, _ENC, _DEC = os.environ._data, os.environ.encodekey, os.environ.decodevalue
@@ -59,6 +60,7 @@ class TLaunch:
         e = self.c.get(k)
         if e is None:
             from triton import knobs
+            EPOCH[0] += 1
             kernel = self.jf.run(*args, grid=grid, warmup=False, **kw)
             bound = list(self.jf.device_caches[dev][4](*args, **kw)[0].values())
             ok = (kernel is not None and len(bound) >= len(args) and all(b is a for a, b in zip(args, bound))
@@ -83,7 +85,10 @@ class RecCache:
         self._c = cache
 
     def __contains__(self, k):
-        return k in self._c
+        r = k in self._c
+        if not r:
+            EPOCH[0] += 1
+        return r
 
     def __getitem__(self, k):
         fn = self._c[k]
@@ -97,10 +102,11 @@ class RecCache:
         return proxy
 
     def __setitem__(self, k, v):
+        EPOCH[0] += 1
         self._c[k] = v
 
     def get(self, k, default=None):
-        return self[k] if k in self else default
+        return self[k] if k in self else default      # a miss bumps EPOCH (via __contains__)
 
     def __getattr__(self, n):
         return getattr(self._c, n)
@@ -246,6 +252,7 @@ class Plan:
                 self.ok = False
                 self.why.append(("nonzero-scratch", nb))
         self.allocs = {p: (nb, dev, zero is True) for p, (nb, dev, zero, returned, _) in allocs.items()}
+        self.verified = False
         self.inputs_tpl = {n: (t.dtype, tuple(t.shape), tuple(t.stride())) for n, t in inputs.items() if t is not None}
         self._run = self._codegen()
 
@@ -373,8 +380,58 @@ def key_of(tag, inputs: dict, extra):
     return tuple(parts)
 
 
-def call(tag, inputs: dict, extra, slow, pre=None):
-    """slow(): runs the normal host path (must fetch compiled fns through RecCache-wrapped caches) and returns ret."""
+def _flat_ret(r):
+    return list(r) if isinstance(r, (tuple, list)) else [r]
+
+
+def _verify(k, plan, inputs, slow, pre, reset, cmp, loose):
+    """First call after recording: the normal host path (its result is returned) AND the replay on the same inputs into
+    separate outputs; the plan is enabled only if they agree bitwise (except the `loose` outputs, non-deterministic
+    accumulation order: rel. L2 <= 1e-3 and finite).  Mismatch or error -> key disabled (WHY)."""
+    ret = slow()
+    why = None
+    try:
+        if reset is not None:
+            reset()
+        if pre is not None:
+            pre()
+        rep = plan.run(inputs)
+        a, b = _flat_ret(ret), _flat_ret(rep)
+        idx = range(len(a)) if cmp is None else cmp
+        for i in idx:
+            x, y = a[i], b[i]
+            if x is None and y is None:
+                continue
+            if x.shape != y.shape or x.dtype != y.dtype:
+                why = ("verify-meta", i)
+                break
+            if i in loose:
+                xf, yf = x.float(), y.float()
+                rel = ((xf - yf).norm() / xf.norm().clamp_min(1e-30)).item()
+                if not (rel <= 1e-3 and bool(torch.isfinite(yf).all())):
+                    why = ("verify-loose", i, rel)
+                    break
+            elif not torch.equal(x.contiguous().view(torch.uint8), y.contiguous().view(torch.uint8)):   # bitwise
+                why = ("verify-mismatch", i)
+                break
+    except Exception as e:
+        why = ("verify-error", repr(e))
+    if why is None:
+        plan.verified = True
+        WHY[k] = ["verified"]
+    else:
+        _PLANS[k] = False
+        WHY[k] = [why]
+        import sys
+        print(f"[dm fastpath] plan for {k[0]} disabled: {why}", file=sys.stderr, flush=True)
+    return ret
+
+
+def call(tag, inputs: dict, extra, slow, pre=None, reset=None, cmp=None, loose=()):
+    """slow(): runs the normal host path (must fetch compiled fns through RecCache-wrapped caches) and returns ret.
+    pre(): host work the replay needs right before its kernels; reset(): restores input-side scratch the slow path
+    consumed (verification call). cmp: indices of ret compared in verification (None: all); loose: indices compared
+    with a tolerance (non-deterministic accumulation)."""
     if not ENABLED or type(next(iter(inputs.values()))) is not torch.Tensor:    # fake / subclass tensors: normal path
         return slow()
     k = key_of(tag, inputs, extra)
@@ -382,6 +439,8 @@ def call(tag, inputs: dict, extra, slow, pre=None):
     if plan is not None:
         if plan is False:
             return slow()
+        if not plan.verified:
+            return _verify(k, plan, inputs, slow, pre, reset, cmp, loose)
         if pre is not None:
             pre()
         return plan.run(inputs)
@@ -390,12 +449,27 @@ def call(tag, inputs: dict, extra, slow, pre=None):
     rec = _Recorder({_sptr(t) for t in inputs.values() if t is not None})
     _TLS.rec = rec
     orig = rec.hooks()
+    import cutlass.cute as _cute
+    ccomp = _cute.compile
+
+    def _cc(*a, **kw):
+        EPOCH[0] += 1
+        return ccomp(*a, **kw)
+    _cute.compile = _cc
+    e0 = EPOCH[0]
     try:
         ret = slow()
     finally:
+        _cute.compile = ccomp
         for n, f in orig.items():
             setattr(torch, n, f)
         _TLS.rec = None
+    if EPOCH[0] != e0:
+        # something was compiled / inserted into a compile cache during this call (cold cache): compiled functions
+        # may have been called outside the recorder (FA4's bwd calls a freshly compiled kernel directly) -> no plan
+        # from this call; a later all-hit call records.
+        WHY[k] = ["compiled-during-recording (will record on a later call)"]
+        return ret
     try:
         p = Plan(rec, inputs, ret)
         _PLANS[k] = p if (p.ok and p.calls) else False

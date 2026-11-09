@@ -1,12 +1,167 @@
 # Results: kda-sm100 candidates vs FA4 (hd128, GB200) — maintained by fa4-bench
 
-## HEADLINE (target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 06:10
+## HEADLINE (target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 07:20
+
+**07:20 RETRACTION (dm-validator + accuracy-audit): 6a313b0, 70d6aea and c3f008d FAIL.** The 6a313b0 forward defaults
+(ss_pv / kvs6 / lean) have a race that changes O (and the LSE the backward uses) between identical calls, about 1/600 calls
+in DET mode (sm100/audit/runs/fwdrace_6a31.log, validate/runs/vc3f0/). That race also explains the "nd" outliers. The
+6a313b0 headline (0.930x) and its forward speedup (+2.9% fwd) are VOID. The 43db3c7 forward: 0/3000 differ. kda-sm100
+reverted the forward default (c088751, reported bitwise = 43db3c7).
+
+**Validated headline: 43db3c7, deterministic mode, vs FA4 non-deterministic default = 0.930x FA4** causal fwd+bwd geomean over
+the 6 target shapes (nvl72013-T18, 4-GPU median per shape, measured 06:05). Reference det vs FA4-det: 0.957x.
+**Target 1.10x: +18.3% still needed.** FA4-fast-mode bound (vs FA4's bwd p10, see caveat below): 0.891x.
+Main column per the user (our non-det vs FA4 non-det): none valid (nd veto by accuracy-audit stands until re-tested on the
+reverted forward).
+
+### Modes used in every column
+
+| column | FA4 side | our side (DM) |
+|---|---|---|
+| **validated headline** | FA4 default backward = non-deterministic (atomic dQ), its fastest (05:19 sweep: tile_n 64 / pack_gqa / no-2CTA within +-2.4% noise) | deterministic (dm_attn_func default, arm `dm_matched`) |
+| main per user: no valid number (nd veto) | same | dm_attn_func(..., deterministic=False), arm `dm_nd`, refused by the API without DM_ALLOW_NONDET_DEBUG=1 |
+| reference | FA4 deterministic=True | deterministic |
+
+| 43db3c7 det vs FA4 non-det (median of 4 GPUs) | 8k | 32k | 64k |
+|---|---|---|---|
+| H16/16 | 0.808 | 0.950 | 1.007 |
+| H32/8  | 0.854 | 0.992 | 0.985 |
+| **gap to 1.10x** H16/16 | +36.1% | +15.8% | +9.2% |
+| **gap to 1.10x** H32/8 | +28.8% | +10.9% | +11.7% |
+| bwd alone, H16/16 / H32/8 | 0.780 / 0.814 | 0.877 / 0.948 | 0.965 / 0.964 |
+| fwd alone, H16/16 / H32/8 | 0.873 / 0.894 | 0.934 / 1.030 | 1.126 / 1.180 |
+| reference: det vs FA4-det, H16/16 / H32/8 | 0.834 / 0.893 | 0.961 / 1.013 | 1.033 / 1.025 |
+
+Full tables (python bench/headline.py hl_43db3c7 dm_matched):
+
+arm=dm_matched  files=results/hl_43db3c7.[sg]*.jsonl  host=nvl72013-T18
+
+vs fa4_bf16  [FA4 default backward = NON-DETERMINISTIC (atomic dQ), its fastest setting on sm100]  (speedup = fa4_bf16_ms / dm_matched_ms; dm_matched = DM build as committed)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.808 | 0.950 | 1.007 | **0.930** |
+| 1 | fwd_bwd | 32/8 | 0.854 | 0.992 | 0.985 |  |
+| 1 | fwd | 16/16 | 0.873 | 0.934 | 1.126 | 1.000 |
+| 1 | fwd | 32/8 | 0.894 | 1.030 | 1.180 |  |
+| 1 | bwd | 16/16 | 0.780 | 0.877 | 0.965 | 0.888 |
+| 1 | bwd | 32/8 | 0.814 | 0.948 | 0.964 |  |
+
+vs fa4_bf16_det  [FA4 deterministic=True backward]  (speedup = fa4_bf16_det_ms / dm_matched_ms; dm_matched = DM build as committed)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.834 | 0.961 | 1.033 | **0.957** |
+| 1 | fwd_bwd | 32/8 | 0.893 | 1.013 | 1.025 |  |
+| 1 | fwd | 16/16 | 0.868 | 0.946 | 1.120 | 1.003 |
+| 1 | fwd | 32/8 | 0.894 | 1.044 | 1.188 |  |
+| 1 | bwd | 16/16 | 0.819 | 0.934 | 0.996 | 0.939 |
+| 1 | bwd | 32/8 | 0.891 | 0.994 | 1.013 |  |
+
+gap to the 1.10x target (causal fwd+bwd vs fa4_bf16): speedup still needed = 1.10 / current
+
+| H/Hk | 8k | 32k | 64k | geomean |
+|---|---|---|---|---|
+| 16/16 | +36.1% | +15.8% | +9.2% | +18.3% |
+| 32/8 | +28.8% | +10.9% | +11.7% |  |
+
+spread across runs/GPUs (min..max of the per-GPU ratio, n = 4), causal fwd+bwd vs fa4_bf16:
+
+| H/Hk | 8k | 32k | 64k |
+|---|---|---|---|
+| 16/16 | 0.794..0.822 | 0.907..0.962 | 0.992..1.013 |
+| 32/8 | 0.827..0.867 | 0.968..1.000 | 0.979..0.996 |
+
+### Superseded / retracted 07:20 (kept for history; 6a313b0 numbers VOID)
+#### old headline (6a313b0, VOID) (target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 06:40
+
+Status source of truth: sm100/validate/VALIDATED.md. **6a313b0 = PROMOTION PASS in deterministic mode (06:35); its
+non-deterministic mode is on HOLD** (an unexplained lost/doubled-tile outlier in the nondet accumulation, the same binary as
+43db3c7 nd; evidence sm100/validate/runs/v6a31/nd/bench_0.json). So only the deterministic mode is validated.
+
+**Validated headline: 6a313b0 deterministic vs FA4 non-deterministic default = 0.930x FA4** causal fwd+bwd geomean over the 6
+target shapes (nvl72013-T18, 4-GPU median per shape). **Target 1.10x: +18.3% still needed.**
+Reference, det vs det: 0.965x (vs FA4 deterministic).
+Main column per the user = our non-det vs FA4 non-det: **none valid. accuracy-audit (06:50) ruled the nd mode a VIOLATION**
+(rare corrupted dQ block). kda-sm100 now refuses deterministic=False unless DM_ALLOW_NONDET_DEBUG=1 (c3f008d). No nd number
+is published until accuracy-audit clears a fixed nd mode.
+
+### Modes used in every column
+
+| column | FA4 side | our side (DM) |
+|---|---|---|
+| **validated headline** | FA4 default backward = non-deterministic (atomic dQ), its fastest (05:19 sweep: tile_n 64 / pack_gqa / no-2CTA all within +-2.4% noise) | deterministic (dm_attn_func default, arm `dm_matched`) |
+| main per user: nd VIOLATION (accuracy-audit 06:50), no valid number | same | dm_attn_func(..., deterministic=False), arm `dm_nd` (refused by the API from c3f008d) |
+| reference | FA4 deterministic=True | deterministic |
+
+| our det vs FA4 non-det (median of 4 GPUs) | 8k | 32k | 64k |
+|---|---|---|---|
+| H16/16 | 0.810 | 0.954 | 0.996 |
+| H32/8  | 0.855 | 0.990 | 0.991 |
+| **gap to 1.10x** H16/16 | +35.8% | +15.3% | +10.4% |
+| **gap to 1.10x** H32/8 | +28.7% | +11.1% | +11.0% |
+| bwd alone, H16/16 / H32/8 | 0.782 / 0.823 | 0.884 / 0.950 | 0.958 / 0.954 |
+| fwd alone, H16/16 / H32/8 | 0.886 / 0.917 | 0.957 / 1.063 | 1.177 / 1.212 |
+| reference: det vs FA4-det, H16/16 / H32/8 | 0.839 / 0.908 | 0.971 / 1.026 | 1.035 / 1.029 |
+
+- vs 43db3c7 det: same-lease A/B (via a970641) +0.4% fwd+bwd, fwd +2.9% (forward trims, bitwise). Sanity errors identical.
+  GPU spread <= 0.043. No SUSPECT flags.
+- Previous published non-det headline 0.936x (43db3c7 nd) is withdrawn as not validated (06:36).
+
+Full tables (python bench/headline.py hl_6a313b0 dm_matched):
+
+arm=dm_matched  files=results/hl_6a313b0.[sg]*.jsonl  host=nvl72013-T18
+
+vs fa4_bf16  [FA4 default backward = NON-DETERMINISTIC (atomic dQ), its fastest setting on sm100]  (speedup = fa4_bf16_ms / dm_matched_ms; dm_matched = DM build as committed)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.810 | 0.954 | 0.996 | **0.930** |
+| 1 | fwd_bwd | 32/8 | 0.855 | 0.990 | 0.991 |  |
+| 1 | fwd | 16/16 | 0.886 | 0.957 | 1.177 | 1.028 |
+| 1 | fwd | 32/8 | 0.917 | 1.063 | 1.212 |  |
+| 1 | bwd | 16/16 | 0.782 | 0.884 | 0.958 | 0.889 |
+| 1 | bwd | 32/8 | 0.823 | 0.950 | 0.954 |  |
+
+vs fa4_bf16_det  [FA4 deterministic=True backward]  (speedup = fa4_bf16_det_ms / dm_matched_ms; dm_matched = DM build as committed)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.839 | 0.971 | 1.035 | **0.965** |
+| 1 | fwd_bwd | 32/8 | 0.908 | 1.026 | 1.029 |  |
+| 1 | fwd | 16/16 | 0.885 | 0.978 | 1.156 | 1.033 |
+| 1 | fwd | 32/8 | 0.920 | 1.077 | 1.223 |  |
+| 1 | bwd | 16/16 | 0.819 | 0.940 | 1.001 | 0.938 |
+| 1 | bwd | 32/8 | 0.882 | 0.995 | 1.008 |  |
+
+gap to the 1.10x target (causal fwd+bwd vs fa4_bf16): speedup still needed = 1.10 / current
+
+| H/Hk | 8k | 32k | 64k | geomean |
+|---|---|---|---|---|
+| 16/16 | +35.8% | +15.3% | +10.4% | +18.3% |
+| 32/8 | +28.7% | +11.1% | +11.0% |  |
+
+spread across runs/GPUs (min..max of the per-GPU ratio, n = 4), causal fwd+bwd vs fa4_bf16:
+
+| H/Hk | 8k | 32k | 64k |
+|---|---|---|---|
+| 16/16 | 0.801..0.824 | 0.916..0.959 | 0.986..1.005 |
+| 32/8 | 0.828..0.858 | 0.970..1.000 | 0.978..1.002 |
+
+### Superseded 06:40 (kept for history)
+#### old headline (target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 06:10
+
+> **06:36 HOLD on the non-deterministic mode (dm-validator):** one bench call (64k MHA, stale) showed a 128-row block off by
+> 3.0e-2 rel (normal 2e-4), which looks like a lost or doubled tile in the non-det dQ (or GQA dK/dV) accumulation. 43db3c7 nd
+> uses the same binary. **So the non-det numbers below (0.936x) are NOT validated and must not be quoted as the headline.**
+> The validated number is the deterministic mode: 43db3c7 det vs FA4 non-det 0.930x, det vs FA4-det 0.957x. 6a313b0 (det PASS)
+> headline follows. Evidence: sm100/validate/runs/v6a31/nd/bench_0.json.
 
 Status source of truth: sm100/validate/VALIDATED.md. **43db3c7 = PROMOTION PASS in BOTH modes (validator 06:00), the newest
 validated commit, no OPEN accuracy items** (= a970641 + the deterministic=False switch; pass 0 / delta / P / dP / dS
 unchanged, so rowsum(dS)=0 at round-off in both modes). It supersedes a970641.
 
-**MAIN (user, non-det vs non-det): 43db3c7 non-deterministic vs FA4 non-deterministic default = 0.936x FA4** causal fwd+bwd,
+**[INVALID: nd mode = VIOLATION, accuracy-audit 06:50] MAIN (user, non-det vs non-det): 43db3c7 non-deterministic vs FA4 non-deterministic default = 0.936x FA4** causal fwd+bwd,
 geomean over the 6 target shapes, nvl72013-T18, 4-GPU median per shape. **Target 1.10x: +17.6% still needed.**
 Reference (det vs det): 43db3c7 deterministic vs FA4 deterministic = 0.957x.
 
@@ -73,6 +228,23 @@ spread across runs/GPUs (min..max of the per-GPU ratio, n = 4), causal fwd+bwd v
 |---|---|---|---|
 | 16/16 | 0.791..0.818 | 0.918..0.974 | 1.000..1.014 |
 | 32/8 | 0.833..0.873 | 0.976..1.011 | 0.986..1.004 |
+
+
+### Measurement caveat (06:55): FA4's backward time is BIMODAL; median-vs-median is the headline, a FA4-best-case bound is given
+Within every timing round FA4's bwd calls fall into a fast and a slow mode: at 32k H16/16, p10 7.2 ms vs p90 8.7 ms (20%).
+The DM kernel is tight (9.40-9.44 ms). The round medians are stable (8.15-8.54 ms), so this is not drift from the
+interleaving. The headline compares medians (our median vs FA4's median, standard). Against FA4's fast mode (its p10) the
+6a313b0 det number would be **0.894x** instead of 0.930x (per shape 0.800 / 0.903 / 0.954 | 0.822 / 0.938 / 0.961), and
+against FA4's single best call 0.854x. The CUPTI kernel-sum clock (5 samples per arm, run after the rounds) happened to land
+in FA4's fast mode (0.906x). Our kernels: CUPTI = events within 2% (no work escapes the timed region, det and nd). Cause (07:05 experiment, bench/exp/fa4_bimodal.py, FA4 alone, 200 calls):
+the spread is inherent to FA4's backward. Standalone it gives median 8.38 ms, p10 7.93, min 7.29, with 61% of calls in the faster
+half. That matches the interleaved headline runs (median ~8.3), so median-vs-median is representative. The L2 flush has no
+effect. The SM clock stayed at 2062 MHz (coarse NVML sample), so clocks are an unlikely cause. Without the pre-spin FA4
+reads 7% slower (Python launch latency would be counted), which confirms the harness design.
+
+### [FAIL 07:20: carries the 6a313b0 forward race] Pre-measured c3f008d (TwoSum pass-0 sums + nd veto guard) vs 70d6aea (= 6a313b0 code), same lease, 07:02
+matched causal fwd+bwd +0.4% geomean (kernel time 0.994..1.005 per shape; bwd +0.6..1.2%, fwd unchanged), sanity bitwise.
+Single-GPU ratio 0.933x -> 0.936x FA4 (0.968x vs det).
 
 ---
 

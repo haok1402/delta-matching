@@ -271,6 +271,9 @@ class DMPass0Sm100:
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         self.dm_nd = "nd" in _fl0   # no denominator: sum_j P := 1 (P is normalized by the forward LSE)
+        # +ni: the correction WG and non-scheduler empty warps have no per-tile work in pass 0: they leave the
+        # dynamic-scheduler consumer group and skip the schedule walk (no CLC-response spin stealing issue slots)
+        self.dm_ni = "ni" in _fl0
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
             assert not any(f in _fl for f in ("fu", "fa", "sq")), "c3 supports the plain static-mix path only"
@@ -1247,6 +1250,8 @@ class DMPass0Sm100:
                 cutlass_pipeline.Agent.Thread
             )
             num_sched_consumer_warps_per_cta = self.threads_per_cta // cute.arch.WARP_SIZE
+            if const_expr(self.dm_ni and not self.dm_c3):
+                num_sched_consumer_warps_per_cta -= len(self.correction_warp_ids) + len(self._dm_idle_empty_warps())
             # NB on CTA0 warp15 == scheduler on CTA1 == empty but still both consume
             num_sched_consumer_warps = num_sched_consumer_warps_per_cta * self.cta_group_size
             sched_consumer_group = cutlass_pipeline.CooperativeGroup(
@@ -1314,7 +1319,8 @@ class DMPass0Sm100:
             for i in cutlass.range_constexpr(len(self.empty_warp_ids)):
                 if warp_idx == self.empty_warp_ids[i] and warp_idx != self.scheduler_warp_id:
                     cute.arch.setmaxregister_decrease(self.num_regs_other)
-                    self.empty_warp(tile_scheduler)
+                    if const_expr(not (self.dm_ni and not self.dm_c3)):
+                        self.empty_warp(tile_scheduler)
         else:
             for i in cutlass.range_constexpr(len(self.empty_warp_ids)):
                 if warp_idx == self.empty_warp_ids[i]:
@@ -2807,9 +2813,14 @@ class DMPass0Sm100:
         tile_scheduler=None,
     ):
         """P0: no O to correct; only walk the tile schedule (CLC / dynamic schedulers count every warp)."""
-        work_tile = tile_scheduler.initial_work_tile_info()
-        while work_tile.is_valid_tile:
-            work_tile = tile_scheduler.advance_to_next_work()
+        if const_expr(not (self.dm_ni and self.dynamic_persistent)):
+            work_tile = tile_scheduler.initial_work_tile_info()
+            while work_tile.is_valid_tile:
+                work_tile = tile_scheduler.advance_to_next_work()
+
+    def _dm_idle_empty_warps(self):
+        """Empty warps that are not the scheduler warp (they only walk the schedule)."""
+        return tuple(w for w in self.empty_warp_ids if w != self.scheduler_warp_id)
 
     @cute.jit
     def correction_rescale(

@@ -2702,8 +2702,18 @@ class DMForwardSm100:
         # p~ = exp2(x - kb + 7) in [0, 256) -> e4m3 code; SFA_b = 2^(kb - 7 - m), SFB_b = vs_b; m = integer running max.
         dm_c = [dm_qsc * dm_ks[j] for j in range(4)]
         dm_bmax = [None] * 4
+        dm_lean = const_expr(self.dm_opts.get("lean", "0") == "1")
         for j in cutlass.range_constexpr(4):
-            if const_expr(self.dm_opts.get("max3", "1") == "1"):
+            if const_expr(dm_lean):
+                # C5: 16 FMNMX3 per 32-key block (4 independent chains), exact max -> bitwise
+                b0 = 32 * j
+                lm = [utils.fmax(tSrS_t2r[b0 + 3 * t], tSrS_t2r[b0 + 3 * t + 1], tSrS_t2r[b0 + 3 * t + 2])
+                      for t in range(4)]
+                for i in cutlass.range_constexpr(12, 32, 2):
+                    t = ((i - 12) // 2) % 4
+                    lm[t] = utils.fmax(lm[t], tSrS_t2r[b0 + i], tSrS_t2r[b0 + i + 1])
+                v = utils.fmax(utils.fmax(lm[0], lm[1], lm[2]), lm[3])
+            elif const_expr(self.dm_opts.get("max3", "1") == "1"):
                 b0 = 32 * j
                 lm = [utils.fmax(tSrS_t2r[b0], tSrS_t2r[b0 + 1]), utils.fmax(tSrS_t2r[b0 + 2], tSrS_t2r[b0 + 3]),
                       utils.fmax(tSrS_t2r[b0 + 4], tSrS_t2r[b0 + 5]), utils.fmax(tSrS_t2r[b0 + 6], tSrS_t2r[b0 + 7])]
@@ -2716,7 +2726,10 @@ class DMForwardSm100:
                 for i in cutlass.range_constexpr(1, 32):
                     v = cute.arch.fmax(v, tSrS_t2r[32 * j + i])
             dm_bmax[j] = v * dm_c[j]
-        dm_xmax = cute.arch.fmax(cute.arch.fmax(dm_bmax[0], dm_bmax[1]), cute.arch.fmax(dm_bmax[2], dm_bmax[3]))
+        if const_expr(dm_lean):
+            dm_xmax = utils.fmax(utils.fmax(dm_bmax[0], dm_bmax[1], dm_bmax[2]), dm_bmax[3])
+        else:
+            dm_xmax = cute.arch.fmax(cute.arch.fmax(dm_bmax[0], dm_bmax[1]), cute.arch.fmax(dm_bmax[2], dm_bmax[3]))
         dm_mcand = dm_utils.ceil_f32(dm_xmax)
         acc_scale = Float32(1.0)
         row_max = dm_mcand
@@ -2739,8 +2752,13 @@ class DMForwardSm100:
             kb = cute.arch.fmax(dm_utils.floor_f32(dm_bmax[j]), Float32(-1e30))
             e = kb - Float32(7.0) - m_safe
             dm_bias[j] = Float32(7.0) - kb
-            dm_w[j] = dm_utils.exp2i_f32(e)
-            dm_sfa[j] = dm_utils.ue8m0_byte(e)
+            if const_expr(dm_lean):
+                # one cvt/clamp builds the UE8M0 byte; the weight 2^e is the same byte shifted into the fp32 exponent
+                dm_sfa[j] = dm_utils.ue8m0_byte(e)
+                dm_w[j] = dm_utils.byte_shl23_f32(dm_sfa[j])
+            else:
+                dm_w[j] = dm_utils.exp2i_f32(e)
+                dm_sfa[j] = dm_utils.ue8m0_byte(e)
         sfa_word = dm_utils.bitcast_i32_f32(dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3]))
         if const_expr(self.dm_opts.get("kvpack", "1") == "1"):
             sfb_word = dm_utils.bitcast_i32_f32(dm_vw)

@@ -51,6 +51,14 @@ def ue8m0_byte(e: Float32, *, loc=None, ip=None) -> Int32:
 
 
 @dsl_user_op
+def byte_shl23_f32(b: Int32, *, loc=None, ip=None) -> Float32:
+    """bitcast(b << 23): 2^(b - 127) for a UE8M0 byte b in [1, 254], +0 for b == 0 (= exp2i_f32 of the same e)."""
+    return Float32(llvm.inline_asm(T.f32(), [Int32(b).ir_value(loc=loc, ip=ip)], "shl.b32 $0, $1, 23;", "=f,r",
+                                   has_side_effects=False, is_align_stack=False,
+                                   asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
 def pow2_exponent_byte(s: Float32, *, loc=None, ip=None) -> Int32:
     """Biased exponent field of a power-of-2 fp32 (= its UE8M0 byte)."""
     return Int32(llvm.inline_asm(

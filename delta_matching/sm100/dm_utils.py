@@ -659,3 +659,23 @@ def st_shared_v4_b32(addr: Int32, a: Int32, b: Int32, c: Int32, d: Int32, *, loc
 def bitcast_f32_i32(x: Float32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=r,f",
                                  has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+@dsl_user_op
+def red_add_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
+    """red.global.add.v4.f32 (sm_90+): 4 contiguous fp32 adds, 16-byte aligned address."""
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+                    "red.relaxed.gpu.global.add.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f", has_side_effects=True,
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def st_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+                    "st.global.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f", has_side_effects=True,
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def fence_acq_rel_gpu(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "fence.acq_rel.gpu;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)

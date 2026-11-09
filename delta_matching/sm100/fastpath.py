@@ -384,10 +384,39 @@ def _flat_ret(r):
     return list(r) if isinstance(r, (tuple, list)) else [r]
 
 
+ND_REL, ND_BLK, ND_ELEM = 2e-4, 5e-4, 1.6e-2     # = dm-validator's run-to-run limits (whole, 128-row block, element)
+
+
+def _nd_spread(x, y):
+    """None if y is within the validator's non-deterministic run-to-run limits of x ((B, N, H, D) gradients): finite,
+    whole-tensor rel L2 <= 2e-4, every (batch, 128-row block, head) rel L2 <= 5e-4, every element |y - x| <= 1.6e-2 of
+    its row's max |x| (2 bf16 ulp).  Else the first violated criterion."""
+    xf, yf = x.float(), y.float()
+    if not bool(torch.isfinite(yf).all()):
+        return ("nonfinite",)
+    d = yf - xf
+    rel = (d.norm() / xf.norm().clamp_min(1e-30)).item()
+    if rel > ND_REL:
+        return ("whole", rel)
+    if xf.dim() == 4 and xf.shape[1] % 128 == 0:
+        B, N, H, D = xf.shape
+        xb = xf.view(B, N // 128, 128, H, D).permute(0, 1, 3, 2, 4).reshape(B, N // 128, H, -1)
+        db = d.view(B, N // 128, 128, H, D).permute(0, 1, 3, 2, 4).reshape(B, N // 128, H, -1)
+        blk = (db.norm(dim=-1) / xb.norm(dim=-1).clamp_min(1e-30)).max().item()
+        if blk > ND_BLK:
+            return ("block", blk)
+        el = (d.abs() / xf.abs().amax(dim=-1, keepdim=True).clamp_min(1e-30)).max().item()
+        if el > ND_ELEM:
+            return ("elem", el)
+    else:
+        return ("shape", tuple(xf.shape))
+    return None
+
+
 def _verify(k, plan, inputs, slow, pre, reset, cmp, loose):
     """First call after recording: the normal host path (its result is returned) AND the replay on the same inputs into
     separate outputs; the plan is enabled only if they agree bitwise (except the `loose` outputs, non-deterministic
-    accumulation order: rel. L2 <= 1e-3 and finite).  Mismatch or error -> key disabled (WHY)."""
+    accumulation order: dm-validator's run-to-run limits, _nd_spread).  Mismatch or error -> key disabled (WHY)."""
     ret = slow()
     why = None
     try:
@@ -406,10 +435,9 @@ def _verify(k, plan, inputs, slow, pre, reset, cmp, loose):
                 why = ("verify-meta", i)
                 break
             if i in loose:
-                xf, yf = x.float(), y.float()
-                rel = ((xf - yf).norm() / xf.norm().clamp_min(1e-30)).item()
-                if not (rel <= 1e-3 and bool(torch.isfinite(yf).all())):
-                    why = ("verify-loose", i, rel)
+                bad = _nd_spread(x, y)
+                if bad is not None:
+                    why = ("verify-loose", i, bad)
                     break
             elif not torch.equal(x.contiguous().view(torch.uint8), y.contiguous().view(torch.uint8)):   # bitwise
                 why = ("verify-mismatch", i)

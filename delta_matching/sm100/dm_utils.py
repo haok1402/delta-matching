@@ -765,6 +765,31 @@ def _tcf_install():
         f = getattr(_A, n, None)
         if f is not None:
             setattr(_A, n, _tcf_wrap(f, b, a))
+    # warp -> elected-leader relays (Codex review 1): every lane fences its own tcgen05 ops before the warp sync, so the
+    # leader's later arrive publishes the whole warp's ops. elect.sync already requires the full warp, so the added
+    # bar.warp.sync is legal wherever elect_one is.
+    _sw = _A.sync_warp
+    _A.sync_warp = _tcf_wrap(_sw, True, True)
+    _el = _A.elect_one
+    if not getattr(_el, "_dm_tcf", False):
+        def elect_one(*a, **kw):
+            if TCF[0]:
+                tc_fence_before()
+                _sw()
+            return _el(*a, **kw)
+        elect_one._dm_tcf = True
+        elect_one.__doc__ = _el.__doc__
+        _A.elect_one = elect_one
+    # flash_attn NamedBarrier.arrive_and_wait_unaligned calls nvvm.barrier_cta_sync directly (bypasses cute.arch.barrier)
+    try:
+        import flash_attn.cute.pipeline as _fp
+        _nb = _fp.NamedBarrier
+        for n, b, a in (("arrive_and_wait_unaligned", True, True), ("arrive_unaligned", True, False)):
+            f = _nb.__dict__.get(n)
+            if f is not None:
+                setattr(_nb, n, _tcf_wrap(f, b, a))
+    except Exception:   # pragma: no cover
+        pass
 
 
 _tcf_install()

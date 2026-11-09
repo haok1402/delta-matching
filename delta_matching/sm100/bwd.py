@@ -280,6 +280,8 @@ def _dm_post_convert(acc, out, *a, **k):
     """FA4 postprocess wrapper: skipped for dQ when the kernel's last writer already wrote bf16 dQ (DM lwc)."""
     if _CTX.get("dq") is not None and out is _CTX["dq"]:
         return
+    if "abl:nopost" in _env("DM_BWD_OPTS", "").split(","):
+        return      # gap8k timing-only ablation: skip every fp32 -> bf16 postprocess (WRONG dq/dk/dv)
     return _ORIG_POST(acc, out, *a, **k)
 
 

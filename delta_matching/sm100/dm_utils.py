@@ -687,3 +687,17 @@ def st_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float3
 def fence_acq_rel_gpu(*, loc=None, ip=None):
     llvm.inline_asm(None, [], "fence.acq_rel.gpu;", "", has_side_effects=True, is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def tc_fence_after(*, loc=None, ip=None):
+    """tcgen05.fence::after_thread_sync: order later tcgen05 ops after a preceding thread sync (mbarrier wait)."""
+    llvm.inline_asm(None, [], "tcgen05.fence::after_thread_sync;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def tc_fence_before(*, loc=None, ip=None):
+    """tcgen05.fence::before_thread_sync: order earlier tcgen05 ops before a following thread sync (mbarrier arrive)."""
+    llvm.inline_asm(None, [], "tcgen05.fence::before_thread_sync;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)

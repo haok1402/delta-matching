@@ -121,6 +121,7 @@ def main():
     ap.add_argument("candidate")
     ap.add_argument("--tool", default="memcheck")
     ap.add_argument("--log", default=None)
+    ap.add_argument("--shape", default=None, help="run only sanitizer shape index i (0-4): one racecheck shard per lease")
     ap.add_argument("--timeout", type=float, default=600.0, help="seconds; a hang under the sanitizer is a FAIL "
                     "(racecheck with lineinfo: 1500 by default, the small q_stage-1 shapes compile under the sanitizer)")
     ap.add_argument("--accept-sites", default=None, metavar="NOTE",
@@ -132,6 +133,8 @@ def main():
     tgt, sep, fn = a.candidate.partition(":")
     cand = os.path.abspath(tgt) + sep + fn
     env = dict(os.environ, PYTORCH_NO_CUDA_MEMORY_CACHING="1")
+    if a.shape is not None:
+        env["DMVAL_SAN_SHAPE"] = str(a.shape)
     lineinfo_dir = None
     if a.tool == "racecheck" and os.environ.get("DMVAL_RACE_LINEINFO", "1") != "0":
         # hazard sites keyed by SOURCE (file:line), not PC (lead 2026-11-09): kernels built with line info, in a fresh

@@ -32,7 +32,13 @@ sup = getattr(mod, "SUPPORTS", {}) or {}
 m = int(sup.get("seqlen_multiple", 128))
 up = lambda n: max(m, (n + m - 1) // m * m)  # noqa: E731
 SHAPES = [(1, 4, 4, up(1152)), (1, 4, 1, up(384)), (1, 8, 2, up(1408)), (2, 2, 2, up(128)), (1, 4, 4, up(1024))]
-for (B, H, Hk, N) in SHAPES:
+import time as _t
+_sel = os.environ.get("DMVAL_SAN_SHAPE")                 # shard: run one shape only (racecheck shards fit the 20-min lease cap)
+_t0 = _t.time()
+for _i, (B, H, Hk, N) in enumerate(SHAPES):
+    if _sel is not None and str(_i) != _sel:
+        continue
+    print(f"shape {_i} start B{B} H{H}/{Hk} N{N} t={_t.time() - _t0:.0f}s", flush=True)
     for causal in ((True, False) if sup.get("noncausal", True) else (True,)):
         g = torch.Generator(device="cuda").manual_seed(N + H)
         q, k, v, do = [torch.randn(B, N, h, 128, device="cuda", generator=g).bfloat16() for h in (H, Hk, Hk, H)]
@@ -45,5 +51,5 @@ for (B, H, Hk, N) in SHAPES:
             if mode == "matched" and hasattr(mod, "debug"):
                 mod.debug(q, k, v, do, causal, mode)
             torch.cuda.synchronize()
-        print("ok", B, H, Hk, N, causal, flush=True)
+        print("ok", B, H, Hk, N, causal, f"t={_t.time() - _t0:.0f}s", flush=True)
 print("SANITIZE_CHILD_DONE", flush=True)

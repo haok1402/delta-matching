@@ -80,6 +80,15 @@ COLSUM_RATIO, COLSUM_ABS = 2.0, 1e-4
 # emulated backward driven by the candidate's own reported delta
 ID_TOL = 1e-3
 BIND_ABS, BIND_REL = 3e-3, 0.05
+# zero-sum invariant at fp32 round-off (user rule): per case, the candidate's identity residual may exceed the exact
+# emulation's own residual (fp32 arithmetic, same P for delta and dS) by at most this factor; floor for cases at ~1e-7
+ROUNDOFF_MULT, ID_FLOOR = 4.0, 1e-5
+# no accuracy regression (user rule) vs the frozen baseline kernel, per case (full / bench: fixed seeds): measured
+# summation-order noise between validated commits is <= 3.4e-4 relative; allowed 5e-3 relative + 1e-5 absolute
+BASELINE = os.environ.get("DMVAL_BASELINE", os.path.expanduser("~/workspace/haok1402/sm100/validate/baseline.json"))
+REG_REL, REG_ABS = 5e-3, 1e-5
+# promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
+ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 
 
 def rel(a, b):
@@ -190,12 +199,20 @@ def cached_refs(case, preset, q, k, v, do, exact, qbk, dev):
     path = _cache_path(case, preset) if (CACHE and case.get("cached")) else None
     if path and os.path.exists(path):
         d = torch.load(path, weights_only=False)
-        return {kk: {n: (t.to(dev) if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in d.items()}
-    keep = ("O", "LSE", "dQ", "dK", "dV", "delta", "rowsum_dS", "colsum_dK")
+        if "em_matched" not in d or "id_roundoff" in d:      # entries without the round-off identity level: recompute
+            return {kk: {n: (t.to(dev) if torch.is_tensor(t) else t) for n, t in vv.items()} for kk, vv in d.items()}
+    keep = ("O", "LSE", "dQ", "dK", "dV", "delta", "rowsum_dS", "colsum_dK", "sum_PdP", "sum_P", "sum_absPdP")
     out = {"ex": exact(q, k, v, do, causal)}
     if causal or case.get("matched_ok"):
         em = R.dm_reference(q, k, v, do, causal, "matched", preset, aux=True, q_block=qbk)
         out["em_matched"] = {n: em[n] for n in keep if n in em}
+        # fp32 round-off level of the identity for this case: the exact emulation's own fp32 LSE and delta pushed through
+        # exactly the path a candidate's debug() values go through (P recomputed from the stored LSE)
+        es = R.dm_reference(q, k, v, do, causal, "matched", preset, aux=True, lse_override=em["LSE"].float(),
+                            delta_override=em["delta"].float(), q_block=qbk)
+        r = ((em["delta"].double() * es["sum_P"] - es["sum_PdP"]).abs() / es["sum_absPdP"].clamp_min(1e-300))
+        r = r[es["sum_absPdP"] > 0]
+        out["id_roundoff"] = {"value": torch.tensor(r.max().item() if r.numel() else 0.0)}
         out["eb_matched"] = R.dm_reference(q, k, v, do, causal, "matched", "bf16", q_block=qbk)
     out["eb_stale"] = R.dm_reference(q, k, v, do, causal, "stale", "bf16", q_block=qbk)
     if path:
@@ -291,6 +308,12 @@ def build_cases(tier, supports, seed):
 
 
 # ---------------------------------------------------------------------------------------------------------- checking
+BASE_ID, BASE_METRICS = None, {}
+if os.path.exists(BASELINE):
+    _b = json.load(open(BASELINE))
+    BASE_ID, BASE_METRICS = _b.get("commit"), _b.get("cases", {})
+
+
 def check_case(case, cr, preset, dev, verbose):
     """Compare one case's candidate outputs with exact attention and the emulation.  Returns (ok, record)."""
     rec = {"name": case["name"], "checks": {}, "metrics": {}}
@@ -406,6 +429,13 @@ def check_case(case, cr, preset, dev, verbose):
                 rec["metrics"]["matched:debug_delta"] = m
                 chk("matched:debug_lse", bool((lse_err <= lse_tol).all()),
                     f"candidate LSE vs the {preset} emulation: max |diff| {m['lse_maxabs']:.3e}")
+                # fp32 round-off level of THIS case (cached with the references): the exact emulation's own residual
+                m["emul_rowsum_rel_max"] = float(refs["id_roundoff"]["value"]) if "id_roundoff" in refs else 0.0
+                id_tol = min(ID_TOL, max(ROUNDOFF_MULT * m["emul_rowsum_rel_max"], ID_FLOOR))
+                chk("matched:rowsum_dS_roundoff", m["rowsum_rel_max"] <= id_tol,
+                    f"identity {m['rowsum_rel_max']:.2e} > {ROUNDOFF_MULT} x the exact emulation's own residual "
+                    f"{m['emul_rowsum_rel_max']:.2e} (floor {ID_FLOOR:.0e}): rowsum(dS)=0 is not at fp32 round-off - "
+                    f"pass 0 must recompute exactly the backward's P / dP")
                 chk("matched:rowsum_dS_direct", m["rowsum_rel_max"] <= ID_TOL,
                     f"|delta sum P - sum P dP| / sum |P dP| = {m['rowsum_rel_max']:.2e} (mean {m['rowsum_rel_mean']:.1e}), "
                     f"allowed {ID_TOL:.0e}; stale-mode deltas sit at 1e-2..1")
@@ -424,6 +454,18 @@ def check_case(case, cr, preset, dev, verbose):
         chk("modes_share_dV", torch.equal(a[3], b[3]), "dV differs between matched and stale")
         if do.float().abs().max() > 0 and ex["dQ"].double().norm() > 1e-4 * ex["dV"].double().norm():
             chk("modes_differ_dQ", not torch.equal(a[1], b[1]), "matched and stale dQ are bitwise equal")
+    if case.get("cached") and BASE_METRICS.get(case["name"]):
+        bm = BASE_METRICS[case["name"]]
+        for key, m in rec["metrics"].items():
+            b = bm.get(key)
+            if not b:
+                continue
+            if "err" in m and "err" in b and case["kind"] not in ("lowrank_v", "zero_do"):
+                chk(f"{key}:no_regression", m["err"] <= b["err"] * (1 + REG_REL) + REG_ABS,
+                    f"error {m['err']:.5f} vs baseline {BASE_ID} {b['err']:.5f} (allowed +{REG_REL:.1%} + {REG_ABS:.0e})")
+            if key == "matched:debug_delta" and "lse_maxabs" in b:
+                chk("matched:lse_no_regression", m.get("lse_maxabs", 0) <= b["lse_maxabs"] * 1.25 + 1e-6,
+                    f"LSE error {m.get('lse_maxabs', 0):.2e} vs baseline {b['lse_maxabs']:.2e}")
     for key, out in runs.items():
         mode, kind = key.split("/")
         base = runs[f"{mode}/plain"]
@@ -481,6 +523,9 @@ def main():
         print("FAIL: candidate import\n" + meta["fatal"]); sys.exit(1)
     preset = a.preset or meta["meta"].get("NUMERICS") or "sm90"
     supports = meta["meta"].get("SUPPORTS") or {}
+    if preset not in ACCEPTED_NUMERICS and not os.environ.get("DMVAL_SELFTEST") and not FWD_ONLY:
+        print(f"FAIL: NUMERICS={preset!r} is not an accepted spec {ACCEPTED_NUMERICS}: only numerics at least as accurate "
+              f"as sm100-mx are promotable (user: operations that trade away accuracy are banned)"); sys.exit(1)
     if preset not in R.PRESETS:
         print(f"FAIL: NUMERICS={preset!r} is not a preset of reference.py ({sorted(R.PRESETS)})"); sys.exit(1)
     cases = build_cases(a.tier, supports, seed)

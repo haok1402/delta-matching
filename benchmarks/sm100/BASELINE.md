@@ -40,6 +40,12 @@ Measured nvl72052-T18 GPUs 2-3 with the filler on the other GPUs (results/focus_
 | 16/16 non-causal | 0.691 (1591) | 2.626 (1466) | 2.739 (1405) | 2.693 (1429) | 0.696 (1579) |
 | 32/8 non-causal | 1.284 (1713) | 5.353 (1438) | 5.487 (1403) | 5.827 (1321) | 1.382 (1591) |
 
+**Baseline freshness check (2026-11-09, kda-sm100-fa4up):** latest upstream FA4 (Dao-AILab 478b5b0) vs our pinned b2edfab9,
+attnbench --arms fa4, focus suite (causal 8k/32k/64k, H16/16 and H32/8), fwd/bwd/fwd_bwd, 2 reps, same GPU: every shape
+within +-1%. So the pinned FA4 is still FA4's state of the art on sm100 for these shapes, and the baseline is unchanged. Logs:
+sm100/kda/runs/fa4up_base/. Combined with the 05:19 config sweep (bench/results/fa4sweep.s0.jsonl: no FA4 backward option is
+faster than its default beyond +-2.4% noise), the main baseline is FA4's fastest non-deterministic backward.
+
 ---
 
 Owner: fa4-bench. Measured 2026-11-08 on nvl72063-T13 (gpupool node), torch 2.14.1+cu130, FA4 = flash-attn-4 @ b2edfab9

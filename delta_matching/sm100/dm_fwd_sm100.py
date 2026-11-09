@@ -3086,6 +3086,7 @@ class DMForwardSm100:
             xb = v * c
             dm_utils.st_shared_b32(self.dm_slbuf + 4 * ((s * 4 + q) * self.m_block_size + tidx), dm_utils.bitcast_f32_i32(xb))
             dm_utils.tc_fence_before()     # this warp's S loads ordered before the kb-published arrival (SF overwrites S)
+            dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
             cute.arch.sync_warp()
             with cute.arch.elect_one():
                 dm_utils.mbar_arrive(self.dm_slbar + 8 * s)
@@ -3101,6 +3102,7 @@ class DMForwardSm100:
             cute.arch.fence_view_async_tmem_store()
             dm_utils.tc_fence_before()     # P tcgen05.st ordered before the P-full arrival (PV reads it)
             if const_expr(self.dm_opts.get("warr", "0") == "1"):
+                dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
                 cute.arch.sync_warp()
                 with cute.arch.elect_one():
                     pipeline_s_p_o.consumer_release_w_index(s)
@@ -3115,6 +3117,7 @@ class DMForwardSm100:
                     dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * s, (nstep - 1) & 1)
             dm_utils.st_shared_b32(self.dm_slbuf + 4 * (1024 + (s * 4 + q) * self.m_block_size + tidx),
                                    dm_utils.bitcast_f32_i32(bsum))
+            dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
             cute.arch.sync_warp()
             with cute.arch.elect_one():
                 dm_utils.mbar_arrive(self.dm_slbar + 16 + 8 * s)
@@ -3234,6 +3237,7 @@ class DMForwardSm100:
                         cute.arch.fence_view_async_tmem_load()   # (k == 0) previous tile's epilogue O loads done
                         dm_utils.tc_fence_before()
                         if const_expr(self.dm_opts.get("warr", "0") == "1"):
+                            dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
                             cute.arch.sync_warp()
                             with cute.arch.elect_one():
                                 pipeline_s_p_o.consumer_release_w_index(s)    # SF written + O rescaled (+ O free at k == 0)
@@ -3246,6 +3250,7 @@ class DMForwardSm100:
                                 dm_utils.nanosleep_1us()
                         bs = [dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(
                             self.dm_slbuf + 4 * (1024 + (s * 4 + j) * self.m_block_size + tidx))) for j in range(4)]
+                        dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
                         cute.arch.sync_warp()
                         with cute.arch.elect_one():
                             dm_utils.mbar_arrive(self.dm_slbar + 32 + 8 * s)

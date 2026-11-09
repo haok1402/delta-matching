@@ -534,6 +534,7 @@ class DMBackwardSm100:
         _o = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
         self.dm_dsqw = "dsqw" in _o
         self.dm_noreg = "dsqnoreg" in _o   # debug: no setmaxnreg at all
+        self.dm_dqstream = "dqstream" in _o   # stream the dQ drain in 32-column t2r chunks
         self.dsq_warp_ids = (16, 17, 18, 19) if self.dm_dsqw else ()
         if self.dm_dsqw:
             r_ = [int(x) for x in next((o[5:] for o in _o if o.startswith("dsqr=")), "80:120:72:88").split(":")]
@@ -6093,12 +6094,13 @@ class DMBackwardSm100:
                     pipeline_dQ.consumer_wait(dQ_consumer_state)
                     # TMEM -> RMEM
                     tdQrdQ_t2r = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
-                    cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
-                    cute.arch.fence_view_async_tmem_load()
-                    cute.arch.sync_warp()
-                    with cute.arch.elect_one():
-                        pipeline_dQ.consumer_release(dQ_consumer_state)
-                    dQ_consumer_state.advance()
+                    if const_expr(not self.dm_dqstream):
+                        cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
+                        cute.arch.fence_view_async_tmem_load()
+                        cute.arch.sync_warp()
+                        with cute.arch.elect_one():
+                            pipeline_dQ.consumer_release(dQ_consumer_state)
+                        dQ_consumer_state.advance()
                     if const_expr(self.deterministic and "dqearly" in self.dm_opts):
                         # DM dqearly: the dQ tile is already in registers and its TMEM (= the S columns) handed back to
                         # the MMA warp; only now poll the deterministic order (same adds, same order: bitwise)
@@ -6147,6 +6149,19 @@ class DMBackwardSm100:
                                     1,
                                 )
                     for stage in cutlass.range_constexpr(cute.size(tdQrdQ, mode=[1]) if const_expr("dqnone" not in self.dm_abl and "dqred" not in self.dm_opts) else 0):
+                        if const_expr(self.dm_dqstream and (stage * self.dQ_reduce_ncol) % self.dQ_reduce_ncol_t2r == 0):
+                            # DM dqstream: TMEM -> RMEM one 32-column t2r chunk at a time (only 32 dQ floats live); the
+                            # dQ TMEM slot is released after the last chunk is in registers. Same values, same adds.
+                            dm_ts = stage * self.dQ_reduce_ncol // self.dQ_reduce_ncol_t2r
+                            dm_rk = cute.rank(tdQtdQ_t2r)
+                            cute.copy(thr_copy_t2r, tdQtdQ_t2r[(None, dm_ts) + (None,) * (dm_rk - 2)],
+                                      tdQrdQ_t2r[(None, dm_ts) + (None,) * (dm_rk - 2)])
+                            cute.arch.fence_view_async_tmem_load()
+                            if const_expr(dm_ts == cute.size(tdQrdQ_t2r_shape, mode=[1]) - 1):
+                                cute.arch.sync_warp()
+                                with cute.arch.elect_one():
+                                    pipeline_dQ.consumer_release(dQ_consumer_state)
+                                dQ_consumer_state.advance()
                         smem_idx = dQ_tma_store_producer_state.index
                         tdQsdQ_r2s = tdQsdQ[None, None, smem_idx]
                         tdQrdQ_r2s = cute.make_tensor(tdQrdQ[None, stage].iterator, tdQsdQ_r2s.shape)

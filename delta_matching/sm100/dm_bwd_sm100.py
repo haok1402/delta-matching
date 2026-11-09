@@ -2332,6 +2332,7 @@ class DMBackwardSm100:
                 self.dsq_loop(
                     thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
                     sDm, storage.dm_xchg_mbar.data_ptr(), aux_data, block_info, SeqlenInfoCls, TileSchedulerCls,
+                    dm_tr=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts and "trace" in self.dm_opts) else None,
                 )
                 tmem_alloc_barrier.arrive()
 
@@ -5681,12 +5682,19 @@ class DMBackwardSm100:
         self, dsq, tidx: Int32, q: Int32, thr_mma_S, work_n: Int32, m_block: Int32, head_idx: Int32, kv_head: Int32,
         batch_idx: Int32, seqlen, aux_data, sdS, sdS_xchg_src, pipeline_dP, pipeline_dS, dsq_dP_state, dsq_dS_state,
         dS_cluster_full_mbar_ptr, dm_sdm: Int32, dm_mbar: Int32, cta_rank: Int32, dsq_j: Int32, dsq_sr: Int32, dsq_last,
+        dm_tr=None,
     ):
         """DM dsq: quantize dS of one m_block (the reduce warps' share of compute_loop's dS phase, same values)."""
         lane_base = q * 32
+        if const_expr(dm_tr is not None):
+            dm_tq = dm_utils.clock64()
         # fp32 dS of this tile stored by every compute warp
         dm_utils.mbar_wait_parity(dm_mbar + 8 * 9, dsq_j & 1)
         dm_utils.tc_fence_after()
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 44, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq = dm_utils.clock64()
         # scales: query blocks of the 4 (half, stage) chunks, key block of this warp (hoisted per tile like compute)
         dm_idx = [dsq[h][0].partition_D(self._cluster_S_coords(thr_mma_S, work_n, 0)) for h in range(2)]
         dm_kv_blk = dm_idx[0][0][0] // 32
@@ -5723,6 +5731,10 @@ class DMBackwardSm100:
                 c = cute.make_fragment_like(fv, self.ds_dtype)
                 c.store(fq.load().to(self.ds_dtype))
                 codes[h][st] = c
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 45, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq = dm_utils.clock64()
         # dK operand: dS codes (TS A operand) + dK SFA / constant SFB, then release dP -> dS to the MMA warp
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
@@ -5741,8 +5753,16 @@ class DMBackwardSm100:
         cute.arch.sync_warp()
         with cute.arch.elect_one():
             pipeline_dP.consumer_release(dsq_dP_state)
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 46, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq = dm_utils.clock64()
         # dQ operand: dS codes in SMEM (own query half) + the peer's half in the exchange buffer
         pipeline_dS.producer_acquire(dsq_dS_state)
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 47, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq = dm_utils.clock64()
         exchange_stage = cta_rank ^ 1
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
@@ -5771,16 +5791,31 @@ class DMBackwardSm100:
             copy_utils.cpasync_bulk_s2cluster(
                 sdS_xchg_src.iterator, sdS.iterator + cta_rank * stage_copy_elems, dS_cluster_full_mbar_ptr,
                 stage_copy_bytes, peer_cta_rank_in_cluster=peer)
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 48, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq = dm_utils.clock64()
         # pipeline_dS(t): dQ(t) overwrites the S tail -> every compute warp must have loaded S(t+1) first
         if not dsq_last:
             dm_utils.mbar_wait_parity(dm_mbar + 8 * 10, dsq_sr & 1)
             dm_utils.tc_fence_after()
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 49, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq = dm_utils.clock64()
         self._dm_write_dq_sf(dsq_j, dm_sdm, dm_mbar, cta_rank)
         cute.arch.fence_view_async_tmem_store()
         dm_utils.tc_fence_before()
         cute.arch.sync_warp()
         with cute.arch.elect_one():
             pipeline_dS.producer_commit(dsq_dS_state)
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 50, Int64(dm_utils.clock64() - dm_tq))
+            dm_tq = dm_utils.clock64()
+        if const_expr(dm_tr is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 51, Int64(1))
 
     def _dm_setmaxreg_dec(self, n: int):
         if not self.dm_noreg:   # trace-time python
@@ -5793,7 +5828,7 @@ class DMBackwardSm100:
     @cute.jit
     def dsq_loop(
         self, thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr, sDm,
-        dm_xchg_mbar, aux_data, block_info, SeqlenInfoCls, TileSchedulerCls,
+        dm_xchg_mbar, aux_data, block_info, SeqlenInfoCls, TileSchedulerCls, dm_tr=None,
     ):
         """DM dsqw: the dS-quantization warpgroup walks the same (work tile, head, m_block) stream as the compute warps."""
         tidx = cute.arch.thread_idx()[0] % (4 * cute.arch.WARP_SIZE)
@@ -5833,7 +5868,7 @@ class DMBackwardSm100:
                     self._dsq_quant_tile(
                         dsq, tidx, q, thr_mma_S, work_n, m_block, head_idx, kv_head, batch_idx, seqlen, aux_data, sdS,
                         dsq_xchg_src, pipeline_dP, pipeline_dS, dsq_dP_state, dsq_dS_state, dS_cluster_full_mbar_ptr,
-                        dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last)
+                        dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last, dm_tr=dm_tr)
                     dsq_dP_state.advance()
                     dsq_dS_state.advance()
                     if not dsq_last:

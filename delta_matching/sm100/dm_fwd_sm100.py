@@ -407,8 +407,12 @@ class DMForwardSm100:
         # (only where ss_pv is supported: q_stage == 2, 1-CTA, no S ping-pong; short N picks q_stage = 1 -> old path)
         # REVERTED 2026-11-09 (dm-validator: ss_pv/kvs6/lean default races, ~1% of repeated det calls corrupt one O tile):
         # defaults OFF again = the 43db3c7 forward; the knobs stay opt-in via DM_FWD_OPTS for debugging.
-        if False and self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1:
-            for _k, _v in (("ss_pv", "1"), ("kvs", "6"), ("lean", "1")):
+        # kda-sm100-sspv2 (2026-11-09): default = OLD path (ss_pv OFF) + lean=1 + kvs=6. Bitwise vs the 43db3c7 forward
+        # (lean: exact block max via FMNMX3 + weight 2^e from the UE8M0 byte, equal to exp2i_f32 for every e; kvs: K/V ring
+        # depth only); no new hand-off. Every race-free ss_pv sScale protocol costs +34..45% fwd (kda/docs/fwdrw-design.md
+        # 6.9; branch kda-sm100-sspv2-late), so ss_pv stays opt-in. "ss_pv=0,lean=0,kvs=99" = the previous forward.
+        if self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1:
+            for _k, _v in (("ss_pv", "0"), ("kvs", "6"), ("lean", "1")):
                 self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
         if "split" in self.dm_opts:

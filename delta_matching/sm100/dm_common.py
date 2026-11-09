@@ -44,7 +44,7 @@ def _ex2_f16x2(x0: Float32, x1: Float32, *, loc=None, ip=None):
         "mov.b32 {lo, hi}, h;\n\t"
         "cvt.f32.f16 $0, lo;\n\t"
         "cvt.f32.f16 $1, hi;\n\t}",
-        "=f,=f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+        "=f,=f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
     return (Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
             Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)))
 

@@ -294,6 +294,25 @@ def tmem_st_x4(addr: Int32, w0: Int32, w1: Int32, w2: Int32, w3: Int32, *, loc=N
 
 
 @dsl_user_op
+def tmem_roundtrip_x16(addr: Int32, *, loc=None, ip=None):
+    """TIMING-ONLY (track Z2 abl:dvrt): tcgen05.ld 16 cols of this thread's lane at addr, wait::ld, tcgen05.st them back.
+    Values are unchanged unless an MMA writes the same columns concurrently (then results are wrong: ablation only)."""
+    regs = ", ".join(f"r{i}" for i in range(16))
+    asm = ("{\n\t.reg .b32 " + regs + ";\n\t"
+           "tcgen05.ld.sync.aligned.32x32b.x16.b32 {" + regs + "}, [$0];\n\t"
+           "tcgen05.wait::ld.sync.aligned;\n\t"
+           "tcgen05.st.sync.aligned.32x32b.x16.b32 [$0], {" + regs + "};\n\t}")
+    llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip)], asm, "r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def tmem_wait_st(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "tcgen05.wait::st.sync.aligned;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
 def bytes4_same(b: Int32, *, loc=None, ip=None) -> Int32:
     """Replicate a byte into all 4 bytes of a word."""
     return Int32(llvm.inline_asm(T.i32(), [Int32(b).ir_value(loc=loc, ip=ip)],

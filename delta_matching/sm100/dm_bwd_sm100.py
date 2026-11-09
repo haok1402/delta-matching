@@ -5830,6 +5830,13 @@ class DMBackwardSm100:
                         dsq, tidx, q, thr_mma_S, work_n, m_block, head_idx, kv_head, batch_idx, seqlen, aux_data, sdS,
                         dsq_xchg_src, pipeline_dP, pipeline_dS, dsq_dP_state, dsq_dS_state, dS_cluster_full_mbar_ptr,
                         dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last)
+                    if const_expr("dvrt" in self.dm_abl):
+                        # TIMING-ONLY track Z2 bound: one full dV accumulator TMEM->reg->TMEM round trip per tile (64 KiB per
+                        # CTA: this warp's 32 lanes x 128 cols), the optimistic transfer cost of parking dV outside TMEM.
+                        dvrt_base = (Int32(32) * q << 16) + Int32(self.tmem_dV_offset)
+                        for dvrt_c in cutlass.range_constexpr(0, 128, 16):
+                            dm_utils.tmem_roundtrip_x16(dvrt_base + Int32(dvrt_c))
+                        dm_utils.tmem_wait_st()
                     dsq_dP_state.advance()
                     dsq_dS_state.advance()
                     if not dsq_last:

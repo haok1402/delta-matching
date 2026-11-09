@@ -45,13 +45,23 @@ class _DMAttnSm100(torch.autograd.Function):
         return dq, dk, dv, None, None, None
 
 
+_ND_VETO = ("non-deterministic backward is VETOED by accuracy-audit (2026-11-09: rare lost/doubled dQ tile contribution "
+            "under investigation in fork kda-sm100-ndrace). Set DM_ALLOW_NONDET_DEBUG=1 only for debugging.")
+
+
+def _check_nd(det):
+    if not det and os.environ.get("DM_ALLOW_NONDET_DEBUG", "0") != "1":
+        raise RuntimeError(_ND_VETO)
+    return det
+
+
 def dm_attn_func(q, k, v, causal=True, mode="matched", deterministic=None):
     """deterministic: None -> env DM_DETERMINISTIC / DM_BWD_DET (default deterministic); False -> non-deterministic
     backward (unordered dQ / GQA dK,dV accumulation). Either way delta and dS use bitwise the same P/dP."""
     assert q.shape[-1] == D and q.dtype == torch.bfloat16 and q.shape[1] % 128 == 0
     assert mode in ("matched", "stale")
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
-    det = _det() if deterministic is None else bool(deterministic)
+    det = _check_nd(_det() if deterministic is None else bool(deterministic))
     return _DMAttnSm100.apply(q, k, v, causal, mode, det)
 
 
@@ -82,7 +92,7 @@ def dm_attn_debug(q, k, v, do, causal=True, mode="matched", identity=None, deter
         os.environ["DM_BWD_OPTS"] = ",".join([o for o in old.split(",") if o] + ["rsdbg"])
         try:
             dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm, trace=rs,
-                        deterministic=_det() if deterministic is None else bool(deterministic))
+                        deterministic=_check_nd(_det() if deterministic is None else bool(deterministic)))
         finally:
             os.environ["DM_BWD_OPTS"] = old
         out["rowsum_dS"] = rs[..., 0].float().contiguous()

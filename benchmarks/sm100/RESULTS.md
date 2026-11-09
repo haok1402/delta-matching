@@ -1,30 +1,114 @@
 # Results: kda-sm100 candidates vs FA4 (hd128, GB200) — maintained by fa4-bench
 
+## HEADLINE (user target: causal, N = 4k / 8k / 32k / 64k; shapes = bench/headline_shapes.json, 8 shapes), updated 2026-11-09 01:36
+
+> **02:15: all 4 GPUs are evolution GPUs again. cc1dbf2 validated (02:05) = new headline commit.**
+> Provisional (same-lease single GPU, nvl72131-T16 GPU 2): **0.912x FA4** causal fwd+bwd geomean over the 8 target shapes
+> (0.948x vs FA4-det), +0.6% vs 4ea8bd5 (GQA 4k +4.4%). The 4-GPU-median headline (run_headline.sh) is queued after the
+> running e646cb1 A/B.
+
+> **02:06 user: causal only.** headline_shapes.json = 8 causal shapes (4k/8k/32k/64k x H16/16, H32/8). The headline was
+> already causal-only. Non-causal numbers in older sections are history.
+
+> **01:52, new node nvl72131-T16 (evolve GPU 2, single-GPU from now on).** The headline commit 3fec800/4ea8bd5 re-measured
+> there: **0.906x FA4** causal fwd+bwd geomean over the 8 target shapes (0.945x vs FA4-det). The 4-GPU median on
+> nvl72052-T18 was 0.917x: a -1.2% node/GPU difference, inside the stated +-1.5% placement uncertainty. Per N (H16/16 | H32/8):
+> 4k 0.817 | 0.772, 8k 0.838 | 0.865, 32k 0.977 | 1.005, 64k 1.010 | 1.003.
+
+**Validated 3fec800 (= 4ea8bd5; matched / Delta-Matching, deterministic bwd), nvl72052-T18, per-shape median across
+GPUs: causal fwd+bwd geomean over the 8 target shapes = 0.917x FA4 (0.951x vs FA4 deterministic).** Non-causal 0.950x.
+
+| matched causal fwd+bwd vs FA4 (median across GPUs) | 4k | 8k | 32k | 64k |
+|---|---|---|---|---|
+| H16/16 | 0.815 | 0.861 | 0.992 | 1.022 |
+| H32/8  | 0.767 | 0.886 | 1.017 | 1.015 |
+| bwd alone, H16/16 / H32/8 | 0.807 / 0.730 | 0.827 / 0.843 | 0.921 / 0.950 | 0.961 / 0.948 |
+| fwd alone, H16/16 / H32/8 | 0.864 / 0.901 | 0.958 / 1.007 | 1.052 / 1.173 | 1.246 / 1.302 |
+
+- **Adding 4k (user) lowers the geomean from 0.963x (8k/32k/64k) to 0.917x.** 4k is now the weakest length:
+  0.82x (MHA) and 0.77x (GQA). Both its bwd (0.73-0.81x) and its fwd (0.86-0.90x) are behind FA4. At 32k-64k it is at or
+  above FA4.
+- 4k cells are the median of 2 GPUs (GPUs 1-2; training had not started yet), and 8k-64k are the median of 4 GPUs.
+  4k GPU spread is small: 0.809-0.821 (H16) and 0.757-0.778 (H32). At 4k FA4 is less power-bound.
+- FA4 baseline at 4k (B=8, median ms): causal fwd+bwd 1.567 (H16/16, 1228 TF) and 2.989 (H32/8, 1288 TF); non-causal 2.626 / 5.353.
+  FA4-fp8 fwd at 4k is 1.15x / 1.09x FA4 bf16 fwd (causal). Details in BASELINE.md.
+- Method: bench/run_headline.sh (all GPUs) where possible. From now on (3 GPUs train), single-GPU runs are calibrated
+  with hl_4ea8bd5 (now including 4k).
+
+Full tables (python bench/headline.py hl_4ea8bd5):
+
+arm=dm_matched  files=results/hl_4ea8bd5.[sg]*.jsonl  host=nvl72052-T18
+
+vs fa4_bf16  (speedup = fa4_bf16_ms / dm_matched_ms)
+
+| causal | pass | H/Hk | 4k | 8k | 32k | 64k | geomean (8 shapes) |
+|---|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.815 | 0.861 | 0.992 | 1.022 | **0.917** |
+| 1 | fwd_bwd | 32/8 | 0.767 | 0.886 | 1.017 | 1.015 |  |
+| 1 | fwd | 16/16 | 0.864 | 0.958 | 1.052 | 1.246 | 1.052 |
+| 1 | fwd | 32/8 | 0.901 | 1.007 | 1.173 | 1.302 |  |
+| 1 | bwd | 16/16 | 0.807 | 0.827 | 0.921 | 0.961 | 0.870 |
+| 1 | bwd | 32/8 | 0.730 | 0.843 | 0.950 | 0.948 |  |
+| 0 | fwd_bwd | 16/16 | 0.841 | 0.915 | 1.010 | 1.006 | 0.950 |
+| 0 | fwd_bwd | 32/8 | 0.846 | 0.971 | 1.030 | 1.001 |  |
+| 0 | fwd | 16/16 | 0.912 | 0.993 | 1.098 | 1.214 | 1.073 |
+| 0 | fwd | 32/8 | 0.964 | 1.023 | 1.191 | 1.241 |  |
+| 0 | bwd | 16/16 | 0.816 | 0.854 | 0.947 | 0.953 | 0.893 |
+| 0 | bwd | 32/8 | 0.776 | 0.909 | 0.982 | 0.926 |  |
+
+vs fa4_bf16_det  (speedup = fa4_bf16_det_ms / dm_matched_ms)
+
+| causal | pass | H/Hk | 4k | 8k | 32k | 64k | geomean (8 shapes) |
+|---|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.846 | 0.890 | 1.017 | 1.047 | **0.951** |
+| 1 | fwd_bwd | 32/8 | 0.800 | 0.950 | 1.046 | 1.049 |  |
+| 1 | fwd | 16/16 | 0.864 | 0.960 | 1.064 | 1.233 | 1.050 |
+| 1 | fwd | 32/8 | 0.901 | 1.011 | 1.167 | 1.275 |  |
+| 1 | bwd | 16/16 | 0.847 | 0.863 | 0.970 | 0.998 | 0.917 |
+| 1 | bwd | 32/8 | 0.769 | 0.915 | 1.003 | 1.005 |  |
+| 0 | fwd_bwd | 16/16 | 0.877 | 0.940 | 1.058 | 1.053 | 0.982 |
+| 0 | fwd_bwd | 32/8 | 0.867 | 1.001 | 1.042 | 1.038 |  |
+| 0 | fwd | 16/16 | 0.912 | 0.993 | 1.086 | 1.221 | 1.070 |
+| 0 | fwd | 32/8 | 0.965 | 1.023 | 1.179 | 1.233 |  |
+| 0 | bwd | 16/16 | 0.861 | 0.913 | 1.009 | 1.021 | 0.941 |
+| 0 | bwd | 32/8 | 0.821 | 0.949 | 0.991 | 0.980 |  |
+
+spread across runs/GPUs (min..max of the per-GPU ratio, n = 4), causal fwd+bwd vs fa4_bf16:
+
+| H/Hk | 4k | 8k | 32k | 64k |
+|---|---|---|---|---|
+| 16/16 | 0.809..0.821 | 0.826..0.889 | 0.980..1.012 | 0.998..1.027 |
+| 32/8 | 0.757..0.778 | 0.878..0.915 | 0.996..1.031 | 1.001..1.024 |
+
+---
+
 All rows are measured by attnbench.py. The candidate and FA4 are timed in the same process on the same GPU, interleaved
 in 6 rounds, with every GPU busy (4 shards). Speedup = FA4_ms / cand_ms, geomean over 12 shapes (H16/16 + H32/8,
 N 1k-32k). "e2e" means the time starts from bf16 q/k/v, so the quantization producers are included, as in training.
 
-> **Stale mode diverges in training** at sm100-mx precision (dm-validator, 2026-11-08; see validator/README.md). Its speed is reported for reference only; the headline is **matched, causal, fwd+bwd**.
+> **Stale mode is reported for reference only.** The headline is **matched (Delta-Matching), causal, fwd+bwd**.
 
 | date | cand (sha) | pass | causal geomean (min-max) | non-causal geomean (min-max) | FA4 fp8 fwd same run | rel.err O vs fp32 | raw |
 |---|---|---|---|---|---|---|---|
 | 2026-11-08 17:38 | C1-v1 fwd e2e (811db9e) | fwd | 0.902 (0.624-1.170) | 0.936 (0.705-1.161) | 1.173 / 1.030 | 5.0-5.7e-2 | results/c1v1_fwd.s*.jsonl |
 | 2026-11-08 17:53 | B1 fwd+bwd, stale mode, deterministic bwd (kda/cands/b1_cur.py @ wt/kda-sm100 7ed21b0) | fwd_bwd | 0.639 (0.368-1.003) vs FA4; 0.661 vs FA4-det | 0.728 (0.438-1.089); 0.746 vs FA4-det | - | O 5e-2, dQ/dK 6.7e-2, dV 5e-2 | results/b1_stale.s*.jsonl |
 | 2026-11-08 18:23 | FULL matched (api.dm_attn_func, pinned snap 6a31419: C1-v2 fwd + P0 kernel + B1 det bwd) | fwd_bwd | **0.729** (0.537-0.891); 0.756 vs FA4-det | 0.771 (0.587-0.945); 0.793 vs FA4-det | - | O 5e-2, dQ/dK 6.5e-2, dV 5e-2 | results/full_6a31419.s*.jsonl |
-| 2026-11-08 18:23 | FULL stale [diverges in training] (same build) | fwd_bwd | 0.686 (0.385-1.047); 0.711 vs FA4-det | 0.800 (0.462-1.169); 0.823 vs FA4-det | - | same | same |
+| 2026-11-08 18:23 | FULL stale  [reference only] (same build) | fwd_bwd | 0.686 (0.385-1.047); 0.711 vs FA4-det | 0.800 (0.462-1.169); 0.823 vs FA4-det | - | same | same |
 | 2026-11-08 18:53 | FULL matched (snap 02016db: stale delta fused into dO quantizer) | fwd_bwd | **0.730** (0.538-0.893); 0.758 vs FA4-det | 0.772 (0.589-0.942); 0.796 vs FA4-det | - | no SUSPECT | results/full_02016db.s*.jsonl |
-| 2026-11-08 18:53 | FULL stale [diverges in training] (snap 02016db) | fwd_bwd | 0.861 (0.592-1.097); 0.894 vs FA4-det | 0.945 (0.672-1.186); 0.975 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 18:53 | FULL stale  [reference only] (snap 02016db) | fwd_bwd | 0.861 (0.592-1.097); 0.894 vs FA4-det | 0.945 (0.672-1.186); 0.975 vs FA4-det | - | no SUSPECT | same |
 | 2026-11-08 19:16 | FULL matched (snap 5a912b2: P0-v2, deg-5 FMA ex2 polynomial in pass 0) | fwd_bwd | **0.729** (0.540-0.893); 0.760 vs FA4-det | 0.789; 0.809 vs FA4-det | - | no SUSPECT | results/full_5a912b2.s*.jsonl |
-| 2026-11-08 19:16 | FULL stale [diverges in training] (snap 5a912b2) | fwd_bwd | 0.858; 0.894 vs FA4-det | 0.950; 0.973 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 19:16 | FULL stale  [reference only] (snap 5a912b2) | fwd_bwd | 0.858; 0.894 vs FA4-det | 0.950; 0.973 vs FA4-det | - | no SUSPECT | same |
 | 2026-11-08 19:40 | FULL matched (snap d227693: B1-v3, delta smem loads hoisted; numerics bitwise = 5a912b2) | fwd_bwd | **0.763** (+4.7% vs 5a912b2); 0.791 vs FA4-det | 0.802 (+1.7%); 0.826 vs FA4-det | - | no SUSPECT | results/full_d227693.s*.jsonl |
-| 2026-11-08 19:40 | FULL stale [diverges in training] (snap d227693) | fwd_bwd | 0.906; 0.940 vs FA4-det | 0.971; 1.000 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 19:40 | FULL stale  [reference only] (snap d227693) | fwd_bwd | 0.906; 0.940 vs FA4-det | 0.971; 1.000 vs FA4-det | - | no SUSPECT | same |
 | 2026-11-08 20:10 | **VALIDATED** FULL matched (snap 21b6b15, in validate/VALIDATED.md; = d227693 + debug hook) on nvl72053-T07 | fwd_bwd | **0.745** (0.551-0.931); 0.776 vs FA4-det | 0.796; 0.821 vs FA4-det | - | no SUSPECT | results/full_21b6b15.s*.jsonl |
-| 2026-11-08 20:10 | FULL stale [diverges in training] (snap 21b6b15) | fwd_bwd | 0.884; 0.921 vs FA4-det | 0.966; 0.996 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 20:10 | FULL stale  [reference only] (snap 21b6b15) | fwd_bwd | 0.884; 0.921 vs FA4-det | 0.966; 0.996 vs FA4-det | - | no SUSPECT | same |
 | 2026-11-08 21:20 | VALIDATED FULL matched, snap 3122cc4 (= a911afe NaN fix + P0-v3 exp mix + OOB clamp), nvl72053-T07 GPUs 0,1,3 | fwd_bwd | **0.752** (0.551-0.94); 0.781 vs FA4-det | 0.805; 0.829 vs FA4-det | - | no SUSPECT | results/full_3122cc4g3.s*.jsonl |
-| 2026-11-08 21:20 | FULL stale [diverges in training], snap 3122cc4 | fwd_bwd | 0.890; 0.924 vs FA4-det | 0.968; 0.996 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 21:20 | FULL stale  [reference only], snap 3122cc4 | fwd_bwd | 0.890; 0.924 vs FA4-det | 0.968; 0.996 vs FA4-det | - | no SUSPECT | same |
 | 2026-11-08 21:55 | VALIDATED FULL matched, snap 30ec6cf (= 3122cc4 + aaca3a0 P0-v4 + 0c3f1e1), nvl72053-T07 GPUs 0-3, same lease as 3122cc4 | fwd_bwd | **0.757** (+1.0% vs 3122cc4 same lease); 0.789 vs FA4-det | 0.807; 0.832 vs FA4-det | - | no SUSPECT | results/ab_3122cc4_30ec6cf_30ec6cf.s*.jsonl |
-| 2026-11-08 22:25 | **VALIDATED (current headline)** FULL matched, snap 9c690e1 (= 30ec6cf + e2e glue + bwd2; bitwise = 30ec6cf), nvl72053-T07 GPUs 1-3, same lease as 30ec6cf | fwd_bwd | **0.794** (0.581-0.961; +5.2% vs 30ec6cf same lease); 0.827 vs FA4-det | 0.850; 0.876 vs FA4-det | - | no SUSPECT | results/ab_30ec6cf_9c690e1_9c690e1.s*.jsonl |
-| 2026-11-08 22:25 | FULL stale [diverges in training], snap 9c690e1 | fwd_bwd | 0.943; 0.982 vs FA4-det | 1.031; 1.063 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 22:25 | VALIDATED FULL matched, snap 9c690e1 (= 30ec6cf + e2e glue + bwd2; bitwise = 30ec6cf), nvl72053-T07 GPUs 1-3, same lease as 30ec6cf | fwd_bwd | **0.794** (0.581-0.961; +5.2% vs 30ec6cf same lease); 0.827 vs FA4-det | 0.850; 0.876 vs FA4-det | - | no SUSPECT | results/ab_30ec6cf_9c690e1_9c690e1.s*.jsonl |
+| 2026-11-08 22:25 | FULL stale  [reference only], snap 9c690e1 | fwd_bwd | 0.943; 0.982 vs FA4-det | 1.031; 1.063 vs FA4-det | - | no SUSPECT | same |
+| 2026-11-08 23:30 | **VALIDATED (current headline)** FULL matched, snap 5b50ab2 (= 69f570a + posmaj GQA schedule; bitwise = 69f570a), nvl72052-T18 GPUs 2-3, same lease as 69f570a | fwd_bwd | **0.817** (0.626-0.988; +1.6% vs 69f570a same lease); 0.854 vs FA4-det | 0.895; 0.924 vs FA4-det | - | no SUSPECT | results/ab_69f570a_5b50ab2_5b50ab2.s*.jsonl |
+| 2026-11-08 23:30 | FULL stale  [reference only], snap 5b50ab2 | fwd_bwd | 0.975; 1.019 vs FA4-det | 1.092; 1.128 vs FA4-det | - | no SUSPECT | same |
 
 ### Notes on C1-v1 (fwd only, no bwd yet)
 - It is faster than FA4 only at long sequences: 1.05-1.17x at 16k-32k, where FA4 hits the power cap and its clock drops.
@@ -269,7 +353,7 @@ Noise floor (A vs A-repeat): per-shape 0.993-1.007.
 - matched causal bwd per N: H16/16 +9.5/+8.9/+8.8/+8.1/+8.5/+8.4% (1k..32k); H32/8 +5.8/+5.0/+4.6/+4.9/+4.3/+4.4%. fwd unchanged.
 - matched causal fwd+bwd vs FA4 per N: H16/16 0.795/0.798/0.790/0.820/0.849/0.931; H32/8 0.581/0.642/0.709/0.822/0.924/0.961.
   Short GQA (1k-2k) is the weakest point.
-- matched non-causal 0.850x (+5.6%). Stale [diverges in training] now beats FA4 on non-causal (1.031x fwd+bwd, bwd 1.044x).
+- matched non-causal 0.850x (+5.6%). Stale [reference only] now beats FA4 on non-causal (1.031x fwd+bwd, bwd 1.044x).
 - Sanity errors vs fp32 are identical to 30ec6cf (O 5.0-5.7e-2, dQ/dK 6.4-6.7e-2, dV 4.9-5.5e-2): the speed-up does not
   come from changed numerics. No SUSPECT flags.
 - This becomes the headline once it is in validate/VALIDATED.md (same node: this run is reused).
@@ -305,3 +389,203 @@ A vs A-repeat:
 | dm_stale | 1 | bwd | 0.878 | 0.876 | -0.2% | 0.931 | 0.999..1.004 | 12 |
 | dm_stale | 1 | fwd | 0.887 | 0.888 | +0.0% | 0.889 | 0.998..1.007 | 12 |
 | dm_stale | 1 | fwd_bwd | 0.889 | 0.889 | -0.0% | 0.923 | 0.999..1.005 | 12 |
+
+### 69f570a (bwd mskipu: CTA-uniform causal-mask skip below the diagonal) vs 9c690e1, same-lease A/B/A, GPUs 0-3 nvl72053-T07, VALIDATED 23:02 (superseded by 5b50ab2 at 23:17) (22:40)
+Noise floor 0.997-1.002. matched causal bwd +1.1% (every shape 1.004-1.012); matched causal fwd+bwd 0.797x -> 0.802x
+FA4 (+0.6%; 0.836x vs det). Non-causal unchanged (as expected for a causal-mask change). No SUSPECT flags.
+(9c690e1 measured 0.797x here on GPUs 0-3 vs 0.794x on GPUs 1-3 before: placement noise, as documented.)
+
+B vs A:
+| arm | causal | pass | 9c690e1 | 69f570a | change | 69f570a vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.811 | 0.813 | +0.2% | 0.851 | 0.997..1.003 | 12 |
+| dm_matched | 0 | fwd | 0.941 | 0.939 | -0.2% | 0.938 | 0.999..1.002 | 12 |
+| dm_matched | 0 | fwd_bwd | 0.853 | 0.851 | -0.3% | 0.878 | 0.989..1.006 | 12 |
+| dm_matched | 1 | bwd | 0.762 | 0.770 | +1.1% | 0.815 | 1.004..1.012 | 12 |
+| dm_matched | 1 | fwd | 0.892 | 0.893 | +0.1% | 0.893 | 0.999..1.003 | 12 |
+| dm_matched | 1 | fwd_bwd | 0.797 | 0.802 | +0.6% | 0.836 | 1.002..1.009 | 12 |
+| dm_stale | 0 | bwd | 1.049 | 1.050 | +0.0% | 1.099 | 0.986..1.001 | 12 |
+| dm_stale | 0 | fwd | 0.941 | 0.939 | -0.2% | 0.937 | 0.997..1.003 | 12 |
+| dm_stale | 0 | fwd_bwd | 1.037 | 1.033 | -0.3% | 1.066 | 0.989..1.003 | 12 |
+| dm_stale | 1 | bwd | 0.953 | 0.965 | +1.2% | 1.021 | 1.004..1.015 | 12 |
+| dm_stale | 1 | fwd | 0.893 | 0.893 | +0.1% | 0.893 | 0.994..1.000 | 12 |
+| dm_stale | 1 | fwd_bwd | 0.946 | 0.953 | +0.7% | 0.993 | 1.003..1.012 | 12 |
+
+A vs A-repeat:
+| arm | causal | pass | 9c690e1 | 9c690e1_r2 | change | 9c690e1_r2 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.811 | 0.812 | +0.1% | 0.852 | 0.997..1.001 | 12 |
+| dm_matched | 0 | fwd | 0.941 | 0.940 | -0.2% | 0.936 | 0.998..1.001 | 12 |
+| dm_matched | 0 | fwd_bwd | 0.853 | 0.855 | +0.2% | 0.879 | 0.998..1.002 | 12 |
+| dm_matched | 1 | bwd | 0.762 | 0.762 | -0.1% | 0.810 | 0.999..1.002 | 12 |
+| dm_matched | 1 | fwd | 0.892 | 0.893 | +0.0% | 0.894 | 0.997..1.000 | 12 |
+| dm_matched | 1 | fwd_bwd | 0.797 | 0.796 | -0.1% | 0.831 | 0.999..1.000 | 12 |
+| dm_stale | 0 | bwd | 1.049 | 1.050 | +0.0% | 1.102 | 0.986..1.008 | 12 |
+| dm_stale | 0 | fwd | 0.941 | 0.940 | -0.1% | 0.936 | 0.999..1.002 | 12 |
+| dm_stale | 0 | fwd_bwd | 1.037 | 1.037 | -0.0% | 1.066 | 0.988..1.000 | 12 |
+| dm_stale | 1 | bwd | 0.953 | 0.953 | -0.1% | 1.012 | 0.999..1.000 | 12 |
+| dm_stale | 1 | fwd | 0.893 | 0.893 | +0.0% | 0.894 | 0.997..1.000 | 12 |
+| dm_stale | 1 | fwd_bwd | 0.946 | 0.945 | -0.1% | 0.986 | 0.998..1.001 | 12 |
+
+### 5b50ab2 (validated 23:17, CURRENT HEADLINE) vs 69f570a (validated 23:02), same-lease A/B, new node nvl72052-T18 GPUs 2-3 (23:30)
+- **Headline: matched causal fwd+bwd 0.817x FA4 (0.854x vs FA4 deterministic), nvl72052-T18.** +1.6% vs 69f570a.
+- The posmaj schedule only affects GQA, as designed. H32/8 matched causal bwd speedup per N: +11.0/+8.0/+5.1/+2.6/+0.9/+0.1%
+  (1k..32k), so the short-GQA weak spot improved. H16/16 is unchanged (1.000).
+- 5b50ab2 matched causal fwd+bwd vs FA4 per N: H16/16 0.79/0.80/0.80/0.81/0.87/0.97; H32/8 0.63/0.68/0.75/0.85/0.96/0.99.
+- Node note: 69f570a matched causal is 0.804x here vs 0.802x on nvl72053-T07 (consistent), but non-causal is 0.885x here
+  vs 0.851x there. FA4 non-causal is slower on this node, so non-causal ratios are not comparable across nodes.
+- Stale [reference only] is 1.09x FA4 non-causal and 0.975x causal on this node.
+
+| arm | causal | pass | 69f570a | 5b50ab2 | change | 5b50ab2 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.842 | 0.853 | +1.3% | 0.892 | 0.998..1.068 | 12 |
+| dm_matched | 0 | fwd | 0.984 | 0.987 | +0.3% | 0.986 | 0.999..1.006 | 12 |
+| dm_matched | 0 | fwd_bwd | 0.885 | 0.895 | +1.1% | 0.924 | 0.994..1.055 | 12 |
+| dm_matched | 1 | bwd | 0.771 | 0.788 | +2.2% | 0.835 | 0.999..1.110 | 12 |
+| dm_matched | 1 | fwd | 0.880 | 0.881 | +0.1% | 0.881 | 0.998..1.003 | 12 |
+| dm_matched | 1 | fwd_bwd | 0.804 | 0.817 | +1.6% | 0.854 | 0.999..1.090 | 12 |
+| dm_stale | 0 | bwd | 1.091 | 1.107 | +1.5% | 1.158 | 0.992..1.082 | 12 |
+| dm_stale | 0 | fwd | 0.983 | 0.986 | +0.3% | 0.985 | 0.998..1.004 | 12 |
+| dm_stale | 0 | fwd_bwd | 1.075 | 1.092 | +1.6% | 1.128 | 0.998..1.064 | 12 |
+| dm_stale | 1 | bwd | 0.966 | 0.991 | +2.6% | 1.050 | 1.000..1.124 | 12 |
+| dm_stale | 1 | fwd | 0.880 | 0.881 | +0.2% | 0.882 | 0.999..1.004 | 12 |
+| dm_stale | 1 | fwd_bwd | 0.957 | 0.975 | +1.9% | 1.019 | 1.000..1.099 | 12 |
+
+Noise floor for 5b50ab2 vs 69f570a (A vs A-repeat, same lease): per-shape 0.992-1.008
+| arm | causal | pass | 69f570a | 69f570a_r2 | change | 69f570a_r2 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.842 | 0.845 | +0.4% | 0.881 | 0.995..1.008 | 12 |
+| dm_matched | 0 | fwd | 0.984 | 0.986 | +0.2% | 0.985 | 0.997..1.005 | 12 |
+| dm_matched | 0 | fwd_bwd | 0.885 | 0.886 | +0.2% | 0.917 | 0.992..1.001 | 12 |
+| dm_matched | 1 | bwd | 0.771 | 0.769 | -0.3% | 0.818 | 0.999..1.000 | 12 |
+| dm_matched | 1 | fwd | 0.880 | 0.881 | +0.2% | 0.881 | 0.998..1.004 | 12 |
+| dm_matched | 1 | fwd_bwd | 0.804 | 0.804 | -0.0% | 0.838 | 1.000..1.001 | 12 |
+| dm_stale | 0 | bwd | 1.091 | 1.092 | +0.1% | 1.138 | 0.987..1.001 | 12 |
+| dm_stale | 0 | fwd | 0.983 | 0.985 | +0.2% | 0.983 | 0.994..1.004 | 12 |
+| dm_stale | 0 | fwd_bwd | 1.075 | 1.078 | +0.3% | 1.115 | 0.994..1.003 | 12 |
+| dm_stale | 1 | bwd | 0.966 | 0.964 | -0.2% | 1.024 | 1.000..1.004 | 12 |
+| dm_stale | 1 | fwd | 0.880 | 0.882 | +0.2% | 0.882 | 0.999..1.004 | 12 |
+| dm_stale | 1 | fwd_bwd | 0.957 | 0.957 | +0.0% | 0.997 | 1.000..1.007 | 12 |
+
+### e34bc6b (kda-sm100-gqa: bwd gloop for GQA) vs 5b50ab2, same-lease A/B, GPUs 0-3 nvl72052-T18, PENDING VALIDATION (23:38)
+- matched causal fwd+bwd 0.828x -> **0.858x FA4 (+3.6%)**, 0.895x vs det. The gain is entirely short GQA: H32/8 matched
+  causal bwd 1k +38.3%, 2k +18.9%; 4k-32k and all MHA unchanged (1.000), so gloop is only selected at N <= 2k.
+- Per N vs FA4 (matched causal fwd+bwd): H16/16 0.81/0.80/0.84/0.81/0.87/0.97; H32/8 0.85/0.78/0.80/0.87/0.95/0.99.
+- Sanity errors are identical to 5b50ab2 (numerics unchanged). No SUSPECT flags.
+- (5b50ab2 measured 0.828x on GPUs 0-3 here vs 0.817x on GPUs 2-3 earlier: placement noise.)
+
+| arm | causal | pass | 5b50ab2 | e34bc6b | change | e34bc6b vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.842 | 0.869 | +3.3% | 0.907 | 0.996..1.256 | 12 |
+| dm_matched | 0 | fwd | 0.962 | 0.964 | +0.2% | 0.965 | 0.999..1.002 | 12 |
+| dm_matched | 0 | fwd_bwd | 0.884 | 0.904 | +2.3% | 0.931 | 0.985..1.197 | 12 |
+| dm_matched | 1 | bwd | 0.800 | 0.834 | +4.3% | 0.884 | 0.999..1.383 | 12 |
+| dm_matched | 1 | fwd | 0.911 | 0.910 | -0.1% | 0.910 | 0.999..1.004 | 12 |
+| dm_matched | 1 | fwd_bwd | 0.828 | 0.858 | +3.6% | 0.895 | 0.999..1.293 | 12 |
+| dm_stale | 0 | bwd | 1.092 | 1.136 | +4.0% | 1.186 | 0.994..1.325 | 12 |
+| dm_stale | 0 | fwd | 0.962 | 0.964 | +0.2% | 0.965 | 0.996..1.002 | 12 |
+| dm_stale | 0 | fwd_bwd | 1.077 | 1.106 | +2.7% | 1.139 | 0.991..1.238 | 12 |
+| dm_stale | 1 | bwd | 1.008 | 1.060 | +5.2% | 1.122 | 0.999..1.478 | 12 |
+| dm_stale | 1 | fwd | 0.911 | 0.910 | -0.1% | 0.910 | 0.999..1.003 | 12 |
+| dm_stale | 1 | fwd_bwd | 0.988 | 1.030 | +4.2% | 1.073 | 0.999..1.346 | 12 |
+
+Noise floor for e34bc6b vs 5b50ab2 (A vs A-repeat, same lease):
+| arm | causal | pass | 5b50ab2 | 5b50ab2_r2 | change | 5b50ab2_r2 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.842 | 0.844 | +0.2% | 0.883 | 0.997..1.002 | 12 |
+| dm_matched | 0 | fwd | 0.962 | 0.968 | +0.5% | 0.966 | 0.999..1.006 | 12 |
+| dm_matched | 0 | fwd_bwd | 0.884 | 0.883 | -0.2% | 0.912 | 0.983..1.002 | 12 |
+| dm_matched | 1 | bwd | 0.800 | 0.800 | -0.1% | 0.846 | 0.999..1.002 | 12 |
+| dm_matched | 1 | fwd | 0.911 | 0.908 | -0.3% | 0.908 | 0.999..1.002 | 12 |
+| dm_matched | 1 | fwd_bwd | 0.828 | 0.831 | +0.3% | 0.866 | 0.999..1.002 | 12 |
+| dm_stale | 0 | bwd | 1.092 | 1.095 | +0.3% | 1.146 | 0.999..1.002 | 12 |
+| dm_stale | 0 | fwd | 0.962 | 0.966 | +0.4% | 0.965 | 0.995..1.002 | 12 |
+| dm_stale | 0 | fwd_bwd | 1.077 | 1.076 | -0.1% | 1.112 | 0.994..1.000 | 12 |
+| dm_stale | 1 | bwd | 1.008 | 1.006 | -0.1% | 1.064 | 0.994..1.002 | 12 |
+| dm_stale | 1 | fwd | 0.911 | 0.909 | -0.2% | 0.909 | 0.999..1.003 | 12 |
+| dm_stale | 1 | fwd_bwd | 0.988 | 0.990 | +0.2% | 1.033 | 0.994..1.001 | 12 |
+
+### 3fec800 (P0-v5: pass-0 two-halves + p3_16_6 exp mix) vs cfb8d13 (= e34bc6b kernels), focus suite, same lease, nvl72052-T18 GPUs 0-1, VALIDATED 00:52 (merged as 4ea8bd5, kernels identical) (00:55)
+- matched causal fwd+bwd 0.950x -> **0.962x FA4 (+1.3%)**, 0.995x vs FA4-det. The matched bwd is +1.7..2.7% on EVERY focus
+  shape (causal and non-causal). The fwd is unchanged, stale is unchanged (pass-0 only), and sanity errors are bitwise
+  equal to cfb8d13. No SUSPECT flags.
+- Per N (matched causal fwd+bwd vs FA4): H16/16 0.880 / 0.984 / 1.016, H32/8 0.891 / 1.004 / 1.007 (8k/32k/64k).
+  At 32k-64k it is now >= FA4, and 8k is the remaining gap (0.88-0.89x).
+- **Placement caveat (measured):** cfb8d13 has the same kernel code as e34bc6b (no diff in delta_matching/). It gave 0.950x
+  here (GPUs 0-1) vs 0.935x for e34bc6b on GPUs 2-3 an hour earlier. The DM kernel's times are identical (+-0.3% per shape),
+  but **FA4's times differ by up to 7% between these GPU pairs** (8k H16/16 fwd/bwd). FA4 bf16 is more power-bound, so it
+  is more sensitive to each GPU's power/thermal envelope. The same-lease ratio is the right commit-to-commit comparison;
+  the absolute headline ratio carries about +-1.5% (geomean) from GPU placement, up to +-7% on a single 8k shape.
+
+arm=dm_matched  files=results/focus_cfb8d13_3fec800_3fec800.s*.jsonl  host=nvl72052-T18
+
+vs fa4_bf16  (speedup = fa4_bf16_ms / dm_matched_ms)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.880 | 0.984 | 1.016 | **0.962** |
+| 1 | fwd_bwd | 32/8 | 0.891 | 1.004 | 1.007 |  |
+| 1 | fwd | 16/16 | 0.984 | 1.082 | 1.247 | 1.130 |
+| 1 | fwd | 32/8 | 1.036 | 1.179 | 1.286 |  |
+| 1 | bwd | 16/16 | 0.846 | 0.913 | 0.964 | 0.910 |
+| 1 | bwd | 32/8 | 0.841 | 0.954 | 0.949 |  |
+| 0 | fwd_bwd | 16/16 | 0.912 | 1.018 | 1.011 | 0.989 |
+| 0 | fwd_bwd | 32/8 | 0.965 | 1.036 | 1.000 |  |
+| 0 | fwd | 16/16 | 0.969 | 1.095 | 1.200 | 1.114 |
+| 0 | fwd | 32/8 | 1.002 | 1.199 | 1.249 |  |
+| 0 | bwd | 16/16 | 0.852 | 0.949 | 0.961 | 0.927 |
+| 0 | bwd | 32/8 | 0.900 | 0.983 | 0.926 |  |
+
+vs fa4_bf16_det  (speedup = fa4_bf16_det_ms / dm_matched_ms)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.904 | 0.997 | 1.047 | **0.995** |
+| 1 | fwd_bwd | 32/8 | 0.945 | 1.041 | 1.045 |  |
+| 1 | fwd | 16/16 | 0.982 | 1.086 | 1.229 | 1.127 |
+| 1 | fwd | 32/8 | 1.038 | 1.179 | 1.278 |  |
+| 1 | bwd | 16/16 | 0.877 | 0.969 | 1.008 | 0.963 |
+| 1 | bwd | 32/8 | 0.921 | 1.004 | 1.009 |  |
+| 0 | fwd_bwd | 16/16 | 0.945 | 1.053 | 1.055 | 1.023 |
+| 0 | fwd_bwd | 32/8 | 0.998 | 1.052 | 1.037 |  |
+| 0 | fwd | 16/16 | 0.971 | 1.065 | 1.220 | 1.106 |
+| 0 | fwd | 32/8 | 0.998 | 1.173 | 1.238 |  |
+| 0 | bwd | 16/16 | 0.920 | 1.005 | 1.025 | 0.977 |
+| 0 | bwd | 32/8 | 0.942 | 0.991 | 0.985 |  |
+
+B vs A:
+| arm | causal | pass | cfb8d13 | 3fec800 | change | 3fec800 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.908 | 0.927 | +2.1% | 0.977 | 1.018..1.027 | 6 |
+| dm_matched | 0 | fwd | 1.096 | 1.114 | +1.6% | 1.106 | 0.993..1.035 | 6 |
+| dm_matched | 0 | fwd_bwd | 0.971 | 0.989 | +1.9% | 1.023 | 1.013..1.029 | 6 |
+| dm_matched | 1 | bwd | 0.888 | 0.910 | +2.4% | 0.963 | 1.017..1.023 | 6 |
+| dm_matched | 1 | fwd | 1.130 | 1.130 | +0.0% | 1.127 | 0.998..1.009 | 6 |
+| dm_matched | 1 | fwd_bwd | 0.950 | 0.962 | +1.3% | 0.995 | 1.005..1.019 | 6 |
+| dm_stale | 0 | bwd | 1.221 | 1.221 | -0.0% | 1.286 | 0.997..1.001 | 6 |
+| dm_stale | 0 | fwd | 1.095 | 1.112 | +1.6% | 1.104 | 0.998..1.034 | 6 |
+| dm_stale | 0 | fwd_bwd | 1.216 | 1.216 | +0.0% | 1.257 | 0.995..1.009 | 6 |
+| dm_stale | 1 | bwd | 1.172 | 1.178 | +0.5% | 1.247 | 0.999..1.005 | 6 |
+| dm_stale | 1 | fwd | 1.128 | 1.131 | +0.2% | 1.128 | 1.000..1.016 | 6 |
+| dm_stale | 1 | fwd_bwd | 1.180 | 1.179 | -0.1% | 1.219 | 0.995..1.000 | 6 |
+
+### cc1dbf2 (kda-sm100-8k: gloop auto-threshold 2048 -> 4096) vs 4ea8bd5, same lease, nvl72131-T16 GPU 2, VALIDATED 02:05 (01:52)
+- **H32/8 4k matched fwd+bwd +4.4% causal, +4.8% non-causal** (kernel time). Every other shape unchanged (0.992-1.004),
+  as designed. Matches the expected -4.6% time.
+- Headline geomean (8 causal shapes, single GPU): 0.906x -> **0.912x FA4 (+0.6%)**, 0.948x vs FA4-det. H32/8 4k: 0.772 -> 0.805.
+- No SUSPECT flags.
+
+| arm | causal | pass | 4ea8bd5 | cc1dbf2 | change | cc1dbf2 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 0 | bwd | 0.892 | 0.897 | +0.6% | 0.944 | 0.990..1.061 | 8 |
+| dm_matched | 0 | fwd | 1.070 | 1.069 | -0.0% | 1.065 | 1.000..1.005 | 8 |
+| dm_matched | 0 | fwd_bwd | 0.948 | 0.953 | +0.5% | 0.982 | 0.992..1.048 | 8 |
+| dm_matched | 1 | bwd | 0.863 | 0.868 | +0.6% | 0.918 | 0.997..1.056 | 8 |
+| dm_matched | 1 | fwd | 1.042 | 1.042 | -0.0% | 1.040 | 0.999..1.005 | 8 |
+| dm_matched | 1 | fwd_bwd | 0.906 | 0.912 | +0.6% | 0.948 | 0.996..1.044 | 8 |
+| dm_stale | 0 | bwd | 1.162 | 1.175 | +1.1% | 1.236 | 0.996..1.081 | 8 |
+| dm_stale | 0 | fwd | 1.067 | 1.067 | +0.0% | 1.063 | 1.000..1.010 | 8 |
+| dm_stale | 0 | fwd_bwd | 1.160 | 1.168 | +0.7% | 1.203 | 0.996..1.060 | 8 |
+| dm_stale | 1 | bwd | 1.102 | 1.110 | +0.7% | 1.175 | 0.996..1.073 | 8 |
+| dm_stale | 1 | fwd | 1.039 | 1.039 | -0.1% | 1.036 | 0.997..1.003 | 8 |
+| dm_stale | 1 | fwd_bwd | 1.096 | 1.105 | +0.9% | 1.149 | 0.996..1.056 | 8 |

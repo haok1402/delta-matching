@@ -70,7 +70,20 @@ def _fws(deterministic):
     return bool(deterministic) and "nofws" not in os.environ.get("DM_BWD_OPTS", "").split(",")
 
 
+_AUTO_MEMO = {}
+
+
 def _auto_opts(q8, k8, causal=False):
+    """Memoized _auto_opts_impl (host-overhead cut, kda-sm100-host): pure function of the env knobs and the shape."""
+    mk = (os.environ.get("DM_BWD_OPTS", ""), os.environ.get("DM_B6", ""), os.environ.get("DM_NSM", ""),
+          q8.shape[1], q8.shape[2], k8.shape[2], bool(causal), q8.device.index)
+    r = _AUTO_MEMO.get(mk)
+    if r is None:
+        r = _AUTO_MEMO[mk] = _auto_opts_impl(q8, k8, causal)
+    return r
+
+
+def _auto_opts_impl(q8, k8, causal=False):
     """Effective DM_BWD_OPTS for this shape. DM gloop (GQA, auto): short sequences spend most of a KV tile on the
     fp32 dK/dV accumulation across the qh query-head CTAs + postprocess; loop the group inside one CTA instead (dK/dV
     in TMEM, stored once). Long causal sequences lose (4x longer tiles -> tail), so only N <= gloopN (default 4096).
@@ -97,12 +110,18 @@ def _auto_opts(q8, k8, causal=False):
     return ",".join(ol)
 
 
+_NSM_MEMO = {}
+
+
 def _num_sms(q8):
     n = int(os.environ.get("DM_NSM", "0"))
     if n:
         return n
     try:
-        return int(torch.cuda.get_device_properties(q8.device).multi_processor_count)
+        d = q8.device.index
+        if d not in _NSM_MEMO:
+            _NSM_MEMO[d] = int(torch.cuda.get_device_properties(q8.device).multi_processor_count)
+        return _NSM_MEMO[d]
     except Exception:
         return 148
 
@@ -240,15 +259,13 @@ FORCE = dict(pack_gqa=False)
 def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: float, deterministic=True, trace=None):
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
-    if not deterministic and os.environ.get("DM_ALLOW_NONDET_DEBUG", "0") != "1":
-        raise RuntimeError("dm_bwd_main(deterministic=False) is VETOED by accuracy-audit (rare lost/doubled dQ tile "
-                           "contribution under investigation, kda-sm100-ndrace). Set DM_ALLOW_NONDET_DEBUG=1 only for debugging.")
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
     if "lwc" in os.environ.get("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
         aux.append(_CTX["dq"])
-    if "pdyn" in _auto_opts(q8, k8, causal).split(","):
+    _ao = _auto_opts(q8, k8, causal)
+    if "pdyn" in _ao.split(","):
         # DM pdyn: claim counter for the dynamic persistent scheduler (last aux tensor), zeroed per launch
         _CTX["pdyn_ctr"] = torch.zeros(1, dtype=torch.int32, device=q8.device)
     if trace is not None and "rsdbg" in os.environ.get("DM_BWD_OPTS", ""):
@@ -259,12 +276,12 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         trace = None
     if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
         aux.append(trace)
-    if "pdyn" in _auto_opts(q8, k8, causal).split(","):
+    if "pdyn" in _ao.split(","):
         aux.append(_CTX.pop("pdyn_ctr"))
     _CTX["delta"] = delta
     _CTX["deterministic"] = deterministic
     opts0 = os.environ.get("DM_BWD_OPTS", "")
-    os.environ["DM_BWD_OPTS"] = _auto_opts(q8, k8, causal)     # kernel knobs + compile cache follow the effective opts
+    os.environ["DM_BWD_OPTS"] = _ao     # kernel knobs + compile cache follow the effective opts
     key = _key(q8, k8, causal, deterministic)
     st = _CTX.pop("staged", None)
     if st is not None and st[0] == key and trace is None:

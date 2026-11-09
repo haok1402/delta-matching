@@ -48,8 +48,26 @@ def _cache():
     return _CACHES[opts]
 
 
+_SEL_MEMO = {}   # host-overhead cut: memoized config selection (pure function of FA4's inputs + our overrides)
+
+
 def _select(orig_select, over):
+    ok = tuple(sorted((k, repr(v)) for k, v in over.items()))
+
     def select(inputs):
+        try:
+            mk = (inputs, ok)
+            hit = _SEL_MEMO.get(mk)
+        except TypeError:
+            mk, hit = None, None
+        if hit is not None:
+            return hit
+        cfg = _select_impl(inputs)
+        if mk is not None:
+            _SEL_MEMO[mk] = cfg
+        return cfg
+
+    def _select_impl(inputs):
         cfg = orig_select(inputs)
         cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "kv_stage"})
         overlap, kv_stage = fa_config.select_sm100_smem_layout(

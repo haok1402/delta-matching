@@ -1727,6 +1727,7 @@ class DMBackwardSm100:
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
+        dm_utils.tcf_begin(0 if "notcf" in self.dm_opts else 2 if "tcfb" in self.dm_opts else 1)   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         bidx, _, _ = cute.arch.block_idx()
         if const_expr("tl2" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
@@ -1977,6 +1978,10 @@ class DMBackwardSm100:
             defer_sync=False,
         )
 
+        # kda-sm100-fwdfence (minimal fences): mark the tcgen05 hand-off pipelines / barriers (dm_utils.tcf_mark)
+        dm_utils.tcf_mark("ua", pipeline_S_P, pipeline_dP, pipeline_dKV, pipeline_dQ)
+        dm_utils.tcf_mark("au", pipeline_dS, pipeline_P)
+        dm_utils.tcf_mark("bar", self.compute_sync_barrier, tmem_alloc_barrier)
         sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner, dtype=self.q_dtype)
         if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
             sQt = storage.sQt.get_tensor(
@@ -2377,6 +2382,7 @@ class DMBackwardSm100:
                     dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 6), dm_utils.globaltimer())
             tmem_alloc_barrier.arrive()
 
+        dm_utils.tcf_end()
         return
 
     @cute.jit
@@ -4816,12 +4822,14 @@ class DMBackwardSm100:
                       # issue the next QK into the slot
                       cute.arch.fence_view_async_tmem_load()
                       cute.arch.sync_warp()
+                      dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                       with cute.arch.elect_one():
                           pipeline_S_P.consumer_release(consumer_state_S)
                       consumer_state_S.advance()
                   elif const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_SERIAL):
                       # Signal S tmem load completion using pipeline_S_P: dP overlaps S
                       cute.arch.fence_view_async_tmem_load()
+                      dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                       with cute.arch.elect_one():
                           pipeline_S_P.consumer_release(consumer_state_S_P_dP)
                   elif const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
@@ -4845,6 +4853,7 @@ class DMBackwardSm100:
                               else:
                                   self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
                                   cute.arch.fence_view_async_tmem_store()
+                                  dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                                   with cute.arch.elect_one():
                                       pipeline_dS.producer_commit(producer_state_dS)
                                   producer_state_dS.advance()
@@ -5067,6 +5076,7 @@ class DMBackwardSm100:
                                           else:
                                               self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
                                               cute.arch.fence_view_async_tmem_store()
+                                              dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                                               with cute.arch.elect_one():
                                                   pipeline_dS.producer_commit(producer_state_dS)
                                               producer_state_dS.advance()
@@ -5109,6 +5119,7 @@ class DMBackwardSm100:
                                   else:
                                       self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
                                       cute.arch.fence_view_async_tmem_store()
+                                      dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                                       with cute.arch.elect_one():
                                           pipeline_dS.producer_commit(producer_state_dS)
                                       producer_state_dS.advance()
@@ -5143,11 +5154,13 @@ class DMBackwardSm100:
                   else:
                       self.compute_sync_barrier.arrive_and_wait()
                   if const_expr(self.split_P_dS):
+                      dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                       with cute.arch.elect_one():
                           pipeline_P.producer_commit(producer_state_P)
                       producer_state_P.advance()
                   elif const_expr(self.cta_schedule != CtaSchedule.TWO_CTA_SERIAL):
                       # Signal tmem store P completion with pipeline_S_P
+                      dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                       with cute.arch.elect_one():
                           pipeline_S_P.consumer_release(consumer_state_S_P_dP)
                           # pipeline_S_P.sync_object_empty.arrive(0, pipeline_S_P.consumer_mask)
@@ -5360,6 +5373,7 @@ class DMBackwardSm100:
 
                       if const_expr(self.use_2cta_instrs):
                           # use pipeline_dP to signal the dS store (TMEM, or SMEM with acc_m64)
+                          dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                           with cute.arch.elect_one():
                               pipeline_dP.consumer_release(consumer_state_S_P_dP)
                       consumer_state_S_P_dP.advance()
@@ -5412,6 +5426,7 @@ class DMBackwardSm100:
                       consumer_state_dPsum.advance()
                       # pipelined 2CTA schedule: pipeline_dS also signals S tmem load completion so is deferred
                       if const_expr(self.cta_schedule != CtaSchedule.TWO_CTA_PIPELINED):
+                          dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                           with cute.arch.elect_one():
                               pipeline_dS.producer_commit(producer_state_dS)
                           producer_state_dS.advance()
@@ -5455,6 +5470,7 @@ class DMBackwardSm100:
                 if process_tile:
                     self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
                     cute.arch.fence_view_async_tmem_store()
+                    dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                     with cute.arch.elect_one():
                         pipeline_dS.producer_commit(producer_state_dS)
                     producer_state_dS.advance()
@@ -5799,6 +5815,7 @@ class DMBackwardSm100:
         cute.arch.fence_view_async_tmem_store()
         dm_utils.tc_fence_before()
         cute.arch.sync_warp()
+        dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
         with cute.arch.elect_one():
             pipeline_dP.consumer_release(dsq_dP_state)
         if const_expr(dm_tr is not None):
@@ -5855,6 +5872,7 @@ class DMBackwardSm100:
         cute.arch.fence_view_async_tmem_store()
         dm_utils.tc_fence_before()
         cute.arch.sync_warp()
+        dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
         with cute.arch.elect_one():
             pipeline_dS.producer_commit(dsq_dS_state)
         if const_expr(dm_tr is not None):
@@ -6185,6 +6203,7 @@ class DMBackwardSm100:
                         cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
                         cute.arch.fence_view_async_tmem_load()
                         cute.arch.sync_warp()
+                        dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                         with cute.arch.elect_one():
                             pipeline_dQ.consumer_release(dQ_consumer_state)
                         dQ_consumer_state.advance()
@@ -6246,6 +6265,7 @@ class DMBackwardSm100:
                             cute.arch.fence_view_async_tmem_load()
                             if const_expr(dm_ts == cute.size(tdQrdQ_t2r_shape, mode=[1]) - 1):
                                 cute.arch.sync_warp()
+                                dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                                 with cute.arch.elect_one():
                                     pipeline_dQ.consumer_release(dQ_consumer_state)
                                 dQ_consumer_state.advance()
@@ -6479,6 +6499,7 @@ class DMBackwardSm100:
             cute.copy(tiled_gmem_store_dV, tdVrdV_r2s, tdVgdV_r2g, pred=tdVpdV)
 
         cute.arch.sync_warp()
+        dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
         with cute.arch.elect_one():
             pipeline_dKV.consumer_release(consumer_state_dKV)
         consumer_state_dKV.advance()
@@ -6537,6 +6558,7 @@ class DMBackwardSm100:
             cute.copy(tiled_gmem_store_dK, tdKrdK_r2s, tdKgdK_r2g, pred=tdKpdK)
 
         cute.arch.sync_warp()
+        dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
         with cute.arch.elect_one():
             pipeline_dKV.consumer_release(consumer_state_dKV)
         consumer_state_dKV.advance()   # DM: needed once a CTA runs >1 tile (pers); no-op for a single tile
@@ -6741,6 +6763,7 @@ class DMBackwardSm100:
                 barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx_cta, 0, 1)
 
         cute.arch.sync_warp()
+        dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
         with cute.arch.elect_one():
             pipeline_dKV.consumer_release(consumer_state_dKV)
         consumer_state_dKV.advance()
@@ -6973,6 +6996,7 @@ class DMBackwardSm100:
             barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
 
         cute.arch.sync_warp()
+        dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
         with cute.arch.elect_one():
             pipeline_dKV.consumer_release(consumer_state_dKV)
         consumer_state_dKV.advance()

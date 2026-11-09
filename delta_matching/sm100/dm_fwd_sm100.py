@@ -1035,6 +1035,7 @@ class DMForwardSm100:
         using tensor memory access (TMA) for efficient data loading, warp specialization for different
         computation phases, and optional attention masking.
         """
+        dm_utils.tcf_begin(int(self.dm_opts.get("tcf", "1")))   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
@@ -1226,6 +1227,10 @@ class DMForwardSm100:
             )
 
 
+        # kda-sm100-fwdfence (minimal fences): mark the tcgen05 hand-off pipelines / barriers (dm_utils.tcf_mark)
+        dm_utils.tcf_mark("ua", pipeline_s_p_o, pipeline_o_acc)
+        dm_utils.tcf_mark("au", pipeline_p_lastsplit)
+        dm_utils.tcf_mark("bar", sm_stats_barrier, tmem_alloc_barrier)
         # Cluster arrive after barrier init
         if const_expr(self.dm_sspv):
             self.dm_sfree = Int32(storage.mbar_dm_sfree.data_ptr().toint())
@@ -1583,6 +1588,7 @@ class DMForwardSm100:
             )
             tmem_alloc_barrier.arrive_unaligned()
 
+        dm_utils.tcf_end()
         return
 
     @cute.jit
@@ -2973,6 +2979,9 @@ class DMForwardSm100:
                 hw_row_max = cute.arch.fmax(hw_row_max, tSrS_red[i])
         else:
             cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
+        if const_expr(not self.dm_sspv and self.dm_opts.get("tcf", "1") != "0"):
+            # kda-sm100-fwdfence: formal tcgen05.wait::ld of S before the P release lets the next QK overwrite S (P aliases S)
+            cute.arch.fence_view_async_tmem_load()
         if const_expr(self.dm_sspv):
             # S scratch fully read by this warpgroup -> the MMA warp may issue the next QK into it
             cute.arch.fence_view_async_tmem_load()
@@ -3154,6 +3163,7 @@ class DMForwardSm100:
             cute.arch.fence_view_async_tmem_store()
             if const_expr(self.split_P_arrive > 0):
                 cute.arch.sync_warp()
+                dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                 with cute.arch.elect_one():
                     pipeline_p_lastsplit.producer_commit_w_index(s_p_o_index)
             else:
@@ -3226,10 +3236,11 @@ class DMForwardSm100:
                         cute.arch.fence_view_async_tmem_store()
                         pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
             cute.arch.fence_view_async_tmem_store()
-            if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+            if const_expr(self.dm_opts.get("tcf", "1") != "0"):   # fwdfence: default path too (all lanes)
                 dm_utils.tc_fence_before()   # SF tcgen05.st ordered before the P-full release
             if const_expr(self.split_P_arrive > 0):
                 cute.arch.sync_warp()
+                dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                 with cute.arch.elect_one():
                     pipeline_p_lastsplit.producer_commit_w_index(s_p_o_index)
             else:
@@ -3492,7 +3503,8 @@ class DMForwardSm100:
                         else:
                             if const_expr(self.dm_trc > 0):
                                 dm_trr = dm_utils.clock64()
-                            if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                            if const_expr(self.dm_opts.get("tcf", "1") != "0"):
+                                cute.arch.fence_view_async_tmem_load()   # fwdfence: O rescale loads complete (formal)
                                 dm_utils.tc_fence_before()   # O rescale tcgen05.st ordered before the release
                             pipeline_s_p_o.consumer_release_w_index(stage)
                             pipeline_sm_stats.consumer_release_w_index(self.q_stage - 1 - stage)
@@ -3603,7 +3615,7 @@ class DMForwardSm100:
                         pipeline_s_p_o.consumer_release_w_index((o_acc_consumer_count + 1) & 1)
                         o_acc_consumer_count += 1
                     else:
-                        if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                        if const_expr(self.dm_opts.get("tcf", "1") != "0"):   # fwdfence: default path too
                             # epilogue O tcgen05.ld complete + ordered before the release that lets the next
                             # work tile's PV_s (zero-init) overwrite O_s (Codex 6.4b)
                             cute.arch.fence_view_async_tmem_load()

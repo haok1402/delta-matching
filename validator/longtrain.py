@@ -157,8 +157,21 @@ def main():
         json.dump({"arm": a.arm, "attn": attn_name, "args": vars(a), "params": sum(p.numel() for p in model.parameters()),
                    "corpus_bytes": n}, open(os.path.join(run, "config.json"), "w"), indent=1)
     log = open(os.path.join(run, "log.jsonl"), "a")
+    import signal
+    stop = {"flag": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))   # node handover: checkpoint, then exit non-zero
+
+    def save():
+        log.flush()
+        tmp = ck + ".tmp"
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step}, tmp)
+        os.replace(tmp, ck)
     t0 = time.time()
     while step < a.steps:
+        if stop["flag"]:
+            save()
+            print(f"SIGTERM: checkpointed {run} at step {step}", flush=True)
+            sys.exit(143)
         lr = a.lr * min(1.0, (step + 1) / a.warmup) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, step / a.steps))))
         for pg in opt.param_groups:
             pg["lr"] = lr
@@ -186,10 +199,7 @@ def main():
         if step % 50 == 0:
             log.flush()
         if step % a.ckpt_every == 0 or step == a.steps:
-            log.flush()
-            tmp = ck + ".tmp"
-            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step}, tmp)
-            os.replace(tmp, ck)
+            save()
         if step % 100 == 0:
             print(f"{a.arm} s{a.seed} step {step} loss {rec['loss']:.4f} {(time.time() - t0) / max(1, step):.3f}s/step",
                   flush=True)

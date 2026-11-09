@@ -825,6 +825,10 @@ class DMBackwardSm100:
                 _dqo = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
                 if "dq32" in _dqo:
                     self.dQ_reduce_ncol, self.sdQaccum_stage = 32, 2
+                elif not self.deterministic and "nodq32" not in _dqo:
+                    # DM dqnd (track P): nd default = 32-col x 2-stage staging (e2e fwd+bwd 0.988-0.992x on the
+                    # GQA 32/4 + 16/4 headline shapes); 'nodq32' restores FA4's 8 x 4. Same adds per element.
+                    self.dQ_reduce_ncol, self.sdQaccum_stage = 32, 2
                 elif "dq32s1" in _dqo:
                     self.dQ_reduce_ncol, self.sdQaccum_stage = 32, 1
                 # DM dqc=<ncol>,dqs=<stages> (kda-sm100-dqnd sweep): explicit staging geometry; same adds per element

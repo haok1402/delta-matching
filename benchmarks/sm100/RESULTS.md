@@ -1,6 +1,71 @@
 # Results: kda-sm100 candidates vs FA4 (hd128, GB200) — maintained by fa4-bench
 
-## STATUS 2026-11-09 03:10: NO COMPLIANT HEADLINE
+## HEADLINE (target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 04:15
+
+Status source of truth: sm100/validate/VALIDATED.md (dm-validator). **77f470e = PROMOTION PASS, the first compliant commit
+(04:05), with 14 OPEN long-N / peaked identity items.** Under accuracy-audit's interim rule those items must be no worse
+than bd94e1f until the row-sums fix lands; worst max 4.6e-5, mean 3.3e-6 at 64k peaked. 0c3f69d (fp64 flush every tile,
+supersedes 49ff526) is meant to close them and is pending validation.
+
+**Headline: 77f470e, nvl72131-T16, 4-GPU median per shape: 0.925x FA4 causal fwd+bwd geomean over the 6 target shapes
+(0.961x vs FA4 deterministic). Target 1.10x: +18.9% still needed.**
+
+| matched causal fwd+bwd vs FA4 (median of 4 GPUs) | 8k | 32k | 64k |
+|---|---|---|---|
+| H16/16 | 0.814 | 0.938 | 0.995 |
+| H32/8  | 0.851 | 0.979 | 0.989 |
+| **gap to 1.10x** H16/16 | +35.1% | +17.3% | +10.6% |
+| **gap to 1.10x** H32/8 | +29.3% | +12.4% | +11.2% |
+
+- Cost of the accuracy fixes vs the non-compliant e646cb1 (same-lease A/B, bd94e1f = 77f470e production): fwd+bwd kernel time
+  +1.8..4.8% per shape (fwd -8.6%, bwd -2.0%).
+- GPU spread <= 0.035 per shape. No SUSPECT flags. Raw: results/hl_77f470e.g*.jsonl.
+- Correction 04:15: at 03:55 I marked this staged headline VOID after kda-sm100-acc's heads-up ("fails the identity mean
+  limit at 32k/64k"). dm-validator's gate records those as OPEN items, not as a FAIL, so the VOID label was wrong.
+
+Full tables (python bench/headline.py hl_77f470e):
+
+arm=dm_matched  files=results/hl_77f470e.[sg]*.jsonl  host=nvl72131-T16
+
+vs fa4_bf16  (speedup = fa4_bf16_ms / dm_matched_ms)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.814 | 0.938 | 0.995 | **0.925** |
+| 1 | fwd_bwd | 32/8 | 0.851 | 0.979 | 0.989 |  |
+| 1 | fwd | 16/16 | 0.868 | 0.934 | 1.121 | 1.001 |
+| 1 | fwd | 32/8 | 0.902 | 1.034 | 1.188 |  |
+| 1 | bwd | 16/16 | 0.790 | 0.876 | 0.956 | 0.886 |
+| 1 | bwd | 32/8 | 0.816 | 0.934 | 0.959 |  |
+
+vs fa4_bf16_det  (speedup = fa4_bf16_det_ms / dm_matched_ms)
+
+| causal | pass | H/Hk | 8k | 32k | 64k | geomean (6 shapes) |
+|---|---|---|---|---|---|---|
+| 1 | fwd_bwd | 16/16 | 0.841 | 0.960 | 1.023 | **0.961** |
+| 1 | fwd_bwd | 32/8 | 0.904 | 1.025 | 1.029 |  |
+| 1 | fwd | 16/16 | 0.868 | 0.949 | 1.112 | 1.000 |
+| 1 | fwd | 32/8 | 0.903 | 1.025 | 1.176 |  |
+| 1 | bwd | 16/16 | 0.827 | 0.932 | 0.998 | 0.941 |
+| 1 | bwd | 32/8 | 0.891 | 0.995 | 1.018 |  |
+
+gap to the 1.10x target (causal fwd+bwd vs fa4_bf16): speedup still needed = 1.10 / current
+
+| H/Hk | 8k | 32k | 64k | geomean |
+|---|---|---|---|---|
+| 16/16 | +35.1% | +17.3% | +10.6% | +18.9% |
+| 32/8 | +29.3% | +12.4% | +11.2% |  |
+
+spread across runs/GPUs (min..max of the per-GPU ratio, n = 4), causal fwd+bwd vs fa4_bf16:
+
+| H/Hk | 8k | 32k | 64k |
+|---|---|---|---|
+| 16/16 | 0.805..0.820 | 0.916..0.951 | 0.979..1.001 |
+| 32/8 | 0.846..0.860 | 0.969..1.004 | 0.979..0.998 |
+
+---
+
+## HISTORY 2026-11-09 03:10: NO COMPLIANT HEADLINE (resolved 04:05 by 77f470e)
 
 **Every commit since 3122cc4 (P0-v3) breaks the zero-sum invariant and is NON-COMPLIANT, NOT PROMOTABLE.** The affected
 commits are 3122cc4, 30ec6cf, 9c690e1, 69f570a, 5b50ab2, e34bc6b, 3fec800/4ea8bd5, cc1dbf2 and e646cb1, and all their speedups below.
@@ -21,6 +86,21 @@ commits are 3122cc4, 30ec6cf, 9c690e1, 69f570a, 5b50ab2, e34bc6b, 3fec800/4ea8bd
   (21b6b15) has an OOB bug, so there is no compliant headline right now.
 
 
+
+### Pre-measured, PENDING the identity gate: 49ff526 (P0-v7: fp64-flushed row sums in pass 0; supersedes 77f470e), 04:00
+Same-lease A/B vs e646cb1 (nvl72131-T16, 1 GPU): fwd+bwd 0.966x -> **0.925x FA4** single-GPU (0.955x vs FA4-det); kernel
+time +1.8..6.4% per shape vs e646cb1 (the total cost of all accuracy fixes). fwd -9.5%, bwd -3.4%. Same as bd94e1f within
+noise (cross-run). No SUSPECT flags. The 4-GPU headline runs as soon as 49ff526 passes.
+
+| arm | causal | pass | e646cb1 | 49ff526 | change | 49ff526 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 1 | bwd | 0.914 | 0.883 | -3.4% | 0.933 | 0.954..1.000 | 6 |
+| dm_matched | 1 | fwd | 1.104 | 1.000 | -9.5% | 1.002 | 0.895..0.934 | 6 |
+| dm_matched | 1 | fwd_bwd | 0.966 | 0.925 | -4.2% | 0.955 | 0.940..0.982 | 6 |
+| dm_stale | 1 | bwd | 1.191 | 1.200 | +0.7% | 1.267 | 0.998..1.036 | 6 |
+| dm_stale | 1 | fwd | 1.104 | 1.000 | -9.4% | 1.002 | 0.896..0.931 | 6 |
+| dm_stale | 1 | fwd_bwd | 1.184 | 1.162 | -1.9% | 1.200 | 0.972..0.999 | 6 |
+
 ### Pre-measured, PENDING the identity gate: bd94e1f, superseded by 77f470e = same production code + debug hooks behind const_expr flags (accuracy fix = fix0 pass 0 bitwise-backward P + all-MUFU forward), 03:32
 Same-lease A/B vs e646cb1, nvl72131-T16 GPU 2, 6 target shapes:
 - **Cost of the accuracy fix:** fwd+bwd kernel time +1.8..+4.8% per shape (geomean ratio 0.958x -> 0.925x FA4, -3.4%).
@@ -29,6 +109,9 @@ Same-lease A/B vs e646cb1, nvl72131-T16 GPU 2, 6 target shapes:
   32k 0.946 | 0.986, 64k 0.991 | 0.988. Gap to 1.10x: geomean +18.9% (8k +36.6% | +29.1%).
 - Sanity (rel. L2 vs fp32) is unchanged to 4 digits. No SUSPECT flags. The identity itself is dm-validator's gate.
 - This becomes the headline (4-GPU median via run_headline.sh) once bd94e1f passes the identity gate and is in VALIDATED.md.
+- Staged 4-GPU headline for 77f470e (now the headline, see top) (03:40, nvl72131-T16, median of 4 GPUs; published as the headline only after the
+  gate PASS): 0.925x FA4 (0.961x vs FA4-det).** Per shape (H16/16 | H32/8): 8k 0.814 | 0.851, 32k 0.938 | 0.979,
+  64k 0.995 | 0.989. Gap to 1.10x +18.9%. GPU spread <= 0.035. No SUSPECT flags. Raw: results/hl_77f470e.g*.jsonl.
 
 | arm | causal | pass | e646cb1 | bd94e1f | change | bd94e1f vs FA4-det | per-shape speedup of cand (min..max) | n |
 |---|---|---|---|---|---|---|---|---|

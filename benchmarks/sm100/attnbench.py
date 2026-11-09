@@ -422,7 +422,8 @@ def main():
         from gpupool_hook import gpupool_ready, gpupool_done
     except ImportError:
         gpupool_ready = gpupool_done = lambda: None
-    gpupool_ready()
+    torch.cuda.init(); torch.empty(1, device=dev)    # create the CUDA context, then hand the GPU back to the filler:
+    gpupool_done()                                   # setup / JIT / fp32 reference / sanity run beside the filler
     for s in shards:
         g = torch.Generator(device=dev).manual_seed(1234)
         B, N, H, Hk, D = s["B"], s["N"], s["H"], s["Hk"], s["D"]
@@ -476,6 +477,11 @@ def main():
                 fout.write(json.dumps(dict(rec0, pass_=p, error=f"{type(ex).__name__}: {str(ex)[:300]}")) + "\n")
                 fout.flush()
         R = max(1, a.rounds)
+        gpupool_ready()                              # quiet GPU only for the timed rounds (+ CUPTI) of this shape
+        for (_a, _p, _mk, _r) in ok:                 # re-warm after the filler stops (power / clock transient)
+            for _ in range(2):
+                _pre, _run = _mk(); _pre(); _run()
+        torch.cuda.synchronize()
         ts = {i: [] for i in range(len(ok))}
         rmed = {i: [] for i in range(len(ok))}
         hms = {i: [] for i in range(len(ok))}
@@ -500,6 +506,7 @@ def main():
             print(f"{arm:18s} {p:7s} B{B:<3d} N{N:<6d} H{H}/{Hk} c={int(s['causal'])}  {res['ev_ms']:8.3f} ms "
                   f"[{res['p10_ms']:.3f},{res['p90_ms']:.3f}] cupti {res.get('cupti_ms', float('nan')):8.3f}  "
                   f"host {res['host_ms']:7.3f}  {res['tflops']:7.1f} TF  sm {c1.get('sm_mhz', '?')}MHz", flush=True)
+        gpupool_done()
         del q, k, v, do, ref
         torch.cuda.empty_cache()
     gpupool_done()

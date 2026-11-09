@@ -2219,6 +2219,9 @@ class DMBackwardSm100:
             tmem.relinquish_alloc_permit()
             tmem_alloc_barrier.arrive_and_wait()
             tmem.free(tmem_ptr)
+            if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
+                if cute.arch.lane_idx() == 0:
+                    dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 7), dm_utils.globaltimer())
 
         # Compute
         # (4, 5, 6, 7, 8, 9, 10, 11) --> 8 warps
@@ -2297,6 +2300,9 @@ class DMBackwardSm100:
                 blocksparse_tensors,
                 dm_dq=aux_data.tensors[4] if const_expr("lwc" in self.dm_opts) else None,
             )
+            if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
+                if warp_idx == self.reduce_warp_ids[0] and cute.arch.lane_idx() == 0:
+                    dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 6), dm_utils.globaltimer())
             tmem_alloc_barrier.arrive()
 
         return
@@ -6394,7 +6400,7 @@ class DMBackwardSm100:
                     # DM epird: intermediate stages only need the smem READ done before reuse; global completion
                     # (needed before the semaphore release) is awaited once after the last stage (same bits)
                     cute.arch.cp_async_bulk_wait_group(
-                        0, read=(read_flag or const_expr("noepird" not in self.dm_opts)))
+                        0, read=(read_flag or const_expr("epird" in self.dm_opts)))
                 cute.arch.barrier_arrive(
                     barrier_id=barrier_id + wg_idx, number_of_threads=128 + cute.arch.WARP_SIZE
                 )

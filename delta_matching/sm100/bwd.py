@@ -73,10 +73,10 @@ def _fws(deterministic):
 def _auto_opts(q8, k8, causal=False):
     """Effective DM_BWD_OPTS for this shape. DM gloop (GQA, auto): short sequences spend most of a KV tile on the
     fp32 dK/dV accumulation across the qh query-head CTAs + postprocess; loop the group inside one CTA instead (dK/dV
-    in TMEM, stored once). Long causal sequences lose (4x longer tiles -> tail), so only N <= gloopN (default 2048).
+    in TMEM, stored once). Long causal sequences lose (4x longer tiles -> tail), so only N <= gloopN (default 4096).
     'nogloop' disables, 'gloop' forces."""
     ol = [o for o in os.environ.get("DM_BWD_OPTS", "").split(",") if o]
-    gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "2048"))
+    gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "4096"))   # k8 fork: harness GQA 4k bwd 0.94x, 8k +0.1..1% slower
     if q8.shape[2] > k8.shape[2] and "gloop" not in ol and "nogloop" not in ol and q8.shape[1] <= gN:
         ol = ol + ["gloop"]
     # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA

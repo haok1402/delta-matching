@@ -99,7 +99,7 @@ def _auto_opts_impl(q8, k8, causal=False):
     # DM dsqw (default, track L): dS tile amax / scale / e4m3 / stores / exchange on a dedicated warpgroup (bitwise);
     # 'nodsqw' disables. Not combined with the layouts it does not support.
     if "nodsqw" not in ol and not any(o in ol for o in ("dsq", "dsqw", "cwg4", "ilp2", "early_dq")):
-        ol = ol + ["dsqw", "dsqr=80:120:64:96"]
+        ol = ol + ["dsqw", "dsqr=72:136:48:88"]
     gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "4096"))   # k8 fork: harness GQA 4k bwd 0.94x, 8k +0.1..1% slower
     if q8.shape[2] > k8.shape[2] and "gloop" not in ol and "nogloop" not in ol and q8.shape[1] <= gN:
         ol = ol + ["gloop"]

@@ -1013,6 +1013,10 @@ class DMBackwardSm100:
         self.use_tma_store = not (
             (self.qhead_per_kvhead == 1 or self.pack_gqa) and mCuSeqlensK is not None
         )
+        # DM dkvdir: MHA dK/dV stored straight from registers to global (no sdK/sdV smem staging, which aliases sK/sV)
+        self.dm_dkvdir = "dkvdir" in self.dm_opts and self.qhead_per_kvhead == 1 and not self.pack_gqa
+        if const_expr(self.dm_dkvdir):
+            self.use_tma_store = False
         # self.use_tma_store = not self.qhead_per_kvhead == 1
         self.dKV_postprocess = self.qhead_per_kvhead > 1 and not self.pack_gqa and not self.dm_gloop
 
@@ -1529,7 +1533,8 @@ class DMBackwardSm100:
             )
 
         # 2-CTA: 231424 and 1-CTA: 232448
-        # print("SMEM: ", self.shared_storage.size_in_bytes())
+        if os.environ.get("DM_PRINT_SMEM"):
+            print("DM SMEM bytes:", self.shared_storage.size_in_bytes(), flush=True)
         if const_expr(self.use_block_sparsity):
             assert all(x is None for x in (mCuSeqlensQ, mCuSeqlensK, mSeqUsedQ, mSeqUsedK)), (
                 "Variable sequence length is not supported yet for blocksparse in bwd"
@@ -3619,6 +3624,10 @@ class DMBackwardSm100:
                     pipeline_Q.consumer_wait(consumer_state_Q)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(3))
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
+                    if const_expr(self.dm_pers > 0):
+                        # DM pers: S(0) of this tile writes the TMEM columns that hold the previous tile's last dQ;
+                        # wait until the reduce warps drained it (the main loop's S waits the same way)
+                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(4))
                     mma_qk_fn(B_idx=consumer_state_Q.index)
                     pipeline_S_P.sync_object_full.arrive(0, pipeline_S_P.producer_mask, cta_group)
@@ -5235,6 +5244,12 @@ class DMBackwardSm100:
                 dm_s0, dm_s1, dm_s2, dm_s3, dm_s4 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
                 dm_s5, dm_s6, dm_s7, dm_s8, dm_s9 = Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)
                 dm_s10, dm_s11, dm_s12, dm_s13 = Int32(0), Int32(0), Int32(0), Int32(0)
+            if const_expr(self.dm_pers > 0 and self.dm_dkvdir):
+                # DM pers + dkvdir: the epilogue no longer touches sK/sV (direct gmem stores), so the load warp may
+                # bring in the next tile's K/V as soon as every compute warp is past the main loop
+                self.compute_sync_barrier.arrive_and_wait()
+                if dm_tid == 0:
+                    cute.arch.mbarrier_arrive(dm_xchg_mbar + 2)
             # Epilogue
             # Run epilogue if we processed any m_blocks for this n_block
             if process_tile:
@@ -5301,7 +5316,7 @@ class DMBackwardSm100:
                         mdK_semaphore,
                         "K",
                     )
-            if const_expr(self.dm_pers > 0):
+            if const_expr(self.dm_pers > 0 and not self.dm_dkvdir):
                 # DM pers: every compute thread's bulk stores have finished READING sdK/sdV (= sK/sV), then one
                 # arrival per tile lets the load warp bring in the next tile's K/V
                 cute.arch.cp_async_bulk_commit_group()
@@ -5957,6 +5972,7 @@ class DMBackwardSm100:
         cute.arch.sync_warp()
         with cute.arch.elect_one():
             pipeline_dKV.consumer_release(consumer_state_dKV)
+        consumer_state_dKV.advance()   # DM: needed once a CTA runs >1 tile (pers); no-op for a single tile
         return consumer_state_dKV
 
     @cute.jit

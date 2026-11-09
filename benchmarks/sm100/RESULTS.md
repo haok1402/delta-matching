@@ -7,8 +7,11 @@ commits are 3122cc4, 30ec6cf, 9c690e1, 69f570a, 5b50ab2, e34bc6b, 3fec800/4ea8bd
 - Rule (user): "You must not break the zero sum invariant. Any operations that trade away the accuracy is banned."
 - Evidence: dm-validator found it (validate/runs/ve646/full.json, gate log validate/runs/gate/e646_full.log) and
   accuracy-audit confirmed it (audit/runs/zs_own_p.log). Pass 0 builds delta with a different exp mix (FA4 deg-3 polynomial
-  / MUFU) than the backward's P. On adversarial input families (outliers, scaled3/10, nearsat, peaked), rowsum(dS) =
-  5e-5..2e-4, against ~1e-7 fp32 round-off (the exact emulation stays <= ~3e-5). On ordinary randn inputs it is ~2e-7.
+  / MUFU) than the backward's P. **Start point (dm-validator, emulation identity on ordinary randn inputs): 21b6b15
+  compliant (3.0e-7); 3122cc4 is the first violation (9.5e-5; it contains the f8ed80a poly mix); every commit through
+  e646cb1 is ~1e-4.** On adversarial families the kernel-side rowsum(dS) reaches 5e-5..2e-4, against ~1e-7 round-off.
+  (Correction 03:40: an earlier version of this note said "~2e-7 on ordinary randn". That value was a different, kernel-own-P
+  measurement and does not show the violation; the emulation metric above does.)
 - Why my bench missed it: its sanity gate checks rel. L2 of O/dQ/dK/dV vs fp32 on randn inputs only. It does not test the
   rowsum(dS) identity or adversarial inputs, so these headlines passed it. Headline eligibility now requires the
   validator's new identity gate (validator/validate.py) in addition to VALIDATED.md.
@@ -16,6 +19,25 @@ commits are 3122cc4, 30ec6cf, 9c690e1, 69f570a, 5b50ab2, e34bc6b, 3fec800/4ea8bd
   gate I re-measure the headline (4-GPU median) and report the pass-0 slowdown vs e646cb1 separately (same-lease A/B).
 - The numbers below are kept as measured, but they are labelled NON-COMPLIANT. The last validated commit before 3122cc4
   (21b6b15) has an OOB bug, so there is no compliant headline right now.
+
+
+### Pre-measured, PENDING the identity gate: bd94e1f, superseded by 77f470e = same production code + debug hooks behind const_expr flags (accuracy fix = fix0 pass 0 bitwise-backward P + all-MUFU forward), 03:32
+Same-lease A/B vs e646cb1, nvl72131-T16 GPU 2, 6 target shapes:
+- **Cost of the accuracy fix:** fwd+bwd kernel time +1.8..+4.8% per shape (geomean ratio 0.958x -> 0.925x FA4, -3.4%).
+  fwd -8.6% (all-MUFU exp), bwd -2.0% (pass 0 MUFU). kda predicted +3-5%.
+- **bd94e1f vs FA4 (single GPU): 0.925x** (0.961x vs FA4-det). Per shape (H16/16 | H32/8): 8k 0.805 | 0.852,
+  32k 0.946 | 0.986, 64k 0.991 | 0.988. Gap to 1.10x: geomean +18.9% (8k +36.6% | +29.1%).
+- Sanity (rel. L2 vs fp32) is unchanged to 4 digits. No SUSPECT flags. The identity itself is dm-validator's gate.
+- This becomes the headline (4-GPU median via run_headline.sh) once bd94e1f passes the identity gate and is in VALIDATED.md.
+
+| arm | causal | pass | e646cb1 | bd94e1f | change | bd94e1f vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 1 | bwd | 0.908 | 0.890 | -2.0% | 0.943 | 0.964..0.998 | 6 |
+| dm_matched | 1 | fwd | 1.097 | 1.003 | -8.6% | 0.997 | 0.896..0.920 | 6 |
+| dm_matched | 1 | fwd_bwd | 0.958 | 0.925 | -3.4% | 0.961 | 0.952..0.982 | 6 |
+| dm_stale | 1 | bwd | 1.181 | 1.197 | +1.4% | 1.269 | 1.000..1.030 | 6 |
+| dm_stale | 1 | fwd | 1.094 | 1.003 | -8.3% | 0.997 | 0.897..0.926 | 6 |
+| dm_stale | 1 | fwd_bwd | 1.176 | 1.153 | -1.9% | 1.198 | 0.972..0.990 | 6 |
 
 ## LAST MEASURED (NON-COMPLIANT) HEADLINE (user target: causal fwd+bwd, N = 8k / 32k / 64k x H16/16, H32/8 = 6 shapes, aim 1.10x FA4), updated 2026-11-09 02:55
 

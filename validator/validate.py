@@ -329,7 +329,13 @@ def build_cases(tier, supports, seed):
     stress_n = 8
     # accuracy-audit 05:30 (4): >= 20 repeats on small, odd and GQA shapes (races show up as spread, not bitwise diffs)
     shapes += [(1, 2, 2, up(128), True, ["stress20"]), (1, 4, 1, up(256), True, ["stress20"]),
-               (1, 4, 1, up(384), True, ["stress20"]), (1, 8, 2, up(1152), True, ["stress20"])]
+               (1, 4, 1, up(384), True, ["stress20"]), (1, 8, 2, up(1152), True, ["stress20"]),
+               (1, 8, 1, up(640), True, ["stress20"])]          # GQA 8:1 (user 2026-11-09: headline = 32/4 + 16/4)
+    # user 2026-11-09: headline shapes are GQA 32/4 (8:1) and 16/4 (4:1): cover the 8:1 ratio in quick, odd + even blocks
+    shapes += [(1, 8, 1, up(1152), True, base_kinds + ["outliers"]), (2, 16, 2, up(1408), True, base_kinds),
+               (1, 32, 4, up(2048), True, ["randn", "peaked", "bigmag"])]
+    if nc:
+        shapes += [(1, 8, 1, up(1152), False, base_kinds), (1, 32, 4, up(1024), False, ["randn"])]
     shapes += [(1, 16, 16, up(4096), True, ["stress"]),
                # odd numbers of 128-row blocks, with the allocator state cycled between calls (out-of-bounds reads)
                (1, 4, 4, up(1152), True, ["stress"]), (1, 4, 1, up(384), True, ["stress"]), (1, 8, 2, up(1408), True, ["stress"])]
@@ -339,21 +345,25 @@ def build_cases(tier, supports, seed):
         shapes += [(1, 16, 16, up(8192), True, ["stress"]), (1, 4, 4, up(4096), True, ["stress"])]
         if nc:
             shapes += [(1, 16, 16, up(8192), False, ["stress"])]
-    if tier == "bench":   # races at the longest headline length
-        shapes.append((1, 16, 16, up(65536), True, ["stress"]))
+    if tier != "quick":   # headline GQA shapes at full size (accuracy + identity hooks)
+        shapes += [(1, 32, 4, up(8192), True, base_kinds + ["outliers"]), (1, 16, 4, up(8192), True, ["randn", "scaled3", "peaked"])]
+    if tier == "bench":   # races at the longest headline length, both headline GQA ratios
+        shapes += [(1, 32, 4, up(65536), True, ["stress"]), (1, 16, 4, up(65536), True, ["stress"])]
     if tier != "quick":
         # 6a313b0's forward race (ss_pv defaults) changed one O tile on ~1% of calls at B8 H32/8 N4096 and was invisible
         # to 8-call stress: many calls on a multi-batch GQA shape with several CTAs per SM, causal and non-causal
         # kda-sm100-sspv2: also on rescale-triggering inputs (ramp / growing-max rows), and the rescale families in accuracy
-        shapes += [(8, 32, 8, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"])]
+        # user 2026-11-09: headline GQA 32/4 (8:1) replaces 32/8; 16/4 (4:1) added
+        shapes += [(8, 32, 4, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"]),
+                   (8, 16, 4, up(4096), True, ["stress60", "stress60_growmax"])]
         if nc:
-            shapes += [(8, 32, 8, up(4096), False, ["stress60", "stress60_ramp", "stress60_growmax"])]
+            shapes += [(8, 32, 4, up(4096), False, ["stress60", "stress60_ramp", "stress60_growmax"])]
         RESC = ["ramp", "growmax", "audit_ramp", "audit_ramp_th", "audit_ramp_sm", "audit_growmax", "audit_ramp_up"]
-        shapes += [(1, 8, 2, up(1152), True, RESC), (2, 16, 16, up(4096), True, RESC)]
+        shapes += [(1, 8, 2, up(1152), True, RESC), (2, 16, 4, up(4096), True, RESC), (1, 32, 4, up(4096), True, RESC)]
         if nc:
             shapes += [(1, 8, 2, up(1408), False, RESC)]
         # accuracy-audit 11:25 (3): alternate randn and rescale-family calls in one stress sequence
-        shapes += [(8, 32, 8, up(4096), True, ["stress60mix_audit_ramp", "stress60mix_audit_growmax"])]
+        shapes += [(8, 32, 4, up(4096), True, ["stress60mix_audit_ramp", "stress60mix_audit_growmax"])]
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
             if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
@@ -656,6 +666,7 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="default: random (printed)")
     ap.add_argument("--json", default=None)
     ap.add_argument("--only", default=None, help="substring filter on case names")
+    ap.add_argument("--skip", default=None, help="drop cases whose name contains this substring (e.g. N131072: 128k in its own run)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--shard", default=None, help="i/n: run every n-th case starting at i (split a tier across GPUs)")
     ap.add_argument("--fwd-only", action="store_true", help="validate the forward (O) only; never a promotion PASS")
@@ -694,6 +705,8 @@ def main():
     cases = build_cases(a.tier, supports, seed)
     if a.only:
         cases = [c for c in cases if a.only in c["name"]]
+    if a.skip:
+        cases = [c for c in cases if a.skip not in c["name"]]
     if a.shard:
         si, sn = (int(x) for x in a.shard.split("/"))
         cases = cases[si::sn]

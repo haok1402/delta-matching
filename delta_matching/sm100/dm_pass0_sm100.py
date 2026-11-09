@@ -263,6 +263,20 @@ class DMPass0Sm100:
         # +c3: the (otherwise idle) correction warpgroup computes column chunk 3 of BOTH q stages; the softmax
         # warpgroups keep chunks 0-2 -> 3 compute warps per SMSP. Partials meet in smem (sScale) per work tile.
         self.dm_c3 = "c3" in self.dm_exp_variant.split("+")[1:]
+        # +sp: exp-kind warp specialization. Softmax WGs: column chunks 0-1 of their stage, MUFU exps only; the
+        # correction WG: chunks 2-3 of BOTH stages, exps by the base static mix (e.g. p3_8_7 = 7 of 8 pairs poly) ->
+        # MUFU and FMA pipes run concurrently. Partials meet in smem (sScale) per work tile, fixed order.
+        self.dm_sp = any(f in ("sp", "sps", "sph", "spi") for f in self.dm_exp_variant.split("+")[1:])
+        self.dm_cx = self.dm_c3 or self.dm_sp          # correction WG computes part of the columns
+        self.dm_cchunks = (2, 3) if self.dm_sp else (3,)
+        # +sps: the correction WG streams S and dP per 32-col chunk (waits both slots, releases both after the last
+        # chunk) -> 64 live fp32 values instead of 2 stages x 2 chunks of S held until dP arrives
+        self.dm_sps = "sps" in self.dm_exp_variant.split("+")[1:]
+        # +sph: per stage: wait S, load its chunks, release S at once, exp/den in place, then wait dP, stream dP chunks
+        self.dm_sph = any(f in ("sph", "spi") for f in self.dm_exp_variant.split("+")[1:])
+        # +spi: inverted specialization: softmax WGs (2 warps/SMSP) run the base static mix (poly-heavy) on chunks 0-1,
+        # the correction WG runs MUFU-only exps on chunks 2-3 of both stages (one warp saturates MUFU)
+        self.dm_spi = "spi" in self.dm_exp_variant.split("+")[1:]
         # +ma: multi-accumulator den/num with a factored per chunk, causal kernels only (the non-causal build spills
         # 35-51 regs with it at any softmax budget 208-224 and gets ~5% slower); +maa: always
         _fl0 = self.dm_exp_variant.split("+")[1:]
@@ -271,8 +285,9 @@ class DMPass0Sm100:
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         self.dm_nd = "nd" in _fl0   # no denominator: sum_j P := 1 (P is normalized by the forward LSE)
-        if self.dm_c3:
+        if self.dm_cx:
             _fl = self.dm_exp_variant.split("+")[1:]
+            assert not ("h2" in _fl), "c3/sp use the plain (non-h2) path"
             assert not any(f in _fl for f in ("fu", "fa", "sq")), "c3 supports the plain static-mix path only"
             assert _r3m(self.dm_exp_variant) == 0 and not self.dm_exp_variant.startswith(("b3_", "mix"))
 
@@ -1083,7 +1098,7 @@ class DMPass0Sm100:
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
             consumer_group=ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if self.dm_c3 else 1)
+                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if self.dm_cx else 1)
             ),  # P0: softmax threads (+ c3 correction WG) release the S/dP slot
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
@@ -1103,7 +1118,7 @@ class DMPass0Sm100:
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
             consumer_group=ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if self.dm_c3 else 1)
+                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if self.dm_cx else 1)
             ),
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
@@ -1473,7 +1488,7 @@ class DMPass0Sm100:
             # sync with mma warp before retrieving tmem ptr
             tmem_alloc_barrier.arrive_and_wait_unaligned()
             tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
-            if const_expr(self.dm_c3):
+            if const_expr(self.dm_cx):
                 self.c3_loop(thr_mma_qk, tStS, sScale, aux_data, pipeline_s_p_o, pipeline_o_acc, block_info, num_splits,
                              SeqlenInfoCls, tile_scheduler)
             else:
@@ -2149,7 +2164,7 @@ class DMPass0Sm100:
         tScS = tScS[(None, None), 0, 0]
         tScS_t2r = thr_tmem_load.partition_D(tScS)
         n_chunks = cute.size(tStS_t2r.shape[2])
-        nc = n_chunks - 1 if const_expr(self.dm_c3) else n_chunks   # c3: chunk 3 belongs to the correction WG
+        nc = n_chunks - len(self.dm_cchunks) if const_expr(self.dm_cx) else n_chunks   # c3/sp: last chunk(s) -> correction WG
         s_full_phase = Int32(0)
         s0s1_phase = Int32(1 if stage == 0 else 0)
 
@@ -2267,7 +2282,7 @@ class DMPass0Sm100:
                         if const_expr(_r3m(self.dm_exp_variant) > 0):
                             for j in cutlass.range_constexpr(n_chunks):
                                 cute.copy(thr_tmem_load, tStS_t2r[None, None, (j + rot) % n_chunks], tSrS[None, None, j])
-                        elif const_expr(self.dm_c3):
+                        elif const_expr(self.dm_cx):
                             for j in cutlass.range_constexpr(nc):
                                 cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
                         else:
@@ -2363,6 +2378,8 @@ class DMPass0Sm100:
                                             p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                     elif const_expr(self.dm_exp_variant.split("+")[0] == "mix"):
                                         p = dm_common.dm_bwd_p_pair_mix(tSrS[i0], tSrS[i0 + 1], cs[j], l2, row_odd)
+                                    elif const_expr(self.dm_sp and not self.dm_spi):
+                                        p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)   # sp: MUFU only
                                     elif const_expr(dm_common.is_static_mix(self.dm_exp_variant.split("+")[0])):
                                         if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
                                             if const_expr(self.dm_exp_variant.startswith("p5_")):
@@ -2439,7 +2456,7 @@ class DMPass0Sm100:
                         dm_utils.red_add_u64(aux[6].iterator.toint() + 8 * (8 * stage + k_), Int64(tr_s[k_]))
             num_t = num[0] + num[1]
             den_t = den[0] + den[1]
-            if const_expr(self.dm_c3):
+            if const_expr(self.dm_cx):
                 # chunk-3 partials of this stage from the correction WG (named barrier 12 + stage, 256 threads)
                 cute.arch.barrier(barrier_id=12 + stage, number_of_threads=256)
                 num_t = num_t + sScale[stage * 256 + 2 * tidx]
@@ -2461,7 +2478,7 @@ class DMPass0Sm100:
         tmem_load_atom = cute.make_copy_atom(tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)), self.qk_acc_dtype)
         tScS = thr_mma_qk.partition_C(cute.make_identity_tensor(self.mma_tiler_qk[:2]))
         tScS = tScS[(None, None), 0, 0]
-        J = 3
+        JS = self.dm_cchunks
         tS = [None] * self.q_stage
         tdP = [None] * self.q_stage
         thr_tmem_load = None
@@ -2501,59 +2518,151 @@ class DMPass0Sm100:
             if has_work:
                 for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
                     n_block = n_block_max - 1 - n_tile
-                    kb = n_block * (self.n_block_size // 32) + J
-                    ksv = Float32(aux[1][batch_idx, kv_head_idx, kb])
-                    vsv = Float32(aux[2][batch_idx, kv_head_idx, kb])
-                    tSrS = [None] * self.q_stage
-                    for st in cutlass.range_constexpr(self.q_stage):
-                        pipeline_s_p_o.consumer_wait_w_index_phase(st, s_full_phase)
-                        tSrS[st] = cute.make_rmem_tensor(tScS_t2r[None, None, J].shape, self.qk_acc_dtype)
-                        cute.copy(thr_tmem_load, tS[st][None, None, J], tSrS[st])
-                        cute.arch.fence_view_async_tmem_load()
-                        pipeline_s_p_o.consumer_release_w_index(st)
-                    variant = self.dm_exp_variant.split("+")[0]
-                    for st in cutlass.range_constexpr(self.q_stage):
-                        c = dm_common.dm_bwd_c(ksv, qsv[st])
-                        a = dm_common.dm_bwd_dp_scale(vsv, dosv[st])
-                        if const_expr(self.is_causal):
-                            if (n_block + 1) * self.n_block_size > self._q_block(work_m, st) * self.m_block_size:
-                                kbase = n_block * self.n_block_size + 32 * J
-                                for i in cutlass.range_constexpr(32):
-                                    tSrS[st][i] = -Float32.inf if kbase + i > rows[st] else tSrS[st][i]
-                        for v in cutlass.range_constexpr(16):
-                            if const_expr(dm_common.is_static_mix(variant)):
-                                if const_expr(dm_common.p5_uses_poly(variant, v)):
-                                    if const_expr(variant.startswith("p5_")):
-                                        p = dm_common.dm_bwd_p_pair_poly5(tSrS[st][2 * v], tSrS[st][2 * v + 1], c, l2[st])
+                    ksv = [Float32(aux[1][batch_idx, kv_head_idx, n_block * (self.n_block_size // 32) + J]) for J in JS]
+                    vsv = [Float32(aux[2][batch_idx, kv_head_idx, n_block * (self.n_block_size // 32) + J]) for J in JS]
+                    if const_expr(self.dm_sph):
+                        variant = self.dm_exp_variant.split("+")[0]
+                        for st in cutlass.range_constexpr(self.q_stage):
+                            pipeline_s_p_o.consumer_wait_w_index_phase(st, s_full_phase)
+                            tSx = [None] * len(JS)
+                            for jj in cutlass.range_constexpr(len(JS)):
+                                tSx[jj] = cute.make_rmem_tensor(tScS_t2r[None, None, JS[jj]].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tS[st][None, None, JS[jj]], tSx[jj])
+                            cute.arch.fence_view_async_tmem_load()
+                            pipeline_s_p_o.consumer_release_w_index(st)
+                            diag = False
+                            if const_expr(self.is_causal):
+                                diag = (n_block + 1) * self.n_block_size > self._q_block(work_m, st) * self.m_block_size
+                            for jj in cutlass.range_constexpr(len(JS)):
+                                c = dm_common.dm_bwd_c(ksv[jj], qsv[st])
+                                if const_expr(self.is_causal):
+                                    if diag:
+                                        kbase = n_block * self.n_block_size + 32 * JS[jj]
+                                        for i in cutlass.range_constexpr(32):
+                                            tSx[jj][i] = -Float32.inf if kbase + i > rows[st] else tSx[jj][i]
+                                for v in cutlass.range_constexpr(16):
+                                    if const_expr(not self.dm_spi and dm_common.p5_uses_poly(variant, v)):
+                                        p = dm_common.dm_bwd_p_pair_poly(tSx[jj][2 * v], tSx[jj][2 * v + 1], c, l2[st])
                                     else:
-                                        p = dm_common.dm_bwd_p_pair_poly(tSrS[st][2 * v], tSrS[st][2 * v + 1], c, l2[st])
+                                        p = dm_common.dm_bwd_p_pair(tSx[jj][2 * v], tSx[jj][2 * v + 1], c, l2[st])
+                                    tSx[jj][2 * v], tSx[jj][2 * v + 1] = p
+                                    if const_expr(v % 2 == 1):
+                                        denb[st] = cute.arch.add_packed_f32x2(denb[st], p)
+                                    else:
+                                        den[st] = cute.arch.add_packed_f32x2(den[st], p)
+                            pipeline_dp.consumer_wait_w_index_phase(st, s_full_phase)
+                            for jj in cutlass.range_constexpr(len(JS)):
+                                tdPr = cute.make_rmem_tensor(tScS_t2r[None, None, JS[jj]].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tdP[st][None, None, JS[jj]], tdPr)
+                                if const_expr(jj == len(JS) - 1):
+                                    cute.arch.fence_view_async_tmem_load()
+                                    pipeline_dp.consumer_release_w_index(st)
+                                a = dm_common.dm_bwd_dp_scale(vsv[jj], dosv[st])
+                                acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
+                                for v in cutlass.range_constexpr(16):
+                                    acc[v % 4] = cute.arch.fma_packed_f32x2(
+                                        (tSx[jj][2 * v], tSx[jj][2 * v + 1]), (tdPr[2 * v], tdPr[2 * v + 1]), acc[v % 4])
+                                accs = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(acc[0], acc[1]),
+                                                                  cute.arch.add_packed_f32x2(acc[2], acc[3]))
+                                num[st] = cute.arch.fma_packed_f32x2(accs, (a, a), num[st])
+                        s_full_phase ^= 1
+                    elif const_expr(self.dm_sps):
+                        variant = self.dm_exp_variant.split("+")[0]
+                        for st in cutlass.range_constexpr(self.q_stage):
+                            pipeline_s_p_o.consumer_wait_w_index_phase(st, s_full_phase)
+                            pipeline_dp.consumer_wait_w_index_phase(st, s_full_phase)
+                            diag = False
+                            if const_expr(self.is_causal):
+                                diag = (n_block + 1) * self.n_block_size > self._q_block(work_m, st) * self.m_block_size
+                            for jj in cutlass.range_constexpr(len(JS)):
+                                J = JS[jj]
+                                tSx = cute.make_rmem_tensor(tScS_t2r[None, None, J].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tS[st][None, None, J], tSx)
+                                tdPr = cute.make_rmem_tensor(tScS_t2r[None, None, J].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tdP[st][None, None, J], tdPr)
+                                if const_expr(jj == len(JS) - 1):
+                                    cute.arch.fence_view_async_tmem_load()
+                                    pipeline_s_p_o.consumer_release_w_index(st)
+                                    pipeline_dp.consumer_release_w_index(st)
+                                c = dm_common.dm_bwd_c(ksv[jj], qsv[st])
+                                a = dm_common.dm_bwd_dp_scale(vsv[jj], dosv[st])
+                                if const_expr(self.is_causal):
+                                    if diag:
+                                        kbase = n_block * self.n_block_size + 32 * J
+                                        for i in cutlass.range_constexpr(32):
+                                            tSx[i] = -Float32.inf if kbase + i > rows[st] else tSx[i]
+                                acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
+                                for v in cutlass.range_constexpr(16):
+                                    if const_expr(dm_common.p5_uses_poly(variant, v)):
+                                        p = dm_common.dm_bwd_p_pair_poly(tSx[2 * v], tSx[2 * v + 1], c, l2[st])
+                                    else:
+                                        p = dm_common.dm_bwd_p_pair(tSx[2 * v], tSx[2 * v + 1], c, l2[st])
+                                    if const_expr(v % 2 == 1):
+                                        denb[st] = cute.arch.add_packed_f32x2(denb[st], p)
+                                    else:
+                                        den[st] = cute.arch.add_packed_f32x2(den[st], p)
+                                    acc[v % 4] = cute.arch.fma_packed_f32x2(p, (tdPr[2 * v], tdPr[2 * v + 1]), acc[v % 4])
+                                accs = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(acc[0], acc[1]),
+                                                                  cute.arch.add_packed_f32x2(acc[2], acc[3]))
+                                num[st] = cute.arch.fma_packed_f32x2(accs, (a, a), num[st])
+                        s_full_phase ^= 1
+                    else:
+                        tSrSs = [[None] * len(JS) for _ in range(self.q_stage)]
+                        for st in cutlass.range_constexpr(self.q_stage):
+                            pipeline_s_p_o.consumer_wait_w_index_phase(st, s_full_phase)
+                            for jj in cutlass.range_constexpr(len(JS)):
+                                tSrSs[st][jj] = cute.make_rmem_tensor(tScS_t2r[None, None, JS[jj]].shape, self.qk_acc_dtype)
+                                cute.copy(thr_tmem_load, tS[st][None, None, JS[jj]], tSrSs[st][jj])
+                            cute.arch.fence_view_async_tmem_load()
+                            pipeline_s_p_o.consumer_release_w_index(st)
+                        variant = self.dm_exp_variant.split("+")[0]
+                        for st in cutlass.range_constexpr(self.q_stage):
+                          for jj in cutlass.range_constexpr(len(JS)):
+                            J = JS[jj]
+                            tSx = tSrSs[st][jj]
+                            c = dm_common.dm_bwd_c(ksv[jj], qsv[st])
+                            a = dm_common.dm_bwd_dp_scale(vsv[jj], dosv[st])
+                            if const_expr(self.is_causal):
+                                if (n_block + 1) * self.n_block_size > self._q_block(work_m, st) * self.m_block_size:
+                                    kbase = n_block * self.n_block_size + 32 * J
+                                    for i in cutlass.range_constexpr(32):
+                                        tSx[i] = -Float32.inf if kbase + i > rows[st] else tSx[i]
+                            for v in cutlass.range_constexpr(16):
+                                if const_expr(dm_common.is_static_mix(variant)):
+                                    if const_expr(dm_common.p5_uses_poly(variant, v)):
+                                        if const_expr(variant.startswith("p5_")):
+                                            p = dm_common.dm_bwd_p_pair_poly5(tSx[2 * v], tSx[2 * v + 1], c, l2[st])
+                                        else:
+                                            p = dm_common.dm_bwd_p_pair_poly(tSx[2 * v], tSx[2 * v + 1], c, l2[st])
+                                    else:
+                                        p = dm_common.dm_bwd_p_pair(tSx[2 * v], tSx[2 * v + 1], c, l2[st])
                                 else:
-                                    p = dm_common.dm_bwd_p_pair(tSrS[st][2 * v], tSrS[st][2 * v + 1], c, l2[st])
+                                    p = dm_common.P_PAIR_VARIANTS[variant](tSx[2 * v], tSx[2 * v + 1], c, l2[st])
+                                tSx[2 * v], tSx[2 * v + 1] = p
+                                if const_expr(self.dm_ma and v % 2 == 1):
+                                    denb[st] = cute.arch.add_packed_f32x2(denb[st], p)
+                                else:
+                                    den[st] = cute.arch.add_packed_f32x2(den[st], p)
+                            if const_expr(jj == 0):
+                                pipeline_dp.consumer_wait_w_index_phase(st, s_full_phase)
+                            tdPr = cute.make_rmem_tensor(tScS_t2r[None, None, J].shape, self.qk_acc_dtype)
+                            cute.copy(thr_tmem_load, tdP[st][None, None, J], tdPr)
+                            if const_expr(jj == len(JS) - 1):
+                                cute.arch.fence_view_async_tmem_load()
+                                pipeline_dp.consumer_release_w_index(st)
+                            if const_expr(self.dm_ma):
+                                acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
+                                for v in cutlass.range_constexpr(16):
+                                    acc[v % 4] = cute.arch.fma_packed_f32x2(
+                                        (tSx[2 * v], tSx[2 * v + 1]), (tdPr[2 * v], tdPr[2 * v + 1]), acc[v % 4])
+                                accs = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(acc[0], acc[1]),
+                                                                  cute.arch.add_packed_f32x2(acc[2], acc[3]))
+                                num[st] = cute.arch.fma_packed_f32x2(accs, (a, a), num[st])
                             else:
-                                p = dm_common.P_PAIR_VARIANTS[variant](tSrS[st][2 * v], tSrS[st][2 * v + 1], c, l2[st])
-                            tSrS[st][2 * v], tSrS[st][2 * v + 1] = p
-                            if const_expr(self.dm_ma and v % 2 == 1):
-                                denb[st] = cute.arch.add_packed_f32x2(denb[st], p)
-                            else:
-                                den[st] = cute.arch.add_packed_f32x2(den[st], p)
-                        pipeline_dp.consumer_wait_w_index_phase(st, s_full_phase)
-                        tdPr = cute.make_rmem_tensor(tScS_t2r[None, None, J].shape, self.qk_acc_dtype)
-                        cute.copy(thr_tmem_load, tdP[st][None, None, J], tdPr)
-                        cute.arch.fence_view_async_tmem_load()
-                        pipeline_dp.consumer_release_w_index(st)
-                        if const_expr(self.dm_ma):
-                            acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
-                            for v in cutlass.range_constexpr(16):
-                                acc[v % 4] = cute.arch.fma_packed_f32x2(
-                                    (tSrS[st][2 * v], tSrS[st][2 * v + 1]), (tdPr[2 * v], tdPr[2 * v + 1]), acc[v % 4])
-                            accs = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(acc[0], acc[1]),
-                                                              cute.arch.add_packed_f32x2(acc[2], acc[3]))
-                            num[st] = cute.arch.fma_packed_f32x2(accs, (a, a), num[st])
-                        else:
-                            for v in cutlass.range_constexpr(16):
-                                dpv = cute.arch.mul_packed_f32x2((tdPr[2 * v], tdPr[2 * v + 1]), (a, a))
-                                num[st] = cute.arch.fma_packed_f32x2((tSrS[st][2 * v], tSrS[st][2 * v + 1]), dpv, num[st])
-                    s_full_phase ^= 1
+                                for v in cutlass.range_constexpr(16):
+                                    dpv = cute.arch.mul_packed_f32x2((tdPr[2 * v], tdPr[2 * v + 1]), (a, a))
+                                    num[st] = cute.arch.fma_packed_f32x2((tSx[2 * v], tSx[2 * v + 1]), dpv, num[st])
+                        s_full_phase ^= 1
             for st in cutlass.range_constexpr(self.q_stage):
                 sScale[st * 256 + 2 * tidx] = num[st][0] + num[st][1]
                 if const_expr(not self.dm_nd):

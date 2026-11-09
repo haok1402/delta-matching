@@ -21,6 +21,8 @@ FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_s
 REGS = dict(softmax=208, correction=32, other=64)  # P0: correction warps idle -> registers to softmax
 _c3r = os.environ.get("DM_P0_C3REGS", "168,96,64").split(",")   # +c3: correction WG computes chunk 3
 REGS_C3 = dict(softmax=int(_c3r[0]), correction=int(_c3r[1]), other=int(_c3r[2]))
+_spr = os.environ.get("DM_P0_SPREGS", "160,128,64").split(",")  # +sp: correction WG does the poly half of both stages
+REGS_SP = dict(softmax=int(_spr[0]), correction=int(_spr[1]), other=int(_spr[2]))
 
 
 def _make_cache():
@@ -67,7 +69,8 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
     def select(inputs):
         cfg = orig[2](inputs)
         cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "registers"})
-        regs = over.get("registers", REGS_C3 if "c3" in exp_variant.split("+")[1:] else REGS)
+        _f = exp_variant.split("+")[1:]
+        regs = over.get("registers", REGS_C3 if "c3" in _f else (REGS_SP if any(x in _f for x in ("sp", "sps", "sph", "spi")) else REGS))
         for fl in exp_variant.split("+")[1:]:      # +r<softmax>_<correction>: register split (other = 64)
             if fl.startswith("r") and "_" in fl and fl[1:].split("_")[0].isdigit():
                 r_ = [int(x) for x in fl[1:].split("_")]

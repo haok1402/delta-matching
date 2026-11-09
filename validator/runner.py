@@ -211,16 +211,22 @@ def run_case(mod, fn, case, dev):
                     POISON_MODE[0] = "none"
                     out = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
                     nonfin = mism = 0
+                    dq_max = 0.0
                     for it in range(n - 1):
                         POISON_MODE[0] = ("ff", "zero", "rand", "none")[it % 4]
                         o2 = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
                         nonfin += any(t is not None and not torch.isfinite(t).all() for t in o2)
-                        mism += any(t is not None and not torch.equal(t, t0) for t, t0 in zip(o2, out))
+                        # user rule (2026-11-09): no output must be bitwise deterministic; every output must stay
+                        # within summation-order noise of the first call (and finite) - record the largest deviation
+                        for t, t0 in zip(o2, out):
+                            if t is not None and t0 is not None:
+                                dq_max = max(dq_max, ((t.double() - t0.double()).norm()
+                                                      / t0.double().norm().clamp_min(1e-300)).item())
                         del o2
                     POISON_MODE[0] = "none"
                     nonfin += any(t is not None and not torch.isfinite(t).all() for t in out)
                     r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin,
-                                                                 "mismatch_calls": mism}
+                                                                 "mismatch_calls": 0, "rel_max": dq_max}
                 elif kind == "mutate":
                     # caching probe: run on buffers, overwrite them in place with the case's second input set, run again
                     bufs = [x.clone() for x in (q, k, v)]
@@ -235,6 +241,8 @@ def run_case(mod, fn, case, dev):
             if dbg is not None and ("matched", "plain") in [tuple(x) for x in case["runs"]]:
                 d = dbg(q, k, v, do, case["causal"], "matched")
                 r["debug"] = {kk: vv.detach().cpu() for kk, vv in (d or {}).items() if torch.is_tensor(vv)}
+                d2 = dbg(q, k, v, do, case["causal"], "matched")      # repeat: identity must hold on EVERY run
+                r["debug_repeat"] = {kk: vv.detach().cpu() for kk, vv in (d2 or {}).items() if torch.is_tensor(vv)}
         except Exception:
             r["error"] = traceback.format_exc()[-4000:]
         return r

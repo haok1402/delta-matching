@@ -45,6 +45,7 @@ imports it fails) on inputs drawn from a seed chosen at run time. Then, per outp
 | rowsum_dS_identity (matched) | sum_j dK_j metric <= 2 x the emulation's + 1e-4 | matched delta makes rowsum(dS) = 0, so sum over keys of dK = Q^T rowsum(dS) ~ 0; stale shows ~2-40x more |
 | modes_share_O / dV | bitwise equal between matched and stale | the modes differ only in delta |
 | modes_differ_dQ | matched != stale | a matched mode that silently runs stale fails |
+| run-to-run (user rule 2026-11-09, final) | NO output must be bitwise deterministic. Repeat, strided-view and stress calls (and matched vs stale O / dV, debug build vs production) must be finite and within 1e-4 rel of the first call; LSE within 1e-5 abs; the in-kernel zero-sum identity must hold on every debug call | "i don't find the particular need for any part to force deterministic ... the zero-sum invariant, and the accuracy, however, must be preserved" |
 | repeat / views bitwise | identical outputs for a repeat call and for strided-view inputs | determinism, stride handling |
 | stress (finite / bitwise every call) | 4 (quick) or 8 (full, bench) repeated calls on large MHA shapes (H16 N4096/8192, causal and full): every call finite and bitwise equal to the first | races show up intermittently (B1-v0's 2-CTA backward produced NaN rows in 1-6 of 6 calls) |
 | no_stale_cache | after overwriting the input buffers in place the result follows the new inputs | output caching keyed on pointers |

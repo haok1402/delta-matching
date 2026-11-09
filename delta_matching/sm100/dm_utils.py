@@ -408,6 +408,13 @@ def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def st_sys_u32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
+                    "st.relaxed.sys.global.u32 [$0], $1;", "l,r", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
 def clock32(*, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %clock;", "=r",
                                  has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
@@ -459,3 +466,36 @@ def globaltimer(*, loc=None, ip=None) -> cutlass.Int64:
 def smid(*, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %smid;", "=r",
                                  has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def mbar_arrive_rank(mbar: Int32, rank: Int32, *, loc=None, ip=None):
+    """mbarrier arrive (release, cluster scope) on CTA `rank`'s mbarrier at the offset of local `mbar`."""
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(rank).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .b32 rm;\n\t"
+                    "mapa.shared::cluster.u32 rm, $0, $1;\n\t"
+                    "mbarrier.arrive.release.cluster.shared::cluster.b64 _, [rm];\n\t}",
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def mbar_arrive_local(mbar: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
+                    "mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];",
+                    "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def atom_add_global_u32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
+                                 "atom.relaxed.gpu.global.add.u32 $0, [$1], $2;", "=r,l,r",
+                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def mbar_wait_parity_cluster(mbar: Int32, phase: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(phase).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .pred P1;\n\tDM_WAITC:\n\t"
+                    "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
+                    "@P1 bra DM_DONEC;\n\tbra DM_WAITC;\n\tDM_DONEC:\n\t}",
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)

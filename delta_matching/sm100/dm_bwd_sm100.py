@@ -3294,6 +3294,8 @@ class DMBackwardSm100:
             sfb_map=tuple((0, 0) for k in range(self.tile_m // 32)),
             cta_group=self.cta_group_size,
         )
+        if const_expr("nodv" in self.dm_abl):   # abl:nodv: no dV MMA (timing only, outputs wrong)
+            mma_pdo_fn = lambda **kw: None  # noqa: E731
         num_unroll_groups = 2 if const_expr(self.use_2cta_instrs) else 1
         dm_nk_dq = self.cluster_tile_n // 32
         mma_dsk_fn = partial(
@@ -4619,26 +4621,27 @@ class DMBackwardSm100:
                         cute.autovec_copy(tSrP_cvt, tRS_sP[None, 0, 0, 0])
                     else:
                         # DM: P^T codes with a pow2 scale per (key row, 32-query block); SFA_dV = s * dos
-                        p_amax = Float32(1.0)
-                        if const_expr("pamax" not in self.dm_abl and "amax3" not in self.dm_opts and "amaxt" not in self.dm_opts):
-                            p_amax = Float32(0.0)
-                            for v in cutlass.range_constexpr(cute.size(tSrS_cur)):
-                                p_amax = cute.arch.fmax(p_amax, tSrS_cur[v])
-                        elif const_expr("pamax" not in self.dm_abl):
-                            # 4 independent 3-input max chains (P >= 0)
-                            pm = [utils.fmax(tSrS_cur[2 * t], tSrS_cur[2 * t + 1]) for t in range(4)]
-                            for v in cutlass.range_constexpr(8, cute.size(tSrS_cur), 8):
-                                for t in cutlass.range_constexpr(4):
-                                    pm[t] = utils.fmax(pm[t], tSrS_cur[v + 2 * t], tSrS_cur[v + 2 * t + 1])
-                            p_amax = utils.fmax(utils.fmax(pm[0], pm[1]), pm[2], pm[3])
-                        p_sb = dm_utils.pow2_sb(p_amax)
-                        p_inv = dm_utils.inv_pow2_from_sb(p_sb)
-                        dm_sfa_dv[stage] = dm_utils.add_sb_clamp(p_sb, dm_sfa_dv[stage])
-                        tSrPq = cute.make_fragment_like(tSrS_cur, Float32)
-                        for v in cutlass.range_constexpr(cute.size(tSrS_cur) // 2):
-                            tSrPq[2 * v], tSrPq[2 * v + 1] = cute.arch.mul_packed_f32x2(
-                                (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]), (p_inv, p_inv))
-                        tSrP_r2t[None, stage, 0, 0].store(tSrPq.load().to(self.q_dtype))
+                        if const_expr("nodv" not in self.dm_abl):   # abl:nodv: no P^T quant (timing only)
+                            p_amax = Float32(1.0)
+                            if const_expr("pamax" not in self.dm_abl and "amax3" not in self.dm_opts and "amaxt" not in self.dm_opts):
+                                p_amax = Float32(0.0)
+                                for v in cutlass.range_constexpr(cute.size(tSrS_cur)):
+                                    p_amax = cute.arch.fmax(p_amax, tSrS_cur[v])
+                            elif const_expr("pamax" not in self.dm_abl):
+                                # 4 independent 3-input max chains (P >= 0)
+                                pm = [utils.fmax(tSrS_cur[2 * t], tSrS_cur[2 * t + 1]) for t in range(4)]
+                                for v in cutlass.range_constexpr(8, cute.size(tSrS_cur), 8):
+                                    for t in cutlass.range_constexpr(4):
+                                        pm[t] = utils.fmax(pm[t], tSrS_cur[v + 2 * t], tSrS_cur[v + 2 * t + 1])
+                                p_amax = utils.fmax(utils.fmax(pm[0], pm[1]), pm[2], pm[3])
+                            p_sb = dm_utils.pow2_sb(p_amax)
+                            p_inv = dm_utils.inv_pow2_from_sb(p_sb)
+                            dm_sfa_dv[stage] = dm_utils.add_sb_clamp(p_sb, dm_sfa_dv[stage])
+                            tSrPq = cute.make_fragment_like(tSrS_cur, Float32)
+                            for v in cutlass.range_constexpr(cute.size(tSrS_cur) // 2):
+                                tSrPq[2 * v], tSrPq[2 * v + 1] = cute.arch.mul_packed_f32x2(
+                                    (tSrS_cur[2 * v], tSrS_cur[2 * v + 1]), (p_inv, p_inv))
+                            tSrP_r2t[None, stage, 0, 0].store(tSrPq.load().to(self.q_dtype))
                         if const_expr(dm_tr is not None):
                             dm_now = dm_utils.clock32()
                             dm_s11 = dm_s11 + (dm_now - dm_tprev)
@@ -4699,7 +4702,7 @@ class DMBackwardSm100:
                                 with cute.arch.elect_one():
                                     pipeline_dS.producer_commit(producer_state_dS)
                                 producer_state_dS.advance()
-                    for stage in cutlass.range_constexpr(num_stages):
+                    for stage in cutlass.range_constexpr(num_stages if const_expr("nodv" not in self.dm_abl) else 0):
                         cute.copy(
                             thr_copy_r2t,
                             tSrP_r2t_f32[None, stage, None, None],
@@ -4712,7 +4715,7 @@ class DMBackwardSm100:
                     dm_tprev = dm_now
                 # DM: dV SFA (per key row, per 32-query k-step) and constant SFB
                 dm_lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
-                for stage in cutlass.range_constexpr(num_stages):
+                for stage in cutlass.range_constexpr(num_stages if const_expr("nodv" not in self.dm_abl) else 0):
                     dm_k = dm_qoff[stage]
                     dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32,
                                         dm_utils.bytes4_same(dm_sfa_dv[stage]))

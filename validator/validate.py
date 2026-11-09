@@ -91,6 +91,10 @@ EMU_ID_FAMILIES = ("randn", "bigmag", "peaked", "uniform")
 BASELINE = os.environ.get("DMVAL_BASELINE", os.path.expanduser("~/workspace/haok1402/sm100/validate/baseline.json"))
 REG_REL, REG_ABS = 5e-3, 1e-5
 REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / baseline err <= 1 + this (measured noise)
+# user rule (2026-11-09): "i don't find the particular need for any part to force deterministic ... the zero-sum
+# invariant, and the accuracy, however, must be preserved": no output must be bitwise run-to-run deterministic; repeat /
+# view / stress calls must be finite and within this relative distance of the first call (fp32 summation-order noise)
+NONDET_REL = 1e-4
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 
@@ -338,8 +342,8 @@ def check_case(case, cr, preset, dev, verbose):
             rec["metrics"][f"{key}"] = st
             chk(f"{key}:finite_every_call", st["nonfinite_calls"] == 0,
                 f"{st['nonfinite_calls']}/{st['calls']} calls had NaN/Inf outputs")
-            chk(f"{key}:bitwise_every_call", st["mismatch_calls"] == 0,
-                f"{st['mismatch_calls']}/{st['calls'] - 1} repeat calls differed from the first")
+            chk(f"{key}:close_every_call", st.get("rel_max", 0.0) <= NONDET_REL,
+                f"outputs varied by up to {st.get('rel_max', 0.0):.2e} rel between calls (allowed {NONDET_REL:.0e})")
         rec["fails"] = fails
         return not fails, rec
     q, k, v, do = (case[n].to(dev) for n in ("q", "k", "v", "do"))
@@ -432,6 +436,10 @@ def check_case(case, cr, preset, dev, verbose):
                 m = {"lse_maxabs": lse_err.max().item(), "rowsum_rel_max": r.max().item() if r.numel() else 0.0,
                      "rowsum_rel_mean": r.mean().item() if r.numel() else 0.0, "bind_dist": bind}
                 rec["metrics"]["matched:debug_delta"] = m
+                rep_l = (cr.get("debug_repeat") or {}).get("lse")
+                if rep_l is not None:
+                    dl_ = (rep_l.to(dev).reshape(lse_c.shape).double() - lse_c.double()).abs().max().item()
+                    chk("matched:lse_repeat_close", dl_ <= 1e-5, f"LSE varies by {dl_:.2e} between two identical calls")
                 chk("matched:debug_lse", bool((lse_err <= lse_tol).all()),
                     f"candidate LSE vs the {preset} emulation: max |diff| {m['lse_maxabs']:.3e}")
                 # fp32 round-off level of THIS case (cached with the references): the exact emulation's own residual
@@ -454,10 +462,17 @@ def check_case(case, cr, preset, dev, verbose):
                     # accuracy-audit ruling 03:45 (1): the identity comes from a debug build -> its grads must be BITWISE
                     # the production grads, or the clean identity could come from a build that does not ship
                     ok_bind = all(kk in dbg for kk in ("dbg_dq", "dbg_dk", "dbg_dv")) and all(
-                        torch.equal(dbg[kk].reshape(t.shape).to(t.dtype), t)
+                        rel(dbg[kk].reshape(t.shape).to(t.dtype), t) <= NONDET_REL
                         for kk, t in (("dbg_dq", cand[1]), ("dbg_dk", cand[2]), ("dbg_dv", cand[3])))
-                    chk("matched:identity_build_bitwise", ok_bind,
-                        "debug(identity) build's dQ/dK/dV missing or not bitwise equal to the production grads")
+                    chk("matched:identity_build_matches", ok_bind,
+                        f"debug(identity) build's dQ/dK/dV missing or not within {NONDET_REL:.0e} of the production grads")
+                    rep = {kk: vv.to(dev) for kk, vv in (cr.get("debug_repeat") or {}).items()}
+                    if "rowsum_dS" in rep:        # the identity must hold on every run, not just one
+                        kr2 = (rep["rowsum_dS"].double().abs() / rep["sum_abs_PdP"].double().clamp_min(1e-300))[
+                            rep["sum_abs_PdP"] > 0]
+                        chk("matched:rowsum_dS_kernel_roundoff_repeat", kr2.numel() == 0 or (
+                            kr2.max().item() <= ID_FLOOR and kr2.mean().item() <= ID_MEAN_FLOOR),
+                            f"repeat run: in-kernel identity max {kr2.max().item():.2e} mean {kr2.mean().item():.2e}")
                 emu_hard = (not kernel_side) or case["kind"] in EMU_ID_FAMILIES
                 b = (BASE_METRICS.get(case["name"], {}).get("matched:debug_delta") or {}) if case.get("cached") else {}
                 if emu_hard:
@@ -488,10 +503,11 @@ def check_case(case, cr, preset, dev, verbose):
                 f"|sum_j dK_j| metric {cs_c:.2e} vs emulation {cs_e:.2e} (stale run {cs_s:.2e})")
     if "matched/plain" in runs and "stale/plain" in runs:
         a, b = runs["matched/plain"], runs["stale/plain"]
-        chk("modes_share_O", torch.equal(a[0], b[0]), "O differs between matched and stale")
-        chk("modes_share_dV", torch.equal(a[3], b[3]), "dV differs between matched and stale")
+        chk("modes_share_O", rel(a[0], b[0]) <= NONDET_REL, f"O differs between matched and stale by {rel(a[0], b[0]):.2e}")
+        chk("modes_share_dV", rel(a[3], b[3]) <= NONDET_REL, f"dV differs between matched and stale by {rel(a[3], b[3]):.2e}")
         if do.float().abs().max() > 0 and ex["dQ"].double().norm() > 1e-4 * ex["dV"].double().norm():
-            chk("modes_differ_dQ", not torch.equal(a[1], b[1]), "matched and stale dQ are bitwise equal")
+            chk("modes_differ_dQ", rel(a[1], b[1]) > 10 * NONDET_REL,
+                f"matched and stale dQ differ by only {rel(a[1], b[1]):.2e} (a matched mode running the stale delta?)")
     if case.get("cached") and BASE_METRICS.get(case["name"]):
         bm = BASE_METRICS[case["name"]]
         for key, m in rec["metrics"].items():
@@ -509,8 +525,9 @@ def check_case(case, cr, preset, dev, verbose):
         base = runs[f"{mode}/plain"]
         if kind in ("repeat", "views"):
             for nm, x, y in zip(names, out, base):
-                chk(f"{key}:{nm}:bitwise", torch.equal(x, y),
-                    f"max |diff| {(x.float() - y.float()).abs().max().item():.3e} vs the plain run")
+                d_ = rel(x, y)        # user rule: no bitwise determinism; finite and within summation-order noise
+                chk(f"{key}:{nm}:close", bool(torch.isfinite(x).all()) and d_ <= NONDET_REL,
+                    f"{nm} differs from the plain run by {d_:.2e} rel (allowed {NONDET_REL:.0e})")
         if kind == "mutate":
             q2, k2, v2 = (case[n].to(dev) for n in ("q2", "k2", "v2"))
             em2 = R.dm_reference(q2, k2, v2, do, causal, mode, preset, o_for_stale=out[0])

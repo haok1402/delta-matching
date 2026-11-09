@@ -153,19 +153,23 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     if kind.startswith("stress60_"):                  # stress60 on a named input family, e.g. stress60_ramp
         kind = kind[len("stress60_"):]
     if kind.startswith("audit_"):
-        # accuracy-audit's rescale families (sm100/audit/families.py, 11:25): q ~ sqrt(D) u + noise, k_j = s_j u + noise,
-        # so the logit ~ s_j along the keys.  ramp +12 nats/tile (rescale every tile), ramp_th +6, ramp_sm +3, ramp_neg -12
-        # (control), growmax: spike keys every 512 whose height grows +10 nats each
+        # accuracy-audit's rescale families (sm100/audit/families.py, CORRECTED after kda-sm100-sspv2's planted-bug
+        # control: the forward visits key blocks from the HIGHEST index down).  q ~ sqrt(D) u + noise, k_j = s_j u + noise:
+        # ramp / ramp_th / ramp_sm rise towards key 0 by 12 / 6 / 3 nats per 128 keys (rescale every tile / just above /
+        # below the lazy threshold); growmax: spike keys every 512, height growing towards key 0 (+10 nats each);
+        # ramp_up: rising with key index = seen first = NO rescale (control)
         fam = kind[len("audit_"):]
         u = rn(D)
         u = u / u.norm()
         j = torch.arange(N, device=dev, dtype=torch.float32)
-        if fam in ("ramp", "ramp_th", "ramp_sm", "ramp_neg"):
-            sj = {"ramp": 12.0, "ramp_th": 6.0, "ramp_sm": 3.0, "ramp_neg": -12.0}[fam] / 128.0 * j
+        if fam in ("ramp", "ramp_th", "ramp_sm"):
+            sj = {"ramp": 12.0, "ramp_th": 6.0, "ramp_sm": 3.0}[fam] / 128.0 * (N - 1 - j)
+        elif fam == "ramp_up":
+            sj = 12.0 / 128.0 * j
         elif fam == "growmax":
             sj = torch.zeros(N, device=dev)
             pos = torch.arange(256, N, 512, device=dev)
-            sj[pos] = 10.0 * torch.arange(1, len(pos) + 1, device=dev, dtype=torch.float32)
+            sj[pos] = 10.0 * torch.arange(len(pos), 0, -1, device=dev, dtype=torch.float32)
         else:
             raise ValueError(kind)
         q = math.sqrt(D) * u.expand(B, N, H, D) + 0.5 * rn(B, N, H, D)
@@ -175,16 +179,18 @@ def make_inputs(kind, B, N, H, Hk, gen, dev):
     if kind in ("randn", "stress", "stress20", "stress60"):
         pass
     elif kind == "ramp":
-        # online-softmax RESCALE path (kda-sm100-sspv2: randn never triggers it): logits rise steadily along the keys, so
-        # every row's running max grows on every key tile.  Channel 0: q = 8, k ramps -28 .. +28 (~40 nats over the row)
+        # online-softmax RESCALE path (kda-sm100-sspv2: randn never triggers it).  The forward visits key blocks from the
+        # HIGHEST index down (FA4 n_block loop), so logits must rise towards key 0 for the running max to grow on every
+        # visited tile (kda-sm100-sspv2 12:05: the ascending version never rescaled).  Channel 0: q = 8, k = +28 .. -28
         j = torch.arange(N, device=dev, dtype=torch.float32)
         q[..., 0] = 8.0
-        k[..., 0] = (28.0 * (2.0 * j / max(N - 1, 1) - 1.0))[None, :, None]
+        k[..., 0] = (28.0 * (1.0 - 2.0 * j / max(N - 1, 1)))[None, :, None]
     elif kind == "growmax":
-        # growing-max rows in steps: k channel 0 is a staircase (16 steps over the sequence), q channel 0 a per-row slope
-        # in [2, 14], so some rows jump the max by many log2 units at each step and others barely move
+        # growing-max rows in steps, in the forward's visiting order (high key index first): k channel 0 is a staircase
+        # rising towards key 0 (16 steps), q channel 0 a per-row slope in [2, 14], so some rows jump the max by many log2
+        # units at each step and others barely move
         j = torch.arange(N, device=dev, dtype=torch.float32)
-        k[..., 0] = (2.5 * torch.floor(16.0 * j / N) - 20.0)[None, :, None]
+        k[..., 0] = (2.5 * torch.floor(16.0 * (N - 1 - j) / N) - 20.0)[None, :, None]
         q[..., 0] = 2.0 + 12.0 * torch.rand(B, N, H, generator=gen, device=dev)
     elif kind.startswith("scaled"):                   # larger logit range: q, k * s
         s = float(kind[6:])
@@ -342,7 +348,7 @@ def build_cases(tier, supports, seed):
         shapes += [(8, 32, 8, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"])]
         if nc:
             shapes += [(8, 32, 8, up(4096), False, ["stress60", "stress60_ramp", "stress60_growmax"])]
-        RESC = ["ramp", "growmax", "audit_ramp", "audit_ramp_th", "audit_ramp_sm", "audit_growmax", "audit_ramp_neg"]
+        RESC = ["ramp", "growmax", "audit_ramp", "audit_ramp_th", "audit_ramp_sm", "audit_growmax", "audit_ramp_up"]
         shapes += [(1, 8, 2, up(1152), True, RESC), (2, 16, 16, up(4096), True, RESC)]
         if nc:
             shapes += [(1, 8, 2, up(1408), False, RESC)]

@@ -19,7 +19,23 @@ RACE_SITES = os.path.expanduser("~/workspace/haok1402/sm100/validate/racecheck_s
 _KER = r"kernel_cutlass_kernel_([A-Za-z0-9_]+?)_object_at\S*\+(0x[0-9a-f]+)(?: in (\S+?):(\d+))?"
 
 
-def race_src_sites(out):
+def _is_decl_line(root, fn, ln, _c={}):
+    """True if file:line is a function declaration / decorator: where line info lands for instructions without their own
+    location (e.g. inline asm emitted without loc), so such a site is NOT mapped to its real source line."""
+    if not root:
+        return False
+    k = (root, fn)
+    if k not in _c:
+        try:
+            _c[k] = open(os.path.join(root, "delta_matching/sm100", fn)).read().splitlines()
+        except OSError:
+            _c[k] = []
+    lines = _c[k]
+    t = lines[int(ln) - 1].strip() if 0 < int(ln) <= len(lines) else ""
+    return t.startswith("def ") or t.startswith("@")
+
+
+def race_src_sites(out, root=None):
     """SOURCE-keyed hazard sites (accuracy-audit + lead 17:05): kernel|Kind@file:line|Kind@file:line from a lineinfo build.
     Returns (mapped set, unmapped PC-keyed set): a pair with either side lacking a source line is unmapped."""
     src, unm, cur = set(), set(), None
@@ -30,7 +46,9 @@ def race_src_sites(out):
             continue
         m = re.search(r"and (\w+) access at " + _KER, ln)
         if m and cur:
-            if cur[3] and m.group(4):
+            decl = root and ((cur[3] and _is_decl_line(root, os.path.basename(cur[3]), cur[4])) or
+                             (m.group(4) and _is_decl_line(root, os.path.basename(m.group(4)), m.group(5))))
+            if cur[3] and m.group(4) and not decl:
                 src.add(f"{cur[0]}|{cur[1]}@{os.path.basename(cur[3])}:{cur[4]}|{m.group(1)}@{os.path.basename(m.group(4))}:{m.group(5)}")
             else:
                 unm.add(f"{cur[0]}|{cur[1]}@{cur[2]}|{m.group(1)}@{m.group(3)}")
@@ -159,7 +177,7 @@ def main():
         # sites and needs a written explanation before they are accepted (--accept-sites "NOTE").
         mode = cand_mode(tgt)
         sites = race_sites(out)
-        src, unm = race_src_sites(out)
+        src, unm = race_src_sites(out, snap_root(tgt))
         allb = json.load(open(RACE_SITES)) if os.path.exists(RACE_SITES) else {}
         base = allb.get(mode, {"sites": [], "notes": []})
         src_keyed = "src_sites" in base and lineinfo_dir is not None

@@ -5,12 +5,17 @@ Refuses incomplete data (shape sets must match)."""
 import collections, glob, json, math, sys
 
 
+
+import os as _os
+_HS = json.load(open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "headline_shapes.json")))["shapes"]
+TARGET = {(x["H"], x["Hk"], x["N"], x["causal"]) for x in _HS}   # only the user's target shapes count
+
 def load(tag):
     d = {}
     for f in glob.glob(f"results/{tag}.s*.jsonl" if tag.startswith(("ab_", "focus_")) else f"results/full_{tag}.s*.jsonl"):
         for l in open(f):
             r = json.loads(l)
-            if "pass_" in r and "error" not in r:
+            if "pass_" in r and "error" not in r and (r["H"], r["Hk"], r["N"], r["causal"]) in TARGET:
                 d[(r["run_id"], r["arm"], r["H"], r["Hk"], r["N"], r["causal"], r["pass_"])] = r
     return d
 

@@ -1,84 +1,56 @@
 # Results: kda-sm100 candidates vs FA4 (hd128, GB200) — maintained by fa4-bench
 
-## HEADLINE (user target: causal, N = 4k / 8k / 32k / 64k; shapes = bench/headline_shapes.json, 8 shapes), updated 2026-11-09 01:36
+## HEADLINE (user target: causal, N = 4k / 8k / 32k / 64k x H16/16, H32/8; bench/headline_shapes.json, 8 shapes), updated 2026-11-09 02:20
 
-> **02:15: all 4 GPUs are evolution GPUs again. cc1dbf2 validated (02:05) = new headline commit.**
-> Provisional (same-lease single GPU, nvl72131-T16 GPU 2): **0.912x FA4** causal fwd+bwd geomean over the 8 target shapes
-> (0.948x vs FA4-det), +0.6% vs 4ea8bd5 (GQA 4k +4.4%). The 4-GPU-median headline (run_headline.sh) is queued after the
-> running e646cb1 A/B.
+**Validated cc1dbf2 (matched / Delta-Matching, deterministic bwd), nvl72131-T16, every shape on all 4 GPUs, per-shape
+median across GPUs: causal fwd+bwd geomean over the 8 target shapes = 0.917x FA4 (0.950x vs FA4 deterministic).**
 
-> **02:06 user: causal only.** headline_shapes.json = 8 causal shapes (4k/8k/32k/64k x H16/16, H32/8). The headline was
-> already causal-only. Non-causal numbers in older sections are history.
-
-> **01:52, new node nvl72131-T16 (evolve GPU 2, single-GPU from now on).** The headline commit 3fec800/4ea8bd5 re-measured
-> there: **0.906x FA4** causal fwd+bwd geomean over the 8 target shapes (0.945x vs FA4-det). The 4-GPU median on
-> nvl72052-T18 was 0.917x: a -1.2% node/GPU difference, inside the stated +-1.5% placement uncertainty. Per N (H16/16 | H32/8):
-> 4k 0.817 | 0.772, 8k 0.838 | 0.865, 32k 0.977 | 1.005, 64k 1.010 | 1.003.
-
-**Validated 3fec800 (= 4ea8bd5; matched / Delta-Matching, deterministic bwd), nvl72052-T18, per-shape median across
-GPUs: causal fwd+bwd geomean over the 8 target shapes = 0.917x FA4 (0.951x vs FA4 deterministic).** Non-causal 0.950x.
-
-| matched causal fwd+bwd vs FA4 (median across GPUs) | 4k | 8k | 32k | 64k |
+| matched causal fwd+bwd vs FA4 (median of 4 GPUs) | 4k | 8k | 32k | 64k |
 |---|---|---|---|---|
-| H16/16 | 0.815 | 0.861 | 0.992 | 1.022 |
-| H32/8  | 0.767 | 0.886 | 1.017 | 1.015 |
-| bwd alone, H16/16 / H32/8 | 0.807 / 0.730 | 0.827 / 0.843 | 0.921 / 0.950 | 0.961 / 0.948 |
-| fwd alone, H16/16 / H32/8 | 0.864 / 0.901 | 0.958 / 1.007 | 1.052 / 1.173 | 1.246 / 1.302 |
+| H16/16 | 0.827 | 0.851 | 0.979 | 1.008 |
+| H32/8  | 0.819 | 0.878 | 1.001 | 1.002 |
+| bwd alone, H16/16 / H32/8 | 0.821 / 0.788 | 0.816 / 0.828 | 0.904 / 0.937 | 0.943 / 0.936 |
+| fwd alone, H16/16 / H32/8 | 0.885 / 0.919 | 0.937 / 0.996 | 1.042 / 1.165 | 1.232 / 1.286 |
 
-- **Adding 4k (user) lowers the geomean from 0.963x (8k/32k/64k) to 0.917x.** 4k is now the weakest length:
-  0.82x (MHA) and 0.77x (GQA). Both its bwd (0.73-0.81x) and its fwd (0.86-0.90x) are behind FA4. At 32k-64k it is at or
-  above FA4.
-- 4k cells are the median of 2 GPUs (GPUs 1-2; training had not started yet), and 8k-64k are the median of 4 GPUs.
-  4k GPU spread is small: 0.809-0.821 (H16) and 0.757-0.778 (H32). At 4k FA4 is less power-bound.
-- FA4 baseline at 4k (B=8, median ms): causal fwd+bwd 1.567 (H16/16, 1228 TF) and 2.989 (H32/8, 1288 TF); non-causal 2.626 / 5.353.
-  FA4-fp8 fwd at 4k is 1.15x / 1.09x FA4 bf16 fwd (causal). Details in BASELINE.md.
-- Method: bench/run_headline.sh (all GPUs) where possible. From now on (3 GPUs train), single-GPU runs are calibrated
-  with hl_4ea8bd5 (now including 4k).
+- At parity with FA4 at 32k-64k (0.98-1.01x). 4k and 8k are the gap (0.82-0.88x), and the bwd (0.79-0.83x there) is most of it.
+- GPU spread on this node is small: at most 0.025 per shape (8k H32/8: 0.865-0.887), much tighter than on nvl72052-T18.
+- Validation: cc1dbf2 is in validate/VALIDATED.md (02:05). No SUSPECT flags on any GPU.
+- Next: e646cb1 (pending validation) measured +1.3% vs 4ea8bd5 in a same-lease A/B; it becomes the headline once validated.
+- Method: bench/run_headline.sh = one 4-GPU lease (194 s), every target shape on each GPU, FA4 / FA4-det / candidate
+  interleaved per GPU, median of the 4 per-GPU ratios. Commit deltas: same-lease A/B (bench/run_ab.sh).
 
-Full tables (python bench/headline.py hl_4ea8bd5):
+Full tables (python bench/headline.py hl_cc1dbf2):
 
-arm=dm_matched  files=results/hl_4ea8bd5.[sg]*.jsonl  host=nvl72052-T18
+arm=dm_matched  files=results/hl_cc1dbf2.[sg]*.jsonl  host=nvl72131-T16
 
 vs fa4_bf16  (speedup = fa4_bf16_ms / dm_matched_ms)
 
 | causal | pass | H/Hk | 4k | 8k | 32k | 64k | geomean (8 shapes) |
 |---|---|---|---|---|---|---|---|
-| 1 | fwd_bwd | 16/16 | 0.815 | 0.861 | 0.992 | 1.022 | **0.917** |
-| 1 | fwd_bwd | 32/8 | 0.767 | 0.886 | 1.017 | 1.015 |  |
-| 1 | fwd | 16/16 | 0.864 | 0.958 | 1.052 | 1.246 | 1.052 |
-| 1 | fwd | 32/8 | 0.901 | 1.007 | 1.173 | 1.302 |  |
-| 1 | bwd | 16/16 | 0.807 | 0.827 | 0.921 | 0.961 | 0.870 |
-| 1 | bwd | 32/8 | 0.730 | 0.843 | 0.950 | 0.948 |  |
-| 0 | fwd_bwd | 16/16 | 0.841 | 0.915 | 1.010 | 1.006 | 0.950 |
-| 0 | fwd_bwd | 32/8 | 0.846 | 0.971 | 1.030 | 1.001 |  |
-| 0 | fwd | 16/16 | 0.912 | 0.993 | 1.098 | 1.214 | 1.073 |
-| 0 | fwd | 32/8 | 0.964 | 1.023 | 1.191 | 1.241 |  |
-| 0 | bwd | 16/16 | 0.816 | 0.854 | 0.947 | 0.953 | 0.893 |
-| 0 | bwd | 32/8 | 0.776 | 0.909 | 0.982 | 0.926 |  |
+| 1 | fwd_bwd | 16/16 | 0.827 | 0.851 | 0.979 | 1.008 | **0.917** |
+| 1 | fwd_bwd | 32/8 | 0.819 | 0.878 | 1.001 | 1.002 |  |
+| 1 | fwd | 16/16 | 0.885 | 0.937 | 1.042 | 1.232 | 1.048 |
+| 1 | fwd | 32/8 | 0.919 | 0.996 | 1.165 | 1.286 |  |
+| 1 | bwd | 16/16 | 0.821 | 0.816 | 0.904 | 0.943 | 0.869 |
+| 1 | bwd | 32/8 | 0.788 | 0.828 | 0.937 | 0.936 |  |
 
 vs fa4_bf16_det  (speedup = fa4_bf16_det_ms / dm_matched_ms)
 
 | causal | pass | H/Hk | 4k | 8k | 32k | 64k | geomean (8 shapes) |
 |---|---|---|---|---|---|---|---|
-| 1 | fwd_bwd | 16/16 | 0.846 | 0.890 | 1.017 | 1.047 | **0.951** |
-| 1 | fwd_bwd | 32/8 | 0.800 | 0.950 | 1.046 | 1.049 |  |
-| 1 | fwd | 16/16 | 0.864 | 0.960 | 1.064 | 1.233 | 1.050 |
-| 1 | fwd | 32/8 | 0.901 | 1.011 | 1.167 | 1.275 |  |
-| 1 | bwd | 16/16 | 0.847 | 0.863 | 0.970 | 0.998 | 0.917 |
-| 1 | bwd | 32/8 | 0.769 | 0.915 | 1.003 | 1.005 |  |
-| 0 | fwd_bwd | 16/16 | 0.877 | 0.940 | 1.058 | 1.053 | 0.982 |
-| 0 | fwd_bwd | 32/8 | 0.867 | 1.001 | 1.042 | 1.038 |  |
-| 0 | fwd | 16/16 | 0.912 | 0.993 | 1.086 | 1.221 | 1.070 |
-| 0 | fwd | 32/8 | 0.965 | 1.023 | 1.179 | 1.233 |  |
-| 0 | bwd | 16/16 | 0.861 | 0.913 | 1.009 | 1.021 | 0.941 |
-| 0 | bwd | 32/8 | 0.821 | 0.949 | 0.991 | 0.980 |  |
+| 1 | fwd_bwd | 16/16 | 0.858 | 0.875 | 1.006 | 1.040 | **0.950** |
+| 1 | fwd_bwd | 32/8 | 0.852 | 0.929 | 1.032 | 1.039 |  |
+| 1 | fwd | 16/16 | 0.878 | 0.941 | 1.044 | 1.222 | 1.046 |
+| 1 | fwd | 32/8 | 0.921 | 0.997 | 1.156 | 1.282 |  |
+| 1 | bwd | 16/16 | 0.855 | 0.849 | 0.964 | 0.992 | 0.920 |
+| 1 | bwd | 32/8 | 0.829 | 0.901 | 0.993 | 1.000 |  |
 
 spread across runs/GPUs (min..max of the per-GPU ratio, n = 4), causal fwd+bwd vs fa4_bf16:
 
 | H/Hk | 4k | 8k | 32k | 64k |
 |---|---|---|---|---|
-| 16/16 | 0.809..0.821 | 0.826..0.889 | 0.980..1.012 | 0.998..1.027 |
-| 32/8 | 0.757..0.778 | 0.878..0.915 | 0.996..1.031 | 1.001..1.024 |
+| 16/16 | 0.819..0.833 | 0.837..0.857 | 0.970..0.983 | 0.995..1.010 |
+| 32/8 | 0.808..0.825 | 0.865..0.887 | 0.991..1.012 | 0.992..1.004 |
 
 ---
 
@@ -589,3 +561,17 @@ B vs A:
 | dm_stale | 1 | bwd | 1.102 | 1.110 | +0.7% | 1.175 | 0.996..1.073 | 8 |
 | dm_stale | 1 | fwd | 1.039 | 1.039 | -0.1% | 1.036 | 0.997..1.003 | 8 |
 | dm_stale | 1 | fwd_bwd | 1.096 | 1.105 | +0.9% | 1.149 | 0.996..1.056 | 8 |
+
+### e646cb1 (cc1dbf2 gloop-to-4k + msplit) vs 4ea8bd5, same lease (chunked per N), nvl72131-T16 GPU 2, PENDING VALIDATION (02:30)
+- matched causal fwd+bwd geomean over the 8 target shapes 0.908x -> **0.919x FA4 (+1.3%)**, 0.956x vs FA4-det. Kernel
+  time is +0.3..+4.2% on every shape; the bwd gains +1.9% (msplit plus GQA 4k gloop) and the fwd is unchanged.
+- Per N (H16/16 | H32/8): 4k 0.821 | 0.805, 8k 0.843 | 0.892, 32k 0.987 | 1.015, 64k 1.007 | 1.017. No SUSPECT flags.
+
+| arm | causal | pass | 4ea8bd5 | e646cb1 | change | e646cb1 vs FA4-det | per-shape speedup of cand (min..max) | n |
+|---|---|---|---|---|---|---|---|---|
+| dm_matched | 1 | bwd | 0.861 | 0.878 | +1.9% | 0.927 | 1.006..1.054 | 8 |
+| dm_matched | 1 | fwd | 1.044 | 1.042 | -0.2% | 1.040 | 0.983..1.002 | 8 |
+| dm_matched | 1 | fwd_bwd | 0.908 | 0.919 | +1.3% | 0.956 | 1.003..1.042 | 8 |
+| dm_stale | 1 | bwd | 1.100 | 1.129 | +2.6% | 1.192 | 1.008..1.072 | 8 |
+| dm_stale | 1 | fwd | 1.040 | 1.041 | +0.0% | 1.039 | 0.999..1.004 | 8 |
+| dm_stale | 1 | fwd_bwd | 1.101 | 1.118 | +1.6% | 1.162 | 1.005..1.054 | 8 |

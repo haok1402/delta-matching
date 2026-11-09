@@ -1615,6 +1615,10 @@ class DMBackwardSm100:
     ):
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         bidx, _, _ = cute.arch.block_idx()
+        if const_expr("tl2" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
+            # DM tl2: kernel-entry globaltimer per CTA at [64 + 8 * bid + 4]
+            if cute.arch.thread_idx()[0] == 0:
+                dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 4), dm_utils.globaltimer())
         # The CTA rank of a 2CTA pair; NOTE [SM100 backward coordinate spaces].
         mma_tile_coord_v = bidx % self.cta_group_size
         is_leader_cta = mma_tile_coord_v == 0
@@ -5012,7 +5016,7 @@ class DMBackwardSm100:
                 # DM tl: per-CTA timeline (start/end globaltimer ns of the compute mainloop, SM id) at [64 + 4 * bid]
                 if dm_tid == 0:
                     dm_bid = cute.arch.block_idx()[0]
-                    dm_tb = dm_tr.iterator.toint() + 8 * (64 + 4 * dm_bid)
+                    dm_tb = dm_tr.iterator.toint() + 8 * (64 + (8 if const_expr("tl2" in self.dm_opts) else 4) * dm_bid)
                     dm_utils.red_add_u64(dm_tb, dm_tl0)
                     dm_utils.red_add_u64(dm_tb + 8, dm_utils.globaltimer())
                     dm_utils.red_add_u64(dm_tb + 16, Int64(dm_utils.smid()))
@@ -5077,6 +5081,8 @@ class DMBackwardSm100:
                         self.dm_epi_barrier,  # barrier_id
                         mdV_semaphore,
                         "V",
+                        dm_tlp=(dm_tr.iterator.toint() + 8 * (64 + 8 * cute.arch.block_idx()[0] + 6)
+                                if const_expr(dm_tr is not None and "tl3" in self.dm_opts) else None),
                     )
                     #### STORE dK
                     consumer_state_dKV = self.epilogue_dK_or_dV_tma(
@@ -5099,6 +5105,10 @@ class DMBackwardSm100:
                         mdK_semaphore,
                         "K",
                     )
+            if const_expr(dm_tr is not None and "tl2" in self.dm_opts):
+                if dm_tid == 0:
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (64 + 8 * cute.arch.block_idx()[0] + 5),
+                                         dm_utils.globaltimer())
             # Zero dK/dV for empty tiles (local attention or block sparsity)
             # When total_m_block_cnt == 0 for block sparsity, no Q tiles contribute to this KV tile
             if const_expr(not self.dKV_postprocess):
@@ -5968,6 +5978,7 @@ class DMBackwardSm100:
         barrier_id: Int32,
         mdKV_semaphore: Optional[cute.Tensor],
         K_or_V: cutlass.Constexpr[str],
+        dm_tlp=None,
     ) -> cutlass.pipeline.PipelineState:
         assert K_or_V in ("K", "V")
         if const_expr(self.acc_m64):
@@ -6068,6 +6079,9 @@ class DMBackwardSm100:
         read_flag = const_expr(not deterministic_KV)
 
         pipeline_dKV.consumer_wait(consumer_state_dKV)
+        if const_expr(dm_tlp is not None):
+            if tidx == 0:
+                dm_utils.red_add_u64(dm_tlp, dm_utils.globaltimer())
 
         # semaphore acquire
         dm_kv_first = cutlass.Boolean(False)
@@ -6080,6 +6094,9 @@ class DMBackwardSm100:
                 dm_kv_pos,
             )
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
+            if const_expr(dm_tlp is not None):
+                if tidx == 0:
+                    dm_utils.red_add_u64(dm_tlp + 8, dm_utils.globaltimer())
             if const_expr(self.dm_fws):
                 dm_kv_first = dm_kv_pos == 0   # DM fws: first q head of the group stores (no dK/dV accum zero-fill)
 
@@ -6143,7 +6160,10 @@ class DMBackwardSm100:
                             )
                 if const_expr(epi_stage < num_epi_stages - 1):
                     cute.arch.cp_async_bulk_commit_group()
-                    cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
+                    # DM epird: intermediate stages only need the smem READ done before reuse; global completion
+                    # (needed before the semaphore release) is awaited once after the last stage (same bits)
+                    cute.arch.cp_async_bulk_wait_group(
+                        0, read=(read_flag or const_expr("noepird" not in self.dm_opts)))
                 cute.arch.barrier_arrive(
                     barrier_id=barrier_id + wg_idx, number_of_threads=128 + cute.arch.WARP_SIZE
                 )

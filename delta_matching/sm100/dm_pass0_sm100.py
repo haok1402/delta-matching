@@ -126,6 +126,33 @@ _LOG2_DTYPE_MAX = {
 # q_row drives the Q/O/LSE tail predicates and the packed-GQA sink head.
 
 
+def _il_sched_s(E: int):
+    """+il<E>s: single dP buffer. Per chunk j: issue dP load j, exps of chunk j+E (cover the load latency), wait, num j."""
+    sched = [("e", j) for j in range(E)] + [("w0", 0)]
+    for j in range(4):
+        sched.append(("l", j))
+        if j + E < 4:
+            sched.append(("e", j + E))
+        sched.append(("f", j))
+        sched.append(("n", j))
+    return sched
+
+
+def _il_sched(E: int):
+    """+il<E> static per-tile schedule (kda-sm100-p0ilp): exps of chunks 0..E-1, dP wait + chunk-0 load, then per chunk j:
+    load dP chunk j+1, exps of chunk j+E, num of chunk j, wait (dP released after the chunk-3 load completes)."""
+    sched = [("e", j) for j in range(E)] + [("w", 0)]
+    for j in range(4):
+        if j < 3:
+            sched.append(("l", j + 1))
+        if j + E < 4:
+            sched.append(("e", j + E))
+        sched.append(("n", j))
+        if j < 3:
+            sched.append(("f", j))
+    return sched
+
+
 def _r3m(variant: str) -> int:
     """'r3_<m>' exp variants -> m (rotated 32x32-block MUFU/deg-3 mix); 0 otherwise."""
     base = variant.split("+")[0]
@@ -272,6 +299,19 @@ class DMPass0Sm100:
         self.dm_ma = ("ma" in _fl0 and self.is_causal) or "maa" in _fl0
         self.dm_b6 = next((int(t[3:]) for t in _fl0 if t.startswith("b6_")), 0)   # deg-6 poly exp on (qb+kb)%m==0 blocks
         self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
+        # +il<E> (h2 path, kda-sm100-p0ilp): one S load (4 chunks, one wait, early S release), exps of chunks 0..E-1
+        # before the dP wait, then per chunk j: issue dP load of chunk j+1 (ping-pong), exps of chunk j+E, num of chunk j.
+        # Per-element ops and every accumulation order (den chains v%4 over chunks 0..3, num over j, TwoSum) unchanged.
+        self.dm_il = next((int(t[2:3]) for t in _fl0 if t.startswith("il") and t[2:3].isdigit()), 0)
+        self.dm_ils = any(t.startswith("il") and t[2:3].isdigit() and t.endswith("s") for t in _fl0)   # +il<E>s: single dP buffer
+        # +il<E>h: keep today's S half loads (S chunks 2,3 loaded + S released after the dP wait), new dP/num schedule
+        self.dm_ilh = any(t.startswith("il") and t[2:3].isdigit() and t.endswith("h") for t in _fl0)
+        # +ilst0 / +ilst1: apply +il only to softmax stage 0 / 1 (per-stage specialised code with +sq)
+        self.dm_ilst = 0 if "ilst0" in _fl0 else (1 if "ilst1" in _fl0 else -1)
+        # +mo: MMA issue order S_0, dP_0, S_1, dP_1 per KV tile (default S_0, S_1, dP_0, dP_1)
+        self.dm_mo = "mo" in _fl0
+        # +vx (with +il): ex2 as side-effecting inline asm (same instruction, bitwise) so LLVM keeps the +il order
+        self.dm_vx = "vx" in _fl0
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         # +f64: per-tile fp32 partial sums (short chains), accumulated across tiles in fp64; delta = num / den in fp64,
@@ -2016,27 +2056,47 @@ class DMPass0Sm100:
                     pipeline_q.consumer_wait_w_index_phase(stage, mma_q_consumer_phase)
                 mma_q_consumer_phase ^= 1
                 for i in cutlass.range(block_iter_count, unroll=1):
-                    pipeline_kv.consumer_wait(mma_kv_consumer_state)
-                    sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                    for stage in cutlass.range_constexpr(self.q_stage):
-                        pipeline_s_p_o.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
-                        gemm_Si[stage](
-                            smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
-                        )
-                        pipeline_s_p_o.producer_commit_w_index(stage)
-                    pipeline_kv.consumer_release(mma_kv_consumer_state)
-                    mma_kv_consumer_state.advance()
-                    pipeline_kv.consumer_wait(mma_kv_consumer_state)
-                    sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                    for stage in cutlass.range_constexpr(self.q_stage):
-                        pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
-                        gemm_dPi[stage](
-                            smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator)
-                        )
-                        pipeline_o_acc.producer_commit_w_index(stage)
-                    pipeline_kv.consumer_release(mma_kv_consumer_state)
-                    mma_kv_consumer_state.advance()
-                    dm_slot_empty_phase ^= 1
+                    if const_expr(self.dm_mo):
+                        # +mo: S_0, dP_0, S_1, dP_1 (needs both K and V of this tile before S_1)
+                        k_state = mma_kv_consumer_state.clone()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        mma_kv_consumer_state.advance()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        for stage in cutlass.range_constexpr(self.q_stage):
+                            pipeline_s_p_o.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_Si[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                            pipeline_s_p_o.producer_commit_w_index(stage)
+                            pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_dPi[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
+                            pipeline_o_acc.producer_commit_w_index(stage)
+                        pipeline_kv.consumer_release(k_state)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        dm_slot_empty_phase ^= 1
+                    else:
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        for stage in cutlass.range_constexpr(self.q_stage):
+                            pipeline_s_p_o.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_Si[stage](
+                                smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
+                            )
+                            pipeline_s_p_o.producer_commit_w_index(stage)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        for stage in cutlass.range_constexpr(self.q_stage):
+                            pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_dPi[stage](
+                                smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator)
+                            )
+                            pipeline_o_acc.producer_commit_w_index(stage)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        dm_slot_empty_phase ^= 1
                 for stage in cutlass.range(self.q_stage):
                     pipeline_q.consumer_release_w_index(stage)
 
@@ -2266,7 +2326,81 @@ class DMPass0Sm100:
                         if const_expr(self.is_causal):
                             diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
                         kbase = n_block * self.n_block_size
-                        for h in cutlass.range_constexpr(2):
+                        if const_expr(self.dm_il > 0 and (self.dm_ilst < 0 or self.dm_ilst == stage)):
+                            # +il<E> (kda-sm100-p0ilp): see __init__. Same per-element P, den chain and num order as below.
+                            assert not self.dm_sqh and self.dm_b6 == 0, "+il supports the default h2 path only"
+                            E_il = self.dm_il
+                            nS0 = 2 if const_expr(self.dm_ilh) else 4
+                            for j in cutlass.range_constexpr(nS0):
+                                cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
+                            cute.arch.fence_view_async_tmem_load()
+                            if const_expr(not self.dm_ilh):
+                                pipeline_s_p_o.consumer_release_w_index(stage)
+                            if const_expr(self.is_causal):
+                                if diag:
+                                    for i in cutlass.range_constexpr(32 * nS0):
+                                        tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
+                            dens = [den, den1, den2, den3]
+                            # static schedule: ('e', j) = exps/den of chunk j; ('w',) = dP wait + load dP chunk 0 + wait;
+                            # ('l', j) = issue dP load of chunk j; ('n', j) = num of chunk j; ('f', j) = wait (+ release at j == 2)
+                            sched = _il_sched_s(E_il) if const_expr(self.dm_ils) else _il_sched(E_il)
+                            dPbuf = [cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS)[None, None, 0].shape, self.qk_acc_dtype)
+                                     for _ in range(1 if const_expr(self.dm_ils) else 2)]
+                            for st in cutlass.range_constexpr(len(sched)):
+                                kind_, j = sched[st]
+                                if const_expr(kind_ == "e"):
+                                    for v in cutlass.range_constexpr(16):
+                                        i0 = 32 * j + 2 * v
+                                        if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
+                                            p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        elif const_expr(self.dm_vx):
+                                            p = dm_common.dm_bwd_p_pair_v(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        else:
+                                            p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                        tSrS[i0], tSrS[i0 + 1] = p
+                                        if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                            if row < seqlen.seqlen_q:
+                                                for e_ in cutlass.range_constexpr(2):
+                                                    aux[len(aux) - 2][batch_idx, head_idx, row,
+                                                                      n_block * self.n_block_size + tScS_t2r[i0 + e_][1]] = tSrS[i0 + e_]
+                                        dens[v % 4] = cute.arch.add_packed_f32x2(dens[v % 4], p)
+                                elif const_expr(kind_ == "w0" or kind_ == "w"):
+                                    pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                                    if const_expr(self.dm_ilh):
+                                        for jj in cutlass.range_constexpr(2, 4):
+                                            cute.copy(thr_tmem_load, tStS_t2r[None, None, jj], tSrS[None, None, jj])
+                                    if const_expr(kind_ == "w"):
+                                        cute.copy(thr_tmem_load, tdPt_t2r[None, None, 0], dPbuf[0])
+                                    if const_expr(kind_ == "w" or self.dm_ilh):
+                                        cute.arch.fence_view_async_tmem_load()
+                                    if const_expr(self.dm_ilh):
+                                        pipeline_s_p_o.consumer_release_w_index(stage)
+                                        if const_expr(self.is_causal):
+                                            if diag:
+                                                for i in cutlass.range_constexpr(64, 128):
+                                                    tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
+                                elif const_expr(kind_ == "l"):
+                                    cute.copy(thr_tmem_load, tdPt_t2r[None, None, j], dPbuf[0 if const_expr(self.dm_ils) else j % 2])
+                                elif const_expr(kind_ == "n"):
+                                    tdPr = dPbuf[0 if const_expr(self.dm_ils) else j % 2]
+                                    if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                        if row < seqlen.seqlen_q:
+                                            for i_ in cutlass.range_constexpr(32):
+                                                aux[len(aux) - 1][batch_idx, head_idx, row,
+                                                                  n_block * self.n_block_size + tScS_t2r[32 * j + i_][1]] = tdPr[i_]
+                                    acc = [(Float32(0.0), Float32(0.0)) for _ in range(4)]
+                                    for v in cutlass.range_constexpr(16):
+                                        acc[v % 4] = cute.arch.fma_packed_f32x2(
+                                            (tSrS[32 * j + 2 * v], tSrS[32 * j + 2 * v + 1]), (tdPr[2 * v], tdPr[2 * v + 1]), acc[v % 4])
+                                    acc01 = cute.arch.add_packed_f32x2(acc[0], acc[1])
+                                    acc23 = cute.arch.add_packed_f32x2(acc[2], acc[3])
+                                    num = cute.arch.fma_packed_f32x2(cute.arch.add_packed_f32x2(acc01, acc23), (as_[j], as_[j]), num)
+                                else:
+                                    cute.arch.fence_view_async_tmem_load()
+                                    if const_expr(j == (3 if const_expr(self.dm_ils) else 2)):
+                                        pipeline_dp.consumer_release_w_index(stage)
+                            den, den1, den2, den3 = dens
+                        for h in cutlass.range_constexpr(0 if const_expr(self.dm_il > 0 and (self.dm_ilst < 0 or self.dm_ilst == stage)) else 2):
                             if const_expr(self.dm_sqh and h == 0):
                                 pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0s1_phase)
                             for j in cutlass.range_constexpr(2 * h, 2 * h + 2):

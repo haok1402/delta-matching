@@ -49,6 +49,20 @@ def _ex2_f16x2(x0: Float32, x1: Float32, *, loc=None, ip=None):
             Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)))
 
 
+@dsl_user_op
+def _ex2_ftz_v(x: Float32, *, loc=None, ip=None):
+    """ex2.approx.ftz.f32 as a side-effecting inline asm: the SAME instruction as cute.math.exp2(fastmath=True)
+    (bitwise), but LLVM cannot sink/hoist it across other side-effecting ops (mbarrier waits, tcgen05.ld/wait)."""
+    return Float32(llvm.inline_asm(T.f32(), [Float32(x).ir_value(loc=loc, ip=ip)], "ex2.approx.ftz.f32 $0, $1;", "=f,f",
+                                   has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+def dm_bwd_p_pair_v(s0: Float32, s1: Float32, c: Float32, l2: Float32):
+    """dm_bwd_p_pair with pinned (side-effecting) ex2: bitwise the same P (kda-sm100-p0ilp +il schedules)."""
+    x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (c, c), (-l2, -l2))
+    return _ex2_ftz_v(x0), _ex2_ftz_v(x1)
+
+
 def dm_bwd_p_pair_f16x2(s0: Float32, s1: Float32, c: Float32, l2: Float32):
     """Proposal: the same fp32 FFMA, exp2 via MUFU ex2.approx.f16x2 (2 per op; rel err ~2^-11, P < 2^-24 -> 0)."""
     x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (c, c), (-l2, -l2))

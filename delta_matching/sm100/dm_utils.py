@@ -650,7 +650,8 @@ def mbar_arrive(mbar: Int32, *, loc=None, ip=None):
 
 @dsl_user_op
 def tc_commit(mbar: Int32, *, loc=None, ip=None):
-    """tcgen05.commit (cta_group::1): mbarrier arrives once all prior tcgen05 ops of this thread have completed."""
+    """tcgen05.commit (cta_group::1): mbarrier arrives once all prior async tcgen05 ops of this thread (mma / cp / shift)
+    have completed; tcgen05.ld / st are NOT tracked (they use tcgen05.wait::ld / ::st)."""
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
                     "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [$0];", "r",
                     has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
@@ -686,4 +687,18 @@ def st_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float3
 @dsl_user_op
 def fence_acq_rel_gpu(*, loc=None, ip=None):
     llvm.inline_asm(None, [], "fence.acq_rel.gpu;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def tc_fence_after(*, loc=None, ip=None):
+    """tcgen05.fence::after_thread_sync: order later tcgen05 ops after a preceding thread sync (mbarrier wait)."""
+    llvm.inline_asm(None, [], "tcgen05.fence::after_thread_sync;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def tc_fence_before(*, loc=None, ip=None):
+    """tcgen05.fence::before_thread_sync: order earlier tcgen05 ops before a following thread sync (mbarrier arrive)."""
+    llvm.inline_asm(None, [], "tcgen05.fence::before_thread_sync;", "", has_side_effects=True, is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT)

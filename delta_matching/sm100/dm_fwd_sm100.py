@@ -405,9 +405,11 @@ class DMForwardSm100:
         # det2 defaults (bitwise, fwdrw R6): ss_pv=1 (P codes in SMEM, SS PV), kvs=6 (smem budget), lean=1; an explicit
         # DM_FWD_OPTS value overrides (e.g. "ss_pv=0,lean=0,kvs=99" = the previous forward)
         # (only where ss_pv is supported: q_stage == 2, 1-CTA, no S ping-pong; short N picks q_stage = 1 -> old path)
-        # REVERTED 2026-11-09 (dm-validator: ss_pv/kvs6/lean default races, ~1% of repeated det calls corrupt one O tile):
-        # defaults OFF again = the 43db3c7 forward; the knobs stay opt-in via DM_FWD_OPTS for debugging.
-        if False and self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1:
+        # Re-enabled 2026-11-09 after the kda-sm100-sspvfix fix (b5bcce3: sScale read/write handshake mbar_dm_cread +
+        # tcgen05 thread-sync fences); the 07:10 revert was for the sScale WAR race. Ordering argument: kda/docs/fwdrw-design.md.
+        # (an explicit pipe=1 debug variant keeps the old path: pipe=1 bypasses the SS-PV P/SF protocol)
+        if (self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1
+                and self.dm_opts.get("pipe", "0") != "1"):
             for _k, _v in (("ss_pv", "1"), ("kvs", "6"), ("lean", "1")):
                 self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
@@ -422,10 +424,14 @@ class DMForwardSm100:
         # (mbarrier sfree); P_s/SF_s reuse waits for PV_s done (mbarrier pvdone). Numerics unchanged.
         if "kvs" in self.dm_opts:   # fwdrw: cap the K/V smem ring depth (budget for sP); timing-checked on the baseline
             self.kv_stage = min(self.kv_stage, int(self.dm_opts["kvs"]))
-        self.dm_sspv = self.dm_opts.get("ss_pv", "0") == "1"
+        # ss_pv applies only where its layout is supported (q_stage == 2, 1-CTA, no S ping-pong); elsewhere (e.g. short N
+        # with q_stage == 1) the knob falls back to the old path, exactly like the former default block did
+        self.dm_sspv = (self.dm_opts.get("ss_pv", "0") == "1" and self.q_stage == 2 and not self.use_s_ping_pong
+                        and self.cta_group_size == 1)
         if self.dm_sspv:
-            assert self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1
             assert self.n_block_size == 128 and self.head_dim_v_padded == 128
+            # the pipe=1 softmax branch stores P to TMEM and bypasses the SS-PV P/SF/pvdone protocol (Codex review)
+            assert self.dm_opts.get("pipe", "0") != "1", "ss_pv=1 is incompatible with pipe=1"
             self.split_P_arrive = 0
             self.tmem_o_offset = [0, 128]
             self.tmem_s_offset = [256, 256]
@@ -770,6 +776,7 @@ class DMForwardSm100:
         load_epi_mbar_size = 2 if const_expr(self.overlap_sO_sQ) else 0
 
         dm_nb1, dm_nb2 = (1, 3) if self.dm_sspv else (0, 0)   # 4 x 8 B keeps the following smem 16-B aligned
+        dm_nb3 = 2 if self.dm_sspv else 0   # sScale read handshake (correction -> softmax), one per stage (16 B)
         dm_sP_size = cute.cosize(self.dm_sP_layout) if self.dm_sspv else 0
 
         @cute.struct
@@ -787,6 +794,7 @@ class DMForwardSm100:
             mbar_s0_s1_sequence: cute.struct.MemRange[Int64, 2 * 2]
             mbar_dm_sfree: cute.struct.MemRange[Int64, dm_nb1]
             mbar_dm_pvdone: cute.struct.MemRange[Int64, dm_nb2]
+            mbar_dm_cread: cute.struct.MemRange[Int64, dm_nb3]
             # Tmem dealloc cluster barrier
             tmem_dealloc_mbar: Int64
             # Tmem holding buffer
@@ -817,6 +825,55 @@ class DMForwardSm100:
                 self.buffer_align_bytes,
             ]
 
+        @cute.struct
+        class SharedStorageSPF:
+            # m_barriers for pipelines
+            mbar_load_Q: cute.struct.MemRange[Int64, self.q_stage * 2]
+            mbar_load_KV: cute.struct.MemRange[Int64, self.kv_stage * 2]
+            mbar_S_full_P_full_O_rescaled: cute.struct.MemRange[Int64, self.s_p_o_stage * 2]
+            mbar_P_full_lastsplit: cute.struct.MemRange[Int64, self.s_p_o_stage * 2]
+            mbar_O_full: cute.struct.MemRange[Int64, self.s_p_o_stage * 2]
+            mbar_softmax_stats: cute.struct.MemRange[Int64, self.s_p_o_stage * 2]
+            # mbar_softmax_stats: cute.struct.MemRange[Int64, self.q_stage * 4 * 2]
+            mbar_O_epi: cute.struct.MemRange[Int64, self.q_stage * 2]
+            mbar_load_epi: cute.struct.MemRange[Int64, load_epi_mbar_size]
+            mbar_s0_s1_sequence: cute.struct.MemRange[Int64, 2 * 2]
+            mbar_dm_sfree: cute.struct.MemRange[Int64, dm_nb1]
+            mbar_dm_pvdone: cute.struct.MemRange[Int64, dm_nb2]
+            mbar_dm_cread: cute.struct.MemRange[Int64, dm_nb3]
+            # Tmem dealloc cluster barrier
+            tmem_dealloc_mbar: Int64
+            # Tmem holding buffer
+            tmem_holding_buf: Int32
+            # Smem tensors
+            # store row max and row sum
+            sScale: cute.struct.MemRange[Float32, self.s_p_o_stage * self.m_block_size * 2]
+            # Scheduler buffers placed here to utilize padding before sO's 1024-byte
+            # alignment. This avoids adding bytes at the end when we're at the smem limit.
+            # PipelineClcFetchAsync / PipelineAsync both expect
+            # 2 * sched_stages mbarriers (full + empty). Response is 4 Int32 per stage
+            # (CLC HW response, or work_info written by dynamic persistent producer).
+            sched_mbar_ptr: cute.struct.MemRange[Int64, sched_mbar_size]
+            sched_response: cute.struct.MemRange[Int32, sched_response_size]
+            # Large TMA buffers with 1024-byte alignment
+            # DM spf: sP placed BEFORE sO / sQ / sK (debug: K/V-ring overrun test)
+            sP: cute.struct.Align[
+                cute.struct.MemRange[self.q_dtype, dm_sP_size],
+                self.buffer_align_bytes,
+            ]
+            sO: cute.struct.Align[
+                cute.struct.MemRange[self.o_dtype, sO_size], self.buffer_align_bytes
+            ]
+            sQ: cute.struct.Align[
+                cute.struct.MemRange[self.q_dtype, sQ_size], self.buffer_align_bytes
+            ]
+            sK: cute.struct.Align[
+                cute.struct.MemRange[self.k_dtype, sKV_size],
+                self.buffer_align_bytes,
+            ]
+
+        if self.dm_opts.get("spf", "0") == "1":
+            SharedStorage = SharedStorageSPF
         self.shared_storage = SharedStorage
         smem_capacity = sm100_smem_capacity(self.arch.major * 10 + self.arch.minor)
         assert SharedStorage.size_in_bytes() <= smem_capacity, (
@@ -1159,10 +1216,13 @@ class DMForwardSm100:
         if const_expr(self.dm_sspv):
             self.dm_sfree = Int32(storage.mbar_dm_sfree.data_ptr().toint())
             self.dm_pvdone = Int32(storage.mbar_dm_pvdone.data_ptr().toint())
+            self.dm_cread = Int32(storage.mbar_dm_cread.data_ptr().toint())
             if cute.arch.thread_idx()[0] == 0:
                 dm_utils.mbar_init(self.dm_sfree, 4 * cute.arch.WARP_SIZE)
                 dm_utils.mbar_init(self.dm_pvdone, 1)
                 dm_utils.mbar_init(self.dm_pvdone + 8, 1)
+                dm_utils.mbar_init(self.dm_cread, 4 * cute.arch.WARP_SIZE)
+                dm_utils.mbar_init(self.dm_cread + 8, 4 * cute.arch.WARP_SIZE)
                 cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
@@ -2035,6 +2095,8 @@ class DMForwardSm100:
                             sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
                         if dm_q > 0:
                             dm_utils.mbar_wait_parity(self.dm_sfree, (dm_q - 1) & 1)
+                        if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                            dm_utils.tc_fence_after()
                         cute.arch.fence_view_async_tmem_load()
                         gemm_Si[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(stage)
@@ -2060,11 +2122,15 @@ class DMForwardSm100:
                             sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
                         for stage in cutlass.range_constexpr(self.q_stage):
                             dm_utils.mbar_wait_parity(self.dm_sfree, (dm_q - 1) & 1)
+                            if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                                dm_utils.tc_fence_after()
                             cute.arch.fence_view_async_tmem_load()
                             gemm_Si[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                             pipeline_s_p_o.producer_commit_w_index(stage)
                             dm_q += 1
                             pipeline_s_p_o.producer_acquire_w_index_phase(stage, P_full_O_rescaled_phase)
+                            if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                                dm_utils.tc_fence_after()   # SF/O tcgen05.st of softmax/correction before this PV
                             dm_utils.gemm_ptx_bs(
                                 pv_mma_op, self.tmem_o_offset[stage], dm_tCrP[None, None, None, stage], tOrVi,
                                 self.dm_sP[None, None, None, stage], sV_cur,
@@ -2087,6 +2153,8 @@ class DMForwardSm100:
                         sV_cur = self.offset_kv_smem(sV_cur, Vi_index, Vi_phase)
                     for stage in cutlass.range_constexpr(self.q_stage):
                         pipeline_s_p_o.producer_acquire_w_index_phase(stage, P_full_O_rescaled_phase)
+                        if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                            dm_utils.tc_fence_after()
                         dm_utils.gemm_ptx_bs(
                             pv_mma_op, self.tmem_o_offset[stage], dm_tCrP[None, None, None, stage], tOrVi,
                             self.dm_sP[None, None, None, stage], sV_cur,
@@ -2435,6 +2503,10 @@ class DMForwardSm100:
 
         warp_idx_in_wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
 
+        # DM ss_pv crd: per-WG count of sScale writes (persists across work tiles; pairs with mbar_dm_cread phases)
+        dm_wcnt = cute.make_rmem_tensor((1,), Int32)
+        dm_wcnt[0] = Int32(0)
+        self._dm_wcnt = dm_wcnt   # set once before the tile loop (softmax_step reads it)
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             work_m, head_idx, batch_idx, split_idx = work_tile.tile_idx
@@ -2607,6 +2679,12 @@ class DMForwardSm100:
                     self.kv_subtile_factor,
                 )
                 if not empty_tile:
+                    if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
+                        # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
+                        dm_wc = dm_wcnt[0]
+                        if dm_wc > 0:
+                            dm_utils.mbar_wait_parity(self.dm_cread + 8 * (stage), (dm_wc - 1) & 1)
+                        dm_wcnt[0] = dm_wc + 1
                     sScale[tidx + stage * self.m_block_size] = softmax.row_sum[0]
                     if const_expr(mLSE is not None or learnable_sink is not None):
                         sScale[
@@ -2682,6 +2760,12 @@ class DMForwardSm100:
                         sm_stats_index = (s_p_o_consumer_count - 1) & 1
                     else:
                         sm_stats_index = stage
+                    if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
+                        # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
+                        dm_wc = dm_wcnt[0]
+                        if dm_wc > 0:
+                            dm_utils.mbar_wait_parity(self.dm_cread + 8 * (sm_stats_index), (dm_wc - 1) & 1)
+                        dm_wcnt[0] = dm_wc + 1
                     sScale[tidx + sm_stats_index * self.m_block_size] = softmax.row_sum[0]
                     if const_expr(mLSE is not None or learnable_sink is not None):
                         sScale[
@@ -2810,6 +2894,8 @@ class DMForwardSm100:
         else:
             s_p_o_index = stage
             pipeline_s_p_o.consumer_wait_w_index_phase(stage, s_p_o_consumer_count)
+            if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                dm_utils.tc_fence_after()   # QK_s commit (S full) -> this WG's S tcgen05.ld (Codex 6.1)
         tSrS_t2r = cute.make_rmem_tensor(thr_tmem_load.partition_D(tScS).shape, self.qk_acc_dtype)
         hw_row_max = Float32(-Float32.inf)
         if const_expr(self.use_ldred_rowmax):
@@ -2823,6 +2909,8 @@ class DMForwardSm100:
         if const_expr(self.dm_sspv):
             # S scratch fully read by this warpgroup -> the MMA warp may issue the next QK into it
             cute.arch.fence_view_async_tmem_load()
+            if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                dm_utils.tc_fence_before()   # S loads ordered before the arrive that lets the next QK overwrite S
             dm_utils.mbar_arrive(self.dm_sfree)
         # tSrS_t2r = copy_utils.load_t2r(thr_tmem_load, tScS_shape, tStS_t2r)
         if cutlass.const_expr(self.score_mod is not None):
@@ -2923,6 +3011,13 @@ class DMForwardSm100:
             sm_stats_index = s_p_o_index
         if const_expr(not is_first):
             thread_idx = thr_tmem_load.thr_idx
+            if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
+                # ss_pv crd: the correction must have read the previous sScale value of this stage before it is overwritten
+                dm_wcnt_l = self._dm_wcnt
+                dm_wc = dm_wcnt_l[0]
+                if dm_wc > 0:
+                    dm_utils.mbar_wait_parity(self.dm_cread + 8 * (sm_stats_index), (dm_wc - 1) & 1)
+                dm_wcnt_l[0] = dm_wc + 1
             sScale[thread_idx + sm_stats_index * self.m_block_size] = acc_scale
         if const_expr(not self.use_s_ping_pong or not is_first):
             sm_stats_barrier.arrive_w_index(index=sm_stats_index * 4 + warp_idx)
@@ -3024,6 +3119,8 @@ class DMForwardSm100:
                 # waited only after the exps so the PV latency hides under them
                 if const_expr(self.dm_opts.get("nosw", "0") != "1"):
                     dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, s_p_o_consumer_count)
+                if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                    dm_utils.tc_fence_after()   # SF tcgen05.st must not be ordered before PV_s(k-1)'s completion
                 cute.copy(thr_tmem_store_sf, tSrSF, tStSF_r2t)
                 # P codes -> sP[stage] (K-major SW128: row r at r*128 B, 16-B chunk c at (c ^ (r & 7)) * 16)
                 tidx_row = Int32(thr_tmem_load.thr_idx)
@@ -3042,6 +3139,8 @@ class DMForwardSm100:
                         cute.arch.fence_view_async_tmem_store()
                         pipeline_s_p_o.consumer_release_w_index(s_p_o_index)
             cute.arch.fence_view_async_tmem_store()
+            if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                dm_utils.tc_fence_before()   # SF tcgen05.st ordered before the P-full release
             if const_expr(self.split_P_arrive > 0):
                 cute.arch.sync_warp()
                 with cute.arch.elect_one():
@@ -3214,16 +3313,30 @@ class DMForwardSm100:
                         # cute.arch.fence_view_async_tmem_load()
                         # scale = tSrScale_t2r[0]
                         scale = sScale[tidx + sm_stats_index * self.m_block_size]
+                        if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
+                            dm_utils.mbar_arrive(self.dm_cread + 8 * sm_stats_index)   # read done -> softmax may overwrite
                         should_rescale = cute.arch.vote_ballot_sync(scale < 1.0) != 0
                         # should_rescale = True
                         # if tidx == 0: cute.printf("Correction scale i = %d, for stage %d: %f, should_rescale = %d\n", i, stage, scale, should_rescale)
                         # Don't need O_full anymore, since by the time softmax has signaled the correction
                         # warps, S_i must have been done, so O_i-1 must have been done as well.
                         # pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
+                        if const_expr(self.dm_sspv and self.dm_opts.get("cwu", "1") == "1"):
+                            # ss_pv: wait for PV_s(k-1) UNCONDITIONALLY (also when this warp skips the rescale). It
+                            # orders the rescale after PV_s(k-1) and gates this warp's "O rescaled" arrival on
+                            # s_p_o.empty[s] until phase k-1 completed (PV_s(k-1) issued => phase k-1 done). Without
+                            # it a non-rescaling correction warp can arrive twice in one phase and complete it before
+                            # a slow softmax warp released its P/SF rows (Codex review 3, fwdrw-design 6.4).
+                            dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, dm_ck & 1)
+                            if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                                dm_utils.tc_fence_after()   # O rescale (tcgen05.ld/st) after PV_s(k-1) completes
                         if should_rescale:
-                            if const_expr(self.dm_sspv and self.dm_opts.get("nocw", "0") != "1"):
-                                # the next QK no longer orders after the previous PV: wait for PV_s(k-1) explicitly
+                            if const_expr(self.dm_sspv and self.dm_opts.get("cwu", "1") != "1"
+                                          and self.dm_opts.get("nocw", "0") != "1"):
+                                # (debug cwu=0: the former conditional wait)
                                 dm_utils.mbar_wait_parity(self.dm_pvdone + 8 * stage, dm_ck & 1)
+                                if const_expr(self.dm_opts.get("tcf", "1") == "1"):
+                                    dm_utils.tc_fence_after()
                             if const_expr(self.use_s_ping_pong):
                                 # Ping-pong issues QK(i+1) before PV(i), so S_i+1 does not imply O_i is done
                                 pipeline_o_acc.consumer_wait_w_index_phase(
@@ -3236,6 +3349,8 @@ class DMForwardSm100:
                             pipeline_sm_stats.consumer_release_w_index(sm_stats_index)
                             o_acc_consumer_count += 1
                         else:
+                            if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                                dm_utils.tc_fence_before()   # O rescale tcgen05.st ordered before the release
                             pipeline_s_p_o.consumer_release_w_index(stage)
                             pipeline_sm_stats.consumer_release_w_index(self.q_stage - 1 - stage)
                     sm_stats_consumer_phase ^= 1
@@ -3276,6 +3391,8 @@ class DMForwardSm100:
                         row_max = sScale[tidx + sm_stats_index * self.m_block_size + self.s_p_o_stage * self.m_block_size]
                     else:
                         row_max = None
+                    if const_expr(self.dm_sspv and self.dm_opts.get("crd", "1") == "1"):
+                        dm_utils.mbar_arrive(self.dm_cread + 8 * sm_stats_index)
                     pipeline_sm_stats.consumer_release_w_index(sm_stats_index)
                     if const_expr(learnable_sink is not None):
                         # Only the first split owns the sink column; empty rows occur with splitKV.
@@ -3299,6 +3416,8 @@ class DMForwardSm100:
                         )
                     else:
                         pipeline_o_acc.consumer_wait_w_index_phase(stage, o_corr_consumer_phase)
+                        if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                            dm_utils.tc_fence_after()   # last PV_s commit -> epilogue O tcgen05.ld (Codex 6.4a)
                     if const_expr(not self.use_correction_warps_for_epi):
                         pipeline_o_epi.producer_acquire_w_index_phase(stage, corr_epi_producer_phase)
                     gO_stage = gO[None, None, stage] if const_expr(gO is not None) else None
@@ -3323,6 +3442,11 @@ class DMForwardSm100:
                         pipeline_s_p_o.consumer_release_w_index((o_acc_consumer_count + 1) & 1)
                         o_acc_consumer_count += 1
                     else:
+                        if const_expr(self.dm_sspv and self.dm_opts.get("tcf", "1") == "1"):
+                            # epilogue O tcgen05.ld complete + ordered before the release that lets the next
+                            # work tile's PV_s (zero-init) overwrite O_s (Codex 6.4b)
+                            cute.arch.fence_view_async_tmem_load()
+                            dm_utils.tc_fence_before()
                         pipeline_s_p_o.consumer_release_w_index(stage)
                     if const_expr(not self.use_correction_warps_for_epi):
                         pipeline_o_epi.producer_commit_w_index(stage)

@@ -48,6 +48,9 @@ DPDUMP = None
 PDUMP = None   # DEBUG (kda-sm100-fix0): set to a (B, H, N, N) fp32 tensor before dm_delta with exp variant "+pd"
 
 
+_SEL_MEMO = {}   # host-overhead cut: memoized config selection
+
+
 def _aux(t: torch.Tensor, leading_dim: int):
     t.__leading_dim__ = leading_dim
     t.__assumed_align__ = 16 if t.dtype == torch.uint8 else 4
@@ -76,6 +79,19 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
     orig = (fi.FlashAttentionForwardSm100, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config)
 
     def select(inputs):
+        try:
+            mk = (inputs, exp_variant, tuple(sorted((k, repr(v)) for k, v in over.items())))
+            hit = _SEL_MEMO.get(mk)
+        except TypeError:
+            mk, hit = None, None
+        if hit is not None:
+            return hit
+        cfg = _select_impl(inputs)
+        if mk is not None:
+            _SEL_MEMO[mk] = cfg
+        return cfg
+
+    def _select_impl(inputs):
         cfg = orig[2](inputs)
         cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "registers"})
         regs = over.get("registers", REGS_C3 if "c3" in exp_variant.split("+")[1:] else REGS)

@@ -15,9 +15,9 @@ rm -f "$OUT/rc.txt"
  run ${G[0]} sanitize $HERE/sanitize.py "$CAND" --log "$OUT/sanitize_memcheck.txt"
  run ${G[0]} racecheck $HERE/sanitize.py "$CAND" --tool racecheck --log "$OUT/sanitize_racecheck.txt"
  run ${G[0]} full $HERE/validate.py "$CAND" --shapes full --json "$OUT/full.json"
- # cold compile cache: abf6f87's host fast path recorded wrong replay plans on calls that JIT-compiled (warm caches hid it)
+ # cold compile cache (CuTe DSL + Triton): abf6f87's host fast path recorded wrong replay plans on calls that JIT-compiled (warm caches hid it)
  CC="$OUT/coldcache.tmp"; rm -rf "$CC"
- FLASH_ATTENTION_CUTE_DSL_CACHE_DIR="$CC" run ${G[0]} cold $HERE/validate.py "$CAND" --shapes quick --json "$OUT/cold.json"
+ FLASH_ATTENTION_CUTE_DSL_CACHE_DIR="$CC" TRITON_CACHE_DIR="$CC/triton" run ${G[0]} cold $HERE/validate.py "$CAND" --shapes quick --json "$OUT/cold.json"
  rm -rf "$CC"
  if [ "$NG" -eq 1 ]; then run ${G[0]} bench $HERE/validate.py "$CAND" --shapes bench --json "$OUT/bench.json"; fi) &
 if [ "$NG" -gt 1 ]; then

@@ -64,7 +64,13 @@ P as e4m3(2^8 P), dS per 64x128 tile on 2^8 ks_j dS, matched delta = sum_j P_ij 
 why rowsum(dS) = delta (1 - sum P) ~ fp32 round-off). Not modelled: MMA accumulation order, ex2/rcp approximations, the
 F2b 1e-8 dominance floor; they move a correct kernel ~1e-3 away from the emulation.
 
-## Training tier calibration (GB200, 2026-11-08; `validator/train_check.py none --arms bf16,emul,emul_stale,emul_nodelta`)
+> **TOY SETUP.** Everything in the training sections below (train_check.py, longtrain.py) uses small byte-level models
+> on a few-MB to 349 MB source-code corpus with an odd held-out split. These runs are smoke tests that the kernels run
+> inside a training loop without breaking (NaNs, a grossly wrong gradient such as delta = 0). They do NOT support
+> conclusions about real LLM training - in particular not about matched vs stale or fp8 vs bf16 quality - and must not
+> be cited as evidence (user, 2026-11-09). The validation verdicts rest on the per-call tiers above.
+
+## Training tier calibration (toy smoke test; GB200, 2026-11-08; `validator/train_check.py none --arms bf16,emul,emul_stale,emul_nodelta`)
 Final-20% mean loss, same seed (same init and batches), sm90 emulation:
 | steps | bf16 | fp8 matched (emul) | fp8 stale | delta = 0 (broken control) | bf16, other seed |
 |---|---|---|---|---|---|
@@ -73,23 +79,26 @@ Final-20% mean loss, same seed (same init and batches), sm90 emulation:
 Same-seed fp8 arms sit within 0.007 nats of bf16; a broken backward is off by > 2 nats within 200 steps. The budget
 max(2%, 0.03 nats) of the same-seed bf16 loss therefore separates them with wide margins (seed-to-seed noise, 0.05, is
 why every arm uses the same seed). matched vs stale is NOT separable at this scale: stale's drift shows over long
-training runs, so this tier judges breakage, not the matched-vs-stale benefit (reported, not judged).
+training runs, so this tier judges breakage only (a smoke test), not the matched-vs-stale benefit.
 
-### Stale vs matched in training (sm100-mx, GB200, 2026-11-08) — why the training tier judges matched only
+### Stale vs matched in toy training (sm100-mx, GB200, 2026-11-08) — observation only, see the TOY SETUP note
 Kernel 6a31419 / 5a912b2: matched healthy on seeds 0-3 (0.59-0.64, at or below bf16); stale diverges on every seed
 (3.1-3.3, onset steps 400-600) and under every forward variant (MUFU exps, eager rescale). The emulation's stale is
 healthy (seeds 0-3) only because the emulation is exactly self-consistent (forward and backward use bitwise the same fp32
 S and exact exp). Perturbing the emulation's FORWARD S by 1e-4 relative (the size of an MMA accumulation-order
 difference between a forward and a backward kernel) makes emulated stale diverge too (3.95; 1e-3: 3.26), while emulated
-matched stays at bf16 level (0.598 / 0.599). So stale mode's divergence is generic to any real fp8 kernel at sm100-mx
-precision - the effect Delta-Matching's matched delta removes - not a kernel bug. Data: sm100/validate/runs/{seeds,v5a9,noise}.
+matched stays at bf16 level (0.598 / 0.599). In this toy setup, stale's divergence therefore did not point to a kernel bug (kernel and emulation agree per call); no
+claim is made about real training. Data: sm100/validate/runs/{seeds,v5a9,noise}.
 Random backward-P error (P_bwd *= 1 + U(-a, a), emulation, 2000 steps): matched trains at bf16 level for a up to 2e-3
 under both sm100-mx and sm100-mx-x (validate/runs/bwdp/). Under sm100-mx-x such noise reads 1e-3..4e-2 on the direct
 identity check, i.e. that check is stricter than training needs for random (non-systematic) error; kept strict by design.
 
-### Training at a target length (N = 8192, batch 2, 2000 steps, kernel 3fec800, GB200, 2026-11-09)
+### Toy training at N = 8192 (batch 2, 2000 steps, kernel 3fec800, GB200, 2026-11-09) - observation only
 | seed | bf16 | matched | stale |
 |---|---|---|---|
 | 0 | 0.6710 | 0.6810 (+0.010) | 3.120 (diverged from ~step 400) |
 | 1 | 0.8211 | 0.8281 (+0.007) | 3.199 (diverged from ~step 200) |
-Matched stays within the training-tier budget (max(2%, 0.03)) at 8k; stale diverges earlier than at 2k. (runs/train8k/)
+Smoke-test reading only: matched ran without breakage at 8k. (runs/train8k/)
+
+### Long training (toy; validate/longtrain/REPORT.md)
+Stopped by the user at ~12k steps. Labelled a toy setup there as well; not evidence about real training.

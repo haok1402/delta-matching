@@ -607,6 +607,11 @@ class DMBackwardSm100:
         # variant knobs for same-process A/B (bwd.py keys the compile cache on DM_BWD_OPTS)
         self.dm_opts = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
+        # abl:dqdrop1=KB:MB:H (POSITIVE CONTROL for the nd/det dQ stress detectors, accuracy-audit 21:20; numerically WRONG):
+        # drop exactly ONE (cluster key tile KB = work_n, 256 keys) x (query tile MB = m_block, 128 rows) dQ contribution of
+        # q-head H, batch 0, by zeroing that partial in the reduce warps (both CTAs of the pair) before staging. det + nd.
+        _dqd = next((x[8:] for x in self.dm_abl if x.startswith("dqdrop1=")), None)
+        self.dm_dqdrop = tuple(int(t) for t in _dqd.split(":")) if _dqd else None
         _p5 = next((x[3:] for x in self.dm_opts if x.startswith("p5=")), None)   # p5=freq:res
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
@@ -5762,6 +5767,14 @@ class DMBackwardSm100:
                     tdQrdQ_t2r = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
                     cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
                     cute.arch.fence_view_async_tmem_load()
+                    if const_expr(self.dm_dqdrop is not None):
+                        # abl:dqdrop1 positive control: this (key tile, query tile, head) dQ partial contributes 0
+                        if work_n == Int32(self.dm_dqdrop[0]):
+                            if m_block == Int32(self.dm_dqdrop[1]):
+                                if head_idx == Int32(self.dm_dqdrop[2]):
+                                    if batch_idx == Int32(0):
+                                        for dm_z in cutlass.range_constexpr(cute.size(tdQrdQ_t2r)):
+                                            tdQrdQ_t2r[dm_z] = Float32(0.0)
                     cute.arch.sync_warp()
                     dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                     with cute.arch.elect_one():

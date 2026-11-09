@@ -99,7 +99,7 @@ REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / b
 # (GQA 32/8 8k, 10 calls; bf16 rounding flips); limits ~10x the measured worst (accuracy-audit 05:35). Deterministic
 # kernels measure exactly 0, so their binding stays effectively bitwise.
 NONDET_REL = 2e-4             # whole tensor
-SPREAD_BLK = 5e-4             # per (batch, 128-row block, head)
+SPREAD_BLK = 1e-3   # accuracy-audit 19:05: under the max(block, head-RMS) normalization; honest worst 4.6e-4, lost tile >= 3%             # per (batch, 128-row block, head)
 SPREAD_ELEM = 1.6e-2          # per element, relative to its row's max |x|: 2 bf16 ulp (1 ulp flip can be 2^-7 = 7.8e-3)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")

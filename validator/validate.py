@@ -330,6 +330,7 @@ def build_cases(tier, supports, seed):
 
 
 # ---------------------------------------------------------------------------------------------------------- checking
+CAND_DETERMINISTIC = [True]
 BASE_ID, BASE_METRICS = None, {}
 if os.path.exists(BASELINE):
     _b = json.load(open(BASELINE))
@@ -502,7 +503,12 @@ def check_case(case, cr, preset, dev, verbose):
                     spread = 0.0             # this case's run-to-run spread of production (repeat run), per accuracy-audit (2)
                     if "matched/repeat" in runs:
                         spread = max(rel(x, y) for x, y in zip(runs["matched/repeat"][1:4], cand[1:4]))
-                    bind_env = min(NONDET_REL, max(4 * spread, 1e-7))   # 4x one repeat pair ~ 2x max over R runs
+                    if CAND_DETERMINISTIC[0]:
+                        bind_env = min(NONDET_REL, max(4 * spread, 1e-7))   # 4x one repeat pair ~ 2x max over R runs
+                    else:
+                        # non-deterministic candidate: debug and production are two nondeterministic runs -> the calibrated
+                        # spread limit; "same build" is established bitwise by validating the commit in deterministic mode
+                        bind_env = NONDET_REL
                     m["prod_spread"] = spread
                     ok_bind = all(kk in dbg for kk in ("dbg_dq", "dbg_dk", "dbg_dv")) and all(
                         rel(dbg[kk].reshape(t.shape).to(t.dtype), t) <= bind_env
@@ -621,6 +627,7 @@ def main():
         print("FAIL: candidate import\n" + meta["fatal"]); sys.exit(1)
     preset = a.preset or meta["meta"].get("NUMERICS") or "sm90"
     supports = meta["meta"].get("SUPPORTS") or {}
+    CAND_DETERMINISTIC[0] = meta["meta"].get("DETERMINISTIC") is not False
     if preset not in ACCEPTED_NUMERICS and not os.environ.get("DMVAL_SELFTEST") and not FWD_ONLY:
         print(f"FAIL: NUMERICS={preset!r} is not an accepted spec {ACCEPTED_NUMERICS}: only numerics at least as accurate "
               f"as sm100-mx are promotable (user: operations that trade away accuracy are banned)"); sys.exit(1)
@@ -770,9 +777,10 @@ def _static_meta(spec):
         vals = {}
         for node in tree.body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
-                    and node.targets[0].id in ("NUMERICS", "SUPPORTS"):
+                    and node.targets[0].id in ("NUMERICS", "SUPPORTS", "DETERMINISTIC"):
                 vals[node.targets[0].id] = ast.literal_eval(node.value)
-        return {"meta": {"NUMERICS": vals.get("NUMERICS"), "SUPPORTS": vals.get("SUPPORTS"), "leaked_modules": []}}
+        return {"meta": {"NUMERICS": vals.get("NUMERICS"), "SUPPORTS": vals.get("SUPPORTS"),
+                         "DETERMINISTIC": vals.get("DETERMINISTIC", True), "leaked_modules": []}}
     except Exception:  # noqa: BLE001  (non-literal values: ask the candidate process)
         return None
 

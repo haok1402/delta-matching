@@ -151,6 +151,7 @@ def main():
         return
     res["meta"]["NUMERICS"] = getattr(mod, "NUMERICS", None)
     res["meta"]["SUPPORTS"] = getattr(mod, "SUPPORTS", None)
+    res["meta"]["DETERMINISTIC"] = getattr(mod, "DETERMINISTIC", True)
     leaked = [m for m in sys.modules if any(m == f or m.startswith(f + ".") for f in FORBIDDEN)]
     res["meta"]["leaked_modules"] = leaked
     case_files = job.get("case_files", [])

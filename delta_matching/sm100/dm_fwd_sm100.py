@@ -411,6 +411,11 @@ class DMForwardSm100:
             for _k, _v in (("ss_pv", "1"), ("kvs", "6"), ("lean", "1")):
                 self.dm_opts.setdefault(_k, _v)
         self.dm_rescale_T = float(self.dm_opts.get("T", 32.0))
+        # upstream FA4 bee0f08 "release softmax statistics per stage": correction frees a stage's sScale slot right after
+        # reading its scale (same-stage) instead of after rescaling the other stage's O (cross-stage). Order only (bitwise).
+        # DM_FWD_OPTS smss=1 enables; never with S ping-pong or ss_pv (own protocols).
+        self.dm_smss = (self.dm_opts.get("smss", "0") == "1" and not self.use_s_ping_pong
+                        and self.dm_opts.get("ss_pv", "0") != "1")
         if "split" in self.dm_opts:
             self.split_P_arrive = int(self.dm_opts["split"])
         # fwdrw: s01=1 -> FA4's S0/S1 exp-sequencing barrier (softmax WG1 exps wait for WG0's, alternating) to keep the
@@ -3196,6 +3201,8 @@ class DMForwardSm100:
                 if const_expr(self.q_stage == 2):
                     # pipeline_sm_stats.consumer_wait_w_index_phase(1, sm_stats_consumer_phase)
                     sm_stats_barrier.arrive_and_wait_w_index(index=1 * 4 + warp_idx)
+                    if const_expr(self.dm_smss):
+                        pipeline_sm_stats.consumer_release_w_index(1)
                 sm_stats_consumer_phase ^= 1
 
                 tSrScale_t2r = cute.make_rmem_tensor(tSrScale_t2r_shape, Float32)
@@ -3214,6 +3221,9 @@ class DMForwardSm100:
                         # cute.arch.fence_view_async_tmem_load()
                         # scale = tSrScale_t2r[0]
                         scale = sScale[tidx + sm_stats_index * self.m_block_size]
+                        if const_expr(self.dm_smss):
+                            # same-stage: this thread has loaded its scale -> free the slot (upstream bee0f08)
+                            pipeline_sm_stats.consumer_release_w_index(stage)
                         should_rescale = cute.arch.vote_ballot_sync(scale < 1.0) != 0
                         # should_rescale = True
                         # if tidx == 0: cute.printf("Correction scale i = %d, for stage %d: %f, should_rescale = %d\n", i, stage, scale, should_rescale)
@@ -3237,12 +3247,13 @@ class DMForwardSm100:
                             o_acc_consumer_count += 1
                         else:
                             pipeline_s_p_o.consumer_release_w_index(stage)
-                            pipeline_sm_stats.consumer_release_w_index(self.q_stage - 1 - stage)
+                            if const_expr(not self.dm_smss):
+                                pipeline_sm_stats.consumer_release_w_index(self.q_stage - 1 - stage)
                     sm_stats_consumer_phase ^= 1
                     if const_expr(self.dm_sspv):
                         dm_ck += 1
                     # o_corr_consumer_phase ^= 1
-                if const_expr(self.q_stage == 2):
+                if const_expr(self.q_stage == 2 and not self.dm_smss):
                     pipeline_sm_stats.consumer_release_w_index(1)
                 # End of seqlen_corr_loop_steps
 

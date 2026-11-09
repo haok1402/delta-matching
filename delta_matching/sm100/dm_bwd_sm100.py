@@ -3833,7 +3833,8 @@ class DMBackwardSm100:
                                 dm_acc5 = dm_acc5 + (dm_utils.clock64() - dm_t0)
                             if const_expr(dm_trace is not None):
                                 dm_t0 = dm_utils.clock64()
-                            cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
+                            if const_expr("noxc" not in self.dm_abl):   # DM abl:noxc (timing only, outputs WRONG)
+                                cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
                             if const_expr(dm_trace is not None):
                                 dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
                             mma_dsk_fn()
@@ -3852,7 +3853,8 @@ class DMBackwardSm100:
                                 dm_acc5 = dm_acc5 + (dm_utils.clock64() - dm_t0)
                             if const_expr(dm_trace is not None):
                                 dm_t0 = dm_utils.clock64()
-                            cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
+                            if const_expr("noxc" not in self.dm_abl):   # DM abl:noxc (timing only, outputs WRONG)
+                                cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
                             if const_expr(dm_trace is not None):
                                 dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
                             mma_dsk_fn()
@@ -5859,7 +5861,9 @@ class DMBackwardSm100:
                 else:
                     cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
         cute.arch.fence_view_async_shared()
-        if const_expr(self.dm_dsqw):
+        if const_expr("noxb" in self.dm_abl):
+            pass   # DM abl:noxb (timing only, outputs WRONG): no 4-warp barrier before the elected exchange
+        elif const_expr(self.dm_dsqw):
             self.dsq_sync_barrier.arrive_and_wait()
         else:
             self.reduce_sync_barrier.arrive_and_wait()

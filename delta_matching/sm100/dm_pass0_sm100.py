@@ -1465,6 +1465,9 @@ class DMPass0Sm100:
             if const_expr(not self.s0_s1_barrier):
                 stage = Int32(0 if const_expr(self.q_stage == 1) or warp_idx < self.softmax1_warp_ids[0] else 1)
                 softmax_loop(stage=stage, tStS=tStS)
+            elif const_expr(self.q_stage == 1 or len(self.softmax1_warp_ids) == 0):
+                # single q stage (short N, e.g. N=128): no second softmax warpgroup -> only stage 0
+                softmax_loop(stage=0, tStS=tStS)
             else:
                 # If there's s0_s1_barrier, it's faster to have 2 WGs having different code
                 if warp_idx < self.softmax1_warp_ids[0]:

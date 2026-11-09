@@ -283,6 +283,12 @@ class DMPass0Sm100:
         # issues on the XU pipe shared with MUFU ex2 (pass 0 is MUFU-bound): bitwise the same values as Float64(x)
         self.dm_f64x = "f64x" in _fl0
         self.dm_f64y = "f64y" in _fl0   # ALU bit path + rare F2F branch for subnormals (bitwise = Float64(x))
+        # +kh: per-tile fp32 partials (as +f64) accumulated across tiles with Kahan compensation in fp32 (no F2F /
+        # FP64 on the per-tile path); the compensated sums are combined in fp64 once at the end: delta = (s - c) / (s' - c')
+        self.dm_kh = "kh" in _fl0
+        # +ts: per-lane error-free TwoSum (double-float) cross-tile accumulation of the fp32 per-tile partials (packed f32x2):
+        # (sum, err) pairs carry ~2x fp32 precision, then all four terms are combined in fp64 once at the end
+        self.dm_ts = "ts" in _fl0
         self.dm_nd = "nd" in _fl0   # no denominator: sum_j P := 1 (P is normalized by the forward LSE)
         # +ni: the correction WG and non-scheduler empty warps have no per-tile work in pass 0: they leave the
         # dynamic-scheduler consumer group and skip the schedule walk (no CLC-response spin stealing issue slots)
@@ -2211,10 +2217,18 @@ class DMPass0Sm100:
                 pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
             num64 = Float64(0.0)
             den64 = Float64(0.0)
+            ts_sn = (Float32(0.0), Float32(0.0))
+            ts_en = (Float32(0.0), Float32(0.0))
+            ts_sd = (Float32(0.0), Float32(0.0))
+            ts_ed = (Float32(0.0), Float32(0.0))
+            ks_n = Float32(0.0)
+            kc_n = Float32(0.0)
+            ks_d = Float32(0.0)
+            kc_d = Float32(0.0)
             if has_work:
                 for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
                     n_block = n_block_max - 1 - n_tile
-                    if const_expr(self.dm_f64 and self.dm_f64k == 1):
+                    if const_expr((self.dm_f64 and self.dm_f64k == 1) or self.dm_kh or self.dm_ts):
                         # tile-local fp32 partials (reset every tile)
                         num = (Float32(0.0), Float32(0.0))
                         den = (Float32(0.0), Float32(0.0))
@@ -2504,7 +2518,34 @@ class DMPass0Sm100:
                         tr_prev = tr_now
                     if const_expr(self.dm_tr):
                         tr_s[5] = tr_s[5] + Int32(1)
-                    if const_expr(self.dm_f64 and self.dm_f64k == 1):
+                    if const_expr(self.dm_ts):
+                        dent = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
+                        # TwoSum(a=sum, b=partial): s = a + b; bb = s - a; err = (a - (s - bb)) + (b - bb)
+                        sn = cute.arch.add_packed_f32x2(ts_sn, num)
+                        bbn = cute.arch.add_packed_f32x2(sn, (-ts_sn[0], -ts_sn[1]))
+                        an = cute.arch.add_packed_f32x2(ts_sn, (-(sn[0] - bbn[0]), -(sn[1] - bbn[1])))
+                        brn = cute.arch.add_packed_f32x2(num, (-bbn[0], -bbn[1]))
+                        ts_en = cute.arch.add_packed_f32x2(ts_en, cute.arch.add_packed_f32x2(an, brn))
+                        ts_sn = sn
+                        sd = cute.arch.add_packed_f32x2(ts_sd, dent)
+                        bbd = cute.arch.add_packed_f32x2(sd, (-ts_sd[0], -ts_sd[1]))
+                        ad = cute.arch.add_packed_f32x2(ts_sd, (-(sd[0] - bbd[0]), -(sd[1] - bbd[1])))
+                        brd = cute.arch.add_packed_f32x2(dent, (-bbd[0], -bbd[1]))
+                        ts_ed = cute.arch.add_packed_f32x2(ts_ed, cute.arch.add_packed_f32x2(ad, brd))
+                        ts_sd = sd
+                    elif const_expr(self.dm_kh):
+                        dent = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
+                        pn = num[0] + num[1]
+                        pd = dent[0] + dent[1]
+                        yn = pn - kc_n
+                        tn = ks_n + yn
+                        kc_n = (tn - ks_n) - yn
+                        ks_n = tn
+                        yd = pd - kc_d
+                        td = ks_d + yd
+                        kc_d = (td - ks_d) - yd
+                        ks_d = td
+                    elif const_expr(self.dm_f64 and self.dm_f64k == 1):
                         dent = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
                         if const_expr(self.dm_f64y):
                             # ALU bit assembly; nonzero subnormal partials (practically never) take F2F in a divergent branch
@@ -2552,6 +2593,14 @@ class DMPass0Sm100:
             delta = num_t / den_t if den_t != Float32(0.0) else Float32(0.0)
             if const_expr(self.dm_f64):
                 delta = Float32(num64 / den64) if den64 != Float64(0.0) else Float32(0.0)
+            if const_expr(self.dm_ts):
+                tn64 = (Float64(ts_sn[0]) + Float64(ts_sn[1])) + (Float64(ts_en[0]) + Float64(ts_en[1]))
+                td64 = (Float64(ts_sd[0]) + Float64(ts_sd[1])) + (Float64(ts_ed[0]) + Float64(ts_ed[1]))
+                delta = Float32(tn64 / td64) if td64 != Float64(0.0) else Float32(0.0)
+            if const_expr(self.dm_kh):
+                kn64 = Float64(ks_n) - Float64(kc_n)
+                kd64 = Float64(ks_d) - Float64(kc_d)
+                delta = Float32(kn64 / kd64) if kd64 != Float64(0.0) else Float32(0.0)
             if const_expr(self.dm_nd):
                 # +nd: sum_j P = 1 to the forward's exp accuracy (P is normalized by the forward LSE) -> delta = sum P dP
                 delta = num_t

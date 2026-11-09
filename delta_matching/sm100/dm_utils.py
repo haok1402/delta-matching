@@ -1,7 +1,7 @@
 """Small PTX helpers for the sm100-mx kernels (CuTe DSL inline asm)."""
 import cutlass
 import cutlass.cute as cute
-from cutlass import Float32, Int32, const_expr
+from cutlass import Float32, Float64, Int32, const_expr
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass._mlir.dialects import llvm
 
@@ -507,3 +507,97 @@ def mbar_wait_parity_cluster(mbar: Int32, phase: Int32, *, loc=None, ip=None):
                     "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
                     "@P1 bra DM_DONEC;\n\tbra DM_WAITC;\n\tDM_DONEC:\n\t}",
                     "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+@dsl_user_op
+def f32_to_f64_exact(x: Float32, *, loc=None, ip=None) -> Float64:
+    """Exact fp32 -> fp64 conversion without F2F (which issues on the XU/MUFU pipe): integer bit assembly for normals,
+    inf and NaN; an exact FP64-pipe path (2^52 magic subtraction, power-of-two scaling) for zero and subnormals.
+    Bitwise identical to cvt.f64.f32 for every fp32 input (NaN payload: quiet bit and upper mantissa preserved)."""
+    asm = (
+        "{\n"
+        ".reg .b32 a, e, m, s, hi, lo, hii, mg, shi, slo;\n"
+        ".reg .b64 dn, ds;\n"
+        ".reg .f64 t;\n"
+        ".reg .pred pz, pi;\n"
+        "mov.b32 a, $1;\n"
+        "and.b32 s, a, 0x80000000;\n"
+        "and.b32 e, a, 0x7f800000;\n"
+        "and.b32 m, a, 0x007fffff;\n"
+        "shr.u32 hi, a, 3;\n"
+        "and.b32 hi, hi, 0x0fffffff;\n"
+        "add.u32 hi, hi, 0x38000000;\n"
+        "or.b32 hi, hi, s;\n"
+        "shl.b32 lo, a, 29;\n"
+        "shr.u32 hii, m, 3;\n"
+        "or.b32 hii, hii, 0x7ff00000;\n"
+        "or.b32 hii, hii, s;\n"
+        "setp.ne.u32 pz, m, 0;\n"
+        "selp.b32 mg, 0x00080000, 0, pz;\n"
+        "or.b32 hii, hii, mg;\n"
+        "setp.eq.u32 pi, e, 0x7f800000;\n"
+        "selp.b32 hi, hii, hi, pi;\n"
+        "mov.b64 dn, {lo, hi};\n"
+        "mov.b32 mg, 0x43300000;\n"
+        "mov.b64 ds, {m, mg};\n"
+        "mov.b64 t, ds;\n"
+        "sub.rn.f64 t, t, 0d4330000000000000;\n"
+        "mul.rn.f64 t, t, 0d36A0000000000000;\n"
+        "mov.b64 {slo, shi}, t;\n"
+        "or.b32 shi, shi, s;\n"
+        "mov.b64 ds, {slo, shi};\n"
+        "setp.eq.u32 pz, e, 0;\n"
+        "selp.b64 dn, ds, dn, pz;\n"
+        "mov.b64 $0, dn;\n"
+        "}\n"
+    )
+    return Float64(llvm.inline_asm(T.f64(), [Float32(x).ir_value(loc=loc, ip=ip)], asm, "=d,f",
+                                   has_side_effects=False, is_align_stack=False,
+                                   asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def f32_to_f64_fastpath(x: Float32, *, loc=None, ip=None) -> Float64:
+    """fp32 -> fp64 by integer bit assembly only (ALU): exact for zero, normals, inf and NaN (quiet bit set like
+    cvt.f64.f32). NOT valid for subnormals (exponent field 0, mantissa != 0): callers must route those to Float64(x)."""
+    asm = (
+        "{\n"
+        ".reg .b32 a, e, m, s, hi, lo, hii, q;\n"
+        ".reg .pred pz, pi, pq;\n"
+        "mov.b32 a, $1;\n"
+        "and.b32 s, a, 0x80000000;\n"
+        "and.b32 e, a, 0x7f800000;\n"
+        "and.b32 m, a, 0x007fffff;\n"
+        "shr.u32 hi, a, 3;\n"
+        "and.b32 hi, hi, 0x0fffffff;\n"
+        "add.u32 hi, hi, 0x38000000;\n"
+        "or.b32 hi, hi, s;\n"
+        "shl.b32 lo, a, 29;\n"
+        "shr.u32 hii, m, 3;\n"
+        "or.b32 hii, hii, 0x7ff00000;\n"
+        "or.b32 hii, hii, s;\n"
+        "setp.ne.u32 pq, m, 0;\n"
+        "selp.b32 q, 0x00080000, 0, pq;\n"
+        "or.b32 hii, hii, q;\n"
+        "setp.eq.u32 pi, e, 0x7f800000;\n"
+        "selp.b32 hi, hii, hi, pi;\n"
+        "setp.eq.u32 pz, e, 0;\n"
+        "selp.b32 hi, s, hi, pz;\n"
+        "selp.b32 lo, 0, lo, pz;\n"
+        "mov.b64 $0, {lo, hi};\n"
+        "}\n"
+    )
+    return Float64(llvm.inline_asm(T.f64(), [Float32(x).ir_value(loc=loc, ip=ip)], asm, "=d,f",
+                                   has_side_effects=False, is_align_stack=False,
+                                   asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def f32_is_subnormal(x: Float32, *, loc=None, ip=None) -> Int32:
+    """1 if x is a nonzero fp32 subnormal (exponent field 0, mantissa != 0), else 0 (ALU only)."""
+    return Int32(llvm.inline_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)],
+                                 "{\n.reg .b32 a, e, m;\n.reg .pred p, q;\nmov.b32 a, $1;\nand.b32 e, a, 0x7f800000;\n"
+                                 "and.b32 m, a, 0x007fffff;\nsetp.eq.u32 p, e, 0;\nsetp.ne.and.u32 q, m, 0, p;\n"
+                                 "selp.u32 $0, 1, 0, q;\n}\n", "=r,f",
+                                 has_side_effects=False, is_align_stack=False,
+                                 asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))

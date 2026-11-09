@@ -259,7 +259,10 @@ class DMPass0Sm100:
         self.ex2_emu_freq = config.ex2_emu_freq
         self.ex2_emu_start_frg = config.ex2_emu_start_frg
         # P0 '+sq': sequence the two softmax WGs' exp phases (WG0 exps while WG1 does its dP phase and vice versa)
-        self.s0_s1_barrier = "sq" in self.dm_exp_variant.split("+")[1:]
+        self.s0_s1_barrier = "sq" in self.dm_exp_variant.split("+")[1:] or "sqh" in self.dm_exp_variant.split("+")[1:]
+        # +sqh (h2 path): the two softmax WGs take turns on the exp halves (s0/s1 sequence barrier); +sq alone (h2) =
+        # per-stage specialized code only
+        self.dm_sqh = "sqh" in self.dm_exp_variant.split("+")[1:]
         # +c3: the (otherwise idle) correction warpgroup computes column chunk 3 of BOTH q stages; the softmax
         # warpgroups keep chunks 0-2 -> 3 compute warps per SMSP. Partials meet in smem (sScale) per work tile.
         self.dm_c3 = "c3" in self.dm_exp_variant.split("+")[1:]
@@ -272,9 +275,13 @@ class DMPass0Sm100:
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         # +f64: per-tile fp32 partial sums (short chains), accumulated across tiles in fp64; delta = num / den in fp64,
         # rounded once to fp32. P and dP are untouched (bitwise the backward's), only the row-sum round-off shrinks.
-        self.dm_f64 = "f64" in _fl0 or any(f.startswith("f64k") for f in _fl0)
+        self.dm_f64 = "f64" in _fl0 or "f64x" in _fl0 or "f64y" in _fl0 or any(f.startswith("f64k") for f in _fl0)
         # +f64k<K>: flush the fp32 partials into the fp64 sums only every K tiles (and on the last tile)
         self.dm_f64k = next((int(f[4:]) for f in _fl0 if f.startswith("f64k")), 1)
+        # +f64x: exact fp32->fp64 conversion on the ALU/FP64 pipes (dm_utils.f32_to_f64_exact) instead of F2F, which
+        # issues on the XU pipe shared with MUFU ex2 (pass 0 is MUFU-bound): bitwise the same values as Float64(x)
+        self.dm_f64x = "f64x" in _fl0
+        self.dm_f64y = "f64y" in _fl0   # ALU bit path + rare F2F branch for subnormals (bitwise = Float64(x))
         self.dm_nd = "nd" in _fl0   # no denominator: sum_j P := 1 (P is normalized by the forward LSE)
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
@@ -2236,6 +2243,8 @@ class DMPass0Sm100:
                             diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
                         kbase = n_block * self.n_block_size
                         for h in cutlass.range_constexpr(2):
+                            if const_expr(self.dm_sqh and h == 0):
+                                pipeline_s0_s1_sequence.sync_object_full.wait(stage, s0s1_phase)
                             for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
                                 cute.copy(thr_tmem_load, tStS_t2r[None, None, j], tSrS[None, None, j])
                             if const_expr(h == 1):
@@ -2267,6 +2276,9 @@ class DMPass0Sm100:
                                         den2 = cute.arch.add_packed_f32x2(den2, p)
                                     else:
                                         den3 = cute.arch.add_packed_f32x2(den3, p)
+                            if const_expr(self.dm_sqh and h == 1):
+                                pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
+                                s0s1_phase ^= 1
                             if const_expr(h == 0):
                                 pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
                             for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
@@ -2471,8 +2483,26 @@ class DMPass0Sm100:
                         tr_s[5] = tr_s[5] + Int32(1)
                     if const_expr(self.dm_f64 and self.dm_f64k == 1):
                         dent = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))
-                        num64 = num64 + (Float64(num[0]) + Float64(num[1]))
-                        den64 = den64 + (Float64(dent[0]) + Float64(dent[1]))
+                        if const_expr(self.dm_f64y):
+                            # ALU bit assembly; nonzero subnormal partials (practically never) take F2F in a divergent branch
+                            c0 = dm_utils.f32_to_f64_fastpath(num[0])
+                            c1 = dm_utils.f32_to_f64_fastpath(num[1])
+                            c2 = dm_utils.f32_to_f64_fastpath(dent[0])
+                            c3 = dm_utils.f32_to_f64_fastpath(dent[1])
+                            if (dm_utils.f32_is_subnormal(num[0]) | dm_utils.f32_is_subnormal(num[1])
+                                    | dm_utils.f32_is_subnormal(dent[0]) | dm_utils.f32_is_subnormal(dent[1])) != Int32(0):
+                                c0 = Float64(num[0])
+                                c1 = Float64(num[1])
+                                c2 = Float64(dent[0])
+                                c3 = Float64(dent[1])
+                            num64 = num64 + (c0 + c1)
+                            den64 = den64 + (c2 + c3)
+                        elif const_expr(self.dm_f64x):
+                            num64 = num64 + (dm_utils.f32_to_f64_exact(num[0]) + dm_utils.f32_to_f64_exact(num[1]))
+                            den64 = den64 + (dm_utils.f32_to_f64_exact(dent[0]) + dm_utils.f32_to_f64_exact(dent[1]))
+                        else:
+                            num64 = num64 + (Float64(num[0]) + Float64(num[1]))
+                            den64 = den64 + (Float64(dent[0]) + Float64(dent[1]))
                     elif const_expr(self.dm_f64):
                         if (n_tile + 1) % self.dm_f64k == 0 or n_tile == n_block_max - n_block_min - 1:
                             dent = cute.arch.add_packed_f32x2(cute.arch.add_packed_f32x2(den, den1), cute.arch.add_packed_f32x2(den2, den3))

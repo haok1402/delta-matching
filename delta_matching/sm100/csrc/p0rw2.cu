@@ -26,7 +26,7 @@ constexpr int NWARPS = 20, NTHR = NWARPS * 32;
 constexpr int CR = 104, OR = 64;            // compute / other registers (CTA pool 20 x 96: 16*104 + 4*64 = 1920)
 
 struct __align__(8) Bars {
-  uint64_t qfull, kvfull[KVS], kvempty[KVS], sfull[2], sempty[2], dfull[2], dempty[2], vfull[KVS];
+  uint64_t qfull, kvfull[KVS], kvempty[KVS], sfull[2], sempty[2], dfull[2], dempty[2], vfull[KVS], qempty;
 };
 constexpr int SMEM_Q = 0, SMEM_DO = 32768, SMEM_KV = 65536, KV_STRIDE = 32768;   // K at +0, V at +16384 of a slot
 constexpr int SMEM_BYTES = SMEM_KV + KVS * KV_STRIDE + 1024;                      // + 1024 alignment slack
@@ -49,8 +49,14 @@ __device__ __forceinline__ void mbar_arrive(uint64_t* b) { asm volatile("mbarrie
 __device__ __forceinline__ void mbar_expect_tx(uint64_t* b, uint32_t bytes) {
   asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(su32(b)), "r"(bytes) : "memory"); }
 __device__ __forceinline__ void mbar_wait(uint64_t* b, uint32_t par) {
+#ifdef P0RW2_OLDWAIT
   uint32_t ok = 0;
   while (!ok) asm volatile("{\n.reg .pred P;\nmbarrier.try_wait.parity.shared::cta.b64 P, [%1], %2;\nselp.u32 %0, 1, 0, P;\n}" : "=r"(ok) : "r"(su32(b)), "r"(par) : "memory");
+#else
+  // DSL idiom: suspend-hinted try_wait in an asm-local loop (no C-level branch on a selp result)
+  asm volatile("{\n.reg .pred P1;\nLAB_WAIT:\nmbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1, 10000000;\n@P1 bra.uni DONE;\nbra.uni LAB_WAIT;\nDONE:\n}"
+               :: "r"(su32(b)), "r"(par) : "memory");
+#endif
 }
 __device__ __forceinline__ void tc_after() { asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory"); }
 __device__ __forceinline__ void tc_before() { asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory"); }
@@ -326,7 +332,11 @@ __global__ void __launch_bounds__(NTHR, 1) k_p0rw2(const __grid_constant__ CUten
 #define P0RW2_TW 12
 #endif
 constexpr int T_NWARPS = P0RW2_TW, T_NTHR = T_NWARPS * 32;
-constexpr int T_OR = T_NWARPS == 16 ? 48 : 64;
+#ifndef P0RW2_TCR
+#define P0RW2_TCR 208
+#endif
+constexpr int T_CR = P0RW2_TCR;
+constexpr int T_OR = T_NWARPS == 16 ? (T_CR == 224 ? 32 : 48) : 64;
 
 // pair-typed TMEM load: 32 columns -> 16 packed f32x2 registers (mov.b64 inside the asm so ptxas keeps aligned pairs)
 #define LDP16(addr, q) asm volatile("{\n.reg .b32 t<32>;\n" \
@@ -336,6 +346,11 @@ constexpr int T_OR = T_NWARPS == 16 ? 48 : 64;
   "mov.b64 %11, {t22,t23};\nmov.b64 %12, {t24,t25};\nmov.b64 %13, {t26,t27};\nmov.b64 %14, {t28,t29};\nmov.b64 %15, {t30,t31};\n}" \
   : "=l"(q[0]),"=l"(q[1]),"=l"(q[2]),"=l"(q[3]),"=l"(q[4]),"=l"(q[5]),"=l"(q[6]),"=l"(q[7]),"=l"(q[8]),"=l"(q[9]),"=l"(q[10]),"=l"(q[11]),"=l"(q[12]),"=l"(q[13]),"=l"(q[14]),"=l"(q[15]) \
   : "r"(addr))
+#define LDP8(addr, q) asm volatile("{\n.reg .b32 t<16>;\n" \
+  "tcgen05.ld.sync.aligned.32x32b.x16.b32 {t0,t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15}, [%8];\n" \
+  "mov.b64 %0, {t0,t1};\nmov.b64 %1, {t2,t3};\nmov.b64 %2, {t4,t5};\nmov.b64 %3, {t6,t7};\n" \
+  "mov.b64 %4, {t8,t9};\nmov.b64 %5, {t10,t11};\nmov.b64 %6, {t12,t13};\nmov.b64 %7, {t14,t15};\n}" \
+  : "=l"(q[0]),"=l"(q[1]),"=l"(q[2]),"=l"(q[3]),"=l"(q[4]),"=l"(q[5]),"=l"(q[6]),"=l"(q[7]) : "r"(addr))
 // (P0, P1) = (ex2(x0), ex2(x1)) on a packed pair, result packed (ex2.approx.ftz.f32 each half)
 __device__ __forceinline__ unsigned long long ex2p(unsigned long long x) {
   unsigned long long y;
@@ -375,13 +390,25 @@ __device__ __forceinline__ void tile_today(Bars& bars, unsigned long long* r2, c
     if (hf == 0) TACQ(&bars.dfull[s], it & 1, 2);
 #pragma unroll
     for (int j = 2 * hf; j < 2 * hf + 2; ++j) {
+      unsigned long long acc[4] = {0, 0, 0, 0};
+#ifdef P0RW2_DX16
+#pragma unroll
+      for (int q = 0; q < 2; ++q) {
+        unsigned long long d2[8];
+        LDP8(cD + 32 * j + 16 * q, d2);
+        wait_ld();
+        if (j == 3 && q == 1) rel(&bars.dempty[s], lane);
+#pragma unroll
+        for (int v = 8 * q; v < 8 * q + 8; ++v) acc[v % 4] = ffma2(r2[16 * j + v], d2[v - 8 * q], acc[v % 4]);
+      }
+#else
       unsigned long long d2[16];
       LDP16(cD + 32 * j, d2);
       wait_ld();
       if (j == 3) rel(&bars.dempty[s], lane);
-      unsigned long long acc[4] = {0, 0, 0, 0};
 #pragma unroll
       for (int v = 0; v < 16; ++v) acc[v % 4] = ffma2(r2[16 * j + v], d2[v], acc[v % 4]);
+#endif
       num = ffma2(fadd2(fadd2(acc[0], acc[1]), fadd2(acc[2], acc[3])), pk(aj[j], aj[j]), num);
     }
   }
@@ -424,7 +451,7 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
   g_trace = p.trace;
 #endif
   if (warp < 8) {
-    asm volatile("setmaxnreg.inc.sync.aligned.u32 208;");
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" :: "n"(T_CR));
     const int s = warp / 4;
     const int m_block = 2 * mp + s;
     const int row = m_block * 128 + quad * 32 + lane, rowc = min(row, p.N - 1);
@@ -444,11 +471,16 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
     for (int it = 0; it < n_max; ++it) {
       const int n = n_max - 1 - it;
       float cj[4], aj[4];
+#ifdef P0RW2_NOPF
+#pragma unroll
+      for (int j = 0; j < 4; ++j) { cj[j] = fmul(fmul(ksr[4 * n + j], qsv), LOG2E); aj[j] = fmul(vsr[4 * n + j], dosv); }
+#else
 #pragma unroll
       for (int j = 0; j < 4; ++j) { cj[j] = fmul(fmul(pks[j], qsv), LOG2E); aj[j] = fmul(pvs[j], dosv); }
       const int nn = n > 0 ? n - 1 : 0;
 #pragma unroll
       for (int j = 0; j < 4; ++j) { pks[j] = ksr[4 * nn + j]; pvs[j] = vsr[4 * nn + j]; }
+#endif
       const bool diag = p.causal && (n + 1) * 128 > m_block * 128;
       unsigned long long den[4] = {0, 0, 0, 0}, num = 0;
 #ifdef P0RW2_NOCOMP
@@ -539,6 +571,140 @@ __global__ void __launch_bounds__(T_NTHR, 1) k_today(const __grid_constant__ CUt
   __syncthreads();
   if (warp == 0) asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, 512;" :: "r"(tb));
 }
+
+// IMPL 2: k_today made persistent: grid = #SMs, static striding over the LPT-ordered work-tile list (heaviest pair
+// first, then (b, h)); all barrier phases run on CTA-global counters; Q/dO reloaded per work tile after qempty.
+__device__ __forceinline__ void work_decode(const Params& p, int w, int& mp, int& b, int& h, int& hk, int& n_max) {
+  const int BH = p.B * p.H;
+  mp = p.npairs - 1 - w / BH;
+  const int bh = w % BH;
+  b = bh / p.H; h = bh % p.H; hk = h / (p.H / p.Hk);
+  const int NB = p.N / 128;
+  n_max = p.causal ? min(NB, 2 * mp + 2) : NB;
+}
+__global__ void __launch_bounds__(T_NTHR, 1) k_pers(const __grid_constant__ CUtensorMap tmQ, const __grid_constant__ CUtensorMap tmK,
+                                                    const __grid_constant__ CUtensorMap tmV, const __grid_constant__ CUtensorMap tmDO,
+                                                    const Params p) {
+  extern __shared__ uint8_t smraw[];
+  __shared__ __align__(8) Bars bars;
+  __shared__ uint32_t s_taddr;
+  const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32, quad = warp % 4;
+  const uint32_t sbase = (su32(smraw) + 1023u) & ~1023u;
+  const int ntiles = p.B * p.H * p.npairs;
+  if (warp == 0) {
+    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], 512;" :: "r"(su32(&s_taddr)));
+    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;");
+  }
+  if (tid == 0) {
+    mbar_init(&bars.qfull, 1); mbar_init(&bars.qempty, 1);
+    for (int i = 0; i < KVS; ++i) { mbar_init(&bars.kvfull[i], 1); mbar_init(&bars.kvempty[i], 1); mbar_init(&bars.vfull[i], 1); }
+    for (int s = 0; s < 2; ++s) { mbar_init(&bars.sfull[s], 1); mbar_init(&bars.sempty[s], 4); mbar_init(&bars.dfull[s], 1); mbar_init(&bars.dempty[s], 4); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  tc_before(); __syncthreads(); tc_after();
+  const uint32_t tb = s_taddr;
+#if defined(P0RW2_TRACE) || defined(P0RW2_CYC)
+  const unsigned long long tcta0 = clock64();
+#endif
+  if (warp < 8) {
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" :: "n"(T_CR));
+    const int s = warp / 4;
+    const uint32_t la = (uint32_t)(quad * 32) << 16;
+    const uint32_t cS = tb + la + 128u * s, cD = tb + la + 256u + 128u * s;
+    unsigned long long r[64];
+    int gi = 0;   // CTA-global key-tile counter (S/dP slot phases)
+    for (int w = blockIdx.x; w < ntiles; w += gridDim.x) {
+      int mp, b, h, hk, n_max; work_decode(p, w, mp, b, h, hk, n_max);
+      const int m_block = 2 * mp + s;
+      const int row = m_block * 128 + quad * 32 + lane, rowc = min(row, p.N - 1);
+      const size_t hrow = (size_t)(b * p.H + h);
+      const float qsv = p.qs[hrow * (p.N / 32) + rowc / 32], dosv = p.dos[hrow * (p.N / 32) + rowc / 32];
+      const float l2 = fmul(p.lse[hrow * p.N + rowc], LOG2E);
+      const unsigned long long nl = pk(fneg(l2), fneg(l2));
+      const float* ksr = p.ks + (size_t)(b * p.Hk + hk) * (p.N / 32);
+      const float* vsr = p.vs + (size_t)(b * p.Hk + hk) * (p.N / 32);
+      unsigned long long sn = 0, en = 0, sd = 0, ed = 0;
+      float pks[4], pvs[4];
+#pragma unroll
+      for (int j = 0; j < 4; ++j) { pks[j] = ksr[4 * (n_max - 1) + j]; pvs[j] = vsr[4 * (n_max - 1) + j]; }
+      for (int it = 0; it < n_max; ++it, ++gi) {
+        const int n = n_max - 1 - it;
+        float cj[4], aj[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) { cj[j] = fmul(fmul(pks[j], qsv), LOG2E); aj[j] = fmul(pvs[j], dosv); }
+        const int nn = n > 0 ? n - 1 : 0;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) { pks[j] = ksr[4 * nn + j]; pvs[j] = vsr[4 * nn + j]; }
+        const bool diag = p.causal && (n + 1) * 128 > m_block * 128;
+        unsigned long long den[4] = {0, 0, 0, 0}, num = 0;
+        if (diag) tile_today<true>(bars, r, cj, aj, cS, cD, s, gi, lane, n * 128, row, nl, den, num);
+        else tile_today<false>(bars, r, cj, aj, cS, cD, s, gi, lane, n * 128, row, nl, den, num);
+        two_sum2(sn, en, num);
+        two_sum2(sd, ed, fadd2(fadd2(den[0], den[1]), fadd2(den[2], den[3])));
+      }
+      float a0, a1, e0, e1, c0, c1, f0, f1;
+      upk(sn, a0, a1); upk(en, e0, e1); upk(sd, c0, c1); upk(ed, f0, f1);
+      const double tn = ((double)a0 + (double)a1) + ((double)e0 + (double)e1), td = ((double)c0 + (double)c1) + ((double)f0 + (double)f1);
+      if (row < p.N) p.delta[hrow * p.N + row] = td != 0.0 ? (float)(tn / td) : 0.f;
+    }
+  } else {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;" :: "n"(T_OR));
+    if (warp == 9 && lane == 0) {   // loads
+      int gk = 0, wt = 0;
+      for (int w = blockIdx.x; w < ntiles; w += gridDim.x, ++wt) {
+        int mp, b, h, hk, n_max; work_decode(p, w, mp, b, h, hk, n_max);
+        if (wt > 0) mbar_wait(&bars.qempty, (wt - 1) & 1);
+        mbar_expect_tx(&bars.qfull, 4 * 16384);
+        for (int s = 0; s < 2; ++s) {
+          tma4(sbase + SMEM_Q + 16384 * s, &tmQ, 0, (2 * mp + s) * 128, h, b, &bars.qfull);
+          tma4(sbase + SMEM_DO + 16384 * s, &tmDO, 0, (2 * mp + s) * 128, h, b, &bars.qfull);
+        }
+        for (int it = 0; it < n_max; ++it, ++gk) {
+          const int n = n_max - 1 - it, slot = gk % KVS;
+          if (gk >= KVS) mbar_wait(&bars.kvempty[slot], ((gk / KVS) - 1) & 1);
+          mbar_expect_tx(&bars.kvfull[slot], 16384);
+          tma4(sbase + SMEM_KV + KV_STRIDE * slot, &tmK, 0, n * 128, hk, b, &bars.kvfull[slot]);
+          mbar_expect_tx(&bars.vfull[slot], 16384);
+          tma4(sbase + SMEM_KV + KV_STRIDE * slot + 16384, &tmV, 0, n * 128, hk, b, &bars.vfull[slot]);
+        }
+      }
+    }
+    if (warp == 8 && lane == 0) {   // MMA
+      int gk = 0, wt = 0;
+      for (int w = blockIdx.x; w < ntiles; w += gridDim.x, ++wt) {
+        int mp, b, h, hk, n_max; work_decode(p, w, mp, b, h, hk, n_max);
+        mbar_wait(&bars.qfull, wt & 1);
+        tc_after();
+        for (int it = 0; it < n_max; ++it, ++gk) {
+          const int slot = gk % KVS;
+          mbar_wait(&bars.kvfull[slot], (gk / KVS) & 1);
+          tc_after();
+          const uint32_t sK = sbase + SMEM_KV + KV_STRIDE * slot, sV = sK + 16384;
+          for (int s = 0; s < 2; ++s) {
+            if (gk > 0) acq(&bars.sempty[s], (gk - 1) & 1);
+            mma_128(tb + 128u * s, sbase + SMEM_Q + 16384 * s, sK);
+            commit(&bars.sfull[s]);
+          }
+          mbar_wait(&bars.vfull[slot], (gk / KVS) & 1);
+          tc_after();
+          for (int s = 0; s < 2; ++s) {
+            if (gk > 0) acq(&bars.dempty[s], (gk - 1) & 1);
+            mma_128(tb + 256u + 128u * s, sbase + SMEM_DO + 16384 * s, sV);
+            commit(&bars.dfull[s]);
+          }
+          commit(&bars.kvempty[slot]);
+        }
+        commit(&bars.qempty);   // Q/dO of this work tile no longer read once these MMAs complete
+      }
+    }
+  }
+#if defined(P0RW2_TRACE) || defined(P0RW2_CYC)
+  if (tid == 0) atomicAdd(&p.trace[0], clock64() - tcta0);
+#endif
+  tc_before();
+  __syncthreads();
+  if (warp == 0) asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, 512;" :: "r"(tb));
+}
 }  // namespace p0rw2
 
 // ---------------------------------------------------------------- host (C ABI, loaded with ctypes) -----------------
@@ -580,12 +746,18 @@ extern "C" int p0rw2_delta(void* q8, const float* qs, void* k8, const float* ks,
 #ifndef P0RW2_IMPL
 #define P0RW2_IMPL 0
 #endif
-  auto kern = P0RW2_IMPL == 1 ? p0rw2::k_today : p0rw2::k_p0rw2;
-  const int nthr = P0RW2_IMPL == 1 ? p0rw2::T_NTHR : p0rw2::NTHR;
+  auto kern = P0RW2_IMPL == 2 ? p0rw2::k_pers : P0RW2_IMPL == 1 ? p0rw2::k_today : p0rw2::k_p0rw2;
+  const int nthr = P0RW2_IMPL >= 1 ? p0rw2::T_NTHR : p0rw2::NTHR;
   if (!attr) {
     if (cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, p0rw2::SMEM_BYTES) != cudaSuccess) return -4;
     attr = true;
   }
-  kern<<<B * H * p.npairs, nthr, p0rw2::SMEM_BYTES, (cudaStream_t)stream>>>(tq, tk, tv, td, p);
+  int grid = B * H * p.npairs;
+  if (P0RW2_IMPL == 2) {
+    static int nsm = 0;
+    if (!nsm) { int dev; cudaGetDevice(&dev); cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev); }
+    grid = grid < nsm ? grid : nsm;
+  }
+  kern<<<grid, nthr, p0rw2::SMEM_BYTES, (cudaStream_t)stream>>>(tq, tk, tv, td, p);
   return (int)cudaGetLastError();
 }

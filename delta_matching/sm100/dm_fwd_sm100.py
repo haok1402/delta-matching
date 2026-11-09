@@ -2324,6 +2324,8 @@ class DMForwardSm100:
                             # means that the correction warps has finished reading tO during
                             # the last iteration of the previous work tile.
                             pipeline_s_p_o.producer_acquire_w_index_phase(stage, P_full_O_rescaled_phase)
+                            if const_expr(self.dm_slice):
+                                dm_utils.tc_fence_after()   # slice: P / SF / O tcgen05.st of other warps before this PV
                             # 3. gemm
                             # sm100_utils.gemm(tiled_mma_pv, tOtO0, tOrP0, tOrVi, zero_init=True)
                             # gemm_Pi[stage](tCrB=tOrVi, sB=sV[None, None, None, Vi_index], zero_init=not O_should_accumulate)
@@ -2390,6 +2392,8 @@ class DMForwardSm100:
                     for stage in cutlass.range_constexpr(self.q_stage):
                         # 2. acquire corrected Oi_partial and Pi
                         pipeline_s_p_o.producer_acquire_w_index_phase(stage, P_full_O_rescaled_phase)
+                        if const_expr(self.dm_slice):
+                            dm_utils.tc_fence_after()
                         # 3. gemm
                         # sm100_utils.gemm(tiled_mma_pv, tOtO0, tOrP0, tOrVi, zero_init=True)
                         # gemm_Pi[stage](tCrB=tOrVi, sB=sV[None, None, None, Vi_index], zero_init=not O_should_accumulate)
@@ -3090,8 +3094,8 @@ class DMForwardSm100:
             rP8.store(rS.load().to(self.q_dtype))
             cute.copy(thr_st, rP, cute.make_tensor(tSt_st.iterator + col, tSt_st.layout))
             cute.arch.fence_view_async_tmem_store()
+            dm_utils.tc_fence_before()     # P tcgen05.st ordered before the P-full arrival (PV reads it)
             if const_expr(self.dm_opts.get("warr", "0") == "1"):
-                dm_utils.tc_fence_before()
                 cute.arch.sync_warp()
                 with cute.arch.elect_one():
                     pipeline_s_p_o.consumer_release_w_index(s)

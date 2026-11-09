@@ -227,6 +227,20 @@ def run_case(mod, fn, case, dev):
                     # compared with the first call of its own input set
                     alt = tuple(case[n_].to(dev) for n_ in ("aq", "ak", "av", "ado")) if "aq" in case else None
                     out_alt = fwd_bwd(fn, *alt, case["causal"], mode) if alt else None
+                    # accuracy-audit 20:00: judge nd calls against the DET build's output for the same inputs (both modes are
+                    # built); only a candidate without a det switch is compared with its own call 0 (validator: block 2e-3)
+                    vs_det = False
+                    if getattr(mod, "DETERMINISTIC", getattr(mod, "DET", True)) is False and hasattr(mod, "DET"):
+                        _d0 = mod.DET
+                        mod.DET = True
+                        try:
+                            ref_ = fwd_bwd(fn, q, k, v, do, case["causal"], mode)
+                            ref_alt = fwd_bwd(fn, *alt, case["causal"], mode) if alt else None
+                            vs_det = True
+                        finally:
+                            mod.DET = _d0
+                    if vs_det:
+                        out, out_alt = ref_, ref_alt
                     keep = q.shape[0] * q.shape[2] * q.shape[1] ** 2 <= 2 ** 28 and alt is None
                     calls = [[None if t is None else t.cpu() for t in out]] if keep else None
                     nonfin, gmax, bmax, emax = 0, 0.0, 0.0, 0.0
@@ -276,6 +290,7 @@ def run_case(mod, fn, case, dev):
                     nonfin += any(t is not None and not torch.isfinite(t).all() for t in out)
                     r.setdefault("stress", {})["%s/%s" % run] = {"calls": n, "nonfinite_calls": nonfin, "mismatch_calls": 0,
                                                                  "rel_max": gmax, "block_rel_max": bmax, "elem_rel_max": emax,
+                                                                 "vs": "det" if vs_det else "call0",
                                                                  "where": where}
                     if keep:
                         r.setdefault("stress_calls", {})["%s/%s" % run] = calls

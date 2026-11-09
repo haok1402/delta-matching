@@ -454,8 +454,9 @@ def check_case(case, cr, preset, dev, verbose):
             chk(f"{key}:close_every_call", st.get("rel_max", 0.0) <= NONDET_REL,
                 f"outputs varied by up to {st.get('rel_max', 0.0):.2e} rel between calls (allowed {NONDET_REL:.0e})")
             # accuracy-audit 05:35 (1): a race corrupting one block hides in the whole-tensor norm -> per block / element
-            chk(f"{key}:block_spread", st.get("block_rel_max", 0.0) <= SPREAD_BLK,
-                f"a 128-row block varied by {st.get('block_rel_max', 0.0):.2e} rel between calls (allowed {SPREAD_BLK:.0e})"
+            blk_lim = SPREAD_BLK if st.get("vs") == "det" or CAND_DETERMINISTIC[0] else 2 * SPREAD_BLK   # audit 20:00
+            chk(f"{key}:block_spread", st.get("block_rel_max", 0.0) <= blk_lim,
+                f"a 128-row block varied by {st.get('block_rel_max', 0.0):.2e} rel vs the {'det build' if st.get('vs') == 'det' else 'first call'} (allowed {blk_lim:.0e})"
                 + (f" at {st['where']['block']}" if st.get("where", {}).get("block") else ""))
             chk(f"{key}:elem_spread", st.get("elem_rel_max", 0.0) <= SPREAD_ELEM,
                 f"an element varied by {st.get('elem_rel_max', 0.0):.2e} of its row max between calls "

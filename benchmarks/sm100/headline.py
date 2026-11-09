@@ -28,7 +28,9 @@ hosts = sorted({r["host"] for r in d.values()})
 print(f"arm={arm}  files=results/{pre}.[sg]*.jsonl  host={','.join(hosts)}")
 tgt_rows, tgt_gm = [], []
 for base in ("fa4_bf16", "fa4_bf16_det"):
-    print(f"\nvs {base}  (speedup = {base}_ms / {arm}_ms)\n")
+    mode = {"fa4_bf16": "FA4 default backward = NON-DETERMINISTIC (atomic dQ), its fastest setting on sm100",
+            "fa4_bf16_det": "FA4 deterministic=True backward"}.get(base, base)
+    print(f"\nvs {base}  [{mode}]  (speedup = {base}_ms / {arm}_ms; {arm} = DM build as committed)\n")
     print("| causal | pass | H/Hk | " + " | ".join(f"{n//1024}k" for n in Ns) + f" | geomean ({2*len(Ns)} shapes) |")
     print("|" + "---|" * (4 + len(Ns)))
     for c in sorted({k[5] for k in d}, reverse=True):

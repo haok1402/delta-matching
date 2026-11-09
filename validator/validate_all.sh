@@ -1,7 +1,7 @@
 #!/bin/bash
 # Promotion validation of one candidate, split across the GPUs of the current gpupool reservation:
 #   gpupool run --gpus N --who <you> -- bash validator/validate_all.sh /abs/cand.py <outdir>
-# GPU 0: quick, then the sanitizer tier, then full; the remaining GPUs: bench shards (with 1 GPU, everything in sequence).
+# GPU 0: quick, then the sanitizer tier, then full, then quick with an empty compile cache (cold); the remaining GPUs: bench shards (with 1 GPU, everything in sequence).
 # Exit 0 iff every part PASSes.  Each part writes <outdir>/<part>.{log,json}; summary in <outdir>/SUMMARY.txt.
 set -u
 CAND=$1; OUT=$2; mkdir -p "$OUT"
@@ -15,6 +15,10 @@ rm -f "$OUT/rc.txt"
  run ${G[0]} sanitize $HERE/sanitize.py "$CAND" --log "$OUT/sanitize_memcheck.txt"
  run ${G[0]} racecheck $HERE/sanitize.py "$CAND" --tool racecheck --log "$OUT/sanitize_racecheck.txt"
  run ${G[0]} full $HERE/validate.py "$CAND" --shapes full --json "$OUT/full.json"
+ # cold compile cache: abf6f87's host fast path recorded wrong replay plans on calls that JIT-compiled (warm caches hid it)
+ CC="$OUT/coldcache.tmp"; rm -rf "$CC"
+ FLASH_ATTENTION_CUTE_DSL_CACHE_DIR="$CC" run ${G[0]} cold $HERE/validate.py "$CAND" --shapes quick --json "$OUT/cold.json"
+ rm -rf "$CC"
  if [ "$NG" -eq 1 ]; then run ${G[0]} bench $HERE/validate.py "$CAND" --shapes bench --json "$OUT/bench.json"; fi) &
 if [ "$NG" -gt 1 ]; then
   NS=$((NG - 1))

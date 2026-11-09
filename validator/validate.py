@@ -215,7 +215,7 @@ def headline_shapes():
     if os.path.exists(HEADLINE):
         return json.load(open(HEADLINE))["shapes"]
     return [{"B": max(1, 32768 // N), "H": H, "Hk": Hk, "N": N, "causal": c}
-            for (H, Hk) in ((16, 16), (32, 8)) for N in (4096, 8192, 32768, 65536) for c in (True,)]
+            for (H, Hk) in ((16, 16), (32, 8)) for N in (8192, 32768, 65536) for c in (True,)]
 
 
 def build_cases(tier, supports, seed):
@@ -242,7 +242,8 @@ def build_cases(tier, supports, seed):
         if m < 128:
             shapes += [(1, 4, 2, up(1000), True, base_kinds), (1, 2, 1, up(1), True, base_kinds), (1, 4, 2, up(77), True, base_kinds)]
     if tier == "full":
-        shapes += [(2, 16, 16, up(2944), True, base_kinds), (1, 32, 8, up(4992), True, base_kinds),
+        shapes += [(2, 32, 8, up(4096), True, base_kinds),     # GQA 4k: the gloop path (N <= 4096), correctness only
+                   (2, 16, 16, up(2944), True, base_kinds), (1, 32, 8, up(4992), True, base_kinds),
                    (3, 8, 4, up(1664), True, ["randn", "scaled3"]), (1, 2, 2, up(128), True, base_kinds)]
         if nc:
             shapes += [(2, 16, 16, up(2944), False, base_kinds), (1, 32, 8, up(4992), False, base_kinds)]

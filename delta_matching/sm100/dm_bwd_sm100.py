@@ -1702,6 +1702,7 @@ class DMBackwardSm100:
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
+        dm_utils.tcf_begin("notcf" not in self.dm_opts)   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         bidx, _, _ = cute.arch.block_idx()
         if const_expr("tl2" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
@@ -2313,6 +2314,7 @@ class DMBackwardSm100:
                     dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 6), dm_utils.globaltimer())
             tmem_alloc_barrier.arrive()
 
+        dm_utils.tcf_end()
         return
 
     @cute.jit

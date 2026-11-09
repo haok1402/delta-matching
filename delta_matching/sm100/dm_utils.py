@@ -132,7 +132,8 @@ def gemm_ptx_bs_ts(
         input_args.append(Int32(mbar_phase).ir_value())
         wait_str = (".reg .pred P1; \n\tLAB_WAIT: \n\t"
                     "mbarrier.try_wait.parity.shared::cta.b64 P1, [$6], $7, 10000000; \n\t"
-                    "@P1 bra DONE; \n\tbra     LAB_WAIT; \n\tDONE: \n\t")
+                    "@P1 bra DONE; \n\tbra     LAB_WAIT; \n\tDONE: \n\t"
+                    + ("tcgen05.fence::after_thread_sync; \n\t" if TCF[0] else ""))
     instr = f"tcgen05.mma.cta_group::{cta_group}.kind::mxf8f6f4.block_scale.scale_vec::1X"
 
     def one(k, pred):
@@ -712,3 +713,58 @@ def tc_fence_before(*, loc=None, ip=None):
     """tcgen05.fence::before_thread_sync: order earlier tcgen05 ops before a following thread sync (mbarrier arrive)."""
     llvm.inline_asm(None, [], "tcgen05.fence::before_thread_sync;", "", has_side_effects=True, is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
+# ---- kda-sm100-fwdfence: tcgen05 thread-sync fences on every cross-thread hand-off (default on) ----
+# PTX orders tcgen05 ops (ld/st/mma/cp) of one thread against another thread only through
+# tcgen05.fence::before_thread_sync (producer, before the sync) and tcgen05.fence::after_thread_sync (consumer, after it).
+# FA4-derived pipelines (cutlass.pipeline / flash_attn.cute.pipeline) emit no such fences. While a DM kernel body is
+# traced with TCF on, every mbarrier / named-barrier wait gets fence::after and every arrive gets fence::before.
+# On sm_100a (CUDA 13.0) both fences emit no SASS: they only forbid ptxas from moving tcgen05 ops across the sync
+# (kda/docs/fence-audit.md). Knobs: fwd DM_FWD_OPTS tcf=0, bwd DM_BWD_OPTS notcf, pass0 exp variant +ntcf.
+TCF = [False]
+
+
+def tcf_begin(on):
+    TCF[0] = bool(on)
+
+
+def tcf_end():
+    TCF[0] = False
+
+
+def _tcf_wrap(f, before, after):
+    if getattr(f, "_dm_tcf", False):
+        return f
+
+    def w(*a, **kw):
+        if TCF[0] and before:
+            tc_fence_before()
+        r = f(*a, **kw)
+        if TCF[0] and after:
+            tc_fence_after()
+        return r
+    w._dm_tcf = True
+    w.__name__ = getattr(f, "__name__", "w")
+    w.__doc__ = f.__doc__
+    return w
+
+
+def _tcf_install():
+    import cutlass.cute.arch as _A
+    g = globals()
+    for n in ("mbar_wait_parity", "mbar_wait_parity_nh", "mbar_wait_parity_cluster"):
+        g[n] = _tcf_wrap(g[n], False, True)
+    for n in ("mbar_arrive", "mbar_arrive_local", "mbar_arrive_rank", "mbar_arrive_expect_tx"):
+        g[n] = _tcf_wrap(g[n], True, False)
+    for n, b, a in (("mbarrier_wait", False, True), ("mbarrier_try_wait", False, True),
+                    ("mbarrier_conditional_try_wait", False, True), ("mbarrier_test_wait", False, True),
+                    ("mbarrier_arrive", True, False), ("mbarrier_arrive_and_expect_tx", True, False),
+                    ("cp_async_mbarrier_arrive_noinc", True, False),
+                    ("barrier", True, True), ("barrier_arrive", True, False)):
+        f = getattr(_A, n, None)
+        if f is not None:
+            setattr(_A, n, _tcf_wrap(f, b, a))
+
+
+_tcf_install()

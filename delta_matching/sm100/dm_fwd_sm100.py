@@ -1034,6 +1034,7 @@ class DMForwardSm100:
         using tensor memory access (TMA) for efficient data loading, warp specialization for different
         computation phases, and optional attention masking.
         """
+        dm_utils.tcf_begin(self.dm_opts.get("tcf", "1") == "1")   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
 
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
@@ -1582,6 +1583,7 @@ class DMForwardSm100:
             )
             tmem_alloc_barrier.arrive_unaligned()
 
+        dm_utils.tcf_end()
         return
 
     @cute.jit

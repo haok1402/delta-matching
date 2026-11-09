@@ -1,5 +1,5 @@
 {
- "_doc": "Headline shapes (user re-scope 2026-11-08: only N = 8k, 32k, 64k matter; 2026-11-09 user added 4k -> N = 4k, 8k, 32k, 64k). hd128. Single source of truth: fa4-bench times exactly these; dm-validator's bench tier validates exactly these. Edit by agreement of fa4-bench and dm-validator. 2026-11-09 user: causal only (non-causal dropped) -> 8 shapes.",
+ "_doc": "Headline shapes (user re-scope 2026-11-08: only N = 8k, 32k, 64k matter; 2026-11-09 user added 4k -> N = 4k, 8k, 32k, 64k). hd128. Single source of truth: fa4-bench times exactly these; dm-validator's bench tier validates exactly these. Edit by agreement of fa4-bench and dm-validator. 2026-11-09 user: causal only (non-causal dropped) -> 8 shapes. (8k/64k-only request withdrawn by the user.)",
  "shapes": [
   {
    "B": 8,

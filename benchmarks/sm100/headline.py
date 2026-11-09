@@ -6,6 +6,11 @@ Per-length table of fwd+bwd (and fwd, bwd) speedup = FA4_ms / arm_ms, same-run p
 configs, causal and non-causal, plus the geomean over the 6 shapes (2 head configs x 3 N) per causal flag."""
 import glob, json, math, statistics, sys
 
+
+import os as _os
+_HS = json.load(open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "headline_shapes.json")))["shapes"]
+TARGET = {(x["H"], x["Hk"], x["N"], x["causal"]) for x in _HS}   # only the user's target shapes count
+
 args = [x for x in sys.argv[1:] if not x.startswith("--calib=")]
 calib = next((x.split("=", 1)[1] for x in sys.argv[1:] if x.startswith("--calib=")), None)
 pre, arm = args[0], (args[1] if len(args) > 1 else "dm_matched")
@@ -13,7 +18,7 @@ d = {}
 for f in glob.glob(f"results/{pre}.s*.jsonl") + glob.glob(f"results/{pre}.g*.jsonl"):
     for l in open(f):
         r = json.loads(l)
-        if "pass_" in r and "error" not in r:
+        if "pass_" in r and "error" not in r and (r["H"], r["Hk"], r["N"], r["causal"]) in TARGET:
             d[(r["run_id"], r["arm"], r["H"], r["Hk"], r["N"], r["causal"], r["pass_"])] = r
 gm = lambda xs: math.exp(sum(map(math.log, xs)) / len(xs)) if xs else float("nan")  # noqa: E731
 Ns = sorted({x["N"] for x in json.load(open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), "headline_shapes.json")))["shapes"]})

@@ -66,6 +66,9 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
     if dm_common.b6_m() > 0 and "+b6_" not in exp_variant:
         exp_variant = exp_variant + f"+b6_{dm_common.b6_m()}"
     over = dict(FORCE)
+    _kvs = _env("DM_P0_KVS", "")     # kda-sm100-stack: K/V smem ring depth (config-level, bitwise: same arithmetic)
+    if _kvs:
+        over["kv_stage"] = int(_kvs)
     if config_override:
         over.update(config_override)
     aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),

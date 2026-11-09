@@ -270,6 +270,7 @@ class DMPass0Sm100:
         # 35-51 regs with it at any softmax budget 208-224 and gets ~5% slower); +maa: always
         _fl0 = self.dm_exp_variant.split("+")[1:]
         self.dm_ma = ("ma" in _fl0 and self.is_causal) or "maa" in _fl0
+        self.dm_b6 = next((int(t[3:]) for t in _fl0 if t.startswith("b6_")), 0)   # deg-6 poly exp on (qb+kb)%m==0 blocks
         self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
@@ -2255,9 +2256,22 @@ class DMPass0Sm100:
                                     for i in cutlass.range_constexpr(64 * h, 64 * h + 64):
                                         tSrS[i] = -Float32.inf if kbase + tScS_t2r[i][1] > row else tSrS[i]
                             for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                                if const_expr(self.dm_b6 > 0):
+                                    # b6: this warp's 32 query rows x chunk j's 32 keys = one 32x32 block; deg-6 poly
+                                    # iff (qb + kb) % m == 0 (warp-uniform), the same rule the backward applies
+                                    if ((row >> 5) + n_block * (self.n_block_size // 32) + j) % self.dm_b6 == 0:
+                                        for v in cutlass.range_constexpr(16):
+                                            i0 = 32 * j + 2 * v
+                                            tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair_poly6(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
+                                    else:
+                                        for v in cutlass.range_constexpr(16):
+                                            i0 = 32 * j + 2 * v
+                                            tSrS[i0], tSrS[i0 + 1] = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                 for v in cutlass.range_constexpr(16):
                                     i0 = 32 * j + 2 * v
-                                    if const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
+                                    if const_expr(self.dm_b6 > 0):
+                                        p = (tSrS[i0], tSrS[i0 + 1])
+                                    elif const_expr(dm_common.p5_uses_poly(self.dm_exp_variant.split("+")[0], v)):
                                         p = dm_common.dm_bwd_p_pair_poly(tSrS[i0], tSrS[i0 + 1], cs[j], l2)
                                     else:
                                         p = dm_common.dm_bwd_p_pair(tSrS[i0], tSrS[i0 + 1], cs[j], l2)

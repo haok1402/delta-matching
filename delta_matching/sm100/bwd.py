@@ -76,6 +76,9 @@ def _auto_opts(q8, k8, causal=False):
     in TMEM, stored once). Long causal sequences lose (4x longer tiles -> tail), so only N <= gloopN (default 4096).
     'nogloop' disables, 'gloop' forces."""
     ol = [o for o in os.environ.get("DM_BWD_OPTS", "").split(",") if o]
+    from . import dm_common
+    if dm_common.b6_m() > 0 and not any(o.startswith("b6=") for o in ol):
+        ol = ol + [f"b6={dm_common.b6_m()}"]   # same DM_B6 as pass 0 (bitwise-identical P)
     gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "4096"))   # k8 fork: harness GQA 4k bwd 0.94x, 8k +0.1..1% slower
     if q8.shape[2] > k8.shape[2] and "gloop" not in ol and "nogloop" not in ol and q8.shape[1] <= gN:
         ol = ol + ["gloop"]

@@ -448,6 +448,30 @@ def ex2_poly5_2(x: Float32, y: Float32, *, loc=None, ip=None):
     return fu.combine_int_frac_ex2(r[0], pe[0], loc=loc, ip=ip), fu.combine_int_frac_ex2(r[1], pe[1], loc=loc, ip=ip)
 
 
+# degree-6 exp2 on [0,1) in the form 1 + f*q(f) (Lawson-minimax, fp32 coefficients; kda/tests/p5acc/fit.py):
+# exhaustive over all fp32 exp arguments in (-64,-0.5] U [0.5,8): max rel 6.6e-8, mean 2.3e-8, 91.8% correctly rounded,
+# e4m3 RN-code mismatch 4.1e-7 vs MUFU ex2.approx.ftz 1.46e-7 / 4.4e-8 / 57.5% / 4.9e-7 (kda/runs/p5acc_exact.log)
+POLY6_EX2 = (1.0, float.fromhex("0x1.62e42cp-1"), float.fromhex("0x1.ebfd58p-3"), float.fromhex("0x1.c68912p-5"),
+             float.fromhex("0x1.3d0b92p-7"), float.fromhex("0x1.46d648p-10"), float.fromhex("0x1.c54182p-13"))
+
+
+def ex2_poly6_2(x: Float32, y: Float32):
+    """2^x for a pair on the FMA pipe, at least as accurate as ex2.approx.ftz.f32 on every element metric; results
+    below 2^-126 (x < -126, incl. -inf) are flushed to 0 exactly like ex2.approx.ftz."""
+    import cutlass
+    from flash_attn.cute import utils as fu
+    fp32_round_int = float(2**23 + 2**22)
+    xy = (cute.arch.fmax(x, -127.0), cute.arch.fmax(y, -127.0))
+    r = cute.arch.add_packed_f32x2(xy, (fp32_round_int, fp32_round_int), rnd="rm")
+    rb = cute.arch.sub_packed_f32x2(r, (fp32_round_int, fp32_round_int))
+    fr = cute.arch.sub_packed_f32x2(xy, rb)
+    pe = fu.evaluate_polynomial_2(*fr, POLY6_EX2)
+    ox = fu.combine_int_frac_ex2(r[0], pe[0])
+    oy = fu.combine_int_frac_ex2(r[1], pe[1])
+    return (Float32(cutlass.select_(x < Float32(-126.0), Float32(0.0), ox)),
+            Float32(cutlass.select_(y < Float32(-126.0), Float32(0.0), oy)))
+
+
 @dsl_user_op
 def cpasync_bulk_store_s2g(smem_ptr, gmem_ptr, store_bytes, *, loc=None, ip=None):
     """cp.async.bulk smem -> gmem plain store (bulk_group), same grouping/wait semantics as the reduce-add variant."""

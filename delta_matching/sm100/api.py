@@ -24,12 +24,12 @@ def _det():
 
 class _DMAttnSm100(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, mode):
+    def forward(ctx, q, k, v, causal, mode, det):
         sm = D ** -0.5
         q8, qs, k8, ks, v8, vs, kvw, _ = quant_qkv2(q, k, v, sm)
         o, lse = dm_fwd(q8, qs, k8, kvw, v8, None, causal)
         ctx.save_for_backward(q8, qs, k8, ks, v8, vs, o, lse)
-        ctx.causal, ctx.mode = causal, mode
+        ctx.causal, ctx.mode, ctx.det = causal, mode, det
         return o
 
     @staticmethod
@@ -37,23 +37,26 @@ class _DMAttnSm100(torch.autograd.Function):
     def backward(ctx, do):
         q8, qs, k8, ks, v8, vs, o, lse = ctx.saved_tensors
         do = do.contiguous()
-        dm_bwd_prestage(q8, k8, lse, ctx.causal, deterministic=_det())    # scratch alloc / zero / lse_log2 on a side stream (overlaps pass 0)
+        dm_bwd_prestage(q8, k8, lse, ctx.causal, deterministic=ctx.det)    # scratch alloc / zero / lse_log2 on a side stream (overlaps pass 0)
         do8, dos, delta = quant_do_delta(do, o if ctx.mode == "stale" else None)   # stale delta fused
         if ctx.mode == "matched":
             delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, ctx.causal)
-        dq, dk, dv = dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal, D ** -0.5, deterministic=_det())
-        return dq, dk, dv, None, None
+        dq, dk, dv = dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal, D ** -0.5, deterministic=ctx.det)
+        return dq, dk, dv, None, None, None
 
 
-def dm_attn_func(q, k, v, causal=True, mode="matched"):
+def dm_attn_func(q, k, v, causal=True, mode="matched", deterministic=None):
+    """deterministic: None -> env DM_DETERMINISTIC / DM_BWD_DET (default deterministic); False -> non-deterministic
+    backward (unordered dQ / GQA dK,dV accumulation). Either way delta and dS use bitwise the same P/dP."""
     assert q.shape[-1] == D and q.dtype == torch.bfloat16 and q.shape[1] % 128 == 0
     assert mode in ("matched", "stale")
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
-    return _DMAttnSm100.apply(q, k, v, causal, mode)
+    det = _det() if deterministic is None else bool(deterministic)
+    return _DMAttnSm100.apply(q, k, v, causal, mode, det)
 
 
 @torch.no_grad()
-def dm_attn_debug(q, k, v, do, causal=True, mode="matched", identity=None):
+def dm_attn_debug(q, k, v, do, causal=True, mode="matched", identity=None, deterministic=None):
     """Validator hook: the exact delta the backward consumes and the LSE it recomputes P from, for these inputs
     (same producers, forward kernel and delta path as dm_attn_func's autograd backward).  (B,H,N) fp32 each, LSE natural.
     identity (opt-in: identity=True or env DM_DEBUG_IDENTITY=1; matched mode): also run the backward main kernel in its
@@ -78,7 +81,8 @@ def dm_attn_debug(q, k, v, do, causal=True, mode="matched", identity=None):
         old = os.environ.get("DM_BWD_OPTS", "")
         os.environ["DM_BWD_OPTS"] = ",".join([o for o in old.split(",") if o] + ["rsdbg"])
         try:
-            dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm, trace=rs)
+            dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, sm, trace=rs,
+                        deterministic=_det() if deterministic is None else bool(deterministic))
         finally:
             os.environ["DM_BWD_OPTS"] = old
         out["rowsum_dS"] = rs[..., 0].float().contiguous()

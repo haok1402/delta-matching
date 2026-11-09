@@ -293,6 +293,11 @@ class DMPass0Sm100:
         # +ni: the correction WG and non-scheduler empty warps have no per-tile work in pass 0: they leave the
         # dynamic-scheduler consumer group and skip the schedule walk (no CLC-response spin stealing issue slots)
         self.dm_ni = "ni" in _fl0
+        # p0co (timing-only ablations, outputs wrong): +ardx = per tile 128 warp redux.max (P^T scale per (key, 32-query
+        # block) is a cross-lane max in pass 0's lane=query layout) + lane select + pow2_sb -> R1 cost; +ardq = +ardx plus the
+        # per-element P^T quantization (mul by the per-column inverse scale + e4m3 cvt) -> R2 compute cost (codes sunk)
+        self.dm_ardx = "ardx" in _fl0 or "ardq" in _fl0
+        self.dm_ardq = "ardq" in _fl0
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
             assert not any(f in _fl for f in ("fu", "fa", "sq")), "c3 supports the plain static-mix path only"
@@ -2215,6 +2220,7 @@ class DMPass0Sm100:
                 nb0 = cutlass.max(n_block_max - 1, 0) * (self.n_block_size // 32)
                 pks = tuple(Float32(aux[1][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
                 pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nb0 + j]) for j in range(4))
+            p0co_sink = Int32(0)
             num64 = Float64(0.0)
             den64 = Float64(0.0)
             ts_sn = (Float32(0.0), Float32(0.0))
@@ -2313,6 +2319,25 @@ class DMPass0Sm100:
                                         den2 = cute.arch.add_packed_f32x2(den2, p)
                                     else:
                                         den3 = cute.arch.add_packed_f32x2(den3, p)
+                            if const_expr(self.dm_ardx):
+                                p0co_lane = cute.arch.lane_idx()
+                                for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                                    p0co_mine = Int32(0)
+                                    for i in cutlass.range_constexpr(32):
+                                        r_ = dm_utils.redux_max_u32(dm_utils.f32_bits(tSrS[32 * j + i]))
+                                        p0co_mine = dm_utils.sel_lane_eq(p0co_lane, Int32(i), r_, p0co_mine)
+                                    p0co_sb = dm_utils.pow2_sb(dm_utils.bits_f32(p0co_mine))
+                                    if const_expr(self.dm_ardq):
+                                        # every lane needs all 32 column scales of the chunk: broadcast via shuffle
+                                        for i in cutlass.range_constexpr(16):
+                                            sb0 = cute.arch.shuffle_sync(p0co_sb, 2 * i)
+                                            sb1 = cute.arch.shuffle_sync(p0co_sb, 2 * i + 1)
+                                            q0, q1 = cute.arch.mul_packed_f32x2(
+                                                (tSrS[32 * j + 2 * i], tSrS[32 * j + 2 * i + 1]),
+                                                (dm_utils.inv_pow2_from_sb(sb0), dm_utils.inv_pow2_from_sb(sb1)))
+                                            p0co_sink = p0co_sink ^ dm_utils.cvt_e4m3x2(q0, q1)
+                                    else:
+                                        p0co_sink = p0co_sink ^ p0co_sb
                             if const_expr(self.dm_sqh and h == 1):
                                 pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
                                 s0s1_phase ^= 1
@@ -2605,6 +2630,9 @@ class DMPass0Sm100:
                 # +nd: sum_j P = 1 to the forward's exp accuracy (P is normalized by the forward LSE) -> delta = sum P dP
                 delta = num_t
             if row < seqlen.seqlen_q:
+                if const_expr(self.dm_ardx):
+                    # timing-only sink (keeps the ablation work alive; the value is garbage)
+                    delta = delta + Float32(p0co_sink & 1)
                 mLSE[row, head_idx, batch_idx] = delta
             work_tile = tile_scheduler.advance_to_next_work()
 

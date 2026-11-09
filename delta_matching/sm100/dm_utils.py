@@ -204,6 +204,45 @@ def redux_max_abs_f32(x: Float32, *, loc=None, ip=None) -> Float32:
         "=f,f", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
 
 
+@dsl_user_op
+def f32_bits(x: Float32, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=r,f",
+                                 has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def bits_f32(x: Int32, *, loc=None, ip=None) -> Float32:
+    return Float32(llvm.inline_asm(T.f32(), [Int32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=f,r",
+                                   has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def cvt_e4m3x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Int32:
+    """Two fp32 -> packed e4m3x2 (RN, satfinite) in the low 16 bits (b in the high byte)."""
+    return Int32(llvm.inline_asm(
+        T.i32(), [Float32(a).ir_value(loc=loc, ip=ip), Float32(b).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b16 c;\n\tcvt.rn.satfinite.e4m3x2.f32 c, $2, $1;\n\tcvt.u32.u16 $0, c;\n\t}",
+        "=r,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def redux_max_u32(x: Int32, *, loc=None, ip=None) -> Int32:
+    """Warp-wide unsigned max (redux.sync.max.u32): for fp32 values >= 0 the bit patterns order like the values."""
+    return Int32(llvm.inline_asm(
+        T.i32(), [Int32(x).ir_value(loc=loc, ip=ip)],
+        "redux.sync.max.u32 $0, $1, 0xffffffff;",
+        "=r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
+@dsl_user_op
+def sel_lane_eq(lane: Int32, i: Int32, a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
+    """lane == i ? a : b"""
+    return Int32(llvm.inline_asm(
+        T.i32(), [Int32(x).ir_value(loc=loc, ip=ip) for x in (lane, i, a, b)],
+        "{\n\t.reg .pred p;\n\tsetp.eq.s32 p, $1, $2;\n\tselp.b32 $0, $3, $4, p;\n\t}",
+        "=r,r,r,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+
+
 def gemm_ptx_bs(
     op, acc_tmem_addr, tCrA, tCrB, sA, sB, sfa_base, sfb_base, sfa_map, sfb_map,
     zero_init=False, tA_addr=None, cta_group: int = 1,

@@ -167,14 +167,13 @@ CACHE_ROOT = os.environ.get("DMVAL_CACHE_DIR", os.path.expanduser("~/workspace/h
 
 
 def _ref_hash():
-    """Identity of everything that determines the cached reference outputs: reference.py, the input generator, this
-    file's case builder (shapes, kinds, seeds).  Any edit invalidates the cache."""
+    """Identity of everything that determines a cached reference output besides its case name / seed: reference.py and
+    the input generator.  Any edit of either invalidates the cache."""
     import hashlib
     import inspect
     h = hashlib.sha256(open(REF_PATH, "rb").read())
     h.update(inspect.getsource(make_inputs).encode())
-    h.update(inspect.getsource(build_cases).encode())
-    h.update(json.dumps(headline_shapes(), sort_keys=True).encode())
+    # (the case list itself is not hashed: each cache entry is keyed by its own case name and seed, which fix its inputs)
     return h.hexdigest()[:16]
 
 
@@ -262,6 +261,8 @@ def build_cases(tier, supports, seed):
         shapes += [(1, 16, 16, up(8192), True, ["stress"]), (1, 4, 4, up(4096), True, ["stress"])]
         if nc:
             shapes += [(1, 16, 16, up(8192), False, ["stress"])]
+    if tier == "bench":   # races at the longest headline length
+        shapes.append((1, 16, 16, up(65536), True, ["stress"]))
     if tier == "bench":   # exactly the shapes fa4-bench times: the shared list sm100/bench/headline_shapes.json
         for sh in headline_shapes():
             if sh["causal"] or nc:

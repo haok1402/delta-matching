@@ -102,15 +102,14 @@ def _auto_opts_impl(q8, k8, causal=False):
     # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA
     # launch/prologue/epilogue is a large share of a KV tile; long sequences keep the hardware's dynamic CTA order
     # (static striding loses 4-18% there). 'nopers' disables, explicit 'pers=N' overrides, persN= sets the cut.
-    pN = int(next((o[5:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
-    # DM pcN (MHA causal, auto, pers2): dynamic persistent grid (pdyn) over all SMs for causal N <= pcN (default 8192):
-    # +6-8% bwd main at causal 8k (2 GPUs, same-process A/B); -1.5% at 32k/64k and -4% non-causal, so off there.
-    pcN = int(next((o[4:] for o in ol if o.startswith("pcN=")), "0"))   # off: fa4-bench harness 8k causal MHA bwd 0.998x (no gain)
+    pN = int(next((o[6:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
+    # DM pcN / pdyn REMOVED (2026-11-09): the dynamic persistent scheduler no longer compiles, its "+6-8% at causal 8k"
+    # came from the b_ab first-arm bias (BABAUDIT) and fa4-bench measured 0.998x. Fail loudly instead of silently ignoring.
+    if any(o == "pdyn" or o.startswith("pcN=") for o in ol):
+        raise ValueError("DM_BWD_OPTS pdyn / pcN= were removed (closed: B8-pdyn-auto, BABAUDIT); use pers=N or persN=N")
     if (q8.shape[2] == k8.shape[2] and "nopers" not in ol and not any(o.startswith("pers=") for o in ol)):
         if q8.shape[1] <= pN:
             ol = ol + ["pers=148"]
-        elif causal and q8.shape[1] <= pcN:
-            ol = ol + [f"pers={_num_sms(q8)}", "pdyn"]
     return ",".join(ol)
 
 

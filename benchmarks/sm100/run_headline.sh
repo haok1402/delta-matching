@@ -11,6 +11,6 @@ GPUPOOL_WHO=fa4-bench exec ../gpupool/bin/gpupool run --gpus ${NG:-4} --timeout 
 source ../env/activate.sh
 IFS=, read -ra G <<< \"\$CUDA_VISIBLE_DEVICES\"
 for ((i=0; i<\${#G[@]}; i++)); do
-  KDA_SNAP=\$PWD/snap/$SHA CUDA_VISIBLE_DEVICES=\${G[\$i]} python attnbench.py --arms fa4,fa4_det --cand dm_matched=$C@matched --cand dm_stale=$C@stale --suite focus --tag hl-$SHA-gpu\${G[\$i]} --out results/hl_$SHA.g\$i.jsonl --resume > results/hl_$SHA.g\$i.log 2>&1 &
+  KDA_SNAP=\$PWD/snap/$SHA CUDA_VISIBLE_DEVICES=\${G[\$i]} python attnbench.py --arms fa4,fa4_det --cand dm_matched=$C@matched --cand dm_stale=$C@stale ${ND:+--cand dm_nd=$PWD/cands/kda_full_nd.py:attn@matched} --suite focus --tag hl-$SHA-gpu\${G[\$i]} --out results/hl_$SHA.g\$i.jsonl --resume > results/hl_$SHA.g\$i.log 2>&1 &
 done
 wait"

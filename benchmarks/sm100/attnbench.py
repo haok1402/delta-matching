@@ -89,6 +89,43 @@ def make_fa4(deterministic=False):
     return fn
 
 
+def make_fa4_variant(spec):
+    """FA4 backward-config variant, e.g. 'tn64', 'pg1', 'pg0', 'no2cta' (comma-joined).  Env knobs of flash_attn.cute
+    (FLASH_ATTENTION_BWD_TILE_N / FLASH_ATTENTION_BWD_PACK_GQA are read per call; FA_DISABLE_2CTA is read at import, so
+    the module flag is patched around the call).  Used to confirm FA4's default is its fastest setting."""
+    from flash_attn.cute import flash_attn_func as fa4
+    import flash_attn.cute.utils as fu
+    env = {}
+    no2cta = False
+    for t in spec.split("+"):
+        if t == "tn64":
+            env["FLASH_ATTENTION_BWD_TILE_N"] = "64"
+        elif t == "tn128":
+            env["FLASH_ATTENTION_BWD_TILE_N"] = "128"
+        elif t in ("pg0", "pg1"):
+            env["FLASH_ATTENTION_BWD_PACK_GQA"] = t[-1]
+        elif t == "no2cta":
+            no2cta = True
+        elif t:
+            raise ValueError(f"unknown fa4 variant token {t}")
+
+    def fn(q, k, v, causal):
+        old = {kk: os.environ.get(kk) for kk in env}
+        old2 = fu._fa_disable_2cta_enabled
+        os.environ.update(env)
+        fu._fa_disable_2cta_enabled = no2cta or old2
+        try:
+            return _first(fa4(q, k, v, causal=causal))
+        finally:
+            fu._fa_disable_2cta_enabled = old2
+            for kk, vv in old.items():
+                if vv is None:
+                    os.environ.pop(kk, None)
+                else:
+                    os.environ[kk] = vv
+    return fn
+
+
 def make_sdpa(backend_name):
     import torch.nn.functional as F
     from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -386,6 +423,8 @@ def main():
                 arms["fa4_bf16"] = (make_fa4(), False)
             elif name == "fa4_det":                      # FA4 with deterministic bwd (like-for-like vs a deterministic DM bwd)
                 arms["fa4_bf16_det"] = (make_fa4(True), False)
+            elif name.startswith("fa4v:"):                 # e.g. fa4v:tn64, fa4v:pg1, fa4v:no2cta
+                arms["fa4_" + name[5:]] = (make_fa4_variant(name[5:]), False)
             elif name == "cudnn":
                 arms["sdpa_cudnn_bf16"] = (make_sdpa("CUDNN_ATTENTION"), False)
             elif name == "flash_sdpa":

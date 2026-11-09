@@ -528,8 +528,23 @@ class DMBackwardSm100:
             regs = [int(x) for x in next((o[5:] for o in os.environ.get("DM_BWD_OPTS", "").split(",") if o.startswith("regs=")), "96/88/64").split("/")]
             registers = type(registers)(reduce=regs[0], compute=regs[1], load=regs[2], mma=regs[2], empty=regs[2])
         self.dm_epi_barrier = 8 if self.dm_cwg4 else int(NamedBarrierBwdSm100.EpilogueWG1)
+        # DM dsqw (track L): a dedicated dS-quantization warpgroup (warps 16-19, TMEM lane quadrant = warp % 4) instead of
+        # the reduce warps (dsq). Register split dsqr=R:C:L:H (reduce, compute, load/mma/relay, dS helper), per SMSP
+        # R + 2C + max(L, empty) + H <= 512.
+        _o = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
+        self.dm_dsqw = "dsqw" in _o
+        self.dm_noreg = "dsqnoreg" in _o   # debug: no setmaxnreg at all
+        self.dsq_warp_ids = (16, 17, 18, 19) if self.dm_dsqw else ()
+        if self.dm_dsqw:
+            r_ = [int(x) for x in next((o[5:] for o in _o if o.startswith("dsqr=")), "80:120:72:88").split(":")]
+            # setmaxnreg only redistributes the CTA's launch allocation: per SMSP 5 warps x 96 (640 threads) = 480
+            assert r_[0] + 2 * r_[1] + max(r_[2], 24) + r_[3] <= 480, f"dsqr {r_}: per-SMSP register sum > 480"
+            assert all(x % 8 == 0 for x in r_), "setmaxnreg needs multiples of 8"
+            registers = type(registers)(reduce=r_[0], compute=r_[1], load=r_[2], mma=r_[2], empty=24)
+            self.num_regs_dsq = r_[3]
+        self.dsq_sync_barrier = cutlass.pipeline.NamedBarrier(barrier_id=12, num_threads=4 * cute.arch.WARP_SIZE)
 
-        # 16 warps -> 512 threads
+        # 16 warps -> 512 threads (dsqw: 20 warps -> 640)
         self.threads_per_cta = cute.arch.WARP_SIZE * len(
             (
                 *self.reduce_warp_ids,
@@ -538,8 +553,10 @@ class DMBackwardSm100:
                 self.load_warp_id,
                 self.relay_warp_id,
                 self.empty_warp_id,
+                *self.dsq_warp_ids,
             )
         )
+        self.dm_launch_regs = (65536 // self.threads_per_cta) // 8 * 8
         # NamedBarrier
         self.compute_sync_barrier = cutlass.pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.Compute),
@@ -611,7 +628,7 @@ class DMBackwardSm100:
         # dQ SF word + peer dS exchange move from the 8 compute warps to the 4 reduce (dQ drain) warps. Reduce warp q owns
         # TMEM lanes 32q..32q+31 = 32 keys = exactly one dS scale block (32 keys x 128 queries): no cross-WG amax exchange.
         # The compute warps store the exact fp32 dS in place over dP and arrive. Same values bitwise.
-        self.dm_dsq = "dsq" in self.dm_opts
+        self.dm_dsq = "dsq" in self.dm_opts or "dsqw" in self.dm_opts
         _p5 = next((x[3:] for x in self.dm_opts if x.startswith("p5=")), None)   # p5=freq:res
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
@@ -1799,7 +1816,7 @@ class DMBackwardSm100:
         tmem_alloc_barrier = cutlass.pipeline.NamedBarrier(
             barrier_id=int(NamedBarrierBwdSm100.TmemPtr),
             num_threads=cute.arch.WARP_SIZE
-            * len((self.mma_warp_id, *self.compute_warp_ids, *self.reduce_warp_ids)),
+            * len((self.mma_warp_id, *self.compute_warp_ids, *self.reduce_warp_ids, *self.dsq_warp_ids)),
         )
         tmem = cutlass.utils.TmemAllocator(
             storage.tmem_holding_buf.ptr,
@@ -2107,14 +2124,14 @@ class DMBackwardSm100:
         #  EMPTY
         # (15)
         if warp_idx == self.empty_warp_id:
-            cute.arch.setmaxregister_decrease(self.num_regs_empty)
+            self._dm_setmaxreg_dec(self.num_regs_empty)
             if const_expr(self.dm_pdyn):
                 self._dm_claim_loop(tile_sched_params, dm_sbase, aux_data.tensors[-1].iterator.toint())
 
         #  RELAY
         # (14)
         if warp_idx == self.relay_warp_id:
-            cute.arch.setmaxregister_decrease(
+            self._dm_setmaxreg_dec(
                 self.num_regs_mma if self.use_2cta_instrs else self.num_regs_empty
             )
             if const_expr(self.use_2cta_instrs):
@@ -2132,7 +2149,7 @@ class DMBackwardSm100:
         #  LOAD
         # (13)
         if warp_idx == self.load_warp_id:
-            cute.arch.setmaxregister_decrease(self.num_regs_load)
+            self._dm_setmaxreg_dec(self.num_regs_load)
             self.load(
                 thr_mma_S,
                 thr_mma_dP,
@@ -2186,7 +2203,7 @@ class DMBackwardSm100:
         #  MMA
         # (12)
         if warp_idx == self.mma_warp_id:
-            cute.arch.setmaxregister_decrease(self.num_regs_mma)
+            self._dm_setmaxreg_dec(self.num_regs_mma)
 
             # Alloc tmem buffer
             tmem.allocate(self.tmem_alloc_cols)
@@ -2248,7 +2265,7 @@ class DMBackwardSm100:
         # Compute
         # (4, 5, 6, 7, 8, 9, 10, 11) --> 8 warps
         if warp_idx >= self.compute_warp_ids[0] and warp_idx <= self.compute_warp_ids[-1]:
-            cute.arch.setmaxregister_increase(self.num_regs_compute)  # 8 warps
+            self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.compute_loop(
@@ -2302,10 +2319,28 @@ class DMBackwardSm100:
             )
             tmem_alloc_barrier.arrive()
 
+        # DM dsqw: dS quantization warpgroup (16, 17, 18, 19)
+        if const_expr(self.dm_dsqw):
+            if warp_idx >= self.dsq_warp_ids[0] and warp_idx <= self.dsq_warp_ids[-1]:
+                if const_expr(self.num_regs_dsq < self.dm_launch_regs):
+                    self._dm_setmaxreg_dec(self.num_regs_dsq)
+                else:
+                    self._dm_setmaxreg_inc(self.num_regs_dsq)
+                tmem.wait_for_alloc()
+                tmem_ptr = tmem.retrieve_ptr(Float32)
+                self.dsq_loop(
+                    thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
+                    sDm, storage.dm_xchg_mbar.data_ptr(), aux_data, block_info, SeqlenInfoCls, TileSchedulerCls,
+                )
+                tmem_alloc_barrier.arrive()
+
         # Reduce
         # (0, 1, 2, 3) - dQ
         if warp_idx >= self.reduce_warp_ids[0] and warp_idx <= self.reduce_warp_ids[-1]:
-            cute.arch.setmaxregister_increase(self.num_regs_reduce)
+            if const_expr(self.num_regs_reduce < self.dm_launch_regs):
+                self._dm_setmaxreg_dec(self.num_regs_reduce)
+            else:
+                self._dm_setmaxreg_inc(self.num_regs_reduce)
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.dQacc_reduce(
@@ -5711,7 +5746,10 @@ class DMBackwardSm100:
                 else:
                     cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
         cute.arch.fence_view_async_shared()
-        self.reduce_sync_barrier.arrive_and_wait()
+        if const_expr(self.dm_dsqw):
+            self.dsq_sync_barrier.arrive_and_wait()
+        else:
+            self.reduce_sync_barrier.arrive_and_wait()
         peer = cta_rank ^ 1
         if tidx == 0:
             slot = dsq_j & 1
@@ -5738,6 +5776,66 @@ class DMBackwardSm100:
         cute.arch.sync_warp()
         with cute.arch.elect_one():
             pipeline_dS.producer_commit(dsq_dS_state)
+
+    def _dm_setmaxreg_dec(self, n: int):
+        if not self.dm_noreg:   # trace-time python
+            cute.arch.setmaxregister_decrease(n)
+
+    def _dm_setmaxreg_inc(self, n: int):
+        if not self.dm_noreg:
+            cute.arch.setmaxregister_increase(n)
+
+    @cute.jit
+    def dsq_loop(
+        self, thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr, sDm,
+        dm_xchg_mbar, aux_data, block_info, SeqlenInfoCls, TileSchedulerCls,
+    ):
+        """DM dsqw: the dS-quantization warpgroup walks the same (work tile, head, m_block) stream as the compute warps."""
+        tidx = cute.arch.thread_idx()[0] % (4 * cute.arch.WARP_SIZE)
+        q = cute.arch.make_warp_uniform(cute.arch.warp_idx() % 4)
+        cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
+        dsq = self._dsq_setup(tidx, thr_mma_S, tdPtdP, sdS, sdS_xchg)
+        dsq_xchg_src = self._dS_exchange_source(sdS_xchg, sdS_dK, cta_rank_in_cluster ^ 1)
+        dsq_dP_state = pipeline.make_pipeline_state(cutlass.pipeline.PipelineUserType.Consumer, 1)
+        dsq_dS_state = pipeline.make_pipeline_state(cutlass.pipeline.PipelineUserType.Producer, 1)
+        dsq_sdm = sDm.iterator.toint()
+        dsq_mbar = dm_xchg_mbar.toint()
+        dsq_j = Int32(0)
+        dsq_sr = Int32(0)
+        tile_scheduler = TileSchedulerCls()
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            (
+                work_n,
+                kv_block,
+                head_idx,
+                kv_head,
+                batch_idx,
+                seqlen,
+                m_block_min,
+                m_block_max,
+                process_tile,
+            ) = self._work_tile(work_tile, cta_rank_in_cluster, SeqlenInfoCls, block_info)
+            dm_head0 = head_idx
+            loop_count = m_block_max - m_block_min
+            for dm_g in cutlass.range(self.dm_G, unroll=1):
+                head_idx = dm_head0 + dm_g
+                for iter_idx in cutlass.range(loop_count, unroll=1):
+                    m_block = m_block_min + iter_idx
+                    dsq_last = iter_idx == loop_count - 1
+                    if const_expr(self.dm_gloop):
+                        dsq_last = dsq_last and dm_g == self.dm_G - 1
+                    self._dsq_quant_tile(
+                        dsq, tidx, q, thr_mma_S, work_n, m_block, head_idx, kv_head, batch_idx, seqlen, aux_data, sdS,
+                        dsq_xchg_src, pipeline_dP, pipeline_dS, dsq_dP_state, dsq_dS_state, dS_cluster_full_mbar_ptr,
+                        dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last)
+                    dsq_dP_state.advance()
+                    dsq_dS_state.advance()
+                    if not dsq_last:
+                        dsq_sr = dsq_sr + 1
+                    dsq_j = dsq_j + 1
+            tile_scheduler.advance_to_next_work()
+            work_tile = tile_scheduler.get_current_work()
 
     @cute.jit
     def dQacc_reduce(
@@ -5797,7 +5895,7 @@ class DMBackwardSm100:
 
         read_flag = const_expr(not self.deterministic)
 
-        if const_expr(self.dm_dsq):
+        if const_expr(self.dm_dsq and not self.dm_dsqw):
             dsq = self._dsq_setup(tidx, thr_mma_S, tdPtdP, sdS, sdS_xchg)
             dsq_xchg_src = self._dS_exchange_source(sdS_xchg, sdS_dK, cta_rank_in_cluster ^ 1)
             dsq_dP_state = pipeline.make_pipeline_state(cutlass.pipeline.PipelineUserType.Consumer, 1)
@@ -5947,7 +6045,7 @@ class DMBackwardSm100:
                     # followed consumer_release, so the MMA warp could start the next dQ MMA during
                     # the poll; now the poll overlaps the current dQ MMA instead, which measured
                     # faster. This m_block's adds are only issued below, after the acquire.
-                    if const_expr(self.dm_dsq):
+                    if const_expr(self.dm_dsq and not self.dm_dsqw):
                         # DM dsq: quantize this m_block's dS before waiting for its dQ (dQ(t) needs these codes)
                         dsq_last = iter_idx == loop_count - 1
                         if const_expr(self.dm_gloop):

@@ -306,11 +306,37 @@ def cached_refs(case, preset, q, k, v, do, exact, qbk, dev):
 HEADLINE = os.environ.get("DMVAL_HEADLINE", os.path.expanduser("~/workspace/haok1402/sm100/bench/headline_shapes.json"))
 
 
-def headline_shapes():
+def hd256_shapes(tier, up, nc):
+    """hd256 case list (user 2026-11-10: second target, causal 8q/2kv (qwen35_m) and 16q/4kv (qwen35_l)), B kept small:
+    every (B, N, H, D=256) tensor is twice the hd128 size."""
+    adv = ["scaled3", "scaled10", "outliers", "bigmag", "nearsat", "peaked", "uniform", "zero_do", "lowrank_v"]
+    resc = ["ramp", "growmax", "audit_ramp", "audit_growmax", "audit_ramp_up"]
+    sh = [(1, 8, 2, up(256), True, ["randn", "outliers", "scaled10"]),
+          (1, 16, 4, up(1024), True, ["randn"] + (adv if tier != "quick" else ["nearsat", "peaked"])),
+          (2, 8, 2, up(768), True, ["randn"]), (1, 8, 2, up(1152), True, ["randn"]), (1, 16, 4, up(1408), True, ["randn"]),
+          (1, 8, 2, up(128), True, ["stress20"]), (1, 16, 4, up(384), True, ["stress20"]),
+          (1, 16, 4, up(1152), True, ["stress"])]
+    if nc:
+        sh += [(1, 8, 2, up(1152), False, ["randn"]), (1, 16, 4, up(1024), False, ["randn"])]
+    if tier != "quick":
+        sh += [(1, 16, 4, up(8192), True, ["randn", "outliers", "scaled3"]), (1, 8, 2, up(8192), True, ["randn"]),
+               (1, 8, 2, up(1152), True, resc), (2, 16, 4, up(4096), True, resc),
+               (4, 16, 4, up(4096), True, ["stress60", "stress60_ramp", "stress60_growmax"])]
+        if nc:
+            sh += [(4, 16, 4, up(4096), False, ["stress60"]), (1, 16, 4, up(4096), False, ["randn", "outliers"])]
+    if tier == "bench":
+        sh += [(1, 8, 2, up(65536), True, ["stress"]), (1, 16, 4, up(65536), True, ["stress"])]
+        for x in headline_shapes(256):
+            if x["causal"]:
+                sh.append((x["B"], x["H"], x["Hk"], up(x["N"]), True, ["randn"]))
+    return sh
+
+
+def headline_shapes(hd=128):
     """The benchmark's headline shapes (shared with fa4-bench); fallback = the user's re-scope N in {8k, 32k, 64k} x
     {MHA 16/16, GQA 32/8} x {causal, non-causal}, B = max(1, 32768 / N)."""
     if os.path.exists(HEADLINE):
-        return json.load(open(HEADLINE))["shapes"]
+        return [x for x in json.load(open(HEADLINE))["shapes"] if int(x.get("D", 128)) == hd]
     return [{"B": max(1, 32768 // N), "H": H, "Hk": Hk, "N": N, "causal": c}
             for (H, Hk) in ((16, 16), (32, 8)) for N in (8192, 32768, 65536) for c in (True,)]
 
@@ -396,10 +422,12 @@ def build_cases(tier, supports, seed):
         for sh in headline_shapes():
             if sh["causal"]:        # user: only causal matters for the headline (non-causal stays in quick / full)
                 shapes.append((sh["B"], sh["H"], sh["Hk"], up(sh["N"]), True, ["randn"]))
+    if D != 128:
+        shapes = hd256_shapes(tier, up, nc)
     cases = []
     for i, (B, H, Hk, N, causal, kinds) in enumerate(shapes):
         for kind in kinds:
-            name = f"B{B}_H{H}_Hk{Hk}_N{N}_{'c' if causal else 'nc'}_{kind}"
+            name = f"B{B}_H{H}_Hk{Hk}_N{N}_{'c' if causal else 'nc'}_{kind}" + ("" if D == 128 else f"_D{D}")
             modes = ["matched", "stale"] if causal or supports.get("matched_noncausal") else ["stale"]
             if FWD_ONLY:
                 modes = modes[:1]
@@ -722,6 +750,7 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="default: random (printed)")
     ap.add_argument("--json", default=None)
     ap.add_argument("--only", default=None, help="substring filter on case names")
+    ap.add_argument("--hd", type=int, default=128, choices=[128, 256], help="head dim (hd256: second target, user 2026-11-10)")
     ap.add_argument("--prep-only", action="store_true", help="only generate + cache the long-case inputs (CPU; run it in a --gpus 0 job)")
     ap.add_argument("--skip", default=None, help="drop cases whose name contains this substring (e.g. N131072: 128k in its own run)")
     ap.add_argument("--verbose", action="store_true")
@@ -730,6 +759,8 @@ def main():
     a = ap.parse_args()
     global FWD_ONLY
     FWD_ONLY = a.fwd_only
+    global D
+    D = a.hd
     tgt, sep, fn_ = a.candidate.partition(":")
     if tgt.endswith(".py"):
         a.candidate = os.path.abspath(tgt) + sep + fn_

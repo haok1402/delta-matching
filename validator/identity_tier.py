@@ -31,11 +31,13 @@ def main():
     ap.add_argument("candidate")
     ap.add_argument("--lengths", default="8192,32768,65536,131072")   # user 2026-11-09: + 128k
     ap.add_argument("--json", default=None)
+    ap.add_argument("--hd", type=int, default=128, choices=[128, 256], help="head dim; hd256 uses 8/2 + 16/4 (qwen35_m / _l)")
     ap.add_argument("--freeze", action="store_true", help="write the measured values as the identity baseline")
     a = ap.parse_args()
     sys.argv = [sys.argv[0]]
     vs = importlib.util.spec_from_file_location("dmval_validate", os.path.join(HERE, "validate.py"))
     V = importlib.util.module_from_spec(vs); vs.loader.exec_module(V)          # make_inputs only (no candidate access)
+    V.D = a.hd
     cs = importlib.util.spec_from_file_location("dm_candidate", a.candidate)
     C = importlib.util.module_from_spec(cs); sys.modules["dm_candidate"] = C; cs.loader.exec_module(C)
     dev = torch.device("cuda")
@@ -43,10 +45,10 @@ def main():
     fams = ["randn", "outliers", "nearsat", "scaled3", "scaled10", "peaked", "bigmag"]
     out, ok, opened = {}, True, []
     for N in (int(x) for x in a.lengths.split(",")):
-        for (H, Hk) in ((32, 4), (16, 4)):     # user 2026-11-09: headline GQA 32/4 + 16/4 (MHA and 32/8 dropped)
+        for (H, Hk) in (((32, 4), (16, 4)) if a.hd == 128 else ((8, 2), (16, 4))):   # hd128 headline; hd256 qwen35_m / _l
             B = max(1, 32768 // N)
             for fam in fams:
-                name = f"B{B}_H{H}_Hk{Hk}_N{N}_c_{fam}"
+                name = f"B{B}_H{H}_Hk{Hk}_N{N}_c_{fam}" + ("" if a.hd == 128 else f"_D{a.hd}")
                 g = torch.Generator().manual_seed(__import__("zlib").crc32(name.encode()) & 0x7FFFFFFF)
                 q, k, v, do = (x.to(dev) for x in V.make_inputs(fam, B, N, H, Hk, g, torch.device("cpu")))
                 leaves = [x.clone().requires_grad_(True) for x in (q, k, v)]

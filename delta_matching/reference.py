@@ -240,6 +240,13 @@ _register(Preset("mxfp8-p", q="blockrows:128", k="blockrows:64", v="blockrows:64
                  p_fwd="mx:keys", p_bwd="mx:keys", ds="mx:keys",
                  notes="sm90 input quantizers; P (PV, dV) and dS (dK, dQ) MX e4m3 per row per 32 keys"))
 PRESETS["mxfp8-all"] = PRESETS["mxfp8"]
+# hd256 contract of the shipped sm90 kernel (user 2026-11-10: "[64,32]"): Q / dO one fp32 scale per 64 rows, K / V one per 32 keys
+# (hd128 was [128,64]). Inputs exact to that contract; the P / dS sites reuse the hd128 sm90 model (an approximation until the
+# d256 P-hat / dS tiling is analysed) - used as the hd256 ACCURACY FLOOR, not as a bitwise spec.
+_register(Preset("sm90-d256", q="blockrows:64", k="blockrows:32", v="blockrows:32", do="blockrows_mul:64",
+                 p_fwd="sm90_pfwd", p_bwd="sm90_pbwd", ds="sm90_ds",
+                 notes="sm90 hd256 input contract [64,32] (Q / dO 64 rows, K / V 32 keys per fp32 scale); P / dS as the hd128 "
+                       "sm90 model (approximation); hd256 accuracy floor"))
 
 
 def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,

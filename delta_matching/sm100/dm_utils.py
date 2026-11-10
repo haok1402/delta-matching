@@ -1044,6 +1044,16 @@ def mbar_arrive_relay_local(mbar: Int32, rank: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def mbar_test_parity(mbar: Int32, phase: Int32, *, loc=None, ip=None) -> Int32:
+    """Non-blocking mbarrier.test_wait.parity (.acquire.cta): 1 if the phase with that parity completed."""
+    return Int32(llvm.inline_asm(T.i32(), [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(phase).ir_value(loc=loc, ip=ip)],
+                                 "{\n\t.reg .pred P1;\n\tmbarrier.test_wait.parity.shared::cta.b64 P1, [$1], $2;\n\t"
+                                 "selp.u32 $0, 1, 0, P1;\n\t}",
+                                 "=r,r,r", has_side_effects=True, is_align_stack=False,
+                                 asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
 def mbar_arrive_rank_cnt(mbar: Int32, rank: Int32, cnt: Int32, *, loc=None, ip=None):
     """mbarrier arrive (.release.cluster) with count `cnt` on CTA `rank`'s copy of `mbar` (ordinv relay forward)."""
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(rank).ir_value(loc=loc, ip=ip),

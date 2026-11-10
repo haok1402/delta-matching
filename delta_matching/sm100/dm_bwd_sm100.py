@@ -4285,17 +4285,20 @@ class DMBackwardSm100:
 
     @cute.jit
     def ord_relay(self, pipeline_S_P, pipeline_dP, pipeline_dS, pipeline_dQ, pipeline_dKV, block_info, SeqlenInfoCls, TileSchedulerCls):
-        """ordinv Part III relay (xs:rly), CTA 1's MMA warp: lane k serves site k independently (independent thread scheduling):
-        0 S_P empty, 1 dP empty, 2 dS full, 3 dQ empty (M phases per work tile each), 4 dKV empty stages 0 and 1 (1 phase each per tile).
-        Per phase: wait the local copy (.acquire.cta, all CTA-1 arrivals, count 2 each), then ONE .release.cluster arrive on the leader's
-        copy with count = number of CTA-1 arrivals."""
+        """ordinv Part III relay (xs:rly), lane 0 of CTA 1's idle MMA warp: a single-thread POLLING loop (mbarrier.test_wait,
+        .acquire.cta) over the local copies of 0 S_P empty, 1 dP empty, 2 dS full, 3 dQ empty (M phases per work tile each) and
+        4/5 dKV empty stage 0/1 (1 phase per tile); each completed local phase (all CTA-1 arrivals, count 2 each) is forwarded as ONE
+        .release.cluster arrive on the leader's copy with count = number of CTA-1 arrivals. No blocking wait, no lane divergence."""
         cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         lane = cute.arch.lane_idx()
         nc, nr = len(self.compute_warp_ids), len(self.reduce_warp_ids)
         bars = (pipeline_S_P.sync_object_empty.get_barrier(0), pipeline_dP.sync_object_empty.get_barrier(0),
-                pipeline_dS.sync_object_full.get_barrier(0), pipeline_dQ.sync_object_empty.get_barrier(0))
-        cnts = (nc, nr, nr, nr)
-        ph = cute.make_rmem_tensor((6,), Int32)
+                pipeline_dS.sync_object_full.get_barrier(0), pipeline_dQ.sync_object_empty.get_barrier(0),
+                pipeline_dKV.sync_object_empty.get_barrier(0), pipeline_dKV.sync_object_empty.get_barrier(1))
+        cnts = (nc, nr, nr, nr, nc, nc)
+        ph = cute.make_rmem_tensor((6,), Int32)     # completed phases per site (all tiles)
+        dn = cute.make_rmem_tensor((6,), Int32)     # forwarded in this tile
+        ob = cute.make_rmem_tensor((6,), Int32)     # local phases observed in this tile
         for k in cutlass.range_constexpr(6):
             ph[k] = Int32(0)
         tile_scheduler = TileSchedulerCls()
@@ -4305,28 +4308,27 @@ class DMBackwardSm100:
                 self._work_tile(work_tile, cta_rank_in_cluster, SeqlenInfoCls, block_info)
             )
             num_iters = (m_block_max - m_block_min) * self.dm_G
-            if process_tile:
-                for k in cutlass.range_constexpr(4):
-                    if lane == k:
+            if process_tile and lane == 0:
+                for k in cutlass.range_constexpr(6):
+                    dn[k] = Int32(0)
+                    ob[k] = Int32(0)
+                left = 2 * (4 * num_iters + 2)     # observations + forwards still to do in this tile
+                while left > 0:
+                    for k in cutlass.range_constexpr(6):
+                        tgt = num_iters if const_expr(k < 4) else Int32(1)
                         a = Int32(bars[k].toint())
-                        for _ in cutlass.range(num_iters, unroll=1):
-                            if const_expr(self.dm_xrp == k):
-                                dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(cnts[k]))   # DEBUG plant: forward first
-                                dm_utils.mbar_wait_parity(a, ph[k] & 1)
-                            else:
-                                dm_utils.mbar_wait_parity(a, ph[k] & 1)
-                                dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(cnts[k]))
-                            ph[k] = ph[k] + 1
-                if lane == 4:
-                    for st in cutlass.range_constexpr(2):
-                        a = Int32(pipeline_dKV.sync_object_empty.get_barrier(st).toint())
-                        if const_expr(self.dm_xrp == 4):
-                            dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(nc))
-                            dm_utils.mbar_wait_parity(a, ph[4 + st] & 1)
-                        else:
-                            dm_utils.mbar_wait_parity(a, ph[4 + st] & 1)
-                            dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(nc))
-                        ph[4 + st] = ph[4 + st] + 1
+                        if ob[k] < tgt:
+                            if dm_utils.mbar_test_parity(a, ph[k] & 1) != 0:     # local phase (all CTA-1 arrivals) complete
+                                ph[k] = ph[k] + 1
+                                ob[k] = ob[k] + 1
+                                left = left - 1
+                        lim = ob[k]
+                        if const_expr(self.dm_xrp == k):
+                            lim = cutlass.min(ob[k] + 1, tgt)   # DEBUG planted control: forward one phase EARLY
+                        if dn[k] < lim:
+                            dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(cnts[k]))
+                            dn[k] = dn[k] + 1
+                            left = left - 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 

@@ -4932,6 +4932,11 @@ class DMBackwardSm100:
                           tSrLSE = tSrLSE_s2r
                       else:
                           tSrLSE = tSsLSE_cur[lane_idx]
+                      if const_expr("pqa" in self.dm_opts):
+                          # qcheap pqa: P^T amax from the exp ARGUMENTS (ex2.approx.ftz is monotone non-decreasing,
+                          # exhaustively verified over all 2^32 inputs, track E) -> max P = ex2(max arg) bitwise;
+                          # the max chains run under the MUFU exps instead of after them
+                          dm_pqa = [Float32(-float("inf")) for _ in range(4)]
                       for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
                           if const_expr(not self.shuffle_LSE):
                               lse_pair = (tSrLSE[2 * v], tSrLSE[2 * v + 1])
@@ -4958,6 +4963,8 @@ class DMBackwardSm100:
                               # accurate (1.7e-7) degree-5 FMA polynomial for a static subset of pairs (MUFU offload)
                               tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_utils.ex2_poly5_2(tSrS_cur[2 * v], tSrS_cur[2 * v + 1])
                           else:
+                              if const_expr("pqa" in self.dm_opts):
+                                  dm_pqa[v % 4] = cute.arch.fmax(dm_pqa[v % 4], cute.arch.fmax(tSrS_cur[2 * v], tSrS_cur[2 * v + 1]))
                               tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
                               tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
                       if const_expr(self.dm_b6 > 0 and "noexp" not in self.dm_abl):
@@ -4983,7 +4990,12 @@ class DMBackwardSm100:
                       else:
                           # DM: P^T codes with a pow2 scale per (key row, 32-query block); SFA_dV = s * dos
                           p_amax = Float32(1.0)
-                          if const_expr("pamax" not in self.dm_abl and "amax3" not in self.dm_opts and "amaxt" not in self.dm_opts):
+                          if const_expr("pqa" in self.dm_opts and "pamax" not in self.dm_abl):
+                              assert self.dm_b6 == 0 and self.dm_p3 is None and self.dm_p5 is None and "poly3" not in self.dm_opts \
+                                  and "noexp" not in self.dm_abl, "pqa needs the all-MUFU exp path"
+                              p_amax = cute.math.exp2(cute.arch.fmax(cute.arch.fmax(dm_pqa[0], dm_pqa[1]),
+                                                                     cute.arch.fmax(dm_pqa[2], dm_pqa[3])), fastmath=True)
+                          elif const_expr("pamax" not in self.dm_abl and "amax3" not in self.dm_opts and "amaxt" not in self.dm_opts):
                               p_amax = Float32(0.0)
                               for v in cutlass.range_constexpr(cute.size(tSrS_cur)):
                                   p_amax = cute.arch.fmax(p_amax, tSrS_cur[v])

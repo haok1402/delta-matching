@@ -90,9 +90,9 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
     big = dbg & 2
     L = B * H
-    ident = torch.zeros(L, N, N // 32, 4, device=dev) if dbg & 5 else torch.zeros(1, 1, 1, 4, device=dev)
+    ident = torch.zeros(L, N, 4, device=dev, dtype=torch.float64) if dbg & 1 else torch.zeros(1, 1, 4, device=dev, dtype=torch.float64)
     dumps = {}
-    lds_tail = [2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2]
+    lds_tail = [2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2]
     n_t = N // 128
     for mode in modes:
         if mode == "dv":

@@ -68,6 +68,14 @@ def ld_shared_v4f(addr: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def tmem_st32(addr: Int32, v, *, loc=None, ip=None):
+    """tcgen05.st.32x32b.x32: this thread's lane, 32 fp32 columns at addr."""
+    regs = ",".join(f"${i + 1}" for i in range(32))
+    _asm(None, [Int32(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in v],
+         "tcgen05.st.sync.aligned.32x32b.x32.b32 [$0], {" + regs + "};", ",".join(["r"] + ["f"] * 32), True, loc, ip)
+
+
+@dsl_user_op
 def sb_of(x: Float32, *, loc=None, ip=None) -> Int32:
     """Biased exponent byte of an fp32 power of two (its UE8M0 code)."""
     return Int32(_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)],
@@ -402,6 +410,9 @@ class DmHd256Mx:
             one = Int32(0x7F7F7F7F)
             num = Float64(0.0)
             den = Float64(0.0)
+            idn = Float64(0.0)
+            idd = Float64(0.0)
+            idp = Float64(0.0)
             # codes smem: row r, 16-byte chunk v of the 128-byte K row at SW128 K-major position
             crow = sC_addr + (r // 8) * 1024 + (r % 8) * 128
             rsw = r % 8
@@ -444,7 +455,9 @@ class DmHd256Mx:
                 if const_expr(self.mode == "dv"):
                     ce = cd_p.acquire_and_advance()
                 af = acc_c.wait_and_advance()
-                vals = cute.make_rmem_tensor(cute.make_layout(128), Float32)   # P (dv) or dS (dk / dq)
+                stash = tb + self.COL_DP           # fp32 dS of chunk j -> cols 128 + 32 j (its dP already read)
+                amk = Float32(0.0)                 # dk: running |dS| max of this row
+                amq = [Float32(0.0)] * 4           # dq: per-chunk |dS| max of this row
                 for j in cutlass.range_constexpr(4):
                     sv = tmem_ld32(tb + 32 * j)
                     dv_ = [Float32(0.0)] * 32
@@ -453,6 +466,7 @@ class DmHd256Mx:
                     cute.arch.fence_view_async_tmem_load()
                     if const_expr(j == 3 and not (self.dbg & 2)):
                         af.release()
+                    vals = cute.make_rmem_tensor(cute.make_layout(32), Float32)   # P (dv) or dS (dk / dq) of chunk j
                     id1 = Float32(0.0)
                     id2 = Float32(0.0)
                     id3 = Float32(0.0)
@@ -482,8 +496,8 @@ class DmHd256Mx:
                             pv[q2 + 1] = p1
                         for q2 in cutlass.range_constexpr(0, 4, 2):
                             if const_expr(self.mode == "dv"):
-                                vals[32 * j + i + q2] = pv[q2]
-                                vals[32 * j + i + q2 + 1] = pv[q2 + 1]
+                                vals[i + q2] = pv[q2]
+                                vals[i + q2 + 1] = pv[q2 + 1]
                             elif const_expr(self.delta_only):
                                 for u in cutlass.range_constexpr(2):
                                     pd = Float64(pv[q2 + u])
@@ -493,39 +507,58 @@ class DmHd256Mx:
                                 x0, x1 = cute.arch.fma_packed_f32x2((dv_[i + q2], dv_[i + q2 + 1]), (ca[j], ca[j]),
                                                                     (-dlv[q2], -dlv[q2 + 1]))
                                 x0, x1 = cute.arch.mul_packed_f32x2((pv[q2], pv[q2 + 1]), (x0, x1))
-                                vals[32 * j + i + q2] = x0
-                                vals[32 * j + i + q2 + 1] = x1
-                        if const_expr(self.dbg & 1):
-                            if const_expr(self.mode == "dq" and not self.delta_only):
-                                for q in cutlass.range_constexpr(4):
-                                    id1 = add_f32(id1, vals[32 * j + i + q])
-                                    id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dv_[i + q], ca[j]))))
-                                    id3 = add_f32(id3, pv[q])
+                                vals[i + q2] = x0
+                                vals[i + q2 + 1] = x1
+                        if const_expr((self.dbg & 1) and self.mode == "dq" and not self.delta_only):
+                            for q in cutlass.range_constexpr(4):
+                                id1 = add_f32(id1, vals[i + q])
+                                id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dv_[i + q], ca[j]))))
+                                id3 = add_f32(id3, pv[q])
+                    if const_expr((self.dbg & 2) and self.has_dp and not self.delta_only):
+                        for i in cutlass.range_constexpr(32):     # raw dP_acc (its TMEM cols get the dS stash)
+                            qi = rtok
+                            ki = ctok0 + 32 * j + i
+                            if const_expr(self.rows_are_keys):
+                                qi = ctok0 + 32 * j + i
+                                ki = rtok
+                            st_global_f32(_gaddr(mDump) + ((Int64(l) * N + qi) * N + ki) * 16 + 4, dv_[i])
                     if const_expr(self.mode == "dv"):
-                        # P^T codes of this (key, 32-query) block right away (no 128-wide live range)
+                        # P^T codes of this (key, 32-query) block right away
                         am = Float32(0.0)
                         for i in cutlass.range_constexpr(32):
-                            am = cute.arch.fmax(am, vals[32 * j + i])
+                            am = cute.arch.fmax(am, vals[i])
                         sbs[j] = dm_utils.pow2_sb(am)
                         inv = dm_utils.inv_pow2_from_sb(sbs[j])
                         for hv in cutlass.range_constexpr(2):
                             w = [None] * 4
                             for u in cutlass.range_constexpr(4):
-                                i0 = 32 * j + 16 * hv + 4 * u
+                                i0 = 16 * hv + 4 * u
                                 y0, y1 = cute.arch.mul_packed_f32x2((vals[i0], vals[i0 + 1]), (inv, inv))
                                 y2, y3 = cute.arch.mul_packed_f32x2((vals[i0 + 2], vals[i0 + 3]), (inv, inv))
                                 w[u] = e4m3x4(y0, y1, y2, y3)
                             st_shared_v4(crow + (((2 * j + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                    elif const_expr(not self.delta_only):
+                        am = Float32(0.0)
+                        for i in cutlass.range_constexpr(32):
+                            am = cute.arch.fmax(am, abs_f32(vals[i]))
+                        if const_expr(self.mode == "dk"):
+                            amk = cute.arch.fmax(amk, am)
+                        else:
+                            amq[j] = am
+                        tmem_st32(stash + 32 * j, [vals[i] for i in range(32)])
                     if const_expr((self.dbg & 1) and self.mode == "dq" and not self.delta_only):
-                        ia = _gaddr(mIdent) + ((Int64(l) * N + rtok) * (N // 32) + ct * 4 + j) * 16
-                        st_global_v4f(ia, id1, id2, id3, Float32(0.0))
+                        idn = idn + Float64(id1)
+                        idd = idd + Float64(id2)
+                        idp = idp + Float64(id3)
+                if const_expr(self.has_dp and not self.delta_only):
+                    cute.arch.fence_view_async_tmem_store()
                 if const_expr(self.dbg & 2):
-                    # raw dump pass (dbg only): re-read S / dP, recompute P with the same helper, dS from vals
+                    # raw dump pass (dbg only): re-read S, recompute P with the same helper, dS from the stash
                     for j in cutlass.range_constexpr(4):
                         sv = tmem_ld32(tb + 32 * j)
-                        dv_ = [Float32(0.0)] * 32
-                        if const_expr(self.has_dp):
-                            dv_ = tmem_ld32(tb + self.COL_DP + 32 * j)
+                        dsj = [Float32(0.0)] * 32
+                        if const_expr(self.has_dp and not self.delta_only):
+                            dsj = tmem_ld32(stash + 32 * j)
                         cute.arch.fence_view_async_tmem_load()
                         for i in cutlass.range_constexpr(0, 32, 2):
                             c0 = ctok0 + 32 * j + i
@@ -552,32 +585,22 @@ class DmHd256Mx:
                                 if const_expr(self.rows_are_keys):
                                     qi = c0 + u
                                     ki = rtok
-                                dsv = Float32(0.0)
-                                if const_expr(self.mode != "dv" and not self.delta_only):
-                                    dsv = vals[32 * j + i + u]
                                 da = _gaddr(mDump) + ((Int64(l) * N + qi) * N + ki) * 16
-                                st_global_v4f(da, sv[i + u], dv_[i + u], pp[u], dsv)
+                                st_global_f32(da, sv[i + u])
+                                st_global_f32(da + 8, pp[u])
+                                st_global_f32(da + 12, dsj[i + u])
                     af.release()
                 if const_expr(self.delta_only):
                     pass
                 else:
                     # ---- block scales (unadorned sb per 32-col chunk) ----
-                    if const_expr(self.mode == "dv"):
-                        pass
-                    elif const_expr(self.mode == "dk"):
-                        am = Float32(0.0)
-                        for i in cutlass.range_constexpr(128):
-                            am = cute.arch.fmax(am, abs_f32(vals[i]))
-                        am = dm_utils.redux_max_abs_f32(am)
-                        sb = dm_utils.pow2_sb(am)
+                    if const_expr(self.mode == "dk"):
+                        sb = dm_utils.pow2_sb(dm_utils.redux_max_abs_f32(amk))
                         sbs = [sb] * 4
-                    else:
+                    elif const_expr(self.mode == "dq"):
                         slot = amax_addr + par * 64
                         for j in cutlass.range_constexpr(4):
-                            am = Float32(0.0)
-                            for i in cutlass.range_constexpr(32):
-                                am = cute.arch.fmax(am, abs_f32(vals[32 * j + i]))
-                            am = dm_utils.redux_max_abs_f32(am)
+                            am = dm_utils.redux_max_abs_f32(amq[j])
                             if lane == 0:
                                 st_shared_f32(slot + (j * 4 + warp) * 4, am)
                         cute.arch.barrier(barrier_id=2, number_of_threads=128)
@@ -589,16 +612,18 @@ class DmHd256Mx:
                     if const_expr(self.mode != "dv"):
                         ce = cd_p.acquire_and_advance()
                     for j in cutlass.range_constexpr(4):
-                        inv = dm_utils.inv_pow2_from_sb(sbs[j])
-                        for hv in cutlass.range_constexpr(2 if self.mode != "dv" else 0):
-                            w = [None] * 4
-                            for u in cutlass.range_constexpr(4):
-                                i0 = 32 * j + 16 * hv + 4 * u
-                                y0, y1 = cute.arch.mul_packed_f32x2((vals[i0], vals[i0 + 1]), (inv, inv))
-                                y2, y3 = cute.arch.mul_packed_f32x2((vals[i0 + 2], vals[i0 + 3]), (inv, inv))
-                                w[u] = e4m3x4(y0, y1, y2, y3)
-                            v = 2 * j + hv
-                            st_shared_v4(crow + ((v ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                        if const_expr(self.mode != "dv"):
+                            inv = dm_utils.inv_pow2_from_sb(sbs[j])
+                            dsj = tmem_ld32(stash + 32 * j)
+                            cute.arch.fence_view_async_tmem_load()
+                            for hv in cutlass.range_constexpr(2):
+                                w = [None] * 4
+                                for u in cutlass.range_constexpr(4):
+                                    i0 = 16 * hv + 4 * u
+                                    y0, y1 = cute.arch.mul_packed_f32x2((dsj[i0], dsj[i0 + 1]), (inv, inv))
+                                    y2, y3 = cute.arch.mul_packed_f32x2((dsj[i0 + 2], dsj[i0 + 3]), (inv, inv))
+                                    w[u] = e4m3x4(y0, y1, y2, y3)
+                                st_shared_v4(crow + (((2 * j + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
                         if const_expr(self.dbg & 2):
                             mSB[l, rtok, ct * 4 + j] = sbs[j]
                     if const_expr(self.dbg & 2):
@@ -616,8 +641,11 @@ class DmHd256Mx:
                                     st_global_u8(_gaddr(mCodes) + (Int64(l) * N + qi) * N + ki, x4[u] >> (8 * q))
                     sfa = pack4(dm_utils.add_sb_clamp(sbs[0], osb[0]), dm_utils.add_sb_clamp(sbs[1], osb[1]),
                                 dm_utils.add_sb_clamp(sbs[2], osb[2]), dm_utils.add_sb_clamp(sbs[3], osb[3]))
-                    dm_utils.tmem_st_x1(tb + self.COL_SFA, sfa)
+                    # SFA (M=128): row r at lane r, column COL_SFA + r // 32 (findings 2026-11-08 mx_ts_mma.cu);
+                    # SFB (N=256): column COL_SFB + n // 32, lanes 32 q + n % 32 -> 8 columns of 1.0 (0x7F)
+                    dm_utils.tmem_st_x1(tb + self.COL_SFA + warp, sfa)
                     dm_utils.tmem_st_x4(tb + self.COL_SFB, one, one, one, one)
+                    dm_utils.tmem_st_x4(tb + self.COL_SFB + 4, one, one, one, one)
                     cute.arch.fence_view_async_tmem_store()
                     cute.arch.fence_view_async_shared()
                     tc_fence_before()
@@ -627,6 +655,10 @@ class DmHd256Mx:
                 fw.release()
                 st_global_f64x2(_gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 16, num, den)
             else:
+                if const_expr((self.dbg & 1) and self.mode == "dq"):
+                    ia = _gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 32
+                    st_global_f64x2(ia, idn, idd)
+                    st_global_f64x2(ia + 16, idp, Float64(0.0))
                 # ---- epilogue: out row (256 fp32 in TMEM) -> bf16 ----
                 fw = fin_c.wait_and_advance()
                 tc_fence_after()

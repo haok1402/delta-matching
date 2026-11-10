@@ -69,17 +69,17 @@ def attention_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool):
     assert ks.shape == (B, k8.shape[2], N // 32) and vs.shape == ks.shape, "K / V: one pow2 scale per 32 keys (MXFP8)"
     aux = [as_aux(qs.contiguous(), 2), as_aux(ks.contiguous(), 2), as_aux(vs.contiguous(), 2), as_aux(dos.contiguous(), 2), as_aux(do8.contiguous().view(torch.uint8), 3), as_aux(lse.contiguous(), 2)]
     names = ["qs", "ks", "vs", "dos", "do8", "lse"]
-    inputs = dict(q8=q8, k8=k8, v8=v8, **{name: t for name, t in zip(names, aux, strict=True)})
+    inputs = dict(q8=q8, k8=k8, v8=v8, **{name: tensor for name, tensor in zip(names, aux, strict=True)})
     return launch_cache_sm100.call("attention_delta_hd256", inputs, (bool(causal), repr(sorted(FORCED_CONFIG.items()))), lambda: launch_through_fa4(q8, k8, v8, aux, causal), cmp=[1])[1]
 
 
-def as_aux(t: torch.Tensor, leading_dim: int):
+def as_aux(tensor: torch.Tensor, leading_dim: int):
     """
     Tag an aux tensor with the leading dim and alignment FA4's aux plumbing reads.
     """
-    t.__leading_dim__ = leading_dim
-    t.__assumed_align__ = 16 if t.dtype == torch.uint8 else 4
-    return t
+    tensor.__leading_dim__ = leading_dim
+    tensor.__assumed_align__ = 16 if tensor.dtype == torch.uint8 else 4
+    return tensor
 
 
 def compile_cache():
@@ -104,14 +104,14 @@ def launch_through_fa4(q8, k8, v8, aux, causal):
 
     def select_config(inputs):
         try:
-            memo_key = (inputs, tuple(sorted((k, repr(v)) for k, v in FORCED_CONFIG.items())))
+            memo_key = (inputs, tuple(sorted((name, repr(value)) for name, value in FORCED_CONFIG.items())))
             hit = CONFIG_MEMO.get(memo_key)
         except TypeError:
             memo_key, hit = None, None
         if hit is not None:
             return hit
         config = fa4_select(inputs)
-        config = dataclasses.replace(config, **{k: v for k, v in FORCED_CONFIG.items() if hasattr(config, k)})
+        config = dataclasses.replace(config, **{name: value for name, value in FORCED_CONFIG.items() if hasattr(config, name)})
         config = dataclasses.replace(config, registers=dataclasses.replace(config.registers, **REGISTERS))
         if memo_key is not None:
             CONFIG_MEMO[memo_key] = config
@@ -202,13 +202,13 @@ class MatchedDeltaHd256:
         assert mCuSeqlensQ is None and mCuSeqlensK is None and mSeqUsedQ is None and mSeqUsedK is None
         assert mPageTable is None and learnable_sink is None and blocksparse_tensors is None and max_seqlen_q is not None
         self.q_dtype, self.k_dtype, self.v_dtype, self.o_dtype = mQ.element_type, mK.element_type, mV.element_type, mO.element_type
-        mQ, mK, mV, mO = [assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)]
+        mQ, mK, mV, mO = [assume_tensor_aligned(tensor) for tensor in (mQ, mK, mV, mO)]
         mQ = cute.make_tensor(mQ.iterator, cute.select(mQ.layout, mode=[1, 3, 2, 0]))  # (s_q, d, h, b)
         # dO codes (uint8 aux tensor) viewed as fp8, same layout as Q
         mdO_bytes = aux_data.tensors[4]
         mdO = cute.make_tensor(cute.recast_ptr(mdO_bytes.iterator, dtype=self.q_dtype), cute.select(mdO_bytes.layout, mode=[1, 3, 2, 0]))
         mdO = assume_tensor_aligned(mdO)
-        mK, mV = [cute.make_tensor(t.iterator, cute.select(t.layout, mode=[1, 3, 2, 0])) for t in (mK, mV)]  # (s_k, d, h_k, b_k)
+        mK, mV = [cute.make_tensor(tensor.iterator, cute.select(tensor.layout, mode=[1, 3, 2, 0])) for tensor in (mK, mV)]  # (s_k, d, h_k, b_k)
         num_splits = Int32(1)
         mO = cute.make_tensor(mO.iterator, cute.select(mO.layout, mode=[1, 3, 2, 0]))
         mLSE = cute.make_tensor(mLSE.iterator, cute.select(mLSE.layout, mode=[2, 1, 0]))  # (s_q, h, b)
@@ -300,12 +300,46 @@ class MatchedDeltaHd256:
             for tma_atom in (tma_atom_Q, tma_atom_K, tma_atom_V, tma_atom_dO):
                 cpasync.prefetch_descriptor(tma_atom)
         cta_layout_vmnk = cute.tiled_divide(cute.make_layout(self.cluster_shape_mnk), (tiled_mma_qk.thr_id.shape,))
-        smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(self.shared_storage)
+        storage = cutlass.utils.SmemAllocator().allocate(self.shared_storage)
+        tmem_alloc_barrier, tmem, pipeline_q, pipeline_kv, pipeline_s, pipeline_dp = self.create_barriers(storage, cta_layout_vmnk)
+        pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
+
+        sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)  # (MMA, MMA_Q, MMA_D, PIPE)
+        sdO = storage.sdO.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)  # (MMA, MMA_Q, MMA_D, PIPE)
+        sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)  # (MMA, MMA_K, MMA_D, PIPE)
+        sV = cute.make_tensor(cute.recast_ptr(sK.iterator, sV_layout.inner), sV_layout.outer)  # same smem as sK, swizzle stripped
+        thr_mma_qk = tiled_mma_qk.get_slice(0)
+        qk_acc_shape = thr_mma_qk.partition_shape_C(self.mma_tiler_qk[:2])
+        # TMEM is always allocated in full (512 columns), so the accumulator view starts at column 0
+        tStS = thr_mma_qk.make_fragment_C(cute.append(qk_acc_shape, self.s_stage))  # (MMA, MMA_M, MMA_N, STAGE)
+        block_info = BlockInfo(self.cta_tiler[0] * self.cta_group_size, self.cta_tiler[1], self.is_causal, False, False, window_size_left, window_size_right, qhead_per_kvhead_packgqa=1, num_splits=num_splits, pack_split_idx=num_splits_dynamic_ptr is not None, num_n_blocks_per_split=None)
+        make_seqlen_info = partial(SeqlenInfoQK.create, seqlen_q_static=mQ.shape[0], seqlen_k_static=mK.shape[0], mCuSeqlensQ=None, mCuSeqlensK=None, mSeqUsedQ=None, mSeqUsedK=None, mCuTotalMBlocks=None, mCuBlockIdxOffsets=None)
+        pipeline_init_wait(cluster_shape_mn=cta_layout_vmnk)
+        tile_scheduler = self.TileScheduler.create(tile_sched_params)
+        assert isinstance(tile_scheduler, TileSchedulerProtocol), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
+
+        for i in cutlass.range_constexpr(len(self.idle_warps)):
+            if warp_idx == self.idle_warps[i]:
+                cute.arch.setmaxregister_decrease(self.num_regs_other)
+        if warp_idx >= self.load_warps[0] and warp_idx <= self.load_warps[-1]:
+            self.load_loop(thr_mma_qk, mQ, mK, mV, sQ, sK, sV, tma_atom_Q, tma_atom_K, tma_atom_V, pipeline_q, pipeline_kv, block_info, num_splits, make_seqlen_info, tile_scheduler, sdO, tma_atom_dO, mdO)
+        if warp_idx == self.mma_warp:
+            self.mma_loop(tiled_mma_qk, sQ, sK, pipeline_q, pipeline_kv, pipeline_s, pipeline_dp, block_info, num_splits, make_seqlen_info, tile_scheduler, sdO, tmem, tmem_alloc_barrier)
+        # The constant 'or' term is kept on purpose: without it the compiler lays the role blocks out in another order.
+        if warp_idx <= self.lower_compute_warps[-1] or const_expr(False):
+            self.compute_loop(self.num_regs_lower_compute, 0, self.lower_compute_warps[4], warp_idx, tmem, tmem_alloc_barrier, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
+        if warp_idx >= self.upper_compute_warps[0] and warp_idx < self.mma_warp:
+            self.compute_loop(self.num_regs_upper_compute, 1, self.upper_compute_warps[4], warp_idx, tmem, tmem_alloc_barrier, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
+        end_kernel_fences()
+
+    def create_barriers(self, storage, cta_layout_vmnk):
+        """
+        TMEM allocator and its named barrier, then the mbarrier pipelines in their shared-memory
+        slots; returns (tmem_alloc_barrier, tmem, pipeline_q, pipeline_kv, pipeline_s, pipeline_dp).
+        """
         # TMEM handoffs span warp-role branches, so all waits and arrivals must be unaligned.
         tmem_alloc_barrier = pipeline_custom.NamedBarrier(barrier_id=int(NamedBarrierFwdSm100.TmemPtr), num_threads=cute.arch.WARP_SIZE * len((self.mma_warp, *self.lower_compute_warps, *self.upper_compute_warps)))
         tmem = cutlass.utils.TmemAllocator(storage.tmem_holding_buf.ptr, barrier_for_retrieve=tmem_alloc_barrier, allocator_warp_id=self.mma_warp, is_two_cta=False, two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar.ptr)
-
         thread_group = partial(pipeline.CooperativeGroup, pipeline.Agent.Thread)
         mma_warp_group = thread_group(1)
         tma_warp_group = thread_group(1)
@@ -327,57 +361,7 @@ class MatchedDeltaHd256:
         mark_fenced("ua", pipeline_s, pipeline_dp)
         mark_fenced("au", pipeline_p)
         mark_fenced("bar", stats_barrier, tmem_alloc_barrier)
-        pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
-
-        sQ = storage.sQ.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)  # (MMA, MMA_Q, MMA_D, PIPE)
-        sdO = storage.sdO.get_tensor(sQ_layout.outer, swizzle=sQ_layout.inner)  # (MMA, MMA_Q, MMA_D, PIPE)
-        sK = storage.sK.get_tensor(sK_layout.outer, swizzle=sK_layout.inner)  # (MMA, MMA_K, MMA_D, PIPE)
-        sV = cute.make_tensor(cute.recast_ptr(sK.iterator, sV_layout.inner), sV_layout.outer)  # same smem as sK, swizzle stripped
-        thr_mma_qk = tiled_mma_qk.get_slice(0)
-        qk_acc_shape = thr_mma_qk.partition_shape_C(self.mma_tiler_qk[:2])
-        # TMEM is always allocated in full (512 columns), so the accumulator view starts at column 0
-        tStS = thr_mma_qk.make_fragment_C(cute.append(qk_acc_shape, self.s_stage))  # (MMA, MMA_M, MMA_N, STAGE)
-        block_info = BlockInfo(self.cta_tiler[0] * self.cta_group_size, self.cta_tiler[1], self.is_causal, False, False, window_size_left, window_size_right, qhead_per_kvhead_packgqa=1, num_splits=num_splits, pack_split_idx=num_splits_dynamic_ptr is not None, num_n_blocks_per_split=None)
-        make_seqlen_info = partial(SeqlenInfoQK.create, seqlen_q_static=mQ.shape[0], seqlen_k_static=mK.shape[0], mCuSeqlensQ=None, mCuSeqlensK=None, mSeqUsedQ=None, mSeqUsedK=None, mCuTotalMBlocks=None, mCuBlockIdxOffsets=None)
-        pipeline_init_wait(cluster_shape_mn=cta_layout_vmnk)
-        tile_scheduler = self.TileScheduler.create(tile_sched_params)
-        assert isinstance(tile_scheduler, TileSchedulerProtocol), f"tile_scheduler is not a TileSchedulerProtocol: {type(tile_scheduler)}"
-
-        for i in cutlass.range_constexpr(len(self.idle_warps)):
-            if warp_idx == self.idle_warps[i]:
-                cute.arch.setmaxregister_decrease(self.num_regs_other)
-        if warp_idx >= self.load_warps[0] and warp_idx <= self.load_warps[-1]:
-            cute.arch.setmaxregister_decrease(self.num_regs_other)
-            self.load_loop(thr_mma_qk, mQ, mK, mV, sQ, sK, sV, tma_atom_Q, tma_atom_K, tma_atom_V, pipeline_q, pipeline_kv, block_info, num_splits, make_seqlen_info, tile_scheduler, sdO, tma_atom_dO, mdO)
-        if warp_idx == self.mma_warp:
-            cute.arch.setmaxregister_decrease(self.num_regs_other)
-            tmem.allocate(cute.arch.get_max_tmem_alloc_cols("sm_100"))
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
-            self.mma_loop(tiled_mma_qk, sQ, sK, pipeline_q, pipeline_kv, pipeline_s, pipeline_dp, block_info, num_splits, make_seqlen_info, tile_scheduler, sdO)
-            tmem.relinquish_alloc_permit()
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            tmem.free(tmem_ptr)
-        # The constant 'or' term is kept on purpose: without it the compiler lays the role blocks out in another order.
-        if warp_idx <= self.lower_compute_warps[-1] or const_expr(False):
-            cute.arch.setmaxregister_increase(self.num_regs_lower_compute)
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            tmem.retrieve_ptr(self.acc_dtype)
-            if warp_idx < self.lower_compute_warps[4]:
-                self.compute_loop(0, 0, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
-            else:
-                self.compute_loop(1, 0, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
-            tmem_alloc_barrier.arrive_unaligned()
-        if warp_idx >= self.upper_compute_warps[0] and warp_idx < self.mma_warp:
-            cute.arch.setmaxregister_increase(self.num_regs_upper_compute)
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            tmem.retrieve_ptr(self.acc_dtype)
-            if warp_idx < self.upper_compute_warps[4]:
-                self.compute_loop(0, 1, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
-            else:
-                self.compute_loop(1, 1, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
-            tmem_alloc_barrier.arrive_unaligned()
-        end_kernel_fences()
+        return tmem_alloc_barrier, tmem, pipeline_q, pipeline_kv, pipeline_s, pipeline_dp
 
     @cute.jit
     def load_loop(self, thr_mma_qk: cute.ThrMma, mQ: cute.Tensor, mK: cute.Tensor, mV: cute.Tensor, sQ: cute.Tensor, sK: cute.Tensor, sV: cute.Tensor, tma_atom_Q: cute.CopyAtom, tma_atom_K: cute.CopyAtom, tma_atom_V: cute.CopyAtom, pipeline_q: pipeline.PipelineAsync,
@@ -385,6 +369,7 @@ class MatchedDeltaHd256:
         """
         Load warp: per work tile, both Q and dO stages, then every K / V tile by descending n_block.
         """
+        cute.arch.setmaxregister_decrease(self.num_regs_other)
         q_producer_phase = Int32(1)
         kv_producer_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, self.kv_stage)
         work_tile = tile_scheduler.initial_work_tile_info()
@@ -436,10 +421,15 @@ class MatchedDeltaHd256:
 
     @cute.jit
     def mma_loop(self, tiled_mma_qk: cute.ThrMma, sQ: cute.Tensor, sK: cute.Tensor, pipeline_q: pipeline.PipelineAsync, pipeline_kv: pipeline.PipelineAsync, pipeline_s: pipeline.PipelineAsync, pipeline_dp: pipeline.PipelineAsync, block_info: BlockInfo, num_splits: Int32,
-                 make_seqlen_info: Callable, tile_scheduler: TileSchedulerProtocol, sdO: cute.Tensor):
+                 make_seqlen_info: Callable, tile_scheduler: TileSchedulerProtocol, sdO: cute.Tensor, tmem, tmem_alloc_barrier):
         """
-        MMA warp: per KV tile, S_s = Q_s K^T for both stages, then dP_s = dO_s V^T for both stages.
+        MMA warp: allocates TMEM, then per KV tile issues S_s = Q_s K^T for both stages and then
+        dP_s = dO_s V^T for both stages; frees TMEM once the compute warps are done.
         """
+        cute.arch.setmaxregister_decrease(self.num_regs_other)
+        tmem.allocate(cute.arch.get_max_tmem_alloc_cols("sm_100"))
+        tmem_alloc_barrier.arrive_and_wait_unaligned()
+        tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
         tSrQ = tiled_mma_qk.make_fragment_A(sQ)
         tSrK = tiled_mma_qk.make_fragment_B(sK)
         qk_mma_op = tiled_mma_qk.op
@@ -491,15 +481,32 @@ class MatchedDeltaHd256:
                 for stage in cutlass.range(self.q_stage):
                     pipeline_q.consumer_release_w_index(stage)
             work_tile = tile_scheduler.advance_to_next_work()
+        tmem.relinquish_alloc_permit()
+        tmem_alloc_barrier.arrive_and_wait_unaligned()
+        tmem.free(tmem_ptr)
 
     @cute.jit
-    def compute_loop(self, stage: int, row_half: int, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler):
+    def compute_loop(self, num_regs: int, row_half: int, first_stage1_warp: int, warp_idx: Int32, tmem, tmem_alloc_barrier, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler):
         """
-        Compute warps of one Q stage and row half: two lanes per query row. tcgen05.ld.16x64b gives
-        thread t of the warp TMEM lane quad 32 + 16 row_half + t / 4 + 8 (t & 1) and the columns of
-        parity (t >> 1) & 1, so the row's two lanes hold the x / y halves of every packed pair.
-        Every den / num / TwoSum chain lives on one lane; the halves meet only in the final fp64
-        combine (shuffle xor 2).
+        Compute warps of one row half: Q stage 0 below first_stage1_warp, stage 1 from it on.
+        """
+        cute.arch.setmaxregister_increase(num_regs)
+        tmem_alloc_barrier.arrive_and_wait_unaligned()
+        tmem.retrieve_ptr(self.acc_dtype)
+        if warp_idx < first_stage1_warp:
+            self.compute_stage_loop(0, row_half, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
+        else:
+            self.compute_stage_loop(1, row_half, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler)
+        tmem_alloc_barrier.arrive_unaligned()
+
+    @cute.jit
+    def compute_stage_loop(self, stage: int, row_half: int, tStS, mLSE, pipeline_s, pipeline_dp, aux_data, block_info, num_splits, make_seqlen_info, tile_scheduler):
+        """
+        delta of one Q stage and row half, two lanes per query row. tcgen05.ld.16x64b gives thread t
+        of the warp TMEM lane quad 32 + 16 row_half + t / 4 + 8 (t & 1) and the columns of parity (t
+        >> 1) & 1, so the row's two lanes hold the x / y halves of every packed pair. Every den /
+        num / TwoSum chain lives on one lane; the halves meet only in the final fp64 combine
+        (shuffle xor 2).
         """
         aux = aux_data.tensors
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
@@ -530,97 +537,156 @@ class MatchedDeltaHd256:
             sum_pair = (Float32(0.0), Float32(0.0))
             err_pair = (Float32(0.0), Float32(0.0))
             # the raw K / V scales of a tile are loaded one iteration ahead
-            scale_idx = cutlass.max(n_block_max - 1, 0) * (self.n_block_size // 32)
-            k_scales = tuple(Float32(aux[1][batch_idx, kv_head_idx, scale_idx + j]) for j in range(4))
-            v_scales = tuple(Float32(aux[2][batch_idx, kv_head_idx, scale_idx + j]) for j in range(4))
+            k_scales, v_scales = self.load_kv_scales(aux, batch_idx, kv_head_idx, cutlass.max(n_block_max - 1, 0) * (self.n_block_size // 32))
             if has_work:
                 for n_tile in cutlass.range(n_block_max - n_block_min, unroll=1):
                     n_block = n_block_max - 1 - n_tile
-                    exp_scales = [None] * 4
-                    dp_scales = [None] * 4
-                    for j in cutlass.range_constexpr(4):
-                        exp_scales[j] = dm_mx256_c(k_scales[j], q_scale)
-                        dp_scales[j] = dm_mx256_dp_scale(v_scales[j], do_scale)
-                    scale_idx = cutlass.max(n_block - 1, n_block_min) * (self.n_block_size // 32)
-                    k_scales = tuple(Float32(aux[1][batch_idx, kv_head_idx, scale_idx + j]) for j in range(4))
-                    v_scales = tuple(Float32(aux[2][batch_idx, kv_head_idx, scale_idx + j]) for j in range(4))
-                    # den chains of this lane's component: den01 = pairs v % 4 == 0, den23 = pairs v % 4 == 2
-                    den01 = (Float32(0.0), Float32(0.0))
-                    den23 = (Float32(0.0), Float32(0.0))
-                    num = (Float32(0.0), Float32(0.0))   # (num of this component, unused)
-                    pipeline_s.consumer_wait_w_index_phase(stage, s_full_phase)
-                    is_diag_tile = False
-                    if const_expr(self.is_causal):
-                        is_diag_tile = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
-                    key_start = n_block * self.n_block_size
-                    s_row = cute.make_rmem_tensor(cute.make_layout(64), self.acc_dtype)
-                    # both S halves to registers first; the S slot is released before any exp, so the MMA warp's
-                    # next S does not wait on this tile's dP
-                    for h in cutlass.range_constexpr(2):
-                        vals = tmem_ld_16x64b_x32(s_addr + Int32(64 * h))
-                        for i in cutlass.range_constexpr(32):
-                            s_row[32 * h + i] = vals[i]
-                    cute.arch.fence_view_async_tmem_load()
-                    with FenceSkipSite("r0"):
-                        pipeline_s.consumer_release_w_index(stage)
-                    for h in cutlass.range_constexpr(2):
-                        if const_expr(self.is_causal):
-                            if is_diag_tile:
-                                for i in cutlass.range_constexpr(32 * h, 32 * h + 32):
-                                    s_row[i] = -Float32.inf if key_start + 2 * i + col_parity > row else s_row[i]
-                        for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
-                            for v in cutlass.range_constexpr(0, 16, 2):
-                                i0 = 16 * j + v
-                                p = dm_mx256_p_pair(s_row[i0], s_row[i0 + 1], exp_scales[j], lse_log2)
-                                s_row[i0], s_row[i0 + 1] = p
-                                if const_expr(v % 4 == 0):
-                                    den01 = cute.arch.add_packed_f32x2(den01, p)
-                                else:
-                                    den23 = cute.arch.add_packed_f32x2(den23, p)
-                        if const_expr(h == 0):
-                            pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
-                        for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
-                            dp_vals = tmem_ld_16x64b_x16(dp_addr + Int32(32 * j))
-                            cute.arch.fence_view_async_tmem_load()
-                            if const_expr(j == 3):
-                                with FenceSkipSite("r1"):
-                                    pipeline_dp.consumer_release_w_index(stage)
-                            acc01 = (Float32(0.0), Float32(0.0))
-                            acc23 = (Float32(0.0), Float32(0.0))
-                            for v in cutlass.range_constexpr(0, 16, 2):
-                                i0 = 16 * j + v
-                                if const_expr(v % 4 == 0):
-                                    acc01 = cute.arch.fma_packed_f32x2((s_row[i0], s_row[i0 + 1]), (dp_vals[v], dp_vals[v + 1]), acc01)
-                                else:
-                                    acc23 = cute.arch.fma_packed_f32x2((s_row[i0], s_row[i0 + 1]), (dp_vals[v], dp_vals[v + 1]), acc23)
-                            # num = fma((acc0 + acc1) + (acc2 + acc3), a_j, num) per component
-                            acc_sum = cute.arch.add_packed_f32x2((acc01[0], acc23[0]), (acc01[1], acc23[1]))
-                            acc_total = cute.arch.add_packed_f32x2((acc_sum[0], Float32(0.0)), (acc_sum[1], Float32(0.0)))
-                            num = cute.arch.fma_packed_f32x2((acc_total[0], Float32(0.0)), (dp_scales[j], Float32(0.0)), num)
-                    # den = (den0 + den1) + (den2 + den3) per component
-                    den_sum = cute.arch.add_packed_f32x2((den01[0], den23[0]), (den01[1], den23[1]))
-                    den = cute.arch.add_packed_f32x2((den_sum[0], Float32(0.0)), (den_sum[1], Float32(0.0)))
-                    # packed TwoSum of (num, den) of this component into (sum_pair, err_pair)
-                    tile_pair = (num[0], den[0])
-                    new_sum = cute.arch.add_packed_f32x2(sum_pair, tile_pair)
-                    tile_part = cute.arch.add_packed_f32x2(new_sum, (-sum_pair[0], -sum_pair[1]))
-                    sum_err = cute.arch.add_packed_f32x2(sum_pair, (-(new_sum[0] - tile_part[0]), -(new_sum[1] - tile_part[1])))
-                    tile_err = cute.arch.add_packed_f32x2(tile_pair, (-tile_part[0], -tile_part[1]))
-                    err_pair = cute.arch.add_packed_f32x2(err_pair, cute.arch.add_packed_f32x2(sum_err, tile_err))
-                    sum_pair = new_sum
+                    exp_scales, dp_scales = self.exp_and_dp_scales(k_scales, v_scales, q_scale, do_scale)
+                    k_scales, v_scales = self.load_kv_scales(aux, batch_idx, kv_head_idx, cutlass.max(n_block - 1, n_block_min) * (self.n_block_size // 32))
+                    tile_pair = self.compute_tile(stage, n_block, m_block, row, col_parity, s_addr, dp_addr, s_full_phase, exp_scales, dp_scales, lse_log2, pipeline_s, pipeline_dp)
+                    err_pair, sum_pair = self.add_two_sum(sum_pair, err_pair, tile_pair)
                     s_full_phase ^= 1
-            # partner lane (other column parity of the same row) = lane ^ 2
-            partner_sum_num = cute.arch.shuffle_sync_bfly(sum_pair[0], offset=2)
-            partner_sum_den = cute.arch.shuffle_sync_bfly(sum_pair[1], offset=2)
-            partner_err_num = cute.arch.shuffle_sync_bfly(err_pair[0], offset=2)
-            partner_err_den = cute.arch.shuffle_sync_bfly(err_pair[1], offset=2)
-            if col_parity == 0:
-                num64 = (Float64(sum_pair[0]) + Float64(partner_sum_num)) + (Float64(err_pair[0]) + Float64(partner_err_num))
-                den64 = (Float64(sum_pair[1]) + Float64(partner_sum_den)) + (Float64(err_pair[1]) + Float64(partner_err_den))
-                delta = Float32(num64 / den64) if den64 != Float64(0.0) else Float32(0.0)
-                if row < seqlen.seqlen_q:
-                    mLSE[row, head_idx, batch_idx] = delta
+            self.store_delta(sum_pair, err_pair, col_parity, row, seqlen, mLSE, head_idx, batch_idx)
             work_tile = tile_scheduler.advance_to_next_work()
+
+    def load_kv_scales(self, aux, batch_idx, kv_head_idx, scale_idx):
+        """
+        The four raw K scales, then the four raw V scales, of the 128-key tile at scale_idx.
+        """
+        k_scales = tuple(Float32(aux[1][batch_idx, kv_head_idx, scale_idx + j]) for j in range(4))
+        v_scales = tuple(Float32(aux[2][batch_idx, kv_head_idx, scale_idx + j]) for j in range(4))
+        return k_scales, v_scales
+
+    def exp_and_dp_scales(self, k_scales, v_scales, q_scale, do_scale):
+        """
+        Per 32-key block j: the exp scale c_j of S and the dP scale a_j (attention_math_sm100).
+        """
+        exp_scales = [None] * 4
+        dp_scales = [None] * 4
+        for j in range(4):
+            exp_scales[j] = dm_mx256_c(k_scales[j], q_scale)
+            dp_scales[j] = dm_mx256_dp_scale(v_scales[j], do_scale)
+        return exp_scales, dp_scales
+
+    @cute.jit
+    def compute_tile(self, stage: int, n_block, m_block, row, col_parity, s_addr, dp_addr, s_full_phase, exp_scales, dp_scales, lse_log2, pipeline_s, pipeline_dp):
+        """
+        One KV tile of this lane's row component: P from S, den = sum P and num = sum P dP a_j;
+        returns (num, den).
+        """
+        # den chains of this lane's component: den01 = pairs pair_col % 4 == 0, den23 = the others
+        den01 = (Float32(0.0), Float32(0.0))
+        den23 = (Float32(0.0), Float32(0.0))
+        num = (Float32(0.0), Float32(0.0))   # (num of this component, unused)
+        pipeline_s.consumer_wait_w_index_phase(stage, s_full_phase)
+        is_diag_tile = False
+        if const_expr(self.is_causal):
+            is_diag_tile = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
+        key_start = n_block * self.n_block_size
+        s_row = self.load_s_tile(s_addr, pipeline_s, stage)
+        for half in cutlass.range_constexpr(2):
+            if const_expr(self.is_causal):
+                if is_diag_tile:
+                    self.mask_future_keys(s_row, half, key_start, col_parity, row)
+            den01, den23 = self.exp_half(s_row, half, exp_scales, lse_log2, den01, den23)
+            if const_expr(half == 0):
+                pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+            num = self.accumulate_num_half(s_row, half, dp_addr, dp_scales, num, pipeline_dp, stage)
+        # den = (den0 + den1) + (den2 + den3) per component
+        den_sum = cute.arch.add_packed_f32x2((den01[0], den23[0]), (den01[1], den23[1]))
+        den = cute.arch.add_packed_f32x2((den_sum[0], Float32(0.0)), (den_sum[1], Float32(0.0)))
+        return (num[0], den[0])
+
+    def load_s_tile(self, s_addr, pipeline_s, stage: int):
+        """
+        Both 64-column S halves of this lane into registers, then the S slot is released, before any
+        exp, so the MMA warp's next S does not wait on this tile's dP.
+        """
+        s_row = cute.make_rmem_tensor(cute.make_layout(64), self.acc_dtype)
+        for half in range(2):
+            s_vals = tmem_ld_16x64b_x32(s_addr + Int32(64 * half))
+            for i in range(32):
+                s_row[32 * half + i] = s_vals[i]
+        cute.arch.fence_view_async_tmem_load()
+        with FenceSkipSite("r0"):
+            pipeline_s.consumer_release_w_index(stage)
+        return s_row
+
+    @cute.jit
+    def mask_future_keys(self, s_row, half: int, key_start, col_parity, row):
+        """
+        Causal mask of one S half on a diagonal tile: keys after the row become -inf.
+        """
+        for i in cutlass.range_constexpr(32 * half, 32 * half + 32):
+            s_row[i] = -Float32.inf if key_start + 2 * i + col_parity > row else s_row[i]
+
+    def exp_half(self, s_row, half: int, exp_scales, lse_log2, den01, den23):
+        """
+        P = exp2(S c_j - lse log2 e) in place over one 64-column S half (attention_math_sm100), plus
+        den += P.
+        """
+        for j in range(2 * half, 2 * half + 2):
+            for pair_col in range(0, 16, 2):
+                col = 16 * j + pair_col
+                p_pair = dm_mx256_p_pair(s_row[col], s_row[col + 1], exp_scales[j], lse_log2)
+                s_row[col], s_row[col + 1] = p_pair
+                if const_expr(pair_col % 4 == 0):
+                    den01 = cute.arch.add_packed_f32x2(den01, p_pair)
+                else:
+                    den23 = cute.arch.add_packed_f32x2(den23, p_pair)
+        return den01, den23
+
+    def accumulate_num_half(self, s_row, half: int, dp_addr, dp_scales, num, pipeline_dp, stage: int):
+        """
+        num += (sum P dP) a_j over the two 32-key blocks of one half; the dP slot is released after
+        its last load.
+        """
+        for j in range(2 * half, 2 * half + 2):
+            dp_vals = tmem_ld_16x64b_x16(dp_addr + Int32(32 * j))
+            cute.arch.fence_view_async_tmem_load()
+            if const_expr(j == 3):
+                with FenceSkipSite("r1"):
+                    pipeline_dp.consumer_release_w_index(stage)
+            acc01 = (Float32(0.0), Float32(0.0))
+            acc23 = (Float32(0.0), Float32(0.0))
+            for pair_col in range(0, 16, 2):
+                col = 16 * j + pair_col
+                if const_expr(pair_col % 4 == 0):
+                    acc01 = cute.arch.fma_packed_f32x2((s_row[col], s_row[col + 1]), (dp_vals[pair_col], dp_vals[pair_col + 1]), acc01)
+                else:
+                    acc23 = cute.arch.fma_packed_f32x2((s_row[col], s_row[col + 1]), (dp_vals[pair_col], dp_vals[pair_col + 1]), acc23)
+            # num = fma((acc0 + acc1) + (acc2 + acc3), a_j, num) per component
+            acc_sum = cute.arch.add_packed_f32x2((acc01[0], acc23[0]), (acc01[1], acc23[1]))
+            acc_total = cute.arch.add_packed_f32x2((acc_sum[0], Float32(0.0)), (acc_sum[1], Float32(0.0)))
+            num = cute.arch.fma_packed_f32x2((acc_total[0], Float32(0.0)), (dp_scales[j], Float32(0.0)), num)
+        return num
+
+    def add_two_sum(self, sum_pair, err_pair, tile_pair):
+        """
+        Packed TwoSum of the tile's (num, den) into the running pairs; returns (error, sum).
+        """
+        new_sum = cute.arch.add_packed_f32x2(sum_pair, tile_pair)
+        tile_part = cute.arch.add_packed_f32x2(new_sum, (-sum_pair[0], -sum_pair[1]))
+        sum_err = cute.arch.add_packed_f32x2(sum_pair, (-(new_sum[0] - tile_part[0]), -(new_sum[1] - tile_part[1])))
+        tile_err = cute.arch.add_packed_f32x2(tile_pair, (-tile_part[0], -tile_part[1]))
+        err_pair = cute.arch.add_packed_f32x2(err_pair, cute.arch.add_packed_f32x2(sum_err, tile_err))
+        return err_pair, new_sum
+
+    @cute.jit
+    def store_delta(self, sum_pair, err_pair, col_parity, row, seqlen, mLSE, head_idx, batch_idx):
+        """
+        Combine both lanes of the row (partner = lane ^ 2) in fp64 and store delta = num / den.
+        """
+        partner_sum_num = cute.arch.shuffle_sync_bfly(sum_pair[0], offset=2)
+        partner_sum_den = cute.arch.shuffle_sync_bfly(sum_pair[1], offset=2)
+        partner_err_num = cute.arch.shuffle_sync_bfly(err_pair[0], offset=2)
+        partner_err_den = cute.arch.shuffle_sync_bfly(err_pair[1], offset=2)
+        if col_parity == 0:
+            num64 = (Float64(sum_pair[0]) + Float64(partner_sum_num)) + (Float64(err_pair[0]) + Float64(partner_err_num))
+            den64 = (Float64(sum_pair[1]) + Float64(partner_sum_den)) + (Float64(err_pair[1]) + Float64(partner_err_den))
+            delta = Float32(num64 / den64) if den64 != Float64(0.0) else Float32(0.0)
+            if row < seqlen.seqlen_q:
+                mLSE[row, head_idx, batch_idx] = delta
 
     def q_block_index(self, work_m, stage):
         """

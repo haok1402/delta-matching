@@ -202,6 +202,7 @@ class Preset:
     k2: str | None = None
     do2: str | None = None
     ds2: str | None = None
+    vd: str | None = None        # V operand of dP = dO V^T when set (MX: blocked along D); default: v, or k's scheme if q2 is set
     center_k: bool = True        # K centered by its per-head mean before quantization (softmax-invariant)
     delta_norm: bool = False     # matched delta = sum_j P dP / sum_j P (instead of sum_j P dP)
     l_from_codes: bool = False   # forward row sum l from the quantized P used in PV (O a convex combination of V rows)
@@ -244,10 +245,11 @@ PRESETS["mxfp8-all"] = PRESETS["mxfp8"]
 # (hd128 was [128,64]). Inputs exact to that contract; the P / dS sites reuse the hd128 sm90 model (an approximation until the
 # d256 P-hat / dS tiling is analysed) - used as the hd256 ACCURACY FLOOR, not as a bitwise spec.
 _register(Preset("sm90-d256", q="blockrows:64", k="blockrows:32", v="blockrows:32", do="blockrows_mul:64",
-                 p_fwd="sm90d256_pfwd", p_bwd="sm90_pbwd", ds="sm90d256_ds",
+                 p_fwd="sm90d256_pfwd", p_bwd="sm90_pbwd", ds="sm90d256_ds", delta_norm=True,
                  notes="sm90 hd256 (kda/docs/sm90-numerics-spec-hd256.md): [64,32] fp32 input scales, P-hat per (row, 32-key group) "
-                       "under a descending 128-key online max (12-binade floor), P' = 2^8 P, dS psi per 64x64, delta = sum P dP "
-                       "(no /sum P); F2b psi floor not modelled (as at hd128); hd256 accuracy floor"))
+                       "under a descending 128-key online max (12-binade floor), P' = 2^8 P, dS psi per 64x64; delta = sum P dP / sum P "
+                       "(lead ruling 2026-11-10: num/den as at hd128 - rowsum(dS)=0 by the method's definition; measured equal "
+                       "to the sm90 no-division form up to rounding); F2b psi floor not modelled; hd256 accuracy floor"))
 
 
 def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,
@@ -411,8 +413,10 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
         Ka = _site(p.k, kh, c0, p)
         _kb = int(p.k.split(":")[1]) if p.k.startswith("blockrows:") else 64      # K scale block (hd128 sm90: 64, hd256: 32)
         kscale = quant_blockrows(kh, _kb)[1].repeat_interleave(_kb, -1)[..., :N] if N % _kb == 0 else None   # (B, Hk, N)
+        if p.k.startswith("mx:"):        # MX K carries no per-key scale: the dS' key weighting is 1
+            kscale = torch.ones_like(kscale) if kscale is not None else None
         Va = _site(p.v, vh, c0, p)                           # operand of O = P V
-        Vd = _site(p.v if p.q2 is None else p.k, vh, c0, p)  # operand of dP = dO V^T (MX: D-blocked like K)
+        Vd = _site(p.vd or (p.v if p.q2 is None else p.k), vh, c0, p)  # operand of dP = dO V^T (MX: D-blocked like K)
         dOa = _site(p.do, doh, c0, p)                        # operand of dP = dO V^T
         Qb = Qa if p.q2 is None else _site(p.q2, qh, c0, p)  # operand of dK = dS^T Q
         Kb = Ka if p.k2 is None else _site(p.k2, kh, c0, p)  # operand of dQ = dS K

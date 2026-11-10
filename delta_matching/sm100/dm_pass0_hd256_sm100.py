@@ -38,6 +38,7 @@ from flash_attn.cute.tensormap_utils import acquire_tensormap, bound_rows, cta_t
 from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
 from flash_attn.cute import utils
 from delta_matching.sm100 import dm_utils, dm_common, dm_common_hd256 as dmh
+from delta_matching.sm100.dm_bwd_hd256kv2_sm100 import warp_arrive_c0, warp_arrive_local
 import flash_attn.cute.pipeline as pipeline_custom
 import cutlass.pipeline as cutlass_pipeline
 from flash_attn.cute.mask import AttentionMask
@@ -325,7 +326,13 @@ class DMPass0Hd256Sm100:
         self.dm_p2 = "p2" in _fl0 or "p2t" in _fl0
         # +p2t (S0b): +p2 with a per-stage causal key range (stage 0 of an adjacent-q pair skips its fully masked top n-blocks: the
         # MMA warp keeps one slot phase per stage, tl_loop iterates its own range); skipped tiles only ever added exact +0 to num/den
-        self.dm_p2t = "p2t" in _fl0
+        self.dm_p2t = "p2t" in _fl0 or "p2c" in _fl0
+        # +p2c (S1): +p2t with COMPLIANT cross-CTA slot releases (accuracy-audit 08:2x): every compute warp does tcgen05.wait::ld ->
+        # fence::before -> bar.warp.sync -> lane 0 arrive; CTA 0 lanes release.cta on their own (leader) barrier, CTA 1 lanes
+        # arrive.release.cluster on the leader's barrier (mapa rank 0); the leader MMA warp waits try_wait.acquire.cluster +
+        # fence::after. Slot-empty barrier counts = 16 warps per pair per stage.
+        self.dm_p2c = "p2c" in _fl0
+        assert not self.dm_p2c or self.dm_es
         assert self.dm_tl and self.use_2cta_instrs == self.dm_p2 and self.q_stage == 2 and self.n_block_size == 128 \
             and self.m_block_size == 128, "hd256 P1: 1-CTA (P2: +p2 2-CTA), q_stage 2, 128x128 tiles, +tl"
         if self.dm_c3:
@@ -1146,8 +1153,9 @@ class DMPass0Hd256Sm100:
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
             consumer_group=ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if (self.dm_c3 or self.dm_tl) else 1)
-            ),  # P0: softmax threads (+ c3 correction WG) release the S/dP slot
+                (1 if self.dm_p2c else cute.arch.WARP_SIZE) * len(self.softmax0_warp_ids) * self.cta_group_size
+                * (2 if (self.dm_c3 or self.dm_tl) else 1)
+            ),  # P0: softmax threads (+ c3 correction WG) release the S/dP slot (+p2c: one arrive per warp)
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
         )
@@ -1166,7 +1174,8 @@ class DMPass0Hd256Sm100:
             num_stages=self.s_p_o_stage,
             producer_group=mma_warp,
             consumer_group=ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * len(self.softmax0_warp_ids) * self.cta_group_size * (2 if (self.dm_c3 or self.dm_tl) else 1)
+                (1 if self.dm_p2c else cute.arch.WARP_SIZE) * len(self.softmax0_warp_ids) * self.cta_group_size
+                * (2 if (self.dm_c3 or self.dm_tl) else 1)
             ),
             cta_layout_vmnk=cta_layout_vmnk,
             defer_sync=True,
@@ -2089,14 +2098,14 @@ class DMPass0Hd256Sm100:
                     for i in cutlass.range(n_block_max - nmx0, unroll=1):
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_s_p_o.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
+                        self._p2_acquire(pipeline_s_p_o, 1, dm_slot_empty_phase >> 1)
                         gemm_S1_only(smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(1)
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_o_acc.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
+                        self._p2_acquire(pipeline_o_acc, 1, dm_slot_empty_phase >> 1)
                         gemm_dP1_only(smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(1)
                         dm_slot_empty_phase ^= 2
@@ -2105,20 +2114,20 @@ class DMPass0Hd256Sm100:
                     for i in cutlass.range(nmx0 - n_block_min, unroll=1):
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_s_p_o.producer_acquire_w_index_phase(0, dm_slot_empty_phase & 1)
+                        self._p2_acquire(pipeline_s_p_o, 0, dm_slot_empty_phase & 1)
                         gemm_Si[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(0)
-                        pipeline_s_p_o.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
+                        self._p2_acquire(pipeline_s_p_o, 1, dm_slot_empty_phase >> 1)
                         gemm_Si[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(1)
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_o_acc.producer_acquire_w_index_phase(0, dm_slot_empty_phase & 1)
+                        self._p2_acquire(pipeline_o_acc, 0, dm_slot_empty_phase & 1)
                         gemm_dPi[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(0)
-                        pipeline_o_acc.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
+                        self._p2_acquire(pipeline_o_acc, 1, dm_slot_empty_phase >> 1)
                         gemm_dPi[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(1)
                         dm_slot_empty_phase ^= 3
@@ -2222,6 +2231,30 @@ class DMPass0Hd256Sm100:
         return work_q_block(
             work_m, stage, cta_rank, q_stage=self.q_stage, cta_group_size=self.cta_group_size
         )
+
+    @cute.jit
+    def _p2_acquire(self, pipe, stage: int, phase):
+        """MMA-warp slot-empty wait (+p2c: acquire.cluster + tcgen05 fence::after; else the pipeline's own acquire)."""
+        if const_expr(self.dm_p2c):
+            dm_utils.mbar_wait_parity_cluster(Int32(pipe.sync_object_empty.get_barrier(stage).toint()), phase)
+            dm_utils.tc_fence_after()
+        else:
+            pipe.producer_acquire_w_index_phase(stage, phase)
+
+    @cute.jit
+    def _p2_release(self, pipe, stage: int, cta_rank, site: str):
+        """compute-warp slot release after its tcgen05.ld + wait::ld (+p2c: fence::before, per-warp aggregated arrive, cluster-scope
+        release from CTA 1; else the pipeline's per-thread release)."""
+        if const_expr(self.dm_p2c):
+            dm_utils.tc_fence_before()
+            bar = Int32(pipe.sync_object_empty.get_barrier(stage).toint())
+            if cta_rank == 0:
+                warp_arrive_local(bar)
+            else:
+                warp_arrive_c0(bar)
+        else:
+            with dm_utils.tcf_site(site):
+                pipe.consumer_release_w_index(stage)
 
     @cute.jit
     def _stage_n_max(self, seqlen, work_m, stage: int, n_block_min, n_block_max):
@@ -2813,8 +2846,7 @@ class DMPass0Hd256Sm100:
                             for i in cutlass.range_constexpr(32):
                                 r[32 * h + i] = vals[i]
                         cute.arch.fence_view_async_tmem_load()
-                        with dm_utils.tcf_site("r0"):
-                            pipeline_s_p_o.consumer_release_w_index(stage)
+                        self._p2_release(pipeline_s_p_o, stage, cta_rank, "r0")
                     for h in cutlass.range_constexpr(2):
                         if const_expr(not self.dm_es and not (self.dm_es2 and h == 1)):
                             vals = dm_utils.tmem_ld_16x64b_x32(s_addr + Int32(64 * h))
@@ -2857,8 +2889,7 @@ class DMPass0Hd256Sm100:
                             dpv = dm_utils.tmem_ld_16x64b_x16(d_addr + Int32(32 * j))
                             cute.arch.fence_view_async_tmem_load()
                             if const_expr(j == 3):
-                                with dm_utils.tcf_site("r1"):
-                                    pipeline_dp.consumer_release_w_index(stage)
+                                self._p2_release(pipeline_dp, stage, cta_rank, "r1")
                             a01 = (Float32(0.0), Float32(0.0))
                             a23 = (Float32(0.0), Float32(0.0))
                             for v in cutlass.range_constexpr(0, 16, 2):

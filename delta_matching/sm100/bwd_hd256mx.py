@@ -84,7 +84,7 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         impl = _env("DM_H256_BWD_IMPL", "")
         impl = (IMPL_DEFAULT if not knob else "1") if impl == "" else impl   # knobs are per class: one impl for all modes
     impls = dict(impl) if isinstance(impl, dict) else {m: str(impl) for m in ("dv", "dk", "dq")}
-    assert all(v in ("1", "2") for v in impls.values()), impls
+    assert all(v in ("1", "2", "3") for v in impls.values()), impls   # "3" = DmHd256Mx2 + dqopt (dq Q1+Q2 candidate)
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -127,10 +127,13 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         if not ordf:
             key = key + ("noordf",)
         cls = DmHd256Mx
-        if impls[mode] == "2":
+        extra = {}
+        if impls[mode] in ("2", "3"):
             from .dm_bwd_hd256mx2_sm100 import DmHd256Mx2 as cls  # noqa: N813
-            key = ("i2",) + key
-        _run(key, lambda: cls(mode, causal, kd, knob, ordf=ordf), ten, lds, [n_t, H, Hk], mode=mode)
+            key = ("i" + impls[mode],) + key
+            if impls[mode] == "3":
+                extra = dict(dqopt=True)
+        _run(key, lambda: cls(mode, causal, kd, knob, ordf=ordf, **extra), ten, lds, [n_t, H, Hk], mode=mode)
         if big or hsh:
             dumps[mode] = dict(dump=dump, codes=codes, sb=sb, hash=hh)
     if dbg:

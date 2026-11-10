@@ -48,11 +48,17 @@ class DmHd256Mx2:
     KNOBS = ("sc", "cd", "ld", "xc", "fin")
     DLY = 1 << 15
 
-    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False):
+    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
         self.ordf = bool(ordf)
+        # dqopt (dq mode; candidate O3-Q12, profile hd256-bwd-r2 + codex/hd256-bwdopt-02-ncu.md): Q1 next tile's ks / vs prefetched one
+        # tile ahead; Q2 SFA split per column half (k-steps 0,1 <- SFA block +0..3 written by half 0, k-steps 2,3 <- block +4..7
+        # written by half 1; SFB moved to +8..15), per-half 128-thread exchange barriers, each half reads only its 2 chunk slots.
+        # Same scale bytes, same MMA order: bitwise.
+        self.dqopt = bool(dqopt) and mode == "dq"
+        self.SFB_OFF = 8 if self.dqopt else 4
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
         self.kn = knob.replace("_safe", "")
@@ -275,8 +281,9 @@ class DmHd256Mx2:
                     dm_utils.gemm_ptx_bs(
                         mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
                         sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                        tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + 4,
-                        tuple((0, k) for k in range(4)), tuple((0, 0) for k in range(4)),
+                        tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                        ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                        tuple((0, 0) for k in range(4)),
                         zero_init=cutlass.Boolean(tp == 0))
                     tf.release()
                     cf.release()
@@ -335,8 +342,8 @@ class DmHd256Mx2:
             if hf == 0:
                 one = Int32(0x7F7F7F7F)
                 for s in cutlass.range_constexpr(2):
-                    dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + 4, one, one, one, one)
-                    dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + 8, one, one, one, one)
+                    dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF, one, one, one, one)
+                    dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF + 4, one, one, one, one)
             # keys-on-rows: stage l2 / delta of tile 0 (threads 0-127 l2, 128-255 delta)
             if const_expr(self.rows_are_keys):
                 h0 = hx * rep
@@ -345,6 +352,15 @@ class DmHd256Mx2:
                 else:
                     st_shared_f32(sLD_addr + ctid * 4, Float32(mDelta[b, h0, c_lo * 128 + ctid - 128]))
                 cute.arch.barrier(barrier_id=2, number_of_threads=256)
+            nk0 = Float32(0.0)
+            nk1 = Float32(0.0)
+            nv0 = Float32(0.0)
+            nv1 = Float32(0.0)
+            if const_expr(self.dqopt):      # Q1: ks / vs of this thread's two chunks of tile 0 (dq: c_lo = 0)
+                nk0 = Float32(mKs[b, hk_row, 2 * hf])
+                nk1 = Float32(mKs[b, hk_row, 2 * hf + 1])
+                nv0 = Float32(mVs[b, hk_row, 2 * hf])
+                nv1 = Float32(mVs[b, hk_row, 2 * hf + 1])
             for t in cutlass.range(total, unroll=1):
                 hi = t // ncs
                 ct = c_lo + t - hi * ncs
@@ -361,7 +377,20 @@ class DmHd256Mx2:
                 cs = [Float32(0.0)] * 2
                 ca = [Float32(0.0)] * 2
                 osb = [Int32(0)] * 4
-                for jj in cutlass.range_constexpr(2):
+                osbo = [Int32(0)] * 2         # dqopt: the other operand's sb of this thread's two chunks
+                if const_expr(self.dqopt):
+                    kc = [nk0, nk1]
+                    vc = [nv0, nv1]
+                    ctn = cutlass.min(ct + 1, c_hi - 1)          # Q1: issue tile t+1's loads now (clamped; last tile reloads itself)
+                    nk0 = Float32(mKs[b, hk_row, ctn * 4 + 2 * hf])
+                    nk1 = Float32(mKs[b, hk_row, ctn * 4 + 2 * hf + 1])
+                    nv0 = Float32(mVs[b, hk_row, ctn * 4 + 2 * hf])
+                    nv1 = Float32(mVs[b, hk_row, ctn * 4 + 2 * hf + 1])
+                    for jj in cutlass.range_constexpr(2):
+                        cs[jj] = dmh.dm_mx256_c(kc[jj], row_s)
+                        ca[jj] = dmh.dm_mx256_dp_scale(vc[jj], row_a)
+                        osbo[jj] = sb_of(kc[jj])
+                for jj in cutlass.range_constexpr(0 if self.dqopt else 2):
                     cj = ct * 4 + 2 * hf + jj
                     if const_expr(self.rows_are_keys):
                         qsj = Float32(mQs[b, h, cj])
@@ -373,7 +402,7 @@ class DmHd256Mx2:
                         vsj = Float32(mVs[b, hk_row, cj])
                         cs[jj] = dmh.dm_mx256_c(ksj, row_s)
                         ca[jj] = dmh.dm_mx256_dp_scale(vsj, row_a)
-                for j in cutlass.range_constexpr(4):
+                for j in cutlass.range_constexpr(0 if self.dqopt else 4):
                     if const_expr(self.mode == "dv"):
                         osb[j] = sb_of(Float32(mdOs[b, h, ct * 4 + j]))
                     elif const_expr(self.mode == "dk"):
@@ -535,7 +564,16 @@ class DmHd256Mx2:
                         if warp == 0:
                             spin(self.DLY)
                     if const_expr(not (self.kn == "xc" and self.unsafe)):
-                        cute.arch.barrier(barrier_id=2, number_of_threads=256)
+                        if const_expr(self.dqopt):
+                            # Q2: chunks 2 hf, 2 hf + 1 are reduced over the 4 lane quadrants of THIS half only
+                            if hf == 0:
+                                cute.arch.barrier(barrier_id=5, number_of_threads=128)
+                            else:
+                                cute.arch.barrier(barrier_id=6, number_of_threads=128)
+                            if const_expr(self.dbg & 1):
+                                cute.arch.barrier(barrier_id=2, number_of_threads=256)    # identity exchange (dbg only)
+                        else:
+                            cute.arch.barrier(barrier_id=2, number_of_threads=256)
                     if const_expr((self.dbg & 1) and self.mode == "dq"):
                         if hf == 0:
                             # original order: chunks 0, 1 (own) then 2, 3 (upper half), fp64 over ascending tiles
@@ -552,6 +590,11 @@ class DmHd256Mx2:
                         sb = dm_utils.pow2_sb(dm_utils.redux_max_abs_f32(cute.arch.fmax(cute.arch.fmax(am2[0], am2[1]), mo)))
                         sbs = [sb, sb]
                         sball = [sb] * 4
+                    elif const_expr(self.dqopt):
+                        sball = [Int32(0)] * 4
+                        for jj in cutlass.range_constexpr(2):
+                            m4 = ld_shared_v4f(xb + (2 * hf + jj) * 16)
+                            sbs[jj] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
                     else:
                         sball = [Int32(0)] * 4
                         for j in cutlass.range_constexpr(4):
@@ -650,7 +693,13 @@ class DmHd256Mx2:
                             for q in cutlass.range_constexpr(4):
                                 st_global_u8(cp, x4[u] >> (8 * q))
                                 cp = cp + stc
-                if hf == 0:
+                if const_expr(self.dqopt):
+                    v0_ = dm_utils.add_sb_clamp(sbs[0], osbo[0])
+                    v1_ = dm_utils.add_sb_clamp(sbs[1], osbo[1])
+                    z_ = Int32(0)
+                    sfw = sel_eq_i32(hf, Int32(0), pack4(v0_, v1_, z_, z_), pack4(z_, z_, v0_, v1_))
+                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                elif hf == 0:
                     sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),
                                 dm_utils.add_sb_clamp(sball[2], osb[2]), dm_utils.add_sb_clamp(sball[3], osb[3]))
                     dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + qd, sfa)

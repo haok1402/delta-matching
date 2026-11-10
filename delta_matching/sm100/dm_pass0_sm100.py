@@ -272,6 +272,7 @@ class DMPass0Sm100:
         self.dm_ma = ("ma" in _fl0 and self.is_causal) or "maa" in _fl0
         self.dm_b6 = next((int(t[3:]) for t in _fl0 if t.startswith("b6_")), 0)   # deg-6 poly exp on (qb+kb)%m==0 blocks
         self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
+        self.dm_mo = "mo" in _fl0   # +mo (track AP): MMA order S_0, dP_0, S_1, dP_1 per KV tile (bitwise, order only)
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         # +f64: per-tile fp32 partial sums (short chains), accumulated across tiles in fp64; delta = num / den in fp64,
@@ -2053,27 +2054,47 @@ class DMPass0Sm100:
                     pipeline_q.consumer_wait_w_index_phase(stage, mma_q_consumer_phase)
                 mma_q_consumer_phase ^= 1
                 for i in cutlass.range(block_iter_count, unroll=1):
-                    pipeline_kv.consumer_wait(mma_kv_consumer_state)
-                    sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                    for stage in cutlass.range_constexpr(self.q_stage):
-                        pipeline_s_p_o.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
-                        gemm_Si[stage](
-                            smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
-                        )
-                        pipeline_s_p_o.producer_commit_w_index(stage)
-                    pipeline_kv.consumer_release(mma_kv_consumer_state)
-                    mma_kv_consumer_state.advance()
-                    pipeline_kv.consumer_wait(mma_kv_consumer_state)
-                    sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                    for stage in cutlass.range_constexpr(self.q_stage):
-                        pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
-                        gemm_dPi[stage](
-                            smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator)
-                        )
-                        pipeline_o_acc.producer_commit_w_index(stage)
-                    pipeline_kv.consumer_release(mma_kv_consumer_state)
-                    mma_kv_consumer_state.advance()
-                    dm_slot_empty_phase ^= 1
+                    if const_expr(self.dm_mo):
+                        # +mo: S_0, dP_0, S_1, dP_1 (K and V of this tile both resident before S_1)
+                        k_state = mma_kv_consumer_state.clone()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        mma_kv_consumer_state.advance()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        for stage in cutlass.range_constexpr(self.q_stage):
+                            pipeline_s_p_o.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_Si[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                            pipeline_s_p_o.producer_commit_w_index(stage)
+                            pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_dPi[stage](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
+                            pipeline_o_acc.producer_commit_w_index(stage)
+                        pipeline_kv.consumer_release(k_state)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        dm_slot_empty_phase ^= 1
+                    else:
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        for stage in cutlass.range_constexpr(self.q_stage):
+                            pipeline_s_p_o.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_Si[stage](
+                                smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
+                            )
+                            pipeline_s_p_o.producer_commit_w_index(stage)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        for stage in cutlass.range_constexpr(self.q_stage):
+                            pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
+                            gemm_dPi[stage](
+                                smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator)
+                            )
+                            pipeline_o_acc.producer_commit_w_index(stage)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        dm_slot_empty_phase ^= 1
                 for stage in cutlass.range(self.q_stage):
                     pipeline_q.consumer_release_w_index(stage)
 

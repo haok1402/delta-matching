@@ -5728,7 +5728,7 @@ class DMBackwardSm100:
             # brain6 timing-only ablation (outputs WRONG): skip pass 1 (no amax TMEM pass) = one-pass helper ceiling
             ds_amax = Float32(1.0)
         else:
-            for h in cutlass.range_constexpr(2):
+            for h in cutlass.range_constexpr(1 if const_expr("hhalf" in self.dm_abl) else 2):
                 for st in cutlass.range_constexpr(nst):
                     frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
                     cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
@@ -5747,8 +5747,11 @@ class DMBackwardSm100:
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
                 frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
-                cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
-                cute.arch.fence_view_async_tmem_load()
+                if const_expr("hhalf" in self.dm_abl and h == 1):
+                    frag.fill(0.0)   # brain6 abl:hhalf (timing only, WRONG): other half done by a free helper
+                else:
+                    cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
+                    cute.arch.fence_view_async_tmem_load()
                 fv = frag[None, 0, 0]
                 fq = cute.make_fragment_like(fv, Float32)
                 for v in cutlass.range_constexpr(cute.size(fv) // 2):

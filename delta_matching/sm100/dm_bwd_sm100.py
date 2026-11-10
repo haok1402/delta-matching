@@ -737,6 +737,12 @@ class DMBackwardSm100:
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
         self.dm_fws = "nofws" not in self.dm_opts
+        # rw8k tconv: tail converter (tailconv.py) launched with PDL after this kernel: launch_dependents after the TMEM
+        # allocation, fence.proxy.async.global before every det semaphore release (the converter reads the accumulators
+        # with generic loads after an ld.acquire of the semaphore). No arithmetic change.
+        self.dm_tconv = "tconv" in self.dm_opts
+        self.dm_tcfence = self.dm_tconv and "tcnofence" not in self.dm_opts   # bisect knobs (timing only)
+        self.dm_tcpush = self.dm_tconv and "tcnopush" not in self.dm_opts
         # pers=<CTAs>: persistent grid of that many CTAs (= SM count, a cluster multiple), 0 = single-tile CTAs
         self.dm_pers = int(next((x[5:] for x in self.dm_opts if x.startswith("pers=")), "0"))
         # pdyn: dynamic (atomic-counter) persistent claim order instead of static grid-stride (needs pers=N)
@@ -2257,6 +2263,8 @@ class DMBackwardSm100:
             self._dm_setmaxreg_dec(self.num_regs_empty)
             if const_expr(self.dm_pdyn):
                 self._dm_claim_loop(tile_sched_params, dm_sbase, aux_data.tensors[-1].iterator.toint())
+            if const_expr(self.dm_tcpush and self.deterministic):
+                self._tcq_empty(aux_data.tensors[4], mdQ_semaphore, TileSchedulerCls, SeqlenInfoCls, block_info)
 
         #  RELAY
         # (14)
@@ -2343,6 +2351,10 @@ class DMBackwardSm100:
             if const_expr(self.dm_allocf):
                 dm_utils.tc_fence_after()    # allocf: ... and the tmem_hold read (retrieve_ptr) after it
             tmem_ptr = tmem.retrieve_ptr(Float32)
+            if const_expr(self.dm_tconv):
+                # rw8k tconv: this CTA holds its TMEM (its last obstructable resource); the PDL dependent (the tail
+                # converter, which uses no TMEM) may launch once every CTA got here or exited
+                cute.arch.griddepcontrol_launch_dependents()
 
             self.mma(
                 tiled_mma_S,
@@ -2524,6 +2536,7 @@ class DMBackwardSm100:
                                       and "trace" in self.dm_opts and "semw" in self.dm_opts) else None),
                 dm_tlv=(aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
                                                          and "trace" in self.dm_opts and self.dm_tlev >= 0) else None),
+                dm_tcq=aux_data.tensors[4] if const_expr(self.dm_tconv and self.deterministic) else None,
             )
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if warp_idx == self.reduce_warp_ids[0] and cute.arch.lane_idx() == 0:
@@ -6156,6 +6169,43 @@ class DMBackwardSm100:
             work_tile = tile_scheduler.get_current_work()
 
     @cute.jit
+    def _tcq_empty(self, dm_tcq, mdQ_semaphore, TileSchedulerCls, SeqlenInfoCls, block_info):
+        """rw8k tconv readiness queue, fed by the otherwise idle EMPTY warp (a scheduling hint for the PDL tail converter;
+        correctness rests on the converter's own ld.acquire of the det counters). For every dQ tile m this CTA is the LAST
+        writer of in the det order (lock value == writers - 1; under spt: work_n == 0), the leader CTA's empty warp waits
+        (ld.acquire.gpu, nanosleep backoff) until both 2-CTA slots of the tile's det counter are final, then appends it:
+        pos = atom.add(tail, 1); entry[pos] = tile + 1. Tiles are appended in the order they become final. The compute /
+        reduce / MMA warps run no extra code. Layout (int32, zeroed per call on the prestage side stream): [0] tail,
+        [1, 1 + T) entries."""
+        cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
+        if cute.arch.lane_idx() == 0 and cta_rank_in_cluster == 0:
+            tile_scheduler = TileSchedulerCls()
+            work_tile = tile_scheduler.initial_work_tile_info()
+            while work_tile.is_valid_tile:
+                (work_n, kv_block, head_idx, kv_head, batch_idx, seqlen, m_block_min, m_block_max,
+                 process_tile) = self._work_tile(work_tile, cta_rank_in_cluster, SeqlenInfoCls, block_info)
+                mt = cute.size(mdQ_semaphore, mode=[0])     # (Mt, rank, H, B) view (semaphore_transpose)
+                nh = cute.size(mdQ_semaphore, mode=[2])
+                ns = cute.size(mdQ_semaphore, mode=[1])
+                base = dm_tcq.iterator.toint()
+                if process_tile:
+                    # DM gloop: one CTA serves the dm_G query heads of its KV group (same order as the reduce warps)
+                    for dm_g in cutlass.range(self.dm_G, unroll=1):
+                        hq = head_idx + dm_g
+                        for m in cutlass.range(m_block_min, m_block_max, unroll=1):
+                            nmax = block_info.get_n_block_max_for_m_block(seqlen, m)
+                            lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info,
+                                                                 seqlen, m, work_n)
+                            if lock == nmax - 1:
+                                srow = mdQ_semaphore.iterator.toint() + Int64(4) * Int64(((batch_idx * nh + hq) * mt + m) * ns)
+                                for r in cutlass.range_constexpr(2):
+                                    dm_utils.poll_acquire_ge_or_trap(srow + Int64(4 * r), nmax, Int32(1 << 26))
+                                pos = dm_utils.atom_add_relaxed_gpu_s32(base, Int32(1))
+                                dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + pos), (batch_idx * nh + hq) * mt + m + 1)
+                tile_scheduler.advance_to_next_work()
+                work_tile = tile_scheduler.get_current_work()
+
+    @cute.jit
     def dQacc_reduce(
         self,
         mdQaccum: cute.Tensor,
@@ -6183,6 +6233,7 @@ class DMBackwardSm100:
         aux_data=None,
         dm_trw=None,
         dm_tlv=None,
+        dm_tcq=None,
     ):
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
@@ -6478,6 +6529,8 @@ class DMBackwardSm100:
                         self.reduce_sync_barrier.arrive_and_wait()
                         if const_expr(self.deterministic and delay_semaphore_release):
                             if not release_now and m_block > m_block_min:
+                                if const_expr(self.dm_tcfence):
+                                    dm_utils.fence_proxy_async_global()
                                 barrier.arrive_inc_async(
                                     mdQ_semaphore_cur[(m_block - 1, None)].iterator,
                                     tidx,
@@ -6552,6 +6605,8 @@ class DMBackwardSm100:
 
                         if const_expr(self.deterministic and stage == 0 and delay_semaphore_release):
                             if not release_now and m_block > m_block_min:
+                                if const_expr(self.dm_tcfence):
+                                    dm_utils.fence_proxy_async_global()
                                 barrier.arrive_inc_async(
                                     mdQ_semaphore_cur[(m_block - 1, None)].iterator,
                                     tidx,
@@ -6581,6 +6636,8 @@ class DMBackwardSm100:
                     # in this role follows their wait_group + barrier, see barrier.arrive_inc_async.
                     if const_expr(self.deterministic):
                         if release_now and not m_block_oob_upper:
+                            if const_expr(self.dm_tcfence):
+                                dm_utils.fence_proxy_async_global()
                             barrier.arrive_inc_async(
                                 mdQ_semaphore_cur[m_block, None].iterator,
                                 tidx,
@@ -6595,6 +6652,8 @@ class DMBackwardSm100:
                     # final semaphore release
                     if const_expr(self.deterministic and delay_semaphore_release):
                         if not release_now:
+                            if const_expr(self.dm_tcfence):
+                                dm_utils.fence_proxy_async_global()
                             barrier.arrive_inc_async(
                                 mdQ_semaphore_cur[(m_block_max - 1, None)].iterator,
                                 tidx,
@@ -6610,6 +6669,8 @@ class DMBackwardSm100:
                 ):
                     m_block_global_max = cute.ceil_div(seqlen.seqlen_q, self.tile_m)
                     for m_block in cutlass.range(m_block_max, m_block_global_max, unroll=1):
+                        if const_expr(self.dm_tcfence):
+                            dm_utils.fence_proxy_async_global()
                         barrier.arrive_inc(
                             mdQ_semaphore_cur[(m_block, None)].iterator, tidx, cta_rank_in_cluster, 1
                         )
@@ -6991,6 +7052,8 @@ class DMBackwardSm100:
                     cute.arch.cp_async_bulk_wait_group(0, read=not deterministic_KV)
                 self.compute_sync_barrier.arrive_and_wait()
             if const_expr(deterministic_KV):
+                if const_expr(self.dm_tcfence):
+                    dm_utils.fence_proxy_async_global()
                 barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx_cta, 0, 1)
 
         cute.arch.sync_warp()
@@ -7233,6 +7296,8 @@ class DMBackwardSm100:
                 cute.arch.cp_async_bulk_commit_group()
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
+            if const_expr(self.dm_tcfence):
+                dm_utils.fence_proxy_async_global()
             barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
 
         cute.arch.sync_warp()

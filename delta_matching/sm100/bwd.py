@@ -107,6 +107,13 @@ def _auto_opts_impl(q8, k8, causal=False):
     # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA
     # launch/prologue/epilogue is a large share of a KV tile; long sequences keep the hardware's dynamic CTA order
     # (static striding loses 4-18% there). 'nopers' disables, explicit 'pers=N' overrides, persN= sets the cut.
+    # DM tconv (rw8k, det, auto): PDL tail converter for dQ (tailconv.py) for N <= tconvN (default 16384): 8k e2e -1.0..-1.5%
+    # per call (both GQA shapes); measured +0.8..+1.6% at 64k-128k, so long sequences keep the serial postprocess.
+    # 'tconv' forces it, 'notconv' disables, tconvN=<N> moves the cut.
+    tN = int(next((o[7:] for o in ol if o.startswith("tconvN=")), "16384"))
+    if ("tconv" not in ol and "notconv" not in ol and q8.shape[1] <= tN
+            and not any(o in ol for o in ("lwc", "trace", "pdyn", "rsdbg", "pdump"))):
+        ol = ol + ["tconv"]
     pN = int(next((o[6:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
     # DM pcN / pdyn REMOVED (2026-11-09): the dynamic persistent scheduler no longer compiles, its "+6-8% at causal 8k"
     # came from the b_ab first-arm bias (BABAUDIT) and fa4-bench measured 0.998x. Fail loudly instead of silently ignoring.
@@ -241,6 +248,21 @@ def _patched_source():
         ("fa_bwd_obj = FlashAttentionBackwardSm100(", "fa_bwd_obj = _DMBackwardSm100("),
         ("_flash_attn_bwd.compile_cache", "_dm_bwd_cache()"),
         ("dk_accum, dk, softmax_scale,", "dk_accum, dk, 1.0,"),
+        # rw8k tconv: readiness queue for the tail converter, allocated with the scratch pool (zeroed per call by the
+        # prestage side stream, which waits for the previous call's converter) and passed to the kernel as aux[4]
+        ("    else:\n        dQ_semaphore = None\n",
+         "    else:\n        dQ_semaphore = None\n"
+         "    if dQ_semaphore is not None and _dm_tconv():\n"
+         "        _dm_tcq = torch.zeros(1 + 2 * (dQ_semaphore.numel() // dQ_semaphore.shape[-1]), dtype=torch.int32, device=device)\n"
+         "        _CTX['tcq_cur'] = _dm_tcq\n"
+         "        aux_tensors = list(aux_tensors[:4]) + [_dm_tcq] + list(aux_tensors[4:])\n"),
+        # rw8k tconv: hand each postprocess call its readiness semaphore (det dQ / dK / dV lock counters)
+        ("        _bwd_postprocess_convert(\n            dq_accum, dq,",
+         "        _CTX['dm_sem'] = ('q', dQ_semaphore, causal, qhead_per_kvhead, cluster_size * tile_n)\n        _bwd_postprocess_convert(\n            dq_accum, dq,"),
+        ("            _bwd_postprocess_convert(\n                dk_accum, dk,",
+         "            _CTX['dm_sem'] = ('kv', dK_semaphore, causal, qhead_per_kvhead, cluster_size * tile_n)\n            _bwd_postprocess_convert(\n                dk_accum, dk,"),
+        ("            _bwd_postprocess_convert(\n                dv_accum, dv,",
+         "            _CTX['dm_sem'] = ('kv', dV_semaphore, causal, qhead_per_kvhead, cluster_size * tile_n)\n            _bwd_postprocess_convert(\n                dv_accum, dv,"),
         ("dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa",
          "dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa and not _dm_gloop()"),
         ("            q.detach(),\n            k.detach(),\n            v.detach(),\n            dout,\n",
@@ -283,8 +305,18 @@ def _dm_cfg(config):
 _ns = dict(vars(fi))
 def _dm_post_convert(acc, out, *a, **k):
     """FA4 postprocess wrapper: skipped for dQ when the kernel's last writer already wrote bf16 dQ (DM lwc)."""
+    sem = _CTX.pop("dm_sem", None)
     if _CTX.get("dq") is not None and out is _CTX["dq"]:
         return
+    if _env("DM_RW8K_SEMDUMP", "0") == "1" and sem is not None and sem[1] is not None and not k.get("fake_mode", False):
+        _CTX.setdefault("semdump", []).append(sem[1])   # DEBUG (rw8k): readiness counters after the call
+    if (sem is not None and sem[1] is not None and sem[0] == "q" and "tconv" in _env("DM_BWD_OPTS", "").split(",")
+            and _env("DM_TCONV_OFF", "0") != "1"):   # DM_TCONV_OFF=1: DEBUG, serial FA4 postprocess (isolates bwd main)
+        # rw8k tconv: PDL tail converter (tailconv.py): same conversion, each tile as soon as its det counter is final
+        from .tailconv import tconv_convert
+        kind, sem_t, causal_, G, ctn = sem
+        return tconv_convert(sem_t, acc, out, *a, dm_kind=kind, dm_causal=bool(causal_), dm_ctn=int(ctn),
+                             dm_G=int(G), queue=_CTX["tcq_cur"], **k)
     return _ORIG_POST(acc, out, *a, **k)
 
 
@@ -296,6 +328,14 @@ def _dm_gloop():
 
 
 _ns.update(_dm_gloop=_dm_gloop)
+
+
+def _dm_tconv():
+    """DM_BWD_OPTS tconv (rw8k): PDL tail converter for dQ (tailconv.py)."""
+    return "tconv" in _env("DM_BWD_OPTS", "").split(",")
+
+
+_ns.update(_dm_tconv=_dm_tconv)
 _ns.update(_dm_zeros=_dm_zeros, _dm_empty=_dm_empty, _DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _dm_bwd_cache=_dm_bwd_cache, _dm_cfg=_dm_cfg)
 exec(compile(_patched_source(), fi.__file__ + ":dm_patched_bwd", "exec"), _ns)
 _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
@@ -309,6 +349,9 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
     # DM d3nh precondition (MMA-warp opaque zero = loop counter >> 30): per-tile main-loop trip count < 2^30
     assert (q8.shape[1] // 128 + 1) * max(1, q8.shape[2] // k8.shape[2]) < 2 ** 30, "d3nh: main-loop trip count >= 2^30"
+    if "tconv" in _auto_opts(q8, k8, causal).split(",") and deterministic:
+        assert trace is None and not any(o in _env("DM_BWD_OPTS", "").split(",") for o in ("lwc", "trace")), \
+            "tconv: det only, aux[4] = readiness queue (no trace / lwc)"
     if "lwc" in _env("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
@@ -350,6 +393,11 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
             os.environ["DM_BWD_OPTS"] = _ao
             pc = fi._bwd_postprocess_convert.compile_cache
             fi._bwd_postprocess_convert.compile_cache = fastpath.RecCache(pc)
+            from . import tailconv as _tc       # rw8k tconv: record the converter launches too
+            if _tc._CACHE is None:
+                _tc._CACHE = _tc._cache()
+            tcc = _tc._CACHE
+            _tc._CACHE = fastpath.RecCache(tcc)
             try:
                 r = _dm_flash_attn_bwd(q8, k8, v8, do8, do8, lse_c, softmax_scale=sm, causal=causal,
                                        deterministic=deterministic, aux_tensors=aux)[:3]
@@ -357,6 +405,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
                 return tuple(r)
             finally:
                 fi._bwd_postprocess_convert.compile_cache = pc
+                _tc._CACHE = tcc
                 os.environ["DM_BWD_OPTS"] = opts0_
                 _CTX.pop("pool", None)
                 _CTX.pop("prestaged", None)

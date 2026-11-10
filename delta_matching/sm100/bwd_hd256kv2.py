@@ -60,8 +60,52 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     return dk, dv, extra
 
 
+_SIDE = {}
+
+
+def _side(dev):
+    k = str(dev)
+    if k not in _SIDE:
+        _SIDE[k] = torch.cuda.Stream(device=dev)
+    return _SIDE[k]
+
+
+def _s1_mode():
+    from .fastpath import env as _env
+    v = _env("DM_H256_S1", "kv2first")
+    assert v in ("0", "kv2first", "dqfirst"), v
+    return v
+
+
 def dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None):
-    """Same contract as bwd_hd256mx.dm_bwd_hd256mx: (dq, dk, dv) [+ dbg dict].  dq = DmHd256Mx dq mode, dk/dv = KV2."""
+    """Same contract as bwd_hd256mx.dm_bwd_hd256mx: (dq, dk, dv) [+ dbg dict].  dq = DmHd256Mx dq mode, dk/dv = KV2.
+    hd256-8k S1 (DM_H256_S1, default kv2first; dbg=0 only): dq and KV2 are independent (both only read the quantized inputs,
+    lse and delta; disjoint outputs) -> dq runs on a side stream concurrently with KV2 on the caller stream, so each fills
+    the other's tail SMs. Same kernels, same inputs, same values; the caller stream joins the side stream before returning."""
+    mode = _s1_mode() if not dbg else "0"
+    if mode != "0" and q8.is_cuda:
+        main = torch.cuda.current_stream(q8.device)
+        side = _side(q8.device)
+        ready = torch.cuda.Event()
+        ready.record(main)                                  # every input of dq (pass 0's delta included) is enqueued on main
+        ins = (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)
+
+        def _dq():
+            side.wait_event(ready)
+            with torch.cuda.stream(side):
+                r = _mx.dm_bwd_hd256mx(*ins, causal, modes=("dq",))
+            for t in ins:
+                t.record_stream(side)                       # main-allocated inputs read on side: no reuse before side is done
+            r[0].record_stream(main)                        # side-allocated dq consumed on main
+            return r[0]
+
+        if mode == "dqfirst":
+            dq = _dq()
+        dk, dv, _ = kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, knob=knob, opts=opts)
+        if mode == "kv2first":
+            dq = _dq()
+        main.wait_stream(side)
+        return dq, dk, dv
     r = _mx.dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, modes=("dq",))
     dq, d = r[0], (r[3] if dbg else None)
     del r                    # the dq-only call's unused (empty) dk / dv buffers go back to the allocator before KV2 allocates

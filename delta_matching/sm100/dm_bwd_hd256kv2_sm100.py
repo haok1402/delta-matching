@@ -64,13 +64,15 @@ def commit_mc(mbar: Int32, *, loc=None, ip=None):
          "r", True, loc, ip)
 
 
-def warp_arrive_c0(mbar):
+@dsl_user_op
+def warp_arrive_c0(mbar: Int32, *, loc=None, ip=None):
     """Per-warp aggregated cross-CTA arrive: every lane has already done its own tcgen05 wait/fence::before (and proxy fence);
-    bar.warp.sync orders the lanes' memory operations before lane 0's mbarrier.arrive.release.cluster on the leader CTA's barrier
-    (causality: warp barrier at CTA scope, then a cluster-scope release; accuracy-audit 08:2x)."""
-    cute.arch.sync_warp()
-    if cute.arch.lane_idx() == 0:
-        dm_utils.mbar_arrive_rank(mbar, Int32(0))
+    bar.warp.sync orders the lanes' memory operations before lane 0's mbarrier.arrive.release.cluster on the leader (rank 0)
+    CTA's barrier at this smem offset (causality: warp barrier, then a cluster-scope release; accuracy-audit 08:2x)."""
+    _asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
+         "{\n\t.reg .pred p;\n\t.reg .b32 l, rm;\n\tbar.warp.sync 0xffffffff;\n\tmov.u32 l, %laneid;\n\t"
+         "setp.eq.u32 p, l, 0;\n\tmapa.shared::cluster.u32 rm, $0, 0;\n\t"
+         "@p mbarrier.arrive.release.cluster.shared::cluster.b64 _, [rm];\n\t}", "r", True, loc, ip)
 
 
 def _coop(n):

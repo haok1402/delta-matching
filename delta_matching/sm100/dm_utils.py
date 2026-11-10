@@ -208,9 +208,81 @@ def redux_max_abs_f32(x: Float32, *, loc=None, ip=None) -> Float32:
         "=f,f", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
+def _dz_str(dz, idx, a_is_tmem):
+    """DM d3nh: PTX that adds the opaque zero operand $idx to the smem descriptor start words (b_lo0, and a0 when A is
+    an smem descriptor). dz is 0 at run time but not provably 0 to ptxas and varies per main-loop iteration, so the
+    per-k-step descriptor words are formed next to each MMA instead of being hoisted out of the loop as 64-bit
+    loop invariants (2 uniform registers each), which exhausts the MMA warp's uniform registers (UR -> R -> local
+    spills). Same descriptors, same MMAs: bitwise."""
+    if dz is None:
+        return ""
+    return f"add.u32 b_lo0, b_lo0, ${idx};\n\t" + ("" if a_is_tmem else f"add.u32 a0, a0, ${idx};\n\t")
+
+
+@dsl_user_op
+def opaque_zero(i: Int32, *, loc=None, ip=None) -> Int32:
+    """DM d3nh: i >> 30 for a main-loop counter i (< 2^30): 0, but not foldable by LLVM (inline asm) nor ptxas (the trip
+    count is a run-time value), and loop-variant."""
+    return Int32(llvm.inline_asm(T.i32(), [Int32(i).ir_value(loc=loc, ip=ip)], "shr.u32 $0, $1, 30;", "=r,r",
+                                 has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT,
+                                 loc=loc, ip=ip))
+
+
+def gemm_ptx_ss_w_idx(tiled_mma, acc, tCrA, tCrB, sA, sB, A_idx=None, B_idx=None, zero_init=False, cta_group=1, dz=None):
+    """SS (both operands smem descriptors) dense MMA over all k-steps: flash_attn.cute.blackwell_helpers.gemm_ptx_w_idx /
+    gemm_ptx_partial (non-TS branch, same PTX), plus DM d3nh's optional opaque zero dz."""
+    from flash_attn.cute import mma_sm100_desc as sm100_desc
+    from flash_attn.cute.blackwell_helpers import i64_to_i32x2, _tcgen05_mma_kind
+    rA = tCrA if A_idx is None else tCrA[None, None, None, A_idx]
+    rB = tCrB if B_idx is None else tCrB[None, None, None, B_idx]
+    sA = sA if A_idx is None else sA[None, None, None, A_idx]
+    sB = sB if B_idx is None else sB[None, None, None, B_idx]
+    op = cute.make_mma_atom(tiled_mma.op).op
+    acc_tmem_addr = acc.iterator.toint()
+    idesc: int = sm100_desc.mma_op_to_idesc(op)
+    kind = _tcgen05_mma_kind(op)
+
+    def desc_base(s, dtype_width, major_mode):
+        b = sm100_desc.make_smem_desc_base(
+            cute.recast_layout(128, dtype_width, s.layout[0]), s.iterator.type.swizzle_type,
+            sm100_desc.Major.K if major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K else sm100_desc.Major.MN)
+        return i64_to_i32x2(b)
+
+    a_lo, a_hi = desc_base(sA, op.a_dtype.width, op.a_major_mode)
+    b_lo, b_hi = desc_base(sB, op.b_dtype.width, op.b_major_mode)
+    nk = cute.size(rA.shape[2])
+    offset_a = [cute.crd2idx((0, 0, k), rA.layout) for k in range(nk)]
+    offset_b = [cute.crd2idx((0, 0, k), rB.layout) for k in range(nk)]
+    start_a = Int32(a_lo | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator))
+    start_b = Int32(b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
+    pred_str = "p" if isinstance(zero_init, cutlass.Boolean) else "0" if zero_init else "1"
+    input_args = [Int32(cute.arch.make_warp_uniform(start_a)).ir_value(),
+                  Int32(cute.arch.make_warp_uniform(start_b)).ir_value(),
+                  Int32(not zero_init).ir_value(),
+                  Int32(cute.arch.make_warp_uniform(acc_tmem_addr)).ir_value()]
+    if dz is not None:
+        input_args.append(Int32(dz).ir_value())
+    body = ("{\n\t.reg .pred leader_thread;\n\t.reg .pred p;\n\t.reg .b32 idesc, tmem_acc, a0, b_lo0, a_lo, b_lo, a_hi, b_hi;\n\t"
+            ".reg .b64 adesc, bdesc;\n\t"
+            "elect.sync _|leader_thread, -1;\n\t"
+            f"mov.b32 idesc, {hex(idesc)};\n\t"
+            "mov.b32 tmem_acc, $3;\n\tmov.b32 a0, $0;\n\tmov.b32 b_lo0, $1;\n\t"
+            + _dz_str(dz, 4, False)
+            + f"mov.b32 a_hi, {hex(a_hi)};\n\tmov.b32 b_hi, {hex(b_hi)};\n\t"
+            "setp.ne.b32 p, $2, 0;\n\t")
+    for k in range(nk):
+        body += (f"add.u32 a_lo, a0, {hex(offset_a[k])};\n\tadd.u32 b_lo, b_lo0, {hex(offset_b[k])};\n\t"
+                 "mov.b64 adesc, {a_lo, a_hi};\n\tmov.b64 bdesc, {b_lo, b_hi};\n\t"
+                 f"@leader_thread tcgen05.mma.cta_group::{cta_group}.kind::{kind} [tmem_acc], adesc, bdesc, idesc, "
+                 f"{pred_str if k == 0 else '1'};\n\t")
+    body += "}\n"
+    llvm.inline_asm(None, input_args, body, ",".join(["r"] * len(input_args)),
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+
+
 def gemm_ptx_bs(
     op, acc_tmem_addr, tCrA, tCrB, sA, sB, sfa_base, sfb_base, sfa_map, sfb_map,
-    zero_init=False, tA_addr=None, cta_group: int = 1,
+    zero_init=False, tA_addr=None, cta_group: int = 1, dz=None,
 ):
     """Block-scaled (kind::mxf8f6f4, UE8M0) MMA over all k-steps of tCrA/tCrB, SS (sA given) or TS (A in TMEM at tA_addr).
     sfa_map / sfb_map: per k-step (column offset added to sfa_base / sfb_base, sf byte id 0..3) python tuples.
@@ -246,12 +318,15 @@ def gemm_ptx_bs(
                   Int32(cute.arch.make_warp_uniform(acc_tmem_addr)).ir_value(),
                   Int32(cute.arch.make_warp_uniform(sfa_base)).ir_value(),
                   Int32(cute.arch.make_warp_uniform(sfb_base)).ir_value()]
+    if dz is not None:
+        input_args.append(Int32(dz).ir_value())
+    dzs = _dz_str(dz, 6, is_ts)
     instr = f"tcgen05.mma.cta_group::{cta_group}.kind::mxf8f6f4.block_scale.scale_vec::1X"
     body = ("{\n\t.reg .pred leader_thread;\n\t.reg .pred p;\n\t.reg .b32 tmem_acc, a0, sfa0, sfb0, sfa, sfb;\n\t"
             ".reg .b32 b_lo0, b_lo, b_hi, a_lo, a_hi;\n\t.reg .b64 bdesc, adesc;\n\t"
             "elect.sync _|leader_thread, -1;\n\t"
             "mov.b32 tmem_acc, $3;\n\tmov.b32 a0, $0;\n\tmov.b32 sfa0, $4;\n\tmov.b32 sfb0, $5;\n\t"
-            "mov.b32 b_lo0, $1;\n\t"
+            "mov.b32 b_lo0, $1;\n\t" + dzs +
             f"mov.b32 b_hi, {hex(b_hi)};\n\t"
             + ("" if is_ts else f"mov.b32 a_hi, {hex(a_hi)};\n\t")
             + "setp.ne.b32 p, $2, 0;\n\t")

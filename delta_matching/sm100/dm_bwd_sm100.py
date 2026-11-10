@@ -185,6 +185,13 @@ def dm_posmajor_once_scheduler(qh: int):
     return DMPosMajOnceScheduler
 
 
+def _dm_drop_dz(fn):
+    """MMA helpers without DM d3nh's opaque-zero operand: accept and ignore dz."""
+    def f(*a, dz=None, **kw):
+        return fn(*a, **kw)
+    return f
+
+
 _DM_ONCE_CLS = {}
 
 
@@ -3639,8 +3646,9 @@ class DMBackwardSm100:
         tdVrP = tiled_mma_dV.make_fragment_A(sP if const_expr(self.acc_m64) else tP)
 
         # mma_qk_fn = partial(gemm_w_idx, tiled_mma_S, tStS, tSrK, tSrQ, zero_init=True)
+        _ss_gemm = dm_utils.gemm_ptx_ss_w_idx if const_expr("d3nh" in self.dm_opts) else _dm_drop_dz(gemm_ptx_w_idx)
         mma_qk_fn = partial(
-            gemm_ptx_w_idx,
+            _ss_gemm,
             tiled_mma_S,
             tStS,
             tSrK,
@@ -3652,7 +3660,7 @@ class DMBackwardSm100:
         )
         # mma_dov_fn = partial(gemm_w_idx, tiled_mma_dP, tdPtdP, tdPrV, tdPrdOt, zero_init=True)
         mma_dov_fn = partial(
-            gemm_ptx_w_idx,
+            _ss_gemm,
             tiled_mma_dP,
             tdPtdP,
             tdPrV,
@@ -3701,7 +3709,7 @@ class DMBackwardSm100:
         # )
         if const_expr(self.acc_m64):
             mma_dsq_fn = partial(
-                gemm_ptx_w_idx,
+                _dm_drop_dz(gemm_ptx_w_idx),
                 tiled_mma_dK,
                 tdKtdK,
                 tdKrdS,
@@ -3711,7 +3719,7 @@ class DMBackwardSm100:
                 cta_group=self.cta_group_size,
             )
         elif const_expr(self.use_smem_dS_for_mma_dK and not self.use_2cta_instrs):
-            mma_dsq_fn = partial(gemm_w_idx, tiled_mma_dK, tdKtdK, tdKrdS, tdKrQ)
+            mma_dsq_fn = partial(_dm_drop_dz(gemm_w_idx), tiled_mma_dK, tdKtdK, tdKrdS, tdKrQ)
         else:
             # Need to explicitly pass in tA_addr for correctness
             mma_dsq_fn = partial(
@@ -3927,6 +3935,7 @@ class DMBackwardSm100:
                         dm_acc4, dm_acc5, dm_acc6, dm_acc7 = Int64(0), Int64(0), Int64(0), Int64(0)
                         dm_tl0 = dm_utils.clock64()
                     for dm_mi in cutlass.range(main_loop_iters, unroll=1):
+                        dmz = dm_utils.opaque_zero(dm_mi) if const_expr("d3nh" in self.dm_opts) else None   # DM d3nh
                         self._dm_prog(Int32(2), dm_pt, dm_mi, Int32(2))
                         # (1) S.T = K @ Q.T (next)
                         if const_expr(dm_trace is not None):
@@ -3941,7 +3950,7 @@ class DMBackwardSm100:
                         if const_expr(dm_trace is not None):
                             dm_acc1 = dm_acc1 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 1, True)
-                        mma_qk_fn(B_idx=consumer_state_Q.index)
+                        mma_qk_fn(B_idx=consumer_state_Q.index, dz=dmz)
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
                         )
@@ -3962,7 +3971,7 @@ class DMBackwardSm100:
                         if const_expr(dm_trace is not None):
                             dm_acc3 = dm_acc3 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 3, True)
-                        mma_dsq_fn(B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK)
+                        mma_dsq_fn(B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK, dz=dmz)
                         accumulate_dK = True
                         pipeline_Qt.consumer_release(consumer_state_Qt)
                         consumer_state_Qt.advance()
@@ -3974,7 +3983,7 @@ class DMBackwardSm100:
                         if const_expr(dm_trace is not None):
                             dm_acc4 = dm_acc4 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 4, True)
-                        mma_dov_fn(B_idx=consumer_state_dO.index)
+                        mma_dov_fn(B_idx=consumer_state_dO.index, dz=dmz)
                         pipeline_dP.sync_object_full.arrive(0, pipeline_dP.producer_mask, cta_group)
 
                         # DM rdo: readiness-based order - if dQ(t)'s operands are not ready yet but P(t+1) is, issue dV(t+1)
@@ -3987,7 +3996,7 @@ class DMBackwardSm100:
                             if dm_dv_first > 0:
                                 pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc ^ 1)  # S -> P (already complete)
                                 dm_utils.tc_fence_after()
-                                mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+                                mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False, dz=dmz)
                         # (5) dQ = dS @ K (cur)
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
@@ -4001,7 +4010,7 @@ class DMBackwardSm100:
                         if const_expr(dm_trace is not None):
                             dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 6, True)
-                        mma_dsk_fn()
+                        mma_dsk_fn(dz=dmz)
                         pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
                         pipeline_dS.consumer_release(consumer_state_dS)
                         consumer_state_dS.advance()
@@ -4021,10 +4030,10 @@ class DMBackwardSm100:
                             dm_acc7 = dm_acc7 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 7, True)
                         if const_expr("rdo" not in self.dm_opts):
-                            mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+                            mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False, dz=dmz)
                         else:
                             if dm_dv_first <= 0:
-                                mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)
+                                mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False, dz=dmz)
                         pipeline_dO.consumer_release(consumer_state_dO)
                         consumer_state_dO.advance()
 

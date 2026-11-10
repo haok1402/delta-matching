@@ -3686,6 +3686,21 @@ class DMBackwardSm100:
                 cta_group=self.cta_group_size,
             )
 
+        # DM bwdenergy timing-only MMA ablations (wrong outputs; every commit / barrier kept, so the pipelines still flow):
+        # abl:nos (S = K Q^T), abl:nodp (dP = V dO^T), abl:nodv (dV += P^T dO), abl:nodk (dK += dS^T Q), abl:nodq (dQ = dS K)
+        def _dm_nomma(*a, **k):
+            return None
+        if const_expr("nos" in self.dm_abl):
+            mma_qk_fn = _dm_nomma
+        if const_expr("nodp" in self.dm_abl):
+            mma_dov_fn = _dm_nomma
+        if const_expr("nodv" in self.dm_abl):
+            mma_pdo_fn = _dm_nomma
+        if const_expr("nodk" in self.dm_abl):
+            mma_dsq_fn = _dm_nomma
+        if const_expr("nodq" in self.dm_abl):
+            mma_dsk_fn = _dm_nomma
+
         pipeline_Q_consumer = pipeline_Q.make_consumer()
 
         consumer_state_Qt = cutlass.pipeline.make_pipeline_state(

@@ -23,7 +23,7 @@ from .fastpath import env as _env
 D = 256
 NUMERICS = "sm100-mx-d256"
 DETERMINISTIC = True
-IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "2"}   # O1 (DmHd256Mx2) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
+IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "3"}   # O1 (DmHd256Mx2) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}
 PROF = []

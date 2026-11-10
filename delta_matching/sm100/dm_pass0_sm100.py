@@ -301,7 +301,7 @@ class DMPass0Sm100:
         # the degree-<deg> FMA polynomial (dm_common.expoff_ex2_pair), the rest MUFU; same rule and op sequence as the backward
         self.dm_eo = dm_common.expoff_pb()
         if self.dm_eo is not None:
-            assert "tl" in _fl0, "expoff: pass 0 +tl path only"
+            assert "tl" in _fl0 and self.m_block_size == 128, "expoff: pass 0 +tl path (m_block_size 128) only"
         if self.dm_tl:
             assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
             assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
@@ -2744,8 +2744,10 @@ class DMPass0Sm100:
                                 for v in cutlass.range_constexpr(0, 16, 2):
                                     i0 = 16 * j + v
                                     r[i0], r[i0 + 1] = cute.arch.fma_packed_f32x2((r[i0], r[i0 + 1]), (cs[j], cs[j]), (-l2, -l2))
-                                if dm_common.expoff_uses_poly(row >> 5, n_block * (self.n_block_size // 32) + j,
-                                                              self.dm_eo[1], self.dm_eo[2]):
+                                # row >> 5 == m_block * 4 + quad (m_block_size 128): warp-uniform form -> uniform branch
+                                if (dm_common.expoff_uses_poly(
+                                        m_block * (self.m_block_size // 32) + quad, n_block * (self.n_block_size // 32) + j,
+                                        self.dm_eo[1], self.dm_eo[2])):
                                     for v in cutlass.range_constexpr(0, 16, 2):
                                         i0 = 16 * j + v
                                         r[i0], r[i0 + 1] = dm_common.expoff_ex2_pair(r[i0], r[i0 + 1], self.dm_eo[0])

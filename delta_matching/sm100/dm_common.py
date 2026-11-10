@@ -158,4 +158,4 @@ def expoff_ex2_pair(x0: Float32, x1: Float32, deg: int):
 
 def expoff_uses_poly(qb, kb, r: int, m: int):
     """Element (q, k) uses the polynomial iff its 32x32 block (qb, kb) = (q // 32, k // 32) has (qb + kb) % m < r."""
-    return (qb + kb) % m < r
+    return cute.arch.make_warp_uniform((qb + kb) % m) < r   # warp-uniform in both kernels -> uniform branch

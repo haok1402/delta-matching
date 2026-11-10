@@ -5779,17 +5779,31 @@ class DMBackwardSm100:
         dm_kv_blk = cutlass.min(dm_kv_blk, (seqlen.seqlen_k + 31) // 32 - 1)
         dm_ksb = dm_utils.pow2_exponent_byte(Float32(aux_data.tensors[1][batch_idx, kv_head, dm_kv_blk]))
         nst = cute.size(dsq[0][2], mode=[1])
+        if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+            dm_hp = dm_utils.clock64()
+            if tidx == 0:
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 56, Int64(dm_hp - dm_tq))
+            dm_hw = Int64(0)
         # pass 1: tile amax over this warp's 32 keys x all 128 queries (max is exact: same scale byte as the 2-warp exchange)
         ds_amax = Float32(0.0)
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
                 frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
+                if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+                    dm_hl = dm_utils.clock64()
                 cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
                 cute.arch.fence_view_async_tmem_load()
+                if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+                    dm_hw = dm_hw + (dm_utils.clock64() - dm_hl)
                 fv = frag[None, 0, 0]
                 for v in cutlass.range_constexpr(cute.size(fv) // 2):
                     ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
         ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
+        if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+            dm_hp2 = dm_utils.clock64()
+            if tidx == 0:
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 57, Int64(dm_hp2 - dm_hp))
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 58, Int64(dm_hw))
         ds_sb = dm_utils.pow2_sb(ds_amax)
         ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
         dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
@@ -5805,11 +5819,18 @@ class DMBackwardSm100:
                 pass
         # pass 2: re-load, scale, e4m3 (codes kept in registers until every fp32 read of the dP region is done)
         codes = [[None] * nst, [None] * nst]
+        if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+            dm_hq = dm_utils.clock64()
+            dm_hw2 = Int64(0)
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
                 frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
+                if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+                    dm_hl = dm_utils.clock64()
                 cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
                 cute.arch.fence_view_async_tmem_load()
+                if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+                    dm_hw2 = dm_hw2 + (dm_utils.clock64() - dm_hl)
                 fv = frag[None, 0, 0]
                 fq = cute.make_fragment_like(fv, Float32)
                 for v in cutlass.range_constexpr(cute.size(fv) // 2):
@@ -5817,6 +5838,12 @@ class DMBackwardSm100:
                 c = cute.make_fragment_like(fv, self.ds_dtype)
                 c.store(fq.load().to(self.ds_dtype))
                 codes[h][st] = c
+        if const_expr(dm_tr is not None and "htr" in self.dm_opts):
+            if tidx == 0:
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 59, Int64(dm_utils.clock64() - dm_hq))
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 60, Int64(dm_hw2))
+                    dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 61, Int64(dm_hq - dm_hp2))
+
         if const_expr(dm_tr is not None):
             if tidx == 0:
                 dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 45, Int64(dm_utils.clock64() - dm_tq))

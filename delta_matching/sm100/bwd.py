@@ -107,6 +107,13 @@ def _auto_opts_impl(q8, k8, causal=False):
     # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA
     # launch/prologue/epilogue is a large share of a KV tile; long sequences keep the hardware's dynamic CTA order
     # (static striding loses 4-18% there). 'nopers' disables, explicit 'pers=N' overrides, persN= sets the cut.
+    # DM tconv (rw8k, det, auto): PDL tail converter for dQ (tailconv.py) for N <= tconvN (default 16384): 8k e2e -1.0..-1.5%
+    # per call (both GQA shapes); measured +0.8..+1.6% at 64k-128k, so long sequences keep the serial postprocess.
+    # 'tconv' forces it, 'notconv' disables, tconvN=<N> moves the cut.
+    tN = int(next((o[7:] for o in ol if o.startswith("tconvN=")), "16384"))
+    if ("tconv" not in ol and "notconv" not in ol and q8.shape[1] <= tN
+            and not any(o in ol for o in ("lwc", "trace", "pdyn", "rsdbg", "pdump"))):
+        ol = ol + ["tconv"]
     pN = int(next((o[6:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
     # DM pcN / pdyn REMOVED (2026-11-09): the dynamic persistent scheduler no longer compiles, its "+6-8% at causal 8k"
     # came from the b_ab first-arm bias (BABAUDIT) and fa4-bench measured 0.998x. Fail loudly instead of silently ignoring.
@@ -342,8 +349,8 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
     # DM d3nh precondition (MMA-warp opaque zero = loop counter >> 30): per-tile main-loop trip count < 2^30
     assert (q8.shape[1] // 128 + 1) * max(1, q8.shape[2] // k8.shape[2]) < 2 ** 30, "d3nh: main-loop trip count >= 2^30"
-    if "tconv" in _env("DM_BWD_OPTS", "").split(","):
-        assert deterministic and trace is None and not any(o in _env("DM_BWD_OPTS", "").split(",") for o in ("lwc", "trace")), \
+    if "tconv" in _auto_opts(q8, k8, causal).split(",") and deterministic:
+        assert trace is None and not any(o in _env("DM_BWD_OPTS", "").split(",") for o in ("lwc", "trace")), \
             "tconv: det only, aux[4] = readiness queue (no trace / lwc)"
     if "lwc" in _env("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"

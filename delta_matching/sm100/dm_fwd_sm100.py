@@ -2329,6 +2329,14 @@ class DMForwardSm100:
                             if dm_pvn > 0:
                                 dm_utils.mbar_wait_parity(self.dm_ord + 8 * stage, (dm_pvn - 1) & 1)
                                 dm_utils.tc_fence_after()
+                        if const_expr(self.dm_ordpc == 1):
+                            if dm_pvn > 0:   # DEBUG planted control at the work-tile boundary (previous tile's last PV_s)
+                                dm_pc_a = ((cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32) << 16
+                                dm_pc_a = dm_pc_a + Int32(tStS[(None, None), 0, 0, 0].iterator.toint()) + Int32(
+                                    self.tmem_s_offset[stage] + (self.dm_sl_sfcol if self.dm_slice else self.dm_sf_col))
+                                dm_pc_w = Int32(-2139062144)   # 0x80808080
+                                dm_utils.tmem_st_x4(dm_pc_a, dm_pc_w, dm_pc_w, dm_pc_w, dm_pc_w)
+                                cute.arch.fence_view_async_tmem_store()
                         # gemm_Si[stage](tCrB=tSrKi, sB=sK_cur)
                         gemm_Si[stage](
                             smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
@@ -3109,7 +3117,7 @@ class DMForwardSm100:
             pipeline_s_p_o.consumer_wait_w_index_phase(s, ph)
             col = Int32(self.tmem_s_offset[s]) + q * 32
             cute.copy(thr_ld, cute.make_tensor(tSt_ld.iterator + col, tSt_ld.layout), rS)
-            if const_expr(self.dm_ordpc == 4):
+            if const_expr(self.dm_ordpc in (4, 5)):
                 dm_sv = [rS[16 + j] for j in range(8)]   # DEBUG planted control: raw S of cols 16..23 (first load)
             if const_expr(mask_seqlen or mask_causal):
                 # = AttentionMask.apply_mask_sm100 (non-pack-GQA, 1-CTA) restricted to columns [32 q, 32 q + 32)
@@ -3140,9 +3148,11 @@ class DMForwardSm100:
                 v = utils.fmax(utils.fmax(lm[0], lm[1]), lm[2], lm[3])
             xb = v * c
             dm_utils.st_shared_b32(self.dm_slbuf + 4 * ((s * 4 + q) * self.m_block_size + tidx), dm_utils.bitcast_f32_i32(xb))
-            if const_expr(self.dm_ordpc == 4):
+            if const_expr(self.dm_ordpc in (4, 5)):
                 dm_pc_a = sbase + ((cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32 << 16) + col + 16
-            if const_expr(self.dm_ordpc == 4 and self.dm_ordld):
+            if const_expr((self.dm_ordpc == 4 and self.dm_ordld) or self.dm_ordpc == 5):
+                # ordpc=5 (regression arm, Codex P3): the re-load at the SAME place as ordpc=4 with ordld, i.e. before the
+                # arrival; only the wait::ld is controlled by ordld (with ordld=0 its completion is forced after the arrival)
                 dm_pv = dm_utils.tmem_ld_32x32b_x8(dm_pc_a)   # re-load of this block's cols 16..23 (q = 0: the SF columns)
             if const_expr(self.dm_ordld):
                 # ordinv: the correction WG's SF tcgen05.st overwrites S_s cols 16..23 that slice WG 0 loaded; PTX
@@ -3154,9 +3164,11 @@ class DMForwardSm100:
             cute.arch.sync_warp()
             with cute.arch.elect_one():
                 dm_utils.mbar_arrive(self.dm_slbar + 8 * s)
-            if const_expr(self.dm_ordpc == 4):
+            if const_expr(self.dm_ordpc in (4, 5)):
                 dm_pois = Float32(0.0)
-                if const_expr(not self.dm_ordld):
+                if const_expr(self.dm_ordpc == 5 and not self.dm_ordld):
+                    cute.arch.fence_view_async_tmem_load()
+                if const_expr(self.dm_ordpc == 4 and not self.dm_ordld):
                     dm_utils.nanosleep_1us()
                     dm_utils.nanosleep_1us()
                     dm_pv = dm_utils.tmem_ld_32x32b_x8(dm_pc_a)   # the re-load at the latest point PTX permits without wait::ld
@@ -3186,7 +3198,7 @@ class DMForwardSm100:
             for i in cutlass.range_constexpr(2, 32, 2):
                 ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
             bsum = ps[0] + ps[1]
-            if const_expr(self.dm_ordpc == 4):
+            if const_expr(self.dm_ordpc in (4, 5)):
                 bsum = bsum + dm_pois   # DEBUG planted control: a re-load that saw the SF store poisons l (-> O, LSE NaN)
             if nstep > 0:
                 if const_expr(self.dm_opts.get("slnobe", "0") != "1"):   # slnobe=1: DEBUG planted WAR bug (no bsempty wait)

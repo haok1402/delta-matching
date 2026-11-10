@@ -1305,6 +1305,10 @@ class DMBackwardSm100:
         # TileScheduler = SingleTileScheduler
         if const_expr(self.is_varlen_k):
             TileScheduler = SingleTileVarlenScheduler
+        elif const_expr(self.deterministic and "dschedst" in self.dm_opts):
+            # DM dschedst (det, opt-in): the nd SingleTileScheduler (grid order, no LPT / head swizzle). Bitwise: the dQ and
+            # dK/dV summation orders are fixed by the semaphore lock values, not by the schedule.
+            TileScheduler = SingleTileScheduler
         elif const_expr(self.dm_gloop and self.deterministic):
             TileScheduler = SingleTileLPTBwdScheduler
         elif const_expr(self.dm_gloop):
@@ -1330,7 +1334,8 @@ class DMBackwardSm100:
             # work tiles of C * tile_n KV rows, see NOTE [SM100 backward work coordinates]
             cute.ceil_div(cute.size(mK.shape[0]), self.cluster_tile_n),  # num_blocks
             cute.size(mQ.shape[2]) // (self.qhead_per_kvhead if const_expr(self.dm_gloop or (
-                self.deterministic and "noposmaj" not in self.dm_opts and self.qhead_per_kvhead > 1 and not self.pack_gqa
+                self.deterministic and "noposmaj" not in self.dm_opts and "dschedst" not in self.dm_opts
+                and self.qhead_per_kvhead > 1 and not self.pack_gqa
                 and self.cta_group_size > 1)) else 1),  # num_heads = num_query_heads (posmaj: KV heads)
             cute.size(mK.shape[3])
             if const_expr(mCuSeqlensK is None)
@@ -1353,7 +1358,7 @@ class DMBackwardSm100:
             is_persistent=self.is_persistent,  # persistent mode not tested
             cu_total_m_blocks_ptr=mCuTotalMBlocks,
             lpt=self.spt,
-            head_swizzle=self.deterministic,
+            head_swizzle=self.deterministic and "dschedst" not in self.dm_opts,
         )
 
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)

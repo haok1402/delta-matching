@@ -180,8 +180,8 @@ class DMFwdHd256MxSm100:
     Out: O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
-                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = True):
-        # C5 (sf_bank, default; Codex hd256-fwd-02 option 1): ONE S buffer [0,128) released by the softmax right after its
+                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False):
+        # C5 (sf_bank, opt-in: REJECTED, slower than C0 - loses the S ping-pong overlap; Codex hd256-fwd-02 option 1): ONE S buffer [0,128) released by the softmax right after its
         # tcgen05.ld (S_empty), SF in two dedicated banks [128 + 32 b, +32) (b = tile parity: SFA +0..3, SFB +8..15), O [256,512).
         # QK never touches SF columns, so there is no PV -> QK WAR; QK(j+1) waits S_empty(j) only. sf_bank=False = C0 layout.
         self.sf_bank = sf_bank

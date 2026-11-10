@@ -325,6 +325,9 @@ class DMFwdHd256MxSm100:
         # issuer never blocks on the completion of the PV it just issued (fwd4 trace: C9 issuer saw P_full 674 clk late).
         self.c9 = bool(c8 == 1 and split in (2, 3))
         self.sempty = self.c9 or bool(c10)      # both WGs arrive S_empty (count 256)
+        self.n_sp = 3 if c10 else 2             # sP buffers
+        self.n_mbar_dm = 26 if c10 else 14
+        self.n_stats = 2 * 128 + 2 * 128 + 4 * 128 + ((12 if c10 else 8) * 128 if c8 else 0)
         # g1 (fork hd256-fwd3, DM_HD256_FWD_G1 bitmask; profile/hd256-fwd3-tl/REPORT.md): critical-path trims of C6, values bitwise
         # (same ops, same tensor-pipe MMAs; only program order / issue form).  1 = G1a: the softmax publishes acc_scale
         # (stats_full) right after the ordered m rule, before the SF stores / P_full (O_ready no longer trails P_full).
@@ -445,7 +448,7 @@ class DMFwdHd256MxSm100:
         sQ_layout = sm100_utils_basic.make_smem_layout_a(tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, 1)
         sK_layout = sm100_utils_basic.make_smem_layout_b(tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, self.kv_stage)
         sV_layout = sm100_utils_basic.make_smem_layout_b(tiled_mma_pv, self.mma_tiler_pv, self.q_dtype, self.kv_stage)
-        sP_layout = sm100_utils_basic.make_smem_layout_a(tiled_mma_pv, self.mma_tiler_pv, self.q_dtype, 3 if self.c10 else 2)
+        sP_layout = sm100_utils_basic.make_smem_layout_a(tiled_mma_pv, self.mma_tiler_pv, self.q_dtype, self.n_sp)
         tma_load_op = cpasync.CopyBulkTensorTileG2SOp(cta_group)
         tma_atom_Q, mQt = cute.nvgpu.make_tiled_tma_atom_A(
             tma_load_op, mQt, cute.select(sQ_layout, mode=[0, 1, 2]), self.mma_tiler_qk, tiled_mma_qk,
@@ -467,9 +470,9 @@ class DMFwdHd256MxSm100:
             mbar_q: cute.struct.MemRange[Int64, 2]
             mbar_kv: cute.struct.MemRange[Int64, self.kv_stage * 2]
             # raw: 0,1 S_full[slot] | 2,3 P_full[slot] | 4 O_full | 5 O_ready | 6,7 stats_full[slot] | 8 final_full
-            mbar_dm: cute.struct.MemRange[Int64, 26 if self.c10 else 14]   # + 9 S_empty (sf_bank), 12/13 S_empty[slot] (C7b); C10 14..24
+            mbar_dm: cute.struct.MemRange[Int64, self.n_mbar_dm]   # + 9 S_empty (sf_bank), 12/13 S_empty[slot] (C7b); C10 14..24
             tmem_holding_buf: Int32
-            sStats: cute.struct.MemRange[Float32, 2 * 128 + 2 * 128 + 4 * 128 + ((12 if self.c10 else 8) * 128 if self.c8 else 0)]   # + mailbox state_m[2][128], state_l[2][128] (+ C8 part[2][4][128])
+            sStats: cute.struct.MemRange[Float32, self.n_stats]   # + mailbox state_m[2][128], state_l[2][128] (+ C8 part[2][4][128])
             sQ: cute.struct.Align[cute.struct.MemRange[self.q_dtype, cute.cosize(sQ_layout)], self.buffer_align_bytes]
             sK: cute.struct.Align[cute.struct.MemRange[self.q_dtype, sKV_size], self.buffer_align_bytes]
             sP: cute.struct.Align[cute.struct.MemRange[self.q_dtype, cute.cosize(sP_layout)], self.buffer_align_bytes]

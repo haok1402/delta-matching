@@ -209,7 +209,7 @@ class DMFwdHd256MxSm100:
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
                  lpt: bool = False, epi: int = 0):
-        # epi (fork hd256-8k F1a; host default DM_HD256_FWD_EPI=1): O epilogue through SMEM. 0 = row-per-thread st.global.v4
+        # epi (fork hd256-8k F1a/F1c; host default DM_HD256_FWD_EPI=2): O epilogue through SMEM. 0 = row-per-thread st.global.v4
         # (each warp store hits 32 rows H*512 B apart). 1 = each correction thread writes its bf16 row (same mul.rn + cvt bits)
         # into a 528 B-strided staging row in the (by then idle) sK ring, bar.warp.sync, then each warp copies ITS OWN 32 rows
         # out row by row (lane l -> 16 B chunk l: one 512 B contiguous store per instruction). Values bitwise; store path only.

@@ -100,8 +100,8 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     lpt = bool(causal) and os.environ.get("DM_HD256_FWD_LPT", "0") == "1"   # hd256-8k L1: global longest-first CTA order (opt-in: REJECTED, 16/4 8k fwd slower)
     if causal and not lpt:
         key = key + ("nolpt",)
-    epi = int(os.environ.get("DM_HD256_FWD_EPI", "1"))   # hd256-8k F1a: SMEM-staged coalesced O epilogue (DEFAULT 1; 0 = old)
-    if epi != 1:
+    epi = int(os.environ.get("DM_HD256_FWD_EPI", "2"))   # hd256-8k F1c: SMEM-staged coalesced O epilogue + TMEM prefetch (DEFAULT 2; 1 = F1a, 0 = old)
+    if epi != 2:
         key = key + (f"epi{epi}",)
     cache = _cache()
     if key not in cache:

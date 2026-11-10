@@ -1385,12 +1385,14 @@ class DMFwdHd256MxSm100:
         part = stats + 4 * (1024 + slot * 512)                      # part[slot][k][128]: bmax2, bmax3, bs2, bs3
         b3 = slot                                                    # C10: per-tile softmax resources ring b3 = j % 3
         ph3 = (j >> 1) & 1
+        pfull = mbar + 16 + 8 * slot
+        partf = mbar + 80 + 8 * slot
         if const_expr(self.c10):
             b3 = j % 3
             ph3 = (j // 3) & 1
             part = stats + 4 * (1024 + b3 * 512)
-        pfull = mbar + (128 + 8 * b3 if const_expr(self.c10) else 16 + 8 * slot)
-        partf = mbar + (176 + 8 * b3 if const_expr(self.c10) else 80 + 8 * slot)
+            pfull = mbar + 128 + 8 * b3
+            partf = mbar + 176 + 8 * b3
         dm_kw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block])
         dm_vw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block + 1])
         dm_ks = [dm_utils.byte_pow2_f32(dm_kw, b) for b in range(4)]

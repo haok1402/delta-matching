@@ -180,7 +180,7 @@ class DmHd256Kv2:
     RELAY_WARP = 11   # relcl/acqcl: DEBUG: only release / only acquire at cluster   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
-    DEFAULT_OPTS = "meta qb2 xpt rly dmk"  # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes) + dmk (fork hd256-kv3)
+    DEFAULT_OPTS = "meta qb2 xpt rly dmk wbal"  # KV2-C1 (bench_c1b3: 1.16-1.27x over C0) + dmk, wbal (fork hd256-kv3)
 
     def _arr(self, leader_bar, relay_bar, crank):
         """compute-warp arrive for a cross-CTA hand-off (see opt rly)."""

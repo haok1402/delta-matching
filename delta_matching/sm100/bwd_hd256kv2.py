@@ -70,7 +70,9 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     ot = DmHd256Kv2.DEFAULT_OPTS if opts is None else opts
     from .fastpath import env as _env
     if _env("DM_H256_KV2_DMK", "1") == "0":       # DEBUG / A-B (fork hd256-kv3): KV2 without the dmk tile-class specialization
-        ot = " ".join(o for o in ot.split() if o != "dmk")
+        ot = " ".join(o for o in ot.split() if o not in ("dmk", "wbal"))
+    if _env("DM_H256_KV2_WBAL", "1") == "0":      # DEBUG / A-B (fork hd256-kv3): KV2 without the wbal warp balance
+        ot = " ".join(o for o in ot.split() if o != "wbal")
     assert (dqw is not None) == ("dqw" in ot.split() or "dqt" in ot.split()), (ot, dqw is None)
     if dqw is not None:
         assert not big

@@ -16,6 +16,7 @@ from .bwd_hd256kv2 import dm_bwd_hd256kv2, kv2_launch
 from .bwd_hd256dqr import dm_bwd_hd256dqr
 from .fastpath import env as _env
 
+LAST_IDENT_PLAN = None     # debug only: plan of the last dm_attn_debug_hd256(identity=True) call ("mx" | None = kv2 | chunk list)
 BWD_IMPL_DEFAULT = "dqr"    # host impl switch (DM_H256_BWD_IMPL): "mx" = DmHd256Mx dv+dk+dq, "kv2" = DmHd256Mx dq + DmHd256Kv2,
 #                             "dqr" = KV2 (+ dS workspace) then the DmHd256Dqg dQ GEMM (fork hd256-dqr2: DEFAULT; scratch <= DM_BWD_WS_LIMIT_GB,
 #                             default 8 GiB (user), in batch chunks; a batch element above the cap -> the "kv2" path, same values)
@@ -76,7 +77,10 @@ def dm_attn_func_hd256(q, k, v, causal=True, mode="matched", deterministic=None)
 @torch.no_grad()
 def dm_attn_debug_hd256(q, k, v, do, causal=True, mode="matched", identity=None, deterministic=None, lockstep=None):
     """Validator hook at hd256 (same contract as api.dm_attn_debug): delta + LSE the backward consumes; with identity
-    (matched mode) also the backward's IN-KERNEL pre-quant rowsum(dS) and sum|P dP| (dbg=1 build, same arithmetic)."""
+    (matched mode) also the backward's IN-KERNEL pre-quant rowsum(dS) and sum|P dP|.  Since bundle 9c these come from the SHIPPED
+    dK/dV kernel KV2 (dbg bit 16 build, same arithmetic: the fp32 dS KV2 quantizes into the codes that dK AND dQ consume, fp64
+    sums per row), run through the backward the api would run (DM_H256_BWD_IMPL default dqr: the same chunk plan as the
+    production call at the current cap / carry policy; kv2: one KV2 launch).  impl mx: the DmHd256Mx dq kernel's dbg=1 sums."""
     import os
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
     o, lse, (q8, qs, k8, ks, v8, vs, _) = dm_fwd_hd256_from_bf16(q, k, v, causal)
@@ -85,9 +89,16 @@ def dm_attn_debug_hd256(q, k, v, do, causal=True, mode="matched", identity=None,
     if identity is None:
         identity = os.environ.get("DM_DEBUG_IDENTITY", "0") == "1"
     if identity and mode == "matched":
-        _, _, _, aux = dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=1)
+        global LAST_IDENT_PLAN
         B, N, H, _ = q8.shape
-        idt = aux["ident"].reshape(B, H, N, 4)
+        if _bwd_impl() == "mx":
+            _, _, _, aux = dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=1)
+            idt = aux["ident"].reshape(B, H, N, 4)
+            LAST_IDENT_PLAN = "mx"
+        else:
+            _, _, _, aux = _bwd(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=16)
+            idt = (aux["kv2"]["hash"] if "kv2" in aux else aux["ident"]).view(torch.float64).reshape(B, H, N, 4)
+            LAST_IDENT_PLAN = aux.get("plan", None)     # debug introspection only: chunk plan run (None = kv2 path)
         out["rowsum_dS"] = idt[..., 0].float().contiguous()
         out["sum_abs_PdP"] = idt[..., 1].float().contiguous()
     if lockstep is None:

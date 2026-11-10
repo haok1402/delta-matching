@@ -56,14 +56,14 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
         dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
     L = B * H
     big = dbg & 2
-    if big or dbg & 8:
+    if big or dbg & 24:
         z8 = lambda *s_: torch.zeros(*s_, device=dev, dtype=torch.uint8)  # noqa: E731
         dump = torch.zeros(L, N, N, 4, device=dev, dtype=torch.float32) if big else _ph(dev)["dump"]
         cp_ = z8(L, N, N) if big else _ph(dev)["c"]
         cs_ = z8(L, N, N) if big else _ph(dev)["c"]
         sbp = torch.zeros(L, N, N // 32, device=dev, dtype=torch.int32) if big else _ph(dev)["sb"]
         sbs = torch.zeros_like(sbp) if big else _ph(dev)["sb"]
-        hh = torch.zeros(L, N, 4, device=dev, dtype=torch.int64) if dbg & 8 else _ph(dev)["h"]
+        hh = torch.zeros(L, N, 4, device=dev, dtype=torch.int64) if dbg & 24 else _ph(dev)["h"]   # 16: [rowsum dS, sum|P dP|] f64
     else:   # production: the dbg tensors are never touched (compiled out) -> shared placeholders, no per-call zeroing
         ph = _ph(dev)
         dump, cp_, cs_, sbp, sbs, hh = ph["dump"], ph["c"], ph["c"], ph["sb"], ph["sb"], ph["h"]
@@ -82,7 +82,7 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
         dump, cp_, sbp = ck, cv.view(torch.uint8).view(B * N, Hk, D * 4), desc.view(1, 1, -1)
     ten = [p(k8), p(v8), p(q8), p(do8), tt(q8), tt(do8), qs, ks, vs, dos, lse, delta, dk, dv, dump, cp_, cs_, sbp, sbs, hh]
     lds = [1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2]
-    kd = dbg & 10
+    kd = dbg & 26
     key = ("kv2", causal, kd, knob, ot)
     _mx._run(key, lambda: DmHd256Kv2(causal, kd, knob, ot), ten, lds, [nt_arg, H, Hk])
     extra = dict(dump=dump, codesP=cp_, codesS=cs_, sbP=sbp, sbS=sbs, hash=hh)
@@ -138,8 +138,8 @@ def dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
             dq = _dq()
         main.wait_stream(side)
         return dq, dk, dv
-    r = _mx.dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, modes=("dq",))
-    dq, d = r[0], (r[3] if dbg else None)
+    r = _mx.dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg & ~16, modes=("dq",))
+    dq, d = r[0], (r[3] if dbg & ~16 else {})
     del r                    # the dq-only call's unused (empty) dk / dv buffers go back to the allocator before KV2 allocates
     dk, dv, ex = kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, knob=knob, opts=opts)
     if dbg:

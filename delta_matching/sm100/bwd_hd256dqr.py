@@ -189,7 +189,10 @@ _CHUNK_HOOK = None      # tests only (positive controls csk / wsk2): hook(chunk 
 
 
 def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqg_knob="", ch=None):
-    """(dq, dk, dv) [+ dbg dict as dm_bwd_hd256kv2].  dbg != 0 or no chunk plan within the cap -> the kv2 (bundle-6/7/8) path.
+    """(dq, dk, dv) [+ dbg dict as dm_bwd_hd256kv2].  dbg not in (0, 16) or no chunk plan within the cap -> the kv2 (bundle-6/7/8) path.
+    dbg = 16 (identity, bundle 9c): the SAME plan as dbg 0, every KV2 launch built with dbg bit 16; returns (dq, dk, dv, d) with
+    d["ident"] = (B*H, N, 4) int64 rows [rowsum dS, sum|P dP|] as f64 bits (KV2 in-kernel, gathered from the chunk that ran each row)
+    and d["plan"] = the chunk plan run (None = kv2 path).
     Chunks (plan()) in order: KV2(+dS workspace) then Dqg per chunk, one reused workspace (stream order = the W hand-off between
     chunks and the carry hand-off between the chunks of a group set).  ch: explicit plan (tests)."""
     B, N, H, _ = q8.shape
@@ -197,9 +200,14 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
     r, nt = H // Hk, N // 128
     causal = bool(causal)
     if ch is None:
-        ch = None if dbg else plan(B, H, Hk, N, causal)
+        ch = None if (dbg & ~16) else plan(B, H, Hk, N, causal)
+    idk = dbg & 16                 # identity build of every KV2 launch (debug only; dbg 0 -> idk 0, nothing below changes)
     if ch is None:
-        return _kv.dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, knob=knob, opts=opts)
+        r_ = _kv.dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, knob=knob, opts=opts)
+        if idk and not (dbg & ~16):
+            r_[3]["ident"] = r_[3]["kv2"]["hash"]
+            r_[3]["plan"] = None
+        return r_
     dev = q8.device
     mode = _cfg()[2]
     base = (_kv.DmHd256Kv2.DEFAULT_OPTS if opts is None else opts) + " " + mode
@@ -219,6 +227,7 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
         gmax = max(c["g1"] - c["g0"] for c in carried)
         carry = (torch.empty(1, N, gmax, D, device=dev, dtype=torch.float32), torch.empty(1, N, gmax, D, device=dev, dtype=torch.float32))
     ci = ci_all = 0
+    ident = torch.zeros(B * H, N, 4, device=dev, dtype=torch.int64) if idk else None
     for c in ch:
         b0, b1, g0, g1, h0, h1, q0, q1 = (c[k_] for k_ in ("b0", "b1", "g0", "g1", "h0", "h1", "q0", "q1"))
         nb, ng, nh = b1 - b0, g1 - g0, h1 - h0
@@ -229,8 +238,10 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
         ci_all += 1
         if ng == Hk and nh == r and q0 == 0 and q1 == nt:     # batch chunk: contiguous batch slices, no copies
             sl = lambda x: x[b0:b1]  # noqa: E731
-            _kv.kv2_launch(*[sl(x) for x in (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)], causal, knob=knob, opts=base, dqw=ws,
-                           out=(sl(dk), sl(dv)))
+            ex_ = _kv.kv2_launch(*[sl(x) for x in (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)], causal, dbg=idk, knob=knob,
+                                 opts=base, dqw=ws, out=(sl(dk), sl(dv)))[2]
+            if idk:
+                ident[b0 * H:b1 * H].copy_(ex_["hash"])
             if _CHUNK_HOOK is not None:
                 _CHUNK_HOOK(ci_all - 1, "dqg", dict(W=W, Wsb=Wsb, carry=carry, chunk=c, T=T))
             dqg_launch(*ws, sl(k8), sl(ks), nb, N, H, causal, knob=dqg_knob, wsw=mode == "dqt", out=sl(dq))
@@ -245,11 +256,12 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
                sq(delta))
         last = h1 == r and q1 == nt
         if nh == r and q0 == 0 and q1 == nt:      # KV-group chunk: no carry
-            dkc, dvc, _ = _kv.kv2_launch(*ins, causal, knob=knob, opts=base, dqw=ws)
+            dkc, dvc, ex_ = _kv.kv2_launch(*ins, causal, dbg=idk, knob=knob, opts=base, dqw=ws)
         else:
             assert nb == 1
             cc = (carry[0].view(-1)[:N * ng * D].view(1, N, ng, D), carry[1].view(-1)[:N * ng * D].view(1, N, ng, D))
-            dkc, dvc, _ = _kv.kv2_launch(*ins, causal, knob=knob, opts=base + " dqc", dqw=ws, dqc=(descs[ci], cc[0], cc[1], q1))
+            dkc, dvc, ex_ = _kv.kv2_launch(*ins, causal, dbg=idk, knob=knob, opts=base + " dqc", dqw=ws,
+                                           dqc=(descs[ci], cc[0], cc[1], q1))
             ci += 1
         bd = None if (q0 == 0 and q1 == nt) else (q0, q1)
         dqc_ = torch.empty(nb, N, ng * nh, D, device=dev, dtype=torch.bfloat16) if bd else None
@@ -259,8 +271,13 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
         rows_ = slice(q0 * 128, q1 * 128)
         for j, hh in enumerate(hql):
             dq[b0:b1, rows_, hh].copy_(dqc_[:, rows_, j])
+            if idk:      # chunk row (b_local, j) of this launch's (nb * ng * nh, N, 4) identity -> global row (b, hh); only its q band
+                for bi in range(nb):
+                    ident[(b0 + bi) * H + hh, rows_].copy_(ex_["hash"][bi * ng * nh + j, rows_])
         if last:
             dk[b0:b1, :, g0:g1].copy_(dkc)
             dv[b0:b1, :, g0:g1].copy_(dvc)
         del dqc_, dkc, dvc, ins, k8c, ksc
+    if idk:
+        return dq, dk, dv, dict(ident=ident, plan=ch)
     return dq, dk, dv

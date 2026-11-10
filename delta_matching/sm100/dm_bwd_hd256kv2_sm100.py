@@ -34,6 +34,9 @@ dbg bit 2: per (query, key) [S_acc, dP_acc, P, dS] -> mDump (L, N, N, 4); P^T co
   [query, key]; unadorned sb -> mSBP / mSBS (L, N, N/32) [key, q-block].
 dbg bit 8: lockstep checksums, definition of DmHd256Mx cb71d63 (keys-on-rows form): per query row [P-bits hash, dS-bits hash,
   dS code|sb hash, fp64 dS rowsum] -> mHash (L, N, 4).
+dbg bit 16 (identity, bundle 9c; exclusive with bit 8; allowed with dqw / dqt / dqc): per query row, fp64 sums over every key this
+  launch visits of the SAME fp32 dS values this kernel quantizes (dsv) and of |P * (dP_acc * ca)| (the DmHd256Mx dbg-1 definition)
+  -> mHash[l, q, 0] / mHash[l, q, 1] as f64 bits (fp64 red.add: order-free up to fp64 round-off).  Compiled out unless set.
 """
 import cutlass
 import cutlass.cute as cute
@@ -47,7 +50,7 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 from delta_matching.sm100 import dm_common_hd256 as dmh
 from delta_matching.sm100 import dm_utils
 from delta_matching.sm100.dm_common_hd256 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_f32, st_global_v4f,
-                                                 ld_shared_f32, st_shared_f32, abs_f32, max_f32, _gaddr, _asm)
+                                                 ld_shared_f32, st_shared_f32, abs_f32, max_f32, mul_f32, _gaddr, _asm)
 from delta_matching.sm100.dm_bwd_hd256mx_sm100 import (st_shared_v4, ld_shared_v4f, spin, sb_of, pack4, tc_fence_before,
                                                        tc_fence_after, st_global_u8, f2i, hmix, hidx, lk_cols_u32,
                                                        lk_cols_f64, sel_eq_i32)
@@ -193,7 +196,8 @@ class DmHd256Kv2:
         assert "dqt" not in self.opts or "rly" in self.opts
         self.wsp = "dqw" in self.opts or "dqt" in self.opts
         self.dqc = "dqc" in self.opts
-        assert not self.dqc or ("dqt" in self.opts and self.dbg == 0)
+        assert not (self.dbg & 16 and self.dbg & 8), "dbg 16 (identity) and 8 (lockstep) share mHash"
+        assert not self.dqc or ("dqt" in self.opts and (self.dbg & ~16) == 0)
         self.threads = 384
 
     @cute.jit
@@ -848,6 +852,11 @@ class DmHd256Kv2:
                     lk_cols_u32(hsl, lane, a0_ + 8)
                     lk_cols_u32(hcl, lane, a0_ + 16)
                     lk_cols_f64(dsv, lane, a0_ + 24)
+                if const_expr(self.dbg & 16):
+                    a1_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
+                    pdl = [abs_f32(mul_f32(pv[i], mul_f32(dpv[i], ca))) for i in range(32)]
+                    lk_cols_f64(dsv, lane, a1_)
+                    lk_cols_f64(pdl, lane, a1_ + 8)
                 # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
                 if warp < 4:
                     bp = [Int32(0)] * 4

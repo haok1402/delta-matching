@@ -6163,13 +6163,14 @@ class DMBackwardSm100:
         exchange_stage = cta_rank ^ 1
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
+                if const_expr(self.dm_xp == "d5"):
+                    zc = cute.make_fragment_like(codes[h][st], self.ds_dtype)
+                    zc.fill(0.0)
                 if exchange_stage == st:
                     cute.autovec_copy(codes[h][st], dsq[h][6][None, 0])
                 else:
                     if const_expr(self.dm_xp == "d5"):
                         # xexempt planted control (DEBUG): CTA 1 publishes a ZERO own sdS half, real codes ~2 us after dS-full
-                        zc = cute.make_fragment_like(codes[h][st], self.ds_dtype)
-                        zc.fill(0.0)
                         if cta_rank == 1:
                             cute.autovec_copy(zc, dsq[h][5][None, st])
                         else:

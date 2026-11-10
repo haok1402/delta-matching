@@ -1,11 +1,10 @@
-"""Host entry of the hd256 matched-delta pass 0 (DMPass0Hd256Sm100, fork hd256-p0, P1 = 1-CTA kv_stage 2).
+"""Host entry of the hd256 matched-delta pass 0 (DMPass0Hd256Sm100, fork hd256-p0mx, P1 = 1-CTA kv_stage 2), MXFP8.
 Same plumbing as pass0.py (FA4 _flash_attn_fwd with the kernel class swapped); hd128's pass0.py is untouched.
 
-dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal) -> delta (B, H, N) fp32, [64,32] fp32 contract:
-  q8 / do8 (B, N, H, 256) e4m3, qs / dos (B, H, N/64) fp32;  k8 / v8 (B, N, Hk, 256) e4m3, ks / vs (B, Hk, N/32) fp32;
-  lse (B, H, N) fp32 natural log.  P_hat / dP per dm_common_hd256.
-  delta form (compile time, env DM_P0H_DELTA or delta_form=): "floor" (sm90 Delta-Matching-256 v1, opt-in):
-  delta = sum_j P_hat dP / 256;  "numden" (DEFAULT per lead ruling 2026-11-10; hd128 sm100 form): delta = sum_j P_hat dP / sum_j P_hat.
+dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal) -> delta (B, H, N) fp32, MXFP8 (sm100-mx-d256) contract:
+  q8 / do8 (B, N, H, 256) e4m3, qs / dos (B, H, N/32) fp32;  k8 / v8 (B, N, Hk, 256) e4m3, ks / vs (B, Hk, N/32) fp32;
+  every scale an exact power of two per 32 tokens over all D (quant_hd256.quant_qkv_mx256 / quant_do_mx256);
+  lse (B, H, N) fp32 natural log.  P / dP per dm_common_hd256.dm_mx256_*; delta = sum_j P dP / sum_j P (num/den only).
 """
 import dataclasses
 import threading
@@ -36,7 +35,7 @@ def _variant(exp_variant: str):
         _CLASSES[exp_variant] = type(f"DMPass0Hd256Sm100_{exp_variant.replace('+', '_F_')}", (DMPass0Hd256Sm100,),
                                      {"dm_exp_variant": exp_variant})
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
-            c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / f"pass0h_{exp_variant}")
+            c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / f"pass0hmx_{exp_variant}")
         else:
             c = cache_utils.JITCache()
         _CACHES[exp_variant] = c
@@ -51,16 +50,16 @@ def _aux(t: torch.Tensor, leading_dim: int):
 
 def variant_for(delta_form: str | None = None) -> str:
     form = delta_form or _env("DM_P0H_DELTA", "numden")
-    assert form in ("floor", "numden"), form
-    return BASE_VARIANT + ("+dnd" if form == "numden" else "+dfl")
+    assert form == "numden", f"hd256 MXFP8 pass 0: delta form num/den only (got {form!r}; the [64,32] floor form is retired)"
+    return BASE_VARIANT + "+dnd"
 
 
 def dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, delta_form: str | None = None,
                    exp_variant: str | None = None):
     B, N, H, Dq = q8.shape
     assert Dq == D and k8.shape[-1] == D and v8.shape[-1] == D and do8.shape == q8.shape and N % 128 == 0
-    assert qs.shape == (B, H, N // 64) and dos.shape == (B, H, N // 64), "Q / dO: one fp32 scale per 64 rows"
-    assert ks.shape == (B, k8.shape[2], N // 32) and vs.shape == ks.shape, "K / V: one fp32 scale per 32 keys"
+    assert qs.shape == (B, H, N // 32) and dos.shape == (B, H, N // 32), "Q / dO: one pow2 scale per 32 rows (MXFP8)"
+    assert ks.shape == (B, k8.shape[2], N // 32) and vs.shape == ks.shape, "K / V: one pow2 scale per 32 keys (MXFP8)"
     if exp_variant is None:
         exp_variant = variant_for(delta_form)
     over = dict(FORCE)

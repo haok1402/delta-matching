@@ -38,3 +38,27 @@ def quant_do_hd256(do):
     do = do if do.stride(-1) == 1 else do.contiguous()
     do8, dos, _, _ = PR.doq_m17(do, None, H, BLK_Q, want_delta=False, want_twin=False)
     return _bnhd(do8, B, H, N), dos.view(B, H, N // BLK_Q)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# MXFP8 (sm100-mx at D=256, dm-validator preset "sm100-mx-d256") = THE hd256 spec since the USER DECISION 2026-11-10.
+# The hd128 sm100-mx producers of quant.py run unchanged at D=256 (they are D-generic): one pow2 (UE8M0-representable)
+# scale per 32 tokens over all of D, code = rn_e4m3(y * 2^-e), Q pre-multiplied by sm = 256^-0.5, K centered by its
+# fixed-order fp32 mean (quant_qkv2), dO plain.  Bitwise = quant.quant_rows_ref with the returned mean (t_p0mx checks).
+# hd256-fwd owns the production hd256 producer; reconcile against these if it differs.
+# ----------------------------------------------------------------------------------------------------------------------
+def quant_qkv_mx256(q, k, v):
+    """q (B, N, H, 256), k / v (B, N, Hk, 256) bf16 -> (q8, qs, k8, ks, v8, vs, mean): codes (B, N, H|Hk, 256) e4m3,
+    scales (B, H|Hk, N/32) fp32 powers of two, mean (B, Hk, 256) fp32 (the K-centering mean)."""
+    from . import quant as Q
+    assert q.shape[-1] == D and q.shape[1] % 128 == 0
+    q8, qs, k8, ks, v8, vs, _kvw, mean = Q.quant_qkv2(q, k, v, D ** -0.5)
+    return q8, qs, k8, ks, v8, vs, mean
+
+
+def quant_do_mx256(do):
+    """do (B, N, H, 256) bf16 -> do8 (B, N, H, 256) e4m3, dos (B, H, N/32) fp32 powers of two."""
+    from . import quant as Q
+    assert do.shape[-1] == D
+    do8, dos, _ = Q.quant_do_delta(do.contiguous(), None)
+    return do8, dos

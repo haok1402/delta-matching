@@ -1064,8 +1064,9 @@ class DmHd256Mx2:
                         else:
                             sfw_c = sfw
                 else:
-                    if const_expr(self.dqopt and not self.esf):
-                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                    if const_expr(self.dqopt):
+                        if const_expr(not self.esf):          # esf: stored before the quantization (above)
+                            dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
                     elif hf == 0:
                         sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),
                                     dm_utils.add_sb_clamp(sball[2], osb[2]), dm_utils.add_sb_clamp(sball[3], osb[3]))

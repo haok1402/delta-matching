@@ -163,7 +163,7 @@ def batch_chunks(B, H, N, causal):
     return _balanced(B, int(_cfg()[0] * (1 << 30) // _ws_bytes(1, H, N, causal)))
 
 
-_CHUNK_HOOK = None      # tests only (positive controls csk): called with the chunk index before each chunk is enqueued
+_CHUNK_HOOK = None      # tests only (positive controls csk / wsk2): hook(chunk index, "chunk" | "dqg", buffers) before each chunk / Dqg
 
 
 def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqg_knob="", ch=None):
@@ -203,12 +203,14 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
         T = nb * ng * nh * _tiles(nt, q0, q1, causal)
         ws = (W[:T], Wsb[:T])
         if _CHUNK_HOOK is not None:
-            _CHUNK_HOOK(ci_all)
+            _CHUNK_HOOK(ci_all, "chunk", dict(W=W, Wsb=Wsb, carry=carry))
         ci_all += 1
         if ng == Hk and nh == r and q0 == 0 and q1 == nt:     # batch chunk: contiguous batch slices, no copies
             sl = lambda x: x[b0:b1]  # noqa: E731
             _kv.kv2_launch(*[sl(x) for x in (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)], causal, knob=knob, opts=base, dqw=ws,
                            out=(sl(dk), sl(dv)))
+            if _CHUNK_HOOK is not None:
+                _CHUNK_HOOK(ci_all - 1, "dqg", None)
             dqg_launch(*ws, sl(k8), sl(ks), nb, N, H, causal, knob=dqg_knob, wsw=mode == "dqt", out=sl(dq))
             continue
         # head-split chunk: contiguous copies of its heads, group-major (g, hi) -> kernel head h = g_local * nh + hi_local
@@ -229,6 +231,8 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
             ci += 1
         bd = None if (q0 == 0 and q1 == nt) else (q0, q1)
         dqc_ = torch.empty(nb, N, ng * nh, D, device=dev, dtype=torch.bfloat16) if bd else None
+        if _CHUNK_HOOK is not None:
+            _CHUNK_HOOK(ci_all - 1, "dqg", None)
         dqc_ = dqg_launch(*ws, k8c, ksc, nb, N, ng * nh, causal, knob=dqg_knob, wsw=mode == "dqt", band=bd, out=dqc_)
         rows_ = slice(q0 * 128, q1 * 128)
         for j, hh in enumerate(hql):

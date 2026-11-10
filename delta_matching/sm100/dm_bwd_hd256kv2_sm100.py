@@ -65,14 +65,14 @@ def commit_mc(mbar: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def warp_arrive_c0(mbar: Int32, *, loc=None, ip=None):
+def warp_arrive_c0(mbar: Int32, cta_scope: bool = False, *, loc=None, ip=None):
     """Per-warp aggregated cross-CTA arrive: every lane has already done its own tcgen05 wait/fence::before (and proxy fence);
     bar.warp.sync orders the lanes' memory operations before lane 0's mbarrier.arrive.release.cluster on the leader (rank 0)
     CTA's barrier at this smem offset (causality: warp barrier, then a cluster-scope release; accuracy-audit 08:2x)."""
     _asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
          "{\n\t.reg .pred p;\n\t.reg .b32 l, rm;\n\tbar.warp.sync 0xffffffff;\n\tmov.u32 l, %laneid;\n\t"
          "setp.eq.u32 p, l, 0;\n\tmapa.shared::cluster.u32 rm, $0, 0;\n\t"
-         "@p mbarrier.arrive.release.cluster.shared::cluster.b64 _, [rm];\n\t}", "r", True, loc, ip)
+         "@p mbarrier.arrive" + ("" if cta_scope else ".release.cluster") + ".shared::cluster.b64 _, [rm];\n\t}", "r", True, loc, ip)
 
 
 def _coop(n):
@@ -95,7 +95,7 @@ class DmHd256Kv2:
 
     # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e); meta: warp 10 stages l2/delta/qs/dos per
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
-    OPTS = ("qb2", "xpt", "meta", "xsv")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc")   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
     DEFAULT_OPTS = "meta qb2 xpt"      # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes)

@@ -190,7 +190,10 @@ class DMFwdHd256Sm100:
         # fold implementation: "cute" = per-chunk cute.copy (ld T, wait, ld O, wait, st); "raw" = all T and O chunks of
         # a fold issued as raw tcgen05.ld, ONE wait::ld, T_empty released right after it, then FMAs and tcgen05.st
         # (same values); "nofold" = DEBUG ONLY timing bound (no O update: wrong output)
-        assert fold in ("cute", "raw", "nofold")
+        # "slab": O d-slab (t_n cols) held in registers across its 4 group folds: one O ld + one O st per slab per
+        # tile instead of per fold (same op sequence per element -> bitwise equal to "raw")
+        assert fold in ("cute", "raw", "nofold", "slab")
+        assert fold != "slab" or t_n == 64
         self.fold = fold
         self.mma_tiler_qk = (128, 128, 256)
         self.mma_tiler_pv = (128, 256, 128)      # smem / TMA tile of V; the MMAs use N=128 d-slabs
@@ -635,6 +638,42 @@ class DMFwdHd256Sm100:
         alpha = ld_shared_f32(sb)
         w = [ld_shared_f32(sb + 4 * 128 * (g + 1)) for g in range(4)]
         nb = self.t_nbuf
+        if const_expr(self.fold == "slab"):
+            lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+            for s in cutlass.range_constexpr(self.t_nslab):
+                obase = (lane << 16) + self.tmem_o + self.t_n * s
+                tmem_wait_st()
+                o = [None, None]
+                if const_expr(not is_first):
+                    o = [list(tmem_ld32(obase + 32 * c)) for c in range(2)]
+                for g in cutlass.range_constexpr(4):
+                    f = 4 * s + g
+                    b = f % nb
+                    dm_utils.mbar_wait_parity(mbar + 32 + 8 * b, Int32((f // nb) & 1))
+                    dm_utils.tc_fence_after()
+                    tbase = (lane << 16) + slot * 128 + self.t_n * b
+                    ts = [tmem_ld32(tbase + 32 * c) for c in range(2)]
+                    tmem_wait_ld()
+                    dm_utils.tc_fence_before()
+                    dm_utils.mbar_arrive(mbar + 72 + 8 * b)                        # T_empty[b]
+                    for c in cutlass.range_constexpr(2):
+                        t = ts[c]
+                        if const_expr(is_first and g == 0):
+                            oc = [None] * 32
+                            for k in cutlass.range_constexpr(0, 32, 2):
+                                oc[k], oc[k + 1] = cute.arch.mul_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]))
+                            o[c] = oc
+                        else:
+                            oc = o[c]
+                            if const_expr(g == 0):
+                                for k in cutlass.range_constexpr(0, 32, 2):
+                                    oc[k], oc[k + 1] = cute.arch.mul_packed_f32x2((oc[k], oc[k + 1]), (alpha, alpha))
+                            for k in cutlass.range_constexpr(0, 32, 2):
+                                oc[k], oc[k + 1] = cute.arch.fma_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]),
+                                                                             (oc[k], oc[k + 1]))
+                for c in cutlass.range_constexpr(2):
+                    tmem_st32(obase + 32 * c, o[c])
+            return
         for f in cutlass.range_constexpr(4 * self.t_nslab):
             s, g, b = f // 4, f % 4, f % nb
             dm_utils.mbar_wait_parity(mbar + 32 + 8 * b, Int32((f // nb) & 1))     # T_full[b] (8 uses per tile)

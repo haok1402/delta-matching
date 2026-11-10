@@ -51,7 +51,7 @@ def dm_fwd_hd256(q8, qs, k8, ks, v8, vs, causal: bool, kv_stage: int = 4):
     lse = torch.empty(B, H, N, device=q8.device, dtype=torch.float32)
     num = numerics()
     t_n = int(os.environ.get("DM_HD256_FWD_TN", "64"))     # PV temp width: 64 (double-buffered T, default) or 128
-    fold = os.environ.get("DM_HD256_FWD_FOLD", "raw")      # raw (default) | cute | nofold (DEBUG timing bound only)
+    fold = os.environ.get("DM_HD256_FWD_FOLD", "slab")     # slab (default) | raw | cute | nofold (DEBUG timing bound only)
     key = ("fwd_hd256", bool(causal), H // Hk, kv_stage, num, t_n, fold)
     cache = _cache()
     if key not in cache:

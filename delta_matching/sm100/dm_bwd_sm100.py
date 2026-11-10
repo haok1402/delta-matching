@@ -6178,7 +6178,7 @@ class DMBackwardSm100:
                     flag = (sem[(m_block, None)].iterator + cta_rank).toint()
                     if lane == 0:
                         v = Int32(0)
-                        while v != target:
+                        while v < target:   # >= (monotone count; n_max - 1 is transient for gconvpc)
                             v = dm_utils.ld_acquire_gpu_u32(flag)
                     dm_utils.bar_warp_sync_all()
                     dm_utils.fence_proxy_async_global()

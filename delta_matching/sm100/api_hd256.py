@@ -1,7 +1,7 @@
 """hd256 route of dm_attn_func (api.py branches here on q.shape[-1] == 256 before any hd128 code).
 Numerics: sm100-mx at D=256.
 forward : quant.quant_qkv2(q, k, v, 256**-0.5) (the D-generic quant.py producers) -> fwd_hd256.dm_fwd_hd256_mx
-backward: dO -> quant.quant_do_delta(dO, None) -> delta (matched: pass-0 kernel pass0_hd256.dm_delta_hd256, num/den; stale: quant.quant_do_delta(dO, O))
+backward: dO -> quant.quant_do_delta(dO, None) -> delta (matched: pass-0 kernel attention_delta_hd256, num/den; stale: quant.quant_do_delta(dO, O))
           -> DM_H256_BWD_IMPL (default "dqr"): bwd_hd256dqr.dm_bwd_hd256dqr = fused paired-CTA dK/dV kernel KV2 writing the dS codes
           to a workspace bounded by DM_BWD_WS_LIMIT_GB (default 8 GiB), then the dQ GEMM kernel Dqg; "kv2" = KV2 + the DmHd256Mx2
           dq kernel; "mx" = the DmHd256Mx dv / dk / dq kernels.  All three are deterministic and bitwise identical.
@@ -11,7 +11,7 @@ import torch
 from .fwd import pack_kv_scales  # noqa: F401
 from .fwd_hd256 import dm_fwd_hd256_mx
 from .quant import quant_qkv2, quant_do_delta
-from .pass0_hd256 import dm_delta_hd256
+from .attention_delta_hd256_sm100 import attention_delta_hd256
 from .bwd_hd256mx import dm_bwd_hd256mx
 from .bwd_hd256kv2 import dm_bwd_hd256kv2, kv2_launch
 from .bwd_hd256dqr import dm_bwd_hd256dqr
@@ -48,7 +48,7 @@ def _delta_hd256(q8, qs, k8, ks, v8, vs, lse, o, do, mode, causal):
     if mode == "stale":
         return quant_do_delta(do, o)
     do8, dos, _ = quant_do_delta(do, None)
-    return do8, dos, dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
+    return do8, dos, attention_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
 
 
 class _DMAttnHd256Sm100(torch.autograd.Function):

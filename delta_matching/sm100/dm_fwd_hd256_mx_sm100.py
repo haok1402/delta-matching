@@ -276,7 +276,7 @@ class DMFwdHd256MxSm100:
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
                  lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0,
-                 c10: int = 0, c11: int = 0, c12: int = 0, c13: int = 0, tsplit: int = 0):
+                 c10: int = 0, c11: int = 0, c12: int = 0, c13: int = 0, tsplit: int = 0, e3: int = 0):
         # c8 (fork hd256-fwd3 C8, DM_HD256_FWD_C8=1; Codex hd256-fwd2-02 C, hd256-fwd3-02): column split of every tile over BOTH
         # softmax WGs.  WG h loads S columns 64h..64h+63 (blocks 2h, 2h+1) and runs the m-independent prefix op for op (bmax, kb,
         # bias, FFMA2, ex2, e4m3 codes -> sP, pairwise block sums).  WG1 publishes bmax2/3, bs2/3 (SMEM part[slot][k][128],
@@ -365,6 +365,21 @@ class DMFwdHd256MxSm100:
             self.num_regs_softmax_c11 = 184
             self.num_regs_correction_c11 = 96
         self.n_mbar_dm = 28 if c13 else 26 if c10 else 14
+        # E3 (fork hd256-fwd5, host DM_HD256_FWD_E3, C12/C13 + epi 2 only; Codex hd256-fwd5-04): the O epilogue is split over the
+        # three warps sharing each TMEM lane quadrant q: softmax warp q (chunks 0-2, copy rows 0-10 of the quadrant), softmax warp 4+q
+        # (chunks 3-5, rows 11-21), correction warp 8+q (chunks 6-7, rows 22-31).  Hand-offs: correction publishes scale = 1/l per
+        # row (stats + 256.., the C6 mailbox area, unused under C12) and arrives scale_full (one-shot mbarrier, count 128, release)
+        # right after its last tail (which waited O_full(PV(cnt-2))) and BEFORE the LSE; helpers wait scale_full (acquire) and only
+        # then O_full(PV(cnt-1)) (parity (cnt-1)&1 is now the current or the immediately preceding phase) + tcgen05 fence::after;
+        # every writer fence.proxy.async after O_full(last) before its ring stores (as epi 2); a 384-thread named barrier (id 11)
+        # between the staging stores and the copy-out; teardown arrivals unchanged, after the epilogue.  Values bitwise (same
+        # mul_rn / bf16x2 per element, each element written once).  DEBUG PCs: 19 no copy barrier (all 12 warps) + helpers stage 20 us
+        # late; 20 helpers skip scale_full + correction stores scale 20 us late; 21 helpers skip O_full + the PV issuer sleeps 20 us
+        # before PV(cnt-1) -> all must corrupt, none can hang (barrier participation unchanged / parity waits always complete).
+        self.e3 = bool(e3) and bool(c12) and epi == 2
+        self.mb_scale = 8 * self.n_mbar_dm
+        if self.e3:
+            self.n_mbar_dm += 1
         self.n_stats = 2 * 128 + 2 * 128 + 4 * 128 + ((24 if c11 else 12 if c10 else 8) * 128 if c8 else 0)
         self.part_stride = 1024 if c11 else 512      # floats per part[] buffer (C11: 8 x 128)
         # g1 (fork hd256-fwd3, DM_HD256_FWD_G1 bitmask; profile/hd256-fwd3-tl/REPORT.md): critical-path trims of C6, values bitwise
@@ -643,6 +658,8 @@ class DMFwdHd256MxSm100:
                     dm_utils.mbar_init(mbar + 128 + 8 * k, 256 if self.c12 else 384 if self.c11 else 256)   # P_full3[b]
                     dm_utils.mbar_init(mbar + 152 + 8 * k, 128)            # stats_full3[b]
                     dm_utils.mbar_init(mbar + 176 + 8 * k, 256 if (self.c11 and not self.c12) else 128)   # partial_full3[b]
+            if const_expr(self.e3):
+                dm_utils.mbar_init(mbar + self.mb_scale, 128)                  # E3 scale_full (one-shot, correction WG)
             cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cluster_layout_vmnk, is_relaxed=True)
 
@@ -767,6 +784,11 @@ class DMFwdHd256MxSm100:
             tmem_alloc_barrier.arrive_and_wait_unaligned()
             if const_expr(self.c12):
                 self.softmax4(mbar, sp_base, stats, mQS, mKVW, m_block, head_idx, kv_head_idx, batch_idx, n_block_max, cnt)
+                if const_expr(self.e3):
+                    if warp_idx < 4:
+                        self.epi3(0, mbar, stats, mO, m_block, head_idx, batch_idx, cnt, Int32(sK.iterator.toint()), None)
+                    else:
+                        self.epi3(1, mbar, stats, mO, m_block, head_idx, batch_idx, cnt, Int32(sK.iterator.toint()), None)
             elif const_expr(self.two_wg):
                 if const_expr(self.c8):
                     self.softmax3(mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx, batch_idx,
@@ -1178,6 +1200,10 @@ class DMFwdHd256MxSm100:
         if i >= 1:
             dm_utils.mbar_wait_parity(mbar + 40, (i - 1) & 1)            # O_ready(i): O rescaled (or not) after PV(i-1)
         self.tr(i, 7)
+        if const_expr(self.e3 and self.pc_inj == 21):
+            if i == cnt - 1:
+                for _d in cutlass.range_constexpr(20):                         # DEBUG PC 21: PV(last) issued 20 us late
+                    dm_utils.nanosleep_1us()
         dm_utils.tc_fence_after()
         sf = (128 + 32 * slot) if const_expr(self.sf_bank) else slot * 128
         sfa_c = sf + self.sfa_off
@@ -2002,13 +2028,22 @@ class DMFwdHd256MxSm100:
         row_sum = l_last
         zero_or_nan = row_sum == Float32(0.0) or row_sum != row_sum
         scale = cute.arch.rcp_approx(row_sum if not zero_or_nan else Float32(1.0))
+        if const_expr(self.e3):
+            if const_expr(self.pc_inj == 20):
+                for _d in cutlass.range_constexpr(20):                         # DEBUG PC 20: scale published 20 us late
+                    dm_utils.nanosleep_1us()
+            st_shared_f32(stats + 4 * (256 + tidx), scale)
+            dm_utils.mbar_arrive(mbar + self.mb_scale)                         # E3 scale_full (release; helpers acquire)
         LN2_ = math.log(2.0)
         lse = (m_last * Float32(1.0) + (cute.math.log2(row_sum, fastmath=True) - Float32(0.0))) * LN2_ \
             if not zero_or_nan else -Float32.inf
         mLSE[batch_idx, head_idx, row] = lse
         if const_expr(self.epi == 10):
             dm_utils.mbar_arrive(mbar + 64)          # DEBUG PC epi 10 only: the load warp's poison trigger (final_full, unused by C11)
-        self.epilogue(mbar, mO, m_block, head_idx, batch_idx, cnt, sk_base, tidx, obase, scale)
+        if const_expr(self.e3):
+            self.epi3(2, mbar, stats, mO, m_block, head_idx, batch_idx, cnt, sk_base, scale)
+        else:
+            self.epilogue(mbar, mO, m_block, head_idx, batch_idx, cnt, sk_base, tidx, obase, scale)
 
     # -----------------------------------------------------------------------------------------------------------------
     @cute.jit
@@ -2052,6 +2087,52 @@ class DMFwdHd256MxSm100:
         dm_utils.mbar_wait_parity(mbar + 64, Int32(0))
         scale = ld_shared_f32(stats + 4 * (2 * 128 + tidx))
         self.epilogue(mbar, mO, m_block, head_idx, batch_idx, cnt, sk_base, tidx, obase, scale)
+
+    @cute.jit
+    def epi3(self, g: cutlass.Constexpr, mbar, stats, mO, m_block, head_idx, batch_idx, cnt, sk_base, scale):
+        """E3 epilogue part of warp role g (0: softmax warp q, 1: softmax warp 4+q, 2: correction warp 8+q); see __init__ e3."""
+        tidx = cute.arch.thread_idx()[0] % 128
+        lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+        obase = (lane << 16) + self.tmem_o
+        if const_expr(g != 2):
+            if const_expr(self.pc_inj != 20):
+                dm_utils.mbar_wait_parity(mbar + self.mb_scale, 0)              # scale_full (correction's last tail done)
+            scale = ld_shared_f32(stats + 4 * (256 + tidx))
+        if const_expr(not (g != 2 and self.pc_inj == 21)):
+            dm_utils.mbar_wait_parity(mbar + 32, (cnt - 1) & 1)                 # O_full(PV(last))
+        dm_utils.tc_fence_after()
+        fence_proxy_async_shared()                                              # ring last written by TMA (as epi 2)
+        N = mO.shape[1]
+        H = mO.shape[2]
+        RS = 528
+        srow = sk_base + Int32(RS) * tidx
+        ln = tidx % 32
+        w0 = tidx - ln
+        c0, nc = (0, 3) if const_expr(g == 0) else ((3, 3) if const_expr(g == 1) else (6, 2))
+        if const_expr(g != 2 and self.pc_inj == 19):
+            for _d in cutlass.range_constexpr(20):                              # DEBUG PC 19: helpers stage 20 us late
+                dm_utils.nanosleep_1us()
+        o = tmem_ld32(obase + 32 * c0)
+        tmem_wait_ld()
+        for cc in cutlass.range_constexpr(nc):
+            c = c0 + cc
+            if const_expr(cc < nc - 1):
+                on = tmem_ld32(obase + 32 * (c + 1))
+            for q in cutlass.range_constexpr(4):
+                wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
+                st_shared_v4_b32(srow + (64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
+            if const_expr(cc < nc - 1):
+                tmem_wait_ld()
+                o = on
+        if const_expr(self.pc_inj != 19):
+            pipeline_custom.NamedBarrier(barrier_id=11, num_threads=384).arrive_and_wait_unaligned()   # staging -> copy-out
+        r0, r1 = (0, 11) if const_expr(g == 0) else ((11, 22) if const_expr(g == 1) else (22, 32))
+        for r in cutlass.range_constexpr(r0, r1):
+            rr = w0 + r
+            v = ld_shared_v4_b32(sk_base + Int32(RS) * rr + 16 * ln)
+            gaddr = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + rr) * H + head_idx)
+                                                  * Int64(self.head_dim * 2)) + Int64(16 * ln)
+            st_global_v4_b32(gaddr, v[0], v[1], v[2], v[3])
 
     @cute.jit
     def epilogue(self, mbar, mO, m_block, head_idx, batch_idx, cnt, sk_base, tidx, obase, scale):

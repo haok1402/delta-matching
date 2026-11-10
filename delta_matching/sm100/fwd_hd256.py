@@ -78,6 +78,9 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     c8 = int(os.environ.get("DM_HD256_FWD_C8", "1"))   # hd256-fwd3 C8 column split (implies G1a): 1 = C8 (DEFAULT), 2 = C8b; 0 = C6
     if c8 != 1:
         key = key + (f"c8_{c8}",)
+    c13 = int(os.environ.get("DM_HD256_FWD_C13", "0"))   # hd256-fwd4 C13: C12 + second MMA issuer (warp 15 PV) (opt-in)
+    if c13:
+        key = key + (f"c13_{c13}",)
     c12 = int(os.environ.get("DM_HD256_FWD_C12", "0"))   # hd256-fwd4 C12: C11 with tile-parity prefix-only softmax WGs (opt-in)
     if c12:
         key = key + (f"c12_{c12}",)
@@ -103,7 +106,7 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (AOT it first in a gpupool --gpus 0 run with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split, trace=trace, g1=g1, c8=c8, c10=c10, c11=c11, c12=c12)
+                                 split=split, trace=trace, g1=g1, c8=c8, c10=c10, c11=c11, c12=c12, c13=c13)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

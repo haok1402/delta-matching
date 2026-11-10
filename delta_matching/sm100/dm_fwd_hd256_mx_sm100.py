@@ -275,7 +275,7 @@ class DMFwdHd256MxSm100:
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
                  lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0,
-                 c10: int = 0, c11: int = 0, c12: int = 0):
+                 c10: int = 0, c11: int = 0, c12: int = 0, c13: int = 0):
         # c8 (fork hd256-fwd3 C8, DM_HD256_FWD_C8=1; Codex hd256-fwd2-02 C, hd256-fwd3-02): column split of every tile over BOTH
         # softmax WGs.  WG h loads S columns 64h..64h+63 (blocks 2h, 2h+1) and runs the m-independent prefix op for op (bmax, kb,
         # bias, FFMA2, ex2, e4m3 codes -> sP, pairwise block sums).  WG1 publishes bmax2/3, bs2/3 (SMEM part[slot][k][128],
@@ -319,6 +319,16 @@ class DMFwdHd256MxSm100:
         # correction WG runs the ordered tail (C11).  Owner-only barriers: S_empty[slot] and W1L[slot] count 128 (the owner arrives
         # both after its S(j) load), partial_full3 count 128, P_full3 count 256 (owner 128 + correction 128).  The WGs are now
         # independent and naturally staggered by half a cycle, so one WG's latency-bound phases overlap the other's MUFU work.
+        # C13 (fork hd256-fwd4, DM_HD256_FWD_C13=1, implies C12): a second MMA issuer.  Warp 12 issues only QK (mma_c13_qk: the
+        # mma_c10 QK part), warp 15 only PV (mma_c13_pv).  No cross-warp MMA order is relied on: QK(j+2) waits PV(j-1)'s completion
+        # through O_done2[(j-1)&1] (new per-parity barrier, tcgen05.commit by warp 15 after PV(j-1); a parity barrier because PV(j)
+        # can complete before warp 12 reaches its wait - PV(j+1) cannot: it needs P_full(j+1) <- W1L(j+2) <- QK(j+2)); PV(j)
+        # depends on QK only through S(j+1) -> W1L(j+1) -> SF(j) (correction).  K stages are released by warp 12, V stages by warp 15
+        # (one release per stage, each a commit tracking its reader).  Trace: warp 13 observes S_full and O_full in pipe order.
+        assert c13 in (0, 1)
+        self.c13 = bool(c13)
+        if c13:
+            c12 = 1
         assert c12 in (0, 1)
         self.c12 = bool(c12)
         if c12:
@@ -351,7 +361,7 @@ class DMFwdHd256MxSm100:
         if c11:
             self.num_regs_softmax_c11 = 184
             self.num_regs_correction_c11 = 96
-        self.n_mbar_dm = 26 if c10 else 14
+        self.n_mbar_dm = 28 if c13 else 26 if c10 else 14
         self.n_stats = 2 * 128 + 2 * 128 + 4 * 128 + ((24 if c11 else 12 if c10 else 8) * 128 if c8 else 0)
         self.part_stride = 1024 if c11 else 512      # floats per part[] buffer (C11: 8 x 128)
         # g1 (fork hd256-fwd3, DM_HD256_FWD_G1 bitmask; profile/hd256-fwd3-tl/REPORT.md): critical-path trims of C6, values bitwise
@@ -444,6 +454,8 @@ class DMFwdHd256MxSm100:
         if self.c11:
             self.num_regs_softmax = 184          # prefix only (no running state)
             self.num_regs_correction = 96        # + ordered tail state; 184*256 + 96*128 + 48*128 = 65536
+        if self.c13:
+            self.idle_warp_ids = (13,)           # warp 15 = PV issuer (decreases its own registers)
         self.buffer_align_bytes = 1024
         self.tmem_o = 256
         self.sfa_col = 32
@@ -577,6 +589,9 @@ class DMFwdHd256MxSm100:
             dm_utils.mbar_init(mbar + 88, 128)     # state_full[1]
             dm_utils.mbar_init(mbar + 96, 256 if (self.sempty and not self.c12) else 128)   # S_empty[0] (C9/C10: both WGs; C12 owner)
             dm_utils.mbar_init(mbar + 104, 256 if (self.sempty and not self.c12) else 128)  # S_empty[1]
+            if const_expr(self.c13):
+                for k in cutlass.range_constexpr(2):
+                    dm_utils.mbar_init(mbar + 200 + 8 * k, 1)              # O_done2[parity]: PV(j) complete (warp 15 commit)
             if const_expr(self.c10):
                 for k in cutlass.range_constexpr(2):
                     dm_utils.mbar_init(mbar + 112 + 8 * k, 128)            # W1L[slot]: WG1 loaded S(t)
@@ -602,7 +617,16 @@ class DMFwdHd256MxSm100:
         for w in cutlass.range_constexpr(len(self.idle_warp_ids)):
             if warp_idx == self.idle_warp_ids[w]:
                 cute.arch.setmaxregister_decrease(self.num_regs_other)
-        if const_expr(self.trace and self.two_wg):
+        if const_expr(self.trace and self.c13):
+            if warp_idx == 13:                     # C13: one observer, pipe order QK(0), QK(1), [QK(j+2)], PV(j)
+                for j0 in cutlass.range_constexpr(2):
+                    if j0 < cnt:
+                        self.tr(j0, 28, tr_wait_clock(mbar + 8 * j0, 0))
+                for j in cutlass.range(cnt, unroll=1):
+                    if j + 2 < cnt:
+                        self.tr(j + 2, 28, tr_wait_clock(mbar + 8 * (j & 1), ((j + 2) >> 1) & 1))
+                    self.tr(j, 29, tr_wait_clock(mbar + 32, j & 1))
+        elif const_expr(self.trace and self.two_wg):
             # DEBUG observers: warp 13 records each S_full(j) completion (QK(j) done), warp 15 each O_full (PV(j) done)
             if warp_idx == 13:
                 for j in cutlass.range(cnt, unroll=1):
@@ -668,6 +692,10 @@ class DMFwdHd256MxSm100:
                 for r in cutlass.range((128 * 528) // (16 * 32), unroll=1):
                     st_shared_v4_b32(skb + Int32(16) * (r * 32 + ln), pz, pz, pz, pz)
 
+        if const_expr(self.c13):
+            if warp_idx == 15:
+                cute.arch.setmaxregister_decrease(self.num_regs_other)
+                self.mma_c13_pv(tiled_mma_pv, sV, sP, acc_pv, pipeline_kv, mbar, cnt)
         if warp_idx == self.mma_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
             tmem.allocate(512)
@@ -752,7 +780,9 @@ class DMFwdHd256MxSm100:
         pv_op = cute.make_mma_atom(tiled_mma_pv.op).op
         kv_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Consumer, self.kv_stage)
         q_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Consumer, 1)
-        if const_expr(self.c10):
+        if const_expr(self.c13):
+            self.mma_c13_qk(tSrQ, tSrK, sQ, sK, pipeline_q, pipeline_kv, mbar, cnt, q_state)
+        elif const_expr(self.c10):
             self.mma_c10(atom_qk, tSrQ, tSrK, tOrP, tOrV, sQ, sK, sP, sV, acc_qk, acc_pv, pv_op, pipeline_q, pipeline_kv, mbar, cnt,
                          q_state)
         elif const_expr(self.split == 3):
@@ -991,6 +1021,49 @@ class DMFwdHd256MxSm100:
         gemm_qk_ptx(self.op_q128, Int32(slot) * 128, tSrQ[None, None, None, 0], tSrK[None, None, None, stage],
                     sQ[None, None, None, 0], sK[None, None, None, stage], 0)
 
+    @cute.jit
+    def mma_c13_qk(self, tSrQ, tSrK, sQ, sK, pipeline_q, pipeline_kv, mbar, cnt, q_state):
+        """C13 warp 12: the QK half of mma_c10; PV(j-1)'s completion via O_done2[(j-1)&1] (parity ((j-1)>>1)&1)."""
+        pipeline_q.consumer_wait(q_state)
+        S = self.kv_stage
+        for j0 in cutlass.range_constexpr(2):
+            if j0 < cnt:
+                self.kv_wait(pipeline_kv, Int32(j0))
+                self.qk_ptx(tSrQ, tSrK, sQ, sK, Int32(j0), Int32(j0))
+                with cute.arch.elect_one():
+                    dm_utils.tc_commit(mbar + 8 * j0)                                   # S_full[j0]
+                pipeline_kv.consumer_release_w_index(Int32(j0))
+        for j in cutlass.range(cnt, unroll=1):
+            if j + 2 < cnt:
+                self.tr(j + 2, 0)
+                if const_expr(self.pc_inj != 6):
+                    dm_utils.mbar_wait_parity(mbar + 96 + 8 * (j & 1), (j >> 1) & 1)   # S_empty(j)
+                if j >= 1:
+                    if const_expr(self.pc_inj != 8):
+                        dm_utils.mbar_wait_parity(mbar + 200 + 8 * ((j - 1) & 1), ((j - 1) >> 1) & 1)   # O_done2: PV(j-1) done
+                dm_utils.tc_fence_after()
+                self.tr(j + 2, 1)
+                ks = self.kseq(j + 2)
+                self.kv_wait(pipeline_kv, ks)
+                self.tr(j + 2, 2)
+                self.qk_ptx(tSrQ, tSrK, sQ, sK, ks % S, j & 1)
+                with cute.arch.elect_one():
+                    dm_utils.tc_commit(mbar + 8 * (j & 1))                              # S_full (tile j+2)
+                self.tr(j + 2, 3)
+                pipeline_kv.consumer_release_w_index(ks % S)
+        pipeline_q.consumer_release(q_state)
+
+    @cute.jit
+    def mma_c13_pv(self, tiled_mma_pv, sV, sP, acc_pv, pipeline_kv, mbar, cnt):
+        """C13 warp 15: PV(j) for j = 0..cnt-1 (mma_pv: V(j), P_full3, O_ready -> PV -> O_full + O_done2[j&1], release V(j))."""
+        tOrP = tiled_mma_pv.make_fragment_A(sP)
+        tOrV = tiled_mma_pv.make_fragment_B(sV)
+        pv_op = cute.make_mma_atom(tiled_mma_pv.op).op
+        S = self.kv_stage
+        for j in cutlass.range(cnt, unroll=1):
+            vs = self.vseq(j, cnt)
+            self.mma_pv(pv_op, acc_pv, tOrP, tOrV, sP, sV, pipeline_kv, None, mbar, j, vs % S, (vs // S) & 1, cnt)
+
     def sf_col10(self, j, cnt):
         """C10 SFA column of tile j (SFB = +8): slot (j+1)&1 + 64 for j < cnt-1, own slot + 80 for the last tile."""
         c = Int32(Int32(j) + 1 < cnt)
@@ -1061,6 +1134,8 @@ class DMFwdHd256MxSm100:
             tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)), zero_init=(i == 0))
         with cute.arch.elect_one():
             dm_utils.tc_commit(mbar + 32)                                   # O_full(i)
+            if const_expr(self.c13):
+                dm_utils.tc_commit(mbar + 200 + 8 * (i & 1))                # O_done2[i&1] (C13: QK warp's PV(i) completion)
         self.tr(i, 8)
         if const_expr(self.pc_inj in (1, 2)):
             if const_expr(self.pc_inj == 2):

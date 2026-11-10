@@ -97,7 +97,7 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     otd = os.environ.get("DM_HD256_ORDT", "1") != "0"           # hd256-ordinv FW15: teardown fence pair (DEFAULT; 0 = DEBUG pre-fix)
     if not otd:
         key = key + ("noordt",)
-    lpt = bool(causal) and os.environ.get("DM_HD256_FWD_LPT", "1") != "0"   # hd256-8k L1: global longest-first CTA order (DEFAULT)
+    lpt = bool(causal) and os.environ.get("DM_HD256_FWD_LPT", "0") == "1"   # hd256-8k L1: global longest-first CTA order (opt-in: REJECTED, 16/4 8k fwd slower)
     if causal and not lpt:
         key = key + ("nolpt",)
     epi = int(os.environ.get("DM_HD256_FWD_EPI", "1"))   # hd256-8k F1a: SMEM-staged coalesced O epilogue (DEFAULT 1; 0 = old)

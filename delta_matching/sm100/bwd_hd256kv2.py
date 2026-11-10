@@ -83,7 +83,7 @@ def dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
     lse and delta; disjoint outputs) -> dq runs on a side stream concurrently with KV2 on the caller stream, so each fills
     the other's tail SMs. Same kernels, same inputs, same values; the caller stream joins the side stream before returning."""
     mode = _s1_mode() if not dbg else "0"
-    if mode != "0" and q8.is_cuda:
+    if mode != "0" and q8.is_cuda and not _mx._fake():
         main = torch.cuda.current_stream(q8.device)
         side = _side(q8.device)
         ready = torch.cuda.Event()

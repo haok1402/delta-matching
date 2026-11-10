@@ -36,8 +36,7 @@ def compile_env():
     string that is hashed into the persistent cache directory (_fingerprint) and into the in-process cache memos:
       DM_ABL (bwd ablation knobs, read in DMBackwardSm100.__init__), DM_TCF_SKIP (read while tracing), the dm_utils fence
       emission settings in effect (DM_TCF_IMPL / DM_TCF_MASK, read at dm_utils import), the pass-0 register splits in effect
-      (DM_P0_C3REGS / DM_P0_TLREGS, read at pass0 import; also in the config), the SM count the static persistent grids
-      are traced with (FLASH_ATTENTION_NUM_SMS or the device), and the CuTe DSL compile settings (CUTE_DSL_LINEINFO,
+      (DM_P0_C3REGS / DM_P0_TLREGS, read at pass0 import; also in the config), and the CuTe DSL compile settings (CUTE_DSL_LINEINFO,
       _COMPILER_OPT, _DEBUG, ... = the DSL's own cache_key_str() minus arch, which FA4's key has, and the runtime lib path).
     Opts strings (DM_FWD_OPTS, effective DM_BWD_OPTS incl. b6=, DM_P0_EXP variant) are hashed by the callers."""
     from . import dm_utils, pass0 as _p0
@@ -48,14 +47,10 @@ def compile_env():
                            if x and not x.startswith(("arch=", "shared_libs=")))
         except Exception as e:  # noqa: BLE001
             dsl = f"unknown:{type(e).__name__}"
-        nsm = os.environ.get("FLASH_ATTENTION_NUM_SMS")
-        if not nsm:
-            try:
-                import cutlass.utils
-                nsm = str(cutlass.utils.HardwareInfo().get_device_multiprocessor_count())
-            except Exception:  # noqa: BLE001
-                nsm = "?"
-        _STATIC_ENV.append(f"dsl={dsl}|nsm={nsm}|tcf_impl={dm_utils._TCF_IMPL}|tcf_mask={dm_utils._TCF_MASK}|"
+        # NOT hashed: the SM count (AOT fakes 148, GB200 reports 152): measured not to change the compiled object (whole .o
+        # byte-identical for fwd / pass 0 / bwd, kda/docs/cachekey-design.md), and hashing it would make every GPU run miss
+        # the AOT entries (compile inside a lease).
+        _STATIC_ENV.append(f"dsl={dsl}|tcf_impl={dm_utils._TCF_IMPL}|tcf_mask={dm_utils._TCF_MASK}|"
                            f"p0regs={sorted(_p0.REGS_C3.items())}{sorted(_p0.REGS_TL.items())}")
     return f"{_STATIC_ENV[0]}|abl={_env('DM_ABL', '')}|tcf_skip={_env('DM_TCF_SKIP', '')}"
 

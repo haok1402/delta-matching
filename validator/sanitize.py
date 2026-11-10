@@ -134,9 +134,10 @@ def main():
     cand = os.path.abspath(tgt) + sep + fn
     env = dict(os.environ, PYTORCH_NO_CUDA_MEMORY_CACHING="1")
     if a.shape is not None:
-        parts = str(a.shape).split("_")                     # "i", "i_c" / "i_n", "i_n_m" / "i_n_s" (matched / stale)
-        env["DMVAL_SAN_SHAPE"] = parts[0]
-        if len(parts) > 1:
+        parts = str(a.shape).split("_")    # "i", "i_c" / "i_n", "i_n_m" / "i_n_s"; "all" = every shape, "b" = both causal
+        if parts[0] != "all":
+            env["DMVAL_SAN_SHAPE"] = parts[0]
+        if len(parts) > 1 and parts[1] != "b":
             env["DMVAL_SAN_CAUSAL"] = "1" if parts[1] == "c" else "0"
         if len(parts) > 2:
             env["DMVAL_SAN_MODE"] = "matched" if parts[2] == "m" else "stale"

@@ -6,7 +6,7 @@ the backward's P and dP; stale: rowsum(dO * O)), then attention_bwd_hd256.
 """
 import torch
 
-from .fwd_hd256 import dm_fwd_hd256_mx
+from .attention_fwd_hd256_sm100 import attention_fwd_hd256
 from .quant import quant_qkv2, quant_do_delta
 from .pass0_hd256 import dm_delta_hd256
 from .attention_bwd_hd256_sm100 import attention_bwd_hd256
@@ -22,7 +22,7 @@ def forward_from_bf16(q, k, v, causal):
     (o, lse, (q8, qs, k8, ks, v8, vs, k_mean)) for bf16 inputs: the forward dm_attn_func runs.
     """
     q8, qs, k8, ks, v8, vs, kvw, mean = quant_qkv2(q, k, v, SOFTMAX_SCALE)   # kvw == pack_kv_scales(ks, vs)
-    o, lse = dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal)
+    o, lse = attention_fwd_hd256(q8, qs, k8, kvw, v8, causal)
     return o, lse, (q8, qs, k8, ks, v8, vs, mean)
 
 

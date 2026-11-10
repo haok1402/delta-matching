@@ -12,6 +12,20 @@ NUMERICS = "sm100-mx-d256"
 DETERMINISTIC = True
 
 
+_PH = {}
+
+
+def _ph(dev):
+    """per-device dbg placeholders (never written by a dbg=0 build)."""
+    k = str(dev)
+    if k not in _PH:
+        _PH[k] = dict(dump=torch.zeros(1, 1, 1, 4, device=dev, dtype=torch.float32),
+                      c=torch.zeros(1, 1, 16, device=dev, dtype=torch.uint8),
+                      sb=torch.zeros(1, 1, 4, device=dev, dtype=torch.int32),
+                      h=torch.zeros(1, 1, 4, device=dev, dtype=torch.int64))
+    return _PH[k]
+
+
 def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None):
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
@@ -25,13 +39,17 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
     L = B * H
     big = dbg & 2
-    z8 = lambda *s: torch.zeros(*s, device=dev, dtype=torch.uint8)  # noqa: E731
-    dump = torch.zeros(L, N, N, 4, device=dev) if big else torch.zeros(1, 1, 1, 4, device=dev)
-    cp_ = z8(L, N, N) if big else z8(1, 1, 16)
-    cs_ = z8(L, N, N) if big else z8(1, 1, 16)
-    sbp = torch.zeros(L, N, N // 32, device=dev, dtype=torch.int32) if big else torch.zeros(1, 1, 4, device=dev, dtype=torch.int32)
-    sbs = torch.zeros_like(sbp)
-    hh = torch.zeros(L, N, 4, device=dev, dtype=torch.int64) if dbg & 8 else torch.zeros(1, 1, 4, device=dev, dtype=torch.int64)
+    if big or dbg & 8:
+        z8 = lambda *s_: torch.zeros(*s_, device=dev, dtype=torch.uint8)  # noqa: E731
+        dump = torch.zeros(L, N, N, 4, device=dev, dtype=torch.float32) if big else _ph(dev)["dump"]
+        cp_ = z8(L, N, N) if big else _ph(dev)["c"]
+        cs_ = z8(L, N, N) if big else _ph(dev)["c"]
+        sbp = torch.zeros(L, N, N // 32, device=dev, dtype=torch.int32) if big else _ph(dev)["sb"]
+        sbs = torch.zeros_like(sbp) if big else _ph(dev)["sb"]
+        hh = torch.zeros(L, N, 4, device=dev, dtype=torch.int64) if dbg & 8 else _ph(dev)["h"]
+    else:   # production: the dbg tensors are never touched (compiled out) -> shared placeholders, no per-call zeroing
+        ph = _ph(dev)
+        dump, cp_, cs_, sbp, sbs, hh = ph["dump"], ph["c"], ph["c"], ph["sb"], ph["sb"], ph["h"]
     ten = [p(k8), p(v8), p(q8), p(do8), tt(q8), tt(do8), qs, ks, vs, dos, lse, delta, dk, dv, dump, cp_, cs_, sbp, sbs, hh]
     lds = [1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2]
     kd = dbg & 10
@@ -45,9 +63,10 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
 def dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None):
     """Same contract as bwd_hd256mx.dm_bwd_hd256mx: (dq, dk, dv) [+ dbg dict].  dq = DmHd256Mx dq mode, dk/dv = KV2."""
     r = _mx.dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, modes=("dq",))
+    dq, d = r[0], (r[3] if dbg else None)
+    del r                    # the dq-only call's unused (empty) dk / dv buffers go back to the allocator before KV2 allocates
     dk, dv, ex = kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, knob=knob, opts=opts)
     if dbg:
-        dq, _, _, d = r
         d["kv2"] = ex
         return dq, dk, dv, d
-    return r[0], dk, dv
+    return dq, dk, dv

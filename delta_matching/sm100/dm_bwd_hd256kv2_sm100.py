@@ -141,7 +141,9 @@ class DmHd256Kv2:
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
     OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc",
-            "sfnomath", "sfnopc", "sfnoxchg", "sfnodsc", "sfnosfa")
+            "sfnomath", "sfnopc", "sfnoxchg", "sfnodsc", "sfnosfa", "sfwb")
+    # sfwb (TIMING ONLY): after the P/dS math every compute thread writes its 32 fp32 P and 32 fp32 dS back to TMEM (free columns
+    # 416-511; the two half-warps' dS columns overlap) = the compute-side cost of handing the codes/SF chain to a helper warpgroup.
     # sf* (fork kda-sm100-kv2sf stage-1 bound, TIMING ONLY, wrong dK/dV): remove one link of the compute warps' P^T / dS codes +
     # SF production chain each.  sfnomath: P = S, dS = dP (no exp / dS math); sfnopc: no P^T block max / codes / smem store
     # (p_sb = 127); sfnoxchg: no p_sb / |dS|-max exchange (no bar 3, no gather; dS scale from the thread-local max); sfnodsc: no dS
@@ -752,6 +754,10 @@ class DmHd256Kv2:
                         x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
                         dsv[i + q2] = x0
                         dsv[i + q2 + 1] = x1
+                if const_expr("sfwb" in self.opts):
+                    dmh_st32(tb + 416 + 32 * hf, [pv[i] for i in range(32)])
+                    dmh_st32(tb + 480, [dsv[i] for i in range(32)])
+                    cute.arch.fence_view_async_tmem_store()
                 if const_expr(self.dbg & 2):
                     pa = _gaddr(mDump) + ((Int64(l) * N + q0) * N + key) * 16
                     for i in cutlass.range_constexpr(32):

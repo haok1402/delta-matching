@@ -421,6 +421,13 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
         kscale = quant_blockrows(kh, _kb)[1].repeat_interleave(_kb, -1)[..., :N] if N % _kb == 0 else None   # (B, Hk, N)
         if p.k.startswith("mx:"):        # MX K carries no per-key scale: the dS' key weighting is 1
             kscale = torch.ones_like(kscale) if kscale is not None else None
+        # per-token fp32 input scales of blockrows schemes (B, H|Hk, N), for residual-folding sites (None otherwise)
+        def _tokscale(scheme, x):
+            if not scheme.startswith(("blockrows:", "blockrows_mul:")):
+                return None
+            b_ = int(scheme.split(":")[1])
+            return quant_blockrows(x, b_, scheme.startswith("blockrows_mul:"))[1].repeat_interleave(b_, -1) if N % b_ == 0 else None
+        qscale, vscale, doscale = _tokscale(p.q, qh), _tokscale(p.v, vh), _tokscale(p.do, doh)
         Va = _site(p.v, vh, c0, p)                           # operand of O = P V
         Vd = _site(p.vd or (p.v if p.q2 is None else p.k), vh, c0, p)  # operand of dP = dO V^T (MX: D-blocked like K)
         dOa = _site(p.do, doh, c0, p)                        # operand of dP = dO V^T
@@ -455,7 +462,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             m = S.amax(-1, keepdim=True)
             P = torch.exp(S - m)
             l = P.sum(-1, keepdim=True)
-            ctx = _Ctx(role="p_fwd", rowmax=m, rows=(i0, i1), causal=causal, S=S)
+            ctx = _Ctx(role="p_fwd", rowmax=m, rows=(i0, i1), causal=causal, S=S,
+                       vscale=None if vscale is None else vscale[:, :, :nk].repeat_interleave(rep, 1))
             Pq = _site(p.p_fwd, P, ctx, p)
             if p.l_from_codes:
                 l = Pq.sum(-1, keepdim=True)
@@ -475,7 +483,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             P = torch.exp(S - LSE[:, :, i0:i1, None])
             if bwd_p_noise:      # diagnostic: elementwise P_bwd * (1 + U(-a, a)) (a cheaper backward exp)
                 P = P * (1 + bwd_p_noise * (2 * torch.rand_like(P) - 1))
-            ctx = _Ctx(role="p_bwd", lse=LSE[:, :, i0:i1, None], rows=(i0, i1), causal=causal, S=S)
+            ctx = _Ctx(role="p_bwd", lse=LSE[:, :, i0:i1, None], rows=(i0, i1), causal=causal, S=S,
+                       doscale=None if doscale is None else doscale[:, :, i0:i1])
             Pq = _site(p.p_bwd, P, ctx, p)
             dVp = Pq.transpose(-1, -2) @ dOb[:, :, i0:i1]                         # (B, H, nk, D)
             dV[:, :, :nk] += dVp.reshape(B, Hk, rep, nk, D).sum(2)
@@ -497,7 +506,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
             delta[:, :, i0:i1] = dl.squeeze(-1)
             dS = _ds_operand(P, Pq, p) * (dP - dl)
             ctx = _Ctx(role="ds", rows=(i0, i1), causal=causal,
-                       kscale=None if kscale is None else kscale[:, :, :nk].repeat_interleave(rep, 1).unsqueeze(-2).squeeze(-2))
+                       kscale=None if kscale is None else kscale[:, :, :nk].repeat_interleave(rep, 1).unsqueeze(-2).squeeze(-2),
+                       qscale=None if qscale is None else qscale[:, :, i0:i1])
             dSq = _site(p.ds, dS, ctx, p)
             dSq2 = dSq if p.ds2 is None else _site(p.ds2, dS, ctx, p)
             if aux:
@@ -613,3 +623,49 @@ make_kda_preset("sm100-mx-lq", ds_block=(128, 32), delta_norm=True, l_from_codes
 make_kda_preset("sm100-mx-x", ds_block=(128, 32), p_fwd="none", delta_from_o=True)
 # kda-sm100-bwd8 proposal (2026-11-09): dS scaled per 32 keys x 32 queries (MXFP8 granularity), everything else sm100-mx
 make_kda_preset("sm100-mx-ds32", ds_block=(32, 32), delta_norm=True)
+
+
+# ------------------------------------------------------------------------------------------ hd256 residual-folding routes
+# lead 2026-11-10: on sm100 the block-scaled MMA takes only pow2 (UE8M0) scales along the contraction dim.  Split every fp32
+# input scale s = 2^e * r (r in [1, 2)): 2^e goes to the MMA scale; r either multiplies post-MMA (scale on a non-contraction
+# dim: exact) or is folded into the OTHER operand before its e4m3 rounding (scale on the contraction dim).  Input codes stay
+# the floor's; only P (fwd), P^T (dV) and dS codes change.  Emulation of the floor-vs-fold question only (not accepted yet).
+def _resid(s):
+    m_, _ = torch.frexp(s)
+    return 2 * m_                                                       # s / 2^floor(log2 s), exact
+
+
+def fold_v_pfwd(P, ctx, p, kind="kda"):
+    """(1) V's per-32-key residual r_j folded into the P-hat basis: codes of P_ij * r_j with a pow2 scale per (row, 32 keys),
+    V codes = the floor's V codes with MMA scale 2^e_j.  kind "kda": the sm100 direct-exponent rule (kda_pfwd on S + ln r);
+    "mx": ideal pow2 ceil per (row, 32 keys)."""
+    r = _resid(ctx.vscale).unsqueeze(-2)                                # (..., 1, C)
+    if kind == "kda":
+        c2 = _Ctx(**{**ctx.__dict__, "S": ctx.S + torch.log(r)})
+        return kda_pfwd(P, c2, 32) / r
+    return fake_mx(_pad_to(P * r, 1, 32), -1, 32)[..., :P.shape[-1]] / r
+
+
+def fold_do_pbwd(P, ctx, p):
+    """(2) dO's per-64-row residual r_i folded into P^T for dV = P^T dO (P^T pow2 per key x 32 queries, the accepted ptmx
+    swap); dO codes = the floor's with MMA scale 2^e_i.  The dP = dO V^T side needs no fold (both scales are on
+    non-contraction dims: exact post-MMA multiply)."""
+    r = _resid(ctx.doscale).unsqueeze(-1)                               # (..., R, 1)
+    x = _pad_to(P * r, 32, 1)
+    return fake_mx(x, -2, 32)[..., :P.shape[-2], :] / r
+
+
+def fold_qk_ds(dS, ctx, p, tr=32, tc=32, fold_q=True):
+    """(3) dS for dK = dS^T Q (contracts queries: Q's residual) and dQ = dS K (contracts keys: K's residual): one code set of
+    dS * ks_j * sq_i (full scales folded, the floor already folds ks_j) with a pow2 scale per tr x tc block; undone exactly
+    post-MMA on the non-contraction side.  fold_q=False: info only (pow2 psi without the Q fold - not realisable for dK)."""
+    w = ctx.kscale.unsqueeze(-2) * (ctx.qscale.unsqueeze(-1) if fold_q else 1.0)
+    return fake_mx2d(dS * w, tr, tc) / w
+
+
+SITE_FNS["fold_v_kda"] = lambda P, ctx, p: fold_v_pfwd(P, ctx, p, "kda")
+SITE_FNS["fold_v_mx"] = lambda P, ctx, p: fold_v_pfwd(P, ctx, p, "mx")
+SITE_FNS["fold_do_ptmx"] = fold_do_pbwd
+for _r, _c in ((32, 32), (64, 64), (128, 32), (64, 32)):
+    SITE_FNS[f"fold_qk_ds:{_r}x{_c}"] = (lambda r_, c_: lambda dS, ctx, p: fold_qk_ds(dS, ctx, p, r_, c_))(_r, _c)
+    SITE_FNS[f"pow2_ds_noq:{_r}x{_c}"] = (lambda r_, c_: lambda dS, ctx, p: fold_qk_ds(dS, ctx, p, r_, c_, False))(_r, _c)

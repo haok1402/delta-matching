@@ -4,8 +4,8 @@ Same plumbing as pass0.py (FA4 _flash_attn_fwd with the kernel class swapped); h
 dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal) -> delta (B, H, N) fp32, [64,32] fp32 contract:
   q8 / do8 (B, N, H, 256) e4m3, qs / dos (B, H, N/64) fp32;  k8 / v8 (B, N, Hk, 256) e4m3, ks / vs (B, Hk, N/32) fp32;
   lse (B, H, N) fp32 natural log.  P_hat / dP per dm_common_hd256.
-  delta form (compile time, env DM_P0H_DELTA or delta_form=): "floor" (default, sm90 Delta-Matching-256 v1):
-  delta = sum_j P_hat dP / 256;  "numden" (hd128 sm100 form): delta = sum_j P_hat dP / sum_j P_hat.
+  delta form (compile time, env DM_P0H_DELTA or delta_form=): "floor" (sm90 Delta-Matching-256 v1, opt-in):
+  delta = sum_j P_hat dP / 256;  "numden" (DEFAULT per lead ruling 2026-11-10; hd128 sm100 form): delta = sum_j P_hat dP / sum_j P_hat.
 """
 import dataclasses
 import threading
@@ -50,7 +50,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 
 
 def variant_for(delta_form: str | None = None) -> str:
-    form = delta_form or _env("DM_P0H_DELTA", "floor")
+    form = delta_form or _env("DM_P0H_DELTA", "numden")
     assert form in ("floor", "numden"), form
     return BASE_VARIANT + ("+dnd" if form == "numden" else "+dfl")
 

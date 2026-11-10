@@ -90,46 +90,41 @@ def _coop(n):
 
 class DmHd256Kv2:
     TK, TQ, D = 64, 128, 256            # keys per CTA, queries per iteration, head dim
-    COL_DK, COL_DV, COL_S, COL_DP = 0, 128, 256, 320
-    COL_SFB, COL_SFA_P, COL_SFA_S = 384, 392, 394     # + 4 * stage
+    # TMEM (Codex kv2-05): dK [0,128) dV [128,256) S slot s at 256 + 64 s (s < NS) dP [384,448) SFB [448,456)
+    # SFA_P stage g at 456 + 4 g (+ r//32), SFA_S stage g at 458 + 4 g
+    COL_DK, COL_DV, COL_S, COL_DP = 0, 128, 256, 384
+    COL_SFB, COL_SFA_P, COL_SFA_S = 448, 456, 458
     NCOMP = 256                          # compute threads per CTA (warps 0-7)
-    MMA_WARP, LOAD_WARP = 8, 9
-    # lsk: planted control (one dS code flipped: b 0, kv head 0, key 0, first tile).  Positive controls of every new hand-off
-    # ("<h>" = UNSAFE order + delay, "<h>_safe" = shipped order + the same delay, must be bitwise the default build):
-    #   q: Q/dO smem released before the S/dP MMAs; d: Qd/dOd released before dV/dK; s: S/dP TMEM released before the
-    #   compute loads; cd: codes/SFA published before they are written; ex: exchange barrier dropped; ld: l2/delta single
-    #   buffer; fin: epilogue reads dK/dV before the final commit.
-    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta")
-    DLY = 1 << 15
-
-    # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e); meta: warp 10 stages l2/delta/qs/dos per
-    # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
-    # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
-    # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly")
-    RELAY_WARP = 11   # relcl/acqcl: DEBUG: only release / only acquire at cluster   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
-    META_WARP = 10
+    MMA_WARP, LOAD_WARP, META_WARP, RELAY_WARP = 8, 9, 10, 11
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
-    DEFAULT_OPTS = "meta qb2 xpt rly"      # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes)
+    # Positive controls ("<h>" = UNSAFE order + delay, "<h>_safe" = shipped order + same delay, must be bitwise the default):
+    #   lsk planted dS-code flip; q / d: Q-dO / Qd-dOd smem released before their MMAs; s / dp: S / dP TMEM slot released
+    #   before the compute loads; pc / dsc: P / dS codes+SFA published before written; exp / exds: P / dS exchange barrier
+    #   dropped; fin: epilogue reads before the final commit; meta: metadata stage released before read; rly: relay forwards
+    #   the P publication before its local wait
+    KNOBS = ("lsk", "q", "d", "s", "dp", "pc", "dsc", "exp", "exds", "fin", "meta", "rly")
+    DLY = 1 << 15
+    # C2 (Codex kv2-05) = C1 (meta qb2 xpt rly, all required) + separate S / dP / P / dS hand-offs, early P publication, two
+    # exchange barriers, 4-event relay.  c1d: second S slot + MMA order S(t), dK(t-1), dP(t), dV(t) (else look-ahead order
+    # S(t+1), dP(t+1), dV(t), dK(t)).
+    OPTS = ("qb2", "xpt", "meta", "rly", "c1d")
+    DEFAULT_OPTS = "meta qb2 xpt rly"
 
     def _arr(self, leader_bar, relay_bar, crank):
-        """compute-warp arrive for a cross-CTA hand-off (see opt rly)."""
-        if const_expr("rly" in self.opts):
-            warp_arrive_local(leader_bar + (relay_bar - leader_bar) * crank)
-        else:
-            warp_arrive_c0(leader_bar, ("ctasc" in self.opts or "acqcl" in self.opts))
+        """compute-warp arrive for a cross-CTA hand-off: CTA 0 -> the leader barrier (.cta, same CTA); CTA 1 -> its local
+        relay barrier, forwarded by the relay warp with ONE arrive.release.cluster (accuracy-audit 08:2x)."""
+        warp_arrive_local(leader_bar + (relay_bar - leader_bar) * crank)
 
     def _wcl(self, mbar, ph):
-        """leader-side wait on a cross-CTA arrive barrier: acquire.cluster (default) / .cta (debug opt ctasc)."""
-        if const_expr("ctasc" in self.opts or "relcl" in self.opts):
-            dm_utils.mbar_wait_parity(mbar, ph)
-        else:
-            dm_utils.mbar_wait_parity_cluster(mbar, ph)
+        """leader-side wait on a cross-CTA hand-off barrier: try_wait.parity.acquire.cluster."""
+        dm_utils.mbar_wait_parity_cluster(mbar, ph)
 
     def __init__(self, causal: bool, dbg: int = 0, knob: str = "", opts=None):
         self.opts = tuple(sorted((self.DEFAULT_OPTS if opts is None else opts).replace(",", " ").split()))
         assert all(o in self.OPTS for o in self.opts), self.opts
-        self.nqs = 2 if "qb2" in self.opts else 1
+        assert all(o in self.opts for o in ("qb2", "xpt", "meta", "rly")), self.opts
+        self.nqs = 2
+        self.NS = 2 if "c1d" in self.opts else 1
         self.causal = bool(causal)
         self.dbg = int(dbg)
         self.kn = knob.replace("_safe", "")
@@ -175,7 +170,7 @@ class DmHd256Kv2:
             bars: cute.struct.MemRange[cutlass.Int64, 32]
             # cross-CTA hand-offs with ordinary / tcgen05.st / ld data (accuracy-audit 08:2x): raw mbarriers, arrive.release.cluster on
             # the leader + try_wait.acquire.cluster there; [F_s, E_s, F_cd0, F_cd1, E_cd0, E_cd1, F_f, E_f]
-            kb: cute.struct.Align[cute.struct.MemRange[cutlass.Int64, 12], 8]   # + relay [L_s, L_cd0, L_cd1, L_f]
+            kb: cute.struct.Align[cute.struct.MemRange[cutlass.Int64, 24], 8]
             tmem_hold: Int32
             tmem_dealloc: cutlass.Int64
             sLD: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 2 * 128], 16]     # [par][l2 | delta][q]
@@ -257,21 +252,20 @@ class DmHd256Kv2:
                                                    tx_count=2 * 2 * self.bytes_t, barrier_storage=bars + 6,
                                                    cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         kbar = Int32(st.kb.data_ptr().toint())
-        F_S, E_S, F_F, E_F = kbar, kbar + 8, kbar + 48, kbar + 56
-        # F_s / E_cd / F_f: one tcgen05.commit (multicast, hardware completion); E_s / F_cd / E_f: 8 compute warps x 2 CTAs
-        # arrive (lane 0 after bar.warp.sync, release.cluster) on the LEADER's barrier; only the leader waits on those (acquire.cluster)
+        bars_a = Int32(bars.toint())
+        # raw barriers (Codex kv2-05 table): index -> kbar + 8 i
+        #  0,1 F_S[2] (commit)   2,3 E_S[2] (8+1)   4 F_DP (commit)   5 E_DP (8+1)   6,7 F_PC[2] (8+1)   8,9 E_PC[2] (commit)
+        #  10,11 F_DSC[2] (8+1)  12,13 E_DSC[2] (commit)   14 F_FIN (commit)   15 E_FIN (8+1)
+        #  16,17 L_S[2]  18 L_DP  19,20 L_PC[2]  21,22 L_DSC[2]  23 L_FIN   (CTA-1 local relay barriers, 8 warps)
         if warp == self.MMA_WARP:
             with cute.arch.elect_one():
-                ncw = (self.NCOMP // 32 + 1) if const_expr("rly" in self.opts) else 2 * self.NCOMP // 32   # arrivals
-                for i_ in cutlass.range_constexpr(4):
-                    dm_utils.mbar_init(kbar + 64 + 8 * i_, self.NCOMP // 32)                           # relay (CTA 1)
-                dm_utils.mbar_init(F_S, 1)
-                dm_utils.mbar_init(E_S, ncw)
-                for i_ in cutlass.range_constexpr(2):
-                    dm_utils.mbar_init(kbar + 16 + 8 * i_, ncw)
-                    dm_utils.mbar_init(kbar + 32 + 8 * i_, 1)
-                dm_utils.mbar_init(F_F, 1)
-                dm_utils.mbar_init(E_F, ncw)
+                for i_ in cutlass.range_constexpr(24):
+                    cnt = 1
+                    if const_expr(i_ in (2, 3, 5, 6, 7, 10, 11, 15)):
+                        cnt = self.NCOMP // 32 + 1
+                    if const_expr(i_ >= 16):
+                        cnt = self.NCOMP // 32
+                    dm_utils.mbar_init(kbar + 8 * i_, cnt)
         m_p, m_c = pipeline.PipelineAsync.create(num_stages=2, producer_group=_coop(32), consumer_group=comp1,
                                                  barrier_storage=bars + 18, defer_sync=True).make_participants()
         cute.arch.mbarrier_init_fence()
@@ -355,26 +349,37 @@ class DmHd256Kv2:
                     me.commit()
                 m_p.tail()
 
-        # ------------------------------------------------------------------ relay warp (CTA 1, opt rly)
-        if const_expr("rly" in self.opts):
-            if warp == self.RELAY_WARP:
-                if crank % 2 == 1:
-                    sc_ = ("ctasc" in self.opts or "acqcl" in self.opts)
-                    for t in cutlass.range(total, unroll=1):
-                        dm_utils.mbar_wait_parity(kbar + 64, t & 1)            # CTA-1 readers of S/dP(t) done (acquire.cta)
-                        warp_arrive_c0(E_S, sc_)                               # -> leader, release.cluster
-                        stg = t & 1
-                        dm_utils.mbar_wait_parity(kbar + 72 + 8 * stg, (t >> 1) & 1)   # CTA-1 codes / SFA of t written
-                        warp_arrive_c0(kbar + 16 + 8 * stg, sc_)
-                    dm_utils.mbar_wait_parity(kbar + 88, Int32(0))            # CTA-1 epilogue readers done
-                    warp_arrive_c0(E_F, sc_)
+        B = lambda i_: kbar + 8 * i_                  # noqa: E731
+        NS = self.NS
+
+        # ------------------------------------------------------------------ relay warp (CTA 1): local acquire -> release.cluster
+        if warp == self.RELAY_WARP:
+            if crank % 2 == 1:
+                for t in cutlass.range(total, unroll=1):
+                    ss = t % NS
+                    sp = (t // NS) & 1
+                    cs_ = t & 1
+                    cp_ = (t >> 1) & 1
+                    dm_utils.mbar_wait_parity(B(16) + 8 * ss, sp)
+                    warp_arrive_c0(B(2) + 8 * ss)
+                    if const_expr(self.kn == "rly" and self.unsafe):
+                        warp_arrive_c0(B(6) + 8 * cs_)                    # UNSAFE: forwarded before CTA 1 wrote P
+                        dm_utils.mbar_wait_parity(B(19) + 8 * cs_, cp_)
+                    else:
+                        dm_utils.mbar_wait_parity(B(19) + 8 * cs_, cp_)
+                        warp_arrive_c0(B(6) + 8 * cs_)
+                    dm_utils.mbar_wait_parity(B(18), t & 1)
+                    warp_arrive_c0(B(5))
+                    dm_utils.mbar_wait_parity(B(21) + 8 * cs_, cp_)
+                    warp_arrive_c0(B(10) + 8 * cs_)
+                dm_utils.mbar_wait_parity(B(23), Int32(0))
+                warp_arrive_c0(B(15))
 
         # ------------------------------------------------------------------ MMA warp (leader CTA issues)
         if warp == self.MMA_WARP:
             if crank % 2 == 0:
                 mma_op = cute.make_mma_atom(mma_o.op).op
                 acc_l = mma_s.make_fragment_C(mma_s.partition_shape_C((2 * self.TK, self.TQ))).layout
-                accS = cute.make_tensor(tmem_ptr + self.COL_S, acc_l)
                 accP = cute.make_tensor(tmem_ptr + self.COL_DP, acc_l)
                 tKr = mma_s.make_fragment_A(sK)
                 tVr = mma_s.make_fragment_A(sV)
@@ -384,81 +389,117 @@ class DmHd256Kv2:
                 tCSr = mma_o.make_fragment_A(sCS)
                 tQdr = mma_o.make_fragment_B(sQd)
                 tdOdr = mma_o.make_fragment_B(sdOd)
-                kf = kv_c.wait_and_advance()
-                # prologue: S(0), dP(0)
-                qf = q_c.wait_and_advance()
-                self._wcl(E_S, Int32(1))       # fresh slot
-                tc_fence_after()
-                if const_expr(self.kn == "q"):
-                    if const_expr(self.unsafe):
-                        qf.release()
-                    spin(self.DLY)
-                mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                for kb in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
-                    cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, qf.index)], accS)
-                    mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                for kb in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
-                    cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, qf.index)], accP)
-                    mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                with cute.arch.elect_one():
-                    commit_mc(F_S)
-                if const_expr(not (self.kn == "q" and self.unsafe)):
-                    qf.release()
-                for t in cutlass.range(total, unroll=1):
-                    if t + 1 < total:
-                        # S/dP(t+1): the slot was released by every compute thread of both CTAs after its S/dP(t) loads
-                        qf = q_c.wait_and_advance()
-                        self._wcl(E_S, t & 1)    # all 512 readers of S/dP(t) done (release.cluster)
-                        tc_fence_after()
-                        if const_expr(self.kn == "q"):
-                            if const_expr(self.unsafe):
-                                qf.release()
+                d_empty = bars_a + 8 * (6 + self.nqs)          # d pipeline (bars + 6): full [6, 6+nqs), empty [6+nqs, 6+2 nqs)
+
+                def issue_s(n, qi):
+                    ss = n % NS
+                    self._wcl(B(2) + 8 * ss, ((n // NS) & 1) ^ 1)          # S slot free (cluster acquire)
+                    tc_fence_after()
+                    accS = cute.make_tensor(tmem_ptr + self.COL_S + 64 * ss, acc_l)
+                    mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                    for kb_ in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
+                        cute.gemm(mma_s, accS, tKr[(None, None, kb_, 0)], tQr[(None, None, kb_, qi)], accS)
+                        mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                    with cute.arch.elect_one():
+                        commit_mc(B(0) + 8 * ss)
+
+                def issue_dp(n, qi):
+                    self._wcl(B(5), (n & 1) ^ 1)
+                    tc_fence_after()
+                    mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                    for kb_ in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
+                        cute.gemm(mma_s, accP, tVr[(None, None, kb_, 0)], tdOr[(None, None, kb_, qi)], accP)
+                        mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                    with cute.arch.elect_one():
+                        commit_mc(B(4))
+
+                def issue_dv(n, di):
+                    g = n & 1
+                    self._wcl(B(6) + 8 * g, (n >> 1) & 1)                  # P codes + SFA of n published
+                    tc_fence_after()
+                    if const_expr(self.kn == "fin"):
+                        if n == total - 1:
                             spin(self.DLY)
-                        mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                        for kb in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
-                            cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, qf.index)], accS)
-                            mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                        mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                        for kb in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
-                            cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, qf.index)], accP)
-                            mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                        with cute.arch.elect_one():
-                            commit_mc(F_S)
-                        if const_expr(not (self.kn == "q" and self.unsafe)):
-                            qf.release()
-                    df = d_c.wait_and_advance()
-                    stg = t & 1
-                    self._wcl(kbar + 16 + 8 * stg, (t >> 1) & 1)   # codes / SFA of t published
+                    dm_utils.gemm_ptx_bs(
+                        mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, g)], tdOdr[(None, None, None, di)],
+                        sCP[(None, None, None, g)], sdOd[(None, None, None, di)],
+                        tmem_base + self.COL_SFA_P + 4 * g, tmem_base + self.COL_SFB,
+                        tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
+                        zero_init=cutlass.Boolean(n == 0), cta_group=2)
+                    with cute.arch.elect_one():
+                        commit_mc(B(8) + 8 * g)                            # P stage free after dV(n)
+
+                def issue_dk(n, di):
+                    g = n & 1
+                    self._wcl(B(10) + 8 * g, (n >> 1) & 1)                 # dS codes + SFA of n published
                     tc_fence_after()
                     if const_expr(self.kn == "d"):
                         if const_expr(self.unsafe):
-                            df.release()
+                            with cute.arch.elect_one():
+                                commit_mc(d_empty + 8 * di)                # UNSAFE: Qd stage released before dK reads it
                         spin(self.DLY)
-                    if const_expr(self.kn == "fin"):
-                        if t == total - 1:
-                            spin(self.DLY)
                     dm_utils.gemm_ptx_bs(
-                        mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, stg)], tdOdr[(None, None, None, df.index)],
-                        sCP[(None, None, None, stg)], sdOd[(None, None, None, df.index)],
-                        tmem_base + self.COL_SFA_P + 4 * stg, tmem_base + self.COL_SFB,
+                        mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, g)], tQdr[(None, None, None, di)],
+                        sCS[(None, None, None, g)], sQd[(None, None, None, di)],
+                        tmem_base + self.COL_SFA_S + 4 * g, tmem_base + self.COL_SFB,
                         tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
-                        zero_init=cutlass.Boolean(t == 0), cta_group=2)
-                    dm_utils.gemm_ptx_bs(
-                        mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, stg)], tQdr[(None, None, None, df.index)],
-                        sCS[(None, None, None, stg)], sQd[(None, None, None, df.index)],
-                        tmem_base + self.COL_SFA_S + 4 * stg, tmem_base + self.COL_SFB,
-                        tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
-                        zero_init=cutlass.Boolean(t == 0), cta_group=2)
+                        zero_init=cutlass.Boolean(n == 0), cta_group=2)
                     with cute.arch.elect_one():
-                        commit_mc(kbar + 32 + 8 * stg)   # after dK(t): covers dV(t) and dK(t) (same issuing thread)
-                    if const_expr(not (self.kn == "d" and self.unsafe)):
-                        df.release()
+                        commit_mc(B(12) + 8 * g)                           # dS stage free after dK(n)
+                        if const_expr(not (self.kn == "d" and self.unsafe)):
+                            commit_mc(d_empty + 8 * di)                    # Qd / dOd stage free after dK(n) (covers dV(n))
+
+                def q_rel(qf):
+                    if const_expr(not (self.kn == "q" and self.unsafe)):
+                        qf.release()
+
+                def q_unsafe(qf):
+                    if const_expr(self.kn == "q"):
+                        if const_expr(self.unsafe):
+                            qf.release()                                   # UNSAFE: Q / dO released before S / dP read them
+                        spin(self.DLY)
+
+                kf = kv_c.wait_and_advance()
+                if const_expr(NS == 1):
+                    # C1c look-ahead order: S(0), dP(0); per t: S(t+1), dP(t+1), dV(t), dK(t)
+                    qf = q_c.wait_and_advance()
+                    q_unsafe(qf)
+                    issue_s(Int32(0), qf.index)
+                    issue_dp(Int32(0), qf.index)
+                    q_rel(qf)
+                    for t in cutlass.range(total, unroll=1):
+                        if t + 1 < total:
+                            qf = q_c.wait_and_advance()
+                            q_unsafe(qf)
+                            issue_s(t + 1, qf.index)
+                            issue_dp(t + 1, qf.index)
+                            q_rel(qf)
+                        df = d_c.wait_and_advance()
+                        issue_dv(t, df.index)
+                        issue_dk(t, df.index)
+                else:
+                    # C1d order: S(t), dK(t-1), dP(t), dV(t); drain dK(total-1)
+                    for t in cutlass.range(total, unroll=1):
+                        qf = q_c.wait_and_advance()
+                        q_unsafe(qf)
+                        issue_s(t, qf.index)
+                        if t > 0:
+                            issue_dk(t - 1, (t - 1) % self.nqs)
+                        issue_dp(t, qf.index)
+                        q_rel(qf)
+                        df = d_c.wait_and_advance()
+                        issue_dv(t, df.index)
+                    issue_dk(total - 1, (total - 1) % self.nqs)
                 with cute.arch.elect_one():
-                    commit_mc(F_F)
+                    commit_mc(B(14))                                       # F_FIN
                 kf.release()
-                self._wcl(E_S, (total - 1) & 1)   # last S/dP slot release arrived
-                self._wcl(E_F, Int32(0))          # epilogue readers done
+                # tails: every cluster-released empty event consumed before teardown
+                for s_ in cutlass.range_constexpr(NS):
+                    nu = (total + NS - 1 - s_) // NS
+                    if nu > 0:
+                        self._wcl(B(2) + 8 * s_, (nu - 1) & 1)
+                self._wcl(B(5), (total - 1) & 1)
+                self._wcl(B(15), Int32(0))
 
         # ------------------------------------------------------------------ compute warps 0-7 (both CTAs)
         if warp < 8:
@@ -477,59 +518,41 @@ class DmHd256Kv2:
                 ct = c_lo + t - hi * ncs
                 h = hx * rep + hi
                 l = b * H + h
-                par = t & 1
                 ctok0 = ct * 128
                 q0 = ctok0 + 32 * jb                      # first query of this thread's block
-                ldb = sLD_addr + par * 1024
-                mf = None
-                qsj = Float32(0.0)
-                dosj = Float32(0.0)
-                if const_expr("meta" in self.opts):
-                    mf = m_c.wait_and_advance()
-                    ldb = sMeta_addr + mf.index * self.META_STAGE
-                    if const_expr(self.kn == "meta"):
-                        if const_expr(self.unsafe):
-                            mf.release()                  # UNSAFE: stage released before it is read
-                        spin(self.DLY)
-                    qsj = ld_shared_f32(ldb + 1024 + jb * 4)
-                    dosj = ld_shared_f32(ldb + 1040 + jb * 4)
-                else:
-                    qsj = Float32(mQs[b, h, ct * 4 + jb])
-                    dosj = Float32(mdOs[b, h, ct * 4 + jb])
-                    if const_expr(self.kn == "ld" and self.unsafe):
-                        ldb = sLD_addr
-                    if tidx < 128:
-                        st_shared_f32(ldb + tidx * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
-                    else:
-                        st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
-                    cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
-                    if const_expr(self.kn == "ld"):
-                        if warp == 3:
-                            spin(self.DLY)
+                ss = t % NS
+                sp = (t // NS) & 1
+                g = t & 1                                 # P / dS code + SFA + exchange stage
+                gp = (t >> 1) & 1
+                mf = m_c.wait_and_advance()
+                ldb = sMeta_addr + mf.index * self.META_STAGE
+                if const_expr(self.kn == "meta"):
+                    if const_expr(self.unsafe):
+                        mf.release()                      # UNSAFE: stage released before it is read
+                    spin(self.DLY)
+                qsj = ld_shared_f32(ldb + 1024 + jb * 4)
+                dosj = ld_shared_f32(ldb + 1040 + jb * 4)
                 cs = dmh.dm_mx256_c(ks_r, qsj)
                 ca = dmh.dm_mx256_dp_scale(vs_r, dosj)
-                stg = t & 1
-                dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
-                if const_expr(self.kn == "cd" and self.unsafe):
-                    self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)   # UNSAFE: published before the codes are written
+                # ======== P half ========
+                dm_utils.mbar_wait_parity(B(8) + 8 * g, gp ^ 1)          # P stage free (commit after dV(t-2))
+                if const_expr(self.kn == "pc" and self.unsafe):
+                    self._arr(B(6) + 8 * g, B(19) + 8 * g, crank)        # UNSAFE: P published before it is written
                     spin(self.DLY)
-                dm_utils.mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
+                dm_utils.mbar_wait_parity(B(0) + 8 * ss, sp)            # S(t) complete (commit)
                 tc_fence_after()
                 if const_expr(self.kn == "s"):
                     if const_expr(self.unsafe):
-                        self._arr(E_S, kbar + 64, crank)   # UNSAFE: slot released before the loads
+                        self._arr(B(2) + 8 * ss, B(16) + 8 * ss, crank)  # UNSAFE: slot released before the loads
                     spin(self.DLY)
-                sv = tmem_ld32(tb + self.COL_S + 32 * hf)
-                dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
+                sv = tmem_ld32(tb + self.COL_S + 64 * ss + 32 * hf)
                 cute.arch.fence_view_async_tmem_load()
                 tc_fence_before()
                 if const_expr(not (self.kn == "s" and self.unsafe)):
-                    self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
+                    self._arr(B(2) + 8 * ss, B(16) + 8 * ss, crank)
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
-                dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 for i in cutlass.range_constexpr(0, 32, 4):
                     l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
-                    dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
                     for q2 in cutlass.range_constexpr(0, 4, 2):
                         s0 = sv[i + q2]
                         s1 = sv[i + q2 + 1]
@@ -540,26 +563,18 @@ class DmHd256Kv2:
                         p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
                         pv[i + q2] = p0
                         pv[i + q2 + 1] = p1
-                        x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
-                                                            (-dlv[q2], -dlv[q2 + 1]))
-                        x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
-                        dsv[i + q2] = x0
-                        dsv[i + q2 + 1] = x1
                 if const_expr(self.dbg & 2):
                     pa = _gaddr(mDump) + ((Int64(l) * N + q0) * N + key) * 16
                     for i in cutlass.range_constexpr(32):
                         st_global_f32(pa, sv[i])
-                        st_global_f32(pa + 4, dpv[i])
                         st_global_f32(pa + 8, pv[i])
-                        st_global_f32(pa + 12, dsv[i])
                         pa = pa + Int64(N) * 16
-                # ---- P^T codes: pow2 per (key, 32 queries), thread-local ----
                 am = Float32(0.0)
                 for i in cutlass.range_constexpr(32):
                     am = cute.arch.fmax(am, pv[i])
                 psb = dm_utils.pow2_sb(am)
                 inv = dm_utils.inv_pow2_from_sb(psb)
-                crow = sCP_addr + stg * cstage_bytes + crow_off
+                crow = sCP_addr + g * cstage_bytes + crow_off
                 hpl = [Int32(0)] * 32
                 for hv in cutlass.range_constexpr(2):
                     w = [None] * 4
@@ -581,39 +596,76 @@ class DmHd256Kv2:
                     for i in cutlass.range_constexpr(32):
                         hpl[i] = hmix(f2i(pv[i]), hidx(q0 + i, key))
                     lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + q0) * 32)
-                # ---- exchange: p_sb byte per (row, q-block); |dS| warp max per warp ----
-                xp = sXP_addr + par * 1024
-                if const_expr(self.kn == "ex"):
+                xp = sXP_addr + g * 1024
+                if const_expr(self.kn == "exp"):
                     if warp == 6:
                         spin(self.DLY)
-                if const_expr("xpt" in self.opts):
-                    dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
-                else:
-                    dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
+                dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
+                if const_expr(not (self.kn == "exp" and self.unsafe)):
+                    cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
+                if warp < 4:
+                    bp = [Int32(0)] * 4
+                    for j in cutlass.range_constexpr(4):
+                        psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
+                        bp[j] = dm_utils.add_sb_clamp(psj, sb_of(ld_shared_f32(ldb + 1040 + j * 4)))
+                    dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * g + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
+                    cute.arch.fence_view_async_tmem_store()
+                cute.arch.fence_view_async_shared()
+                tc_fence_before()
+                if const_expr(self.kn == "pc"):
+                    if const_expr(not self.unsafe):
+                        spin(self.DLY)
+                if const_expr(not (self.kn == "pc" and self.unsafe)):
+                    self._arr(B(6) + 8 * g, B(19) + 8 * g, crank)       # P codes + SFA published
+                # ======== dS half ========
+                dm_utils.mbar_wait_parity(B(12) + 8 * g, gp ^ 1)        # dS stage free (commit after dK(t-2))
+                if const_expr(self.kn == "dsc" and self.unsafe):
+                    self._arr(B(10) + 8 * g, B(21) + 8 * g, crank)      # UNSAFE: dS published before it is written
+                    spin(self.DLY)
+                dm_utils.mbar_wait_parity(B(4), t & 1)                  # dP(t) complete (commit)
+                tc_fence_after()
+                if const_expr(self.kn == "dp"):
+                    if const_expr(self.unsafe):
+                        self._arr(B(5), B(18), crank)                    # UNSAFE: dP slot released before the loads
+                    spin(self.DLY)
+                dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
+                cute.arch.fence_view_async_tmem_load()
+                tc_fence_before()
+                if const_expr(not (self.kn == "dp" and self.unsafe)):
+                    self._arr(B(5), B(18), crank)
+                dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
+                for i in cutlass.range_constexpr(0, 32, 4):
+                    dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
+                    for q2 in cutlass.range_constexpr(0, 4, 2):
+                        x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
+                                                            (-dlv[q2], -dlv[q2 + 1]))
+                        x0, x1 = cute.arch.mul_packed_f32x2((pv[i + q2], pv[i + q2 + 1]), (x0, x1))
+                        dsv[i + q2] = x0
+                        dsv[i + q2 + 1] = x1
+                if const_expr(self.dbg & 2):
+                    pa = _gaddr(mDump) + ((Int64(l) * N + q0) * N + key) * 16
+                    for i in cutlass.range_constexpr(32):
+                        st_global_f32(pa + 4, dpv[i])
+                        st_global_f32(pa + 12, dsv[i])
+                        pa = pa + Int64(N) * 16
                 amd = Float32(0.0)
                 for i in cutlass.range_constexpr(32):
                     amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
                 wm = dm_utils.redux_max_abs_f32(amd)
+                if const_expr(self.kn == "exds"):
+                    if warp == 6:
+                        spin(self.DLY)
                 if lane == 0:
-                    if const_expr("xsv" in self.opts):
-                        st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
-                    else:
-                        st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
-                cute.arch.fence_view_async_shared()
-                if const_expr(not (self.kn == "ex" and self.unsafe)):
-                    cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
-                g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
-                xs = sXS_addr + par * 32
-                m4 = Float32(0.0)
-                if const_expr("xsv" in self.opts):
-                    x4 = ld_shared_v4f(xs + g * 16)
-                    m4 = max_f32(max_f32(x4[0], x4[1]), max_f32(x4[2], x4[3]))
-                else:
-                    m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
-                                 max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
+                    st_shared_f32(sXS_addr + (g * 8 + warp) * 4, wm)
+                if const_expr(not (self.kn == "exds" and self.unsafe)):
+                    cute.arch.barrier(barrier_id=5, number_of_threads=self.NCOMP)
+                gk = qd % 2                                # key group: warps gk, gk+2, gk+4, gk+6
+                xs = sXS_addr + g * 32
+                m4 = max_f32(max_f32(ld_shared_f32(xs + gk * 4), ld_shared_f32(xs + (gk + 2) * 4)),
+                             max_f32(ld_shared_f32(xs + (gk + 4) * 4), ld_shared_f32(xs + (gk + 6) * 4)))
                 dsb = dm_utils.pow2_sb(m4)
                 invs = dm_utils.inv_pow2_from_sb(dsb)
-                srow = sCS_addr + stg * cstage_bytes + crow_off
+                srow = sCS_addr + g * cstage_bytes + crow_off
                 hsl = [Int32(0)] * 32
                 hcl = [Int32(0)] * 32
                 for hv in cutlass.range_constexpr(2):
@@ -647,41 +699,24 @@ class DmHd256Kv2:
                     lk_cols_u32(hsl, lane, a0_ + 8)
                     lk_cols_u32(hcl, lane, a0_ + 16)
                     lk_cols_f64(dsv, lane, a0_ + 24)
-                # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
                 if warp < 4:
-                    bp = [Int32(0)] * 4
                     bs = [Int32(0)] * 4
                     for j in cutlass.range_constexpr(4):
-                        psj = Int32(0)
-                        if const_expr("xpt" in self.opts):
-                            psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
-                        else:
-                            psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
-                        dsc_ = Float32(0.0)
-                        qsc_ = Float32(0.0)
-                        if const_expr("meta" in self.opts):
-                            dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
-                            qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
-                        else:
-                            dsc_ = Float32(mdOs[b, h, ct * 4 + j])
-                            qsc_ = Float32(mQs[b, h, ct * 4 + j])
-                        bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
-                        bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
-                    dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
-                    dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
+                        bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(ld_shared_f32(ldb + 1024 + j * 4)))
+                    dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * g + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
                     cute.arch.fence_view_async_tmem_store()
-                if const_expr("meta" in self.opts and not (self.kn == "meta" and self.unsafe)):
+                if const_expr(not (self.kn == "meta" and self.unsafe)):
                     mf.release()
                 cute.arch.fence_view_async_shared()
                 tc_fence_before()
-                if const_expr(self.kn == "cd"):
+                if const_expr(self.kn == "dsc"):
                     if const_expr(not self.unsafe):
                         spin(self.DLY)
-                if const_expr(not (self.kn == "cd" and self.unsafe)):
-                    self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)    # release.cluster on the leader's barrier
+                if const_expr(not (self.kn == "dsc" and self.unsafe)):
+                    self._arr(B(10) + 8 * g, B(21) + 8 * g, crank)      # dS codes + SFA published
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
             if const_expr(not (self.kn == "fin" and self.unsafe)):
-                dm_utils.mbar_wait_parity(F_F, Int32(0))
+                dm_utils.mbar_wait_parity(B(14), Int32(0))
             tc_fence_after()
             d0 = 128 * (qd // 2) + 64 * hf
             for which in cutlass.range_constexpr(2):
@@ -698,13 +733,14 @@ class DmHd256Kv2:
                         st_global_v4(ob + (32 * cb + i) * 2, w[0], w[1], w[2], w[3])
             tc_fence_before()
             if const_expr(self.kn == "fin" and self.unsafe):
-                dm_utils.mbar_wait_parity(F_F, Int32(0))  # UNSAFE: dK / dV were read before the final commit
-            self._arr(E_F, kbar + 88, crank)
-            # code-stage tail: the last commit on each stage has landed in this CTA before teardown (no in-flight arrive)
+                dm_utils.mbar_wait_parity(B(14), Int32(0))  # UNSAFE: dK / dV were read before the final commit
+            self._arr(B(15), B(23), crank)
+            # tails: the last stage-free commits have landed in this CTA before teardown (no in-flight arrive)
             for s_ in cutlass.range_constexpr(2):
                 nu = (total - s_ + 1) // 2
                 if nu > 0:
-                    dm_utils.mbar_wait_parity(kbar + 32 + 8 * s_, (nu - 1) & 1)
+                    dm_utils.mbar_wait_parity(B(8) + 8 * s_, (nu - 1) & 1)
+                    dm_utils.mbar_wait_parity(B(12) + 8 * s_, (nu - 1) & 1)
 
         # teardown (ordinv K9): every TMEM reader / MMA issuer fences before the CTA + cluster barriers, the deallocator after
         tc_fence_before()

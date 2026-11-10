@@ -5215,7 +5215,13 @@ class DMBackwardSm100:
                       tdPrdP_all[stage] = tdPrdP_t2r
                   cute.arch.fence_view_async_tmem_load()
                   dm_dsm = [Float32(0.0), Float32(0.0), Float32(0.0), Float32(0.0)]   # amaxt: 4 independent chains
+                  CRT = const_expr(dm_tr is not None and "crt" in self.dm_opts and self.dm_dsq)
+                  if const_expr(CRT):
+                      dm_crt_s = dm_utils.clock64()   # chunkready (timing-only): start of the dS math
+                      dm_crt_c0 = dm_crt_s
                   for stage in cutlass.range_constexpr(num_stages):
+                      if const_expr(CRT and stage == 1):
+                          dm_crt_c0 = dm_utils.clock64()   # end of stage-0 dS math (first chunk consumable)
                       tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
                       tSrS_cur = tSrS_t2r[None, stage, 0, 0]
                       tSrdPsum = dm_dps_all[stage]
@@ -5472,6 +5478,13 @@ class DMBackwardSm100:
                       cute.arch.fence_view_async_tmem_store()
                       dm_utils.tc_fence_before()
                       cute.arch.sync_warp()
+                      if const_expr(CRT):
+                          if dm_tid == 0:
+                              dm_crt_a = dm_utils.clock64()
+                              dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 54, Int64(dm_crt_a - dm_crt_c0))
+                              dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 55, Int64(dm_crt_a - dm_crt_s))
+                              dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 62, Int64(num_stages))
+                              dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 63, Int64(1))
                       if cute.arch.lane_idx() == 0:
                           dm_utils.mbar_arrive(dm_mbar + 8 * 9)
                       consumer_state_S_P_dP.advance()

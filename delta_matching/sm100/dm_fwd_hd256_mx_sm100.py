@@ -179,7 +179,9 @@ class DMFwdHd256MxSm100:
     qs (B,H,N/32) fp32 pow2; kvw (B,Hk,N/64) int32 packed UE8M0 words ([2t] K bytes of tile t, [2t+1] V bytes).
     Out: O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
-    def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0):
+    def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
+                 sf_wait: bool = True):
+        self.sf_wait = sf_wait   # False = DEBUG/A-B only: the pre-C0 schedule without the PV(j-2) -> QK(j) completion wait
         self.is_causal = is_causal
         self.qhead_per_kvhead = qhead_per_kvhead
         self.m_block_size = 128
@@ -409,7 +411,7 @@ class DMFwdHd256MxSm100:
             # slot j&1 holds SF(j-2), read by PV(j-2): PTX does not order PV(j-2) (mxf8f6f4, acc O) before QK(j) (f8f6f4,
             # acc S) by issue order (Codex fwd-01 / PTX 9.7.16.6) -> wait PV(j-2)'s completion. Phase-safe: PV(j-3) is complete
             # (PV(j-2) waited O_ready(j-2), arrived after O_full(PV(j-3))) and PV(j-1) is not issued yet.
-            if i >= 1:
+            if const_expr(self.sf_wait) and i >= 1:
                 dm_utils.mbar_wait_parity(mbar + 32, (j - 2) & 1)
                 dm_utils.tc_fence_after()
             pipeline_kv.consumer_wait(kv_state)

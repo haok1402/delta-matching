@@ -87,10 +87,11 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     q8, k8, v8, qs, kvw = (t.contiguous() for t in (q8, k8, v8, qs, kvw))
     o = torch.empty(B, N, H, D, device=q8.device, dtype=torch.bfloat16)
     lse = torch.empty(B, H, N, device=q8.device, dtype=torch.float32)
-    key = ("fwd_hd256_mx", bool(causal), H // Hk, kv_stage)
+    sfw = os.environ.get("DM_HD256_MX_SFWAIT", "1") != "0"      # 0 = DEBUG A/B only (pre-C0 unsafe SF overwrite order)
+    key = ("fwd_hd256_mx", bool(causal), H // Hk, kv_stage, sfw)
     cache = _cache()
     if key not in cache:
-        kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage)
+        kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

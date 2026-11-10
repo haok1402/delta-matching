@@ -292,7 +292,16 @@ class DMFwdHd256MxSm100:
         self.c8 = c8
         if c8:
             g1 = g1 | 1
-            assert two_wg and not sf_bank and split == 0
+            assert two_wg and not sf_bank and (split == 0 or (split == 2 and c8 == 1))
+        # C9 (fork hd256-fwd4, c8 == 1 + split == 2 = DM_HD256_FWD_SPLIT=2 with the default C8): the C8 softmax (column split) on the
+        # C7c MMA program.  SF(j) at slot+112..127 (SFA +112..115, SFB +120..127; both inside WG1's S columns 64..127, so WG0's SF
+        # stores stay ordered by C8's WG1 wait::ld -> fence::before -> partial_full -> WG0 wait + fence::after edge); QK(j) = QK_a
+        # (N112, cols 0..111) + QK_b (N16, cols 112..127).  BOTH WGs arrive S_empty[slot] (count 256) right after their own
+        # tcgen05.ld + wait::ld (+fence::before); the MMA issues QK_a(j+2) at S_empty(j) (overlaps softmax(j)), PV(j) at P_full(j),
+        # and QK_b(j+2) only after O_full(PV(j)) (+fence::after: PV(j) reads SF(j) there).  Values bitwise == C8 (same per-element
+        # 8-step K=32 S accumulation, same softmax ops).  DEBUG PCs (C9): 6 = MMA skips S_empty AND WG1 sleeps 20 us before its
+        # S load (must corrupt); 7 = both WGs arrive S_empty before their S load, WG1 sleeps 20 us before it (must corrupt).
+        self.c9 = bool(c8 == 1 and split == 2)
         # g1 (fork hd256-fwd3, DM_HD256_FWD_G1 bitmask; profile/hd256-fwd3-tl/REPORT.md): critical-path trims of C6, values bitwise
         # (same ops, same tensor-pipe MMAs; only program order / issue form).  1 = G1a: the softmax publishes acc_scale
         # (stats_full) right after the ordered m rule, before the SF stores / P_full (O_ready no longer trails P_full).
@@ -300,7 +309,7 @@ class DMFwdHd256MxSm100:
         # 4 = G1c: the MMA warp waits K(j) (TMA full) before the C0 O_full(PV(j-2)) wait (off the PV -> QK path).
         # 8 = G1d: SFB (V scale word, m-independent) stored before the mailbox wait; SFA / SFB as tcgen05.st x4 (same columns).
         self.g1 = g1
-        assert g1 == 0 or (two_wg and not sf_bank and split == 0), "G1 trims apply to C6 (two_wg, C0 layout, split 0)"
+        assert g1 == 0 or (two_wg and not sf_bank and (split == 0 or (c8 == 1 and g1 == 1))), "G1 trims apply to C6/C8 (C9: G1a only)"
         # trace (DEBUG, fork hd256-fwd3; DM_HD256_FWD_TRACE=1; False = compiled out, default PTX unchanged): %clock64 per event
         # into mDbg (int64 [n_cta, n_m + 1, TR_E]); events listed in tr().  Warps 13 / 15 (idle) observe S_full / O_full
         # completions.  Numerics untouched (stores to a separate buffer; lane-0 predicated, no divergence).
@@ -510,8 +519,8 @@ class DMFwdHd256MxSm100:
             dm_utils.mbar_init(mbar + 72, 128)
             dm_utils.mbar_init(mbar + 80, 128)     # state_full[0] (two_wg)
             dm_utils.mbar_init(mbar + 88, 128)     # state_full[1]
-            dm_utils.mbar_init(mbar + 96, 128)     # S_empty[0] (C7b)
-            dm_utils.mbar_init(mbar + 104, 128)    # S_empty[1]
+            dm_utils.mbar_init(mbar + 96, 256 if self.c9 else 128)     # S_empty[0] (C7b; C9: both WGs)
+            dm_utils.mbar_init(mbar + 104, 256 if self.c9 else 128)    # S_empty[1]
             cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cluster_layout_vmnk, is_relaxed=True)
 
@@ -1253,9 +1262,18 @@ class DMFwdHd256MxSm100:
             for r in cutlass.range_constexpr(8):                             # DEBUG PC 12 (C8b): SFB before our S load
                 tmem_st1(sfbase + self.sfb_off + r, dm_vw)
             tmem_wait_st()
+        if const_expr(self.c9 and self.pc_inj == 7):
+            dm_utils.tc_fence_before()
+            dm_utils.mbar_arrive(mbar + 96 + 8 * slot)                      # DEBUG PC 7 (C9): S_empty BEFORE our S load
+        if const_expr(self.c9 and h == 1 and self.pc_inj in (6, 7)):
+            for _d in cutlass.range_constexpr(20):                           # DEBUG PC 6/7 (C9): widen the window (WG1 load late)
+                dm_utils.nanosleep_1us()
         s0 = tmem_ld32(sfbase + c0)
         s1 = tmem_ld32(sfbase + c0 + 32)
         tmem_wait_ld()
+        if const_expr(self.c9 and self.pc_inj != 7):
+            dm_utils.tc_fence_before()
+            dm_utils.mbar_arrive(mbar + 96 + 8 * slot)                      # C9: S_empty[slot](j): our S(j) columns are in registers
         if const_expr(h == 1 and self.c8 == 2 and self.pc_inj != 12):
             for r in cutlass.range_constexpr(8):                             # C8b: SFB(j) in our own columns after our load
                 tmem_st1(sfbase + self.sfb_off + r, dm_vw)

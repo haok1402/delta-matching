@@ -64,7 +64,12 @@ class DmHd256Kv2:
     COL_SFB, COL_SFA_P, COL_SFA_S = 384, 392, 394     # + 4 * stage
     NCOMP = 256                          # compute threads per CTA (warps 0-7)
     MMA_WARP, LOAD_WARP = 8, 9
-    KNOBS = ("lsk",)       # lsk: planted control (one dS code flipped: b 0, kv head 0, key 0, first tile)
+    # lsk: planted control (one dS code flipped: b 0, kv head 0, key 0, first tile).  Positive controls of every new hand-off
+    # ("<h>" = UNSAFE order + delay, "<h>_safe" = shipped order + the same delay, must be bitwise the default build):
+    #   q: Q/dO smem released before the S/dP MMAs; d: Qd/dOd released before dV/dK; s: S/dP TMEM released before the
+    #   compute loads; cd: codes/SFA published before they are written; ex: exchange barrier dropped; ld: l2/delta single
+    #   buffer; fin: epilogue reads dK/dV before the final commit.
+    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin")
     DLY = 1 << 15
 
     def __init__(self, causal: bool, dbg: int = 0, knob: str = ""):
@@ -279,6 +284,10 @@ class DmHd256Kv2:
                 # prologue: S(0), dP(0)
                 qf = q_c.wait_and_advance()
                 se = s_p.acquire_and_advance()
+                if const_expr(self.kn == "q"):
+                    if const_expr(self.unsafe):
+                        qf.release()
+                    spin(self.DLY)
                 mma_s.set(tcgen05.Field.ACCUMULATE, False)
                 for kb in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
                     cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, 0)], accS)
@@ -288,13 +297,18 @@ class DmHd256Kv2:
                     cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, 0)], accP)
                     mma_s.set(tcgen05.Field.ACCUMULATE, True)
                 se.commit()
-                qf.release()
+                if const_expr(not (self.kn == "q" and self.unsafe)):
+                    qf.release()
                 for t in cutlass.range(total, unroll=1):
                     if t + 1 < total:
                         # S/dP(t+1): the slot was released by every compute thread of both CTAs after its S/dP(t) loads
                         qf = q_c.wait_and_advance()
                         se = s_p.acquire_and_advance()
                         tc_fence_after()
+                        if const_expr(self.kn == "q"):
+                            if const_expr(self.unsafe):
+                                qf.release()
+                            spin(self.DLY)
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
                             cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, 0)], accS)
@@ -304,11 +318,19 @@ class DmHd256Kv2:
                             cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, 0)], accP)
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
                         se.commit()
-                        qf.release()
+                        if const_expr(not (self.kn == "q" and self.unsafe)):
+                            qf.release()
                     df = d_c.wait_and_advance()
                     cf = cd_c.wait_and_advance()
                     tc_fence_after()
                     stg = cf.index
+                    if const_expr(self.kn == "d"):
+                        if const_expr(self.unsafe):
+                            df.release()
+                        spin(self.DLY)
+                    if const_expr(self.kn == "fin"):
+                        if t == total - 1:
+                            spin(self.DLY)
                     dm_utils.gemm_ptx_bs(
                         mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, stg)], tdOdr[(None, None, None, 0)],
                         sCP[(None, None, None, stg)], sdOd[(None, None, None, 0)],
@@ -322,7 +344,8 @@ class DmHd256Kv2:
                         tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
                         zero_init=cutlass.Boolean(t == 0), cta_group=2)
                     cf.release()      # tcgen05.commit after dK(t): covers dV(t) and dK(t) (same issuing thread)
-                    df.release()
+                    if const_expr(not (self.kn == "d" and self.unsafe)):
+                        df.release()
                 fe = f_p.acquire_and_advance()
                 fe.commit()
                 kf.release()
@@ -354,20 +377,33 @@ class DmHd256Kv2:
                 cs = dmh.dm_mx256_c(ks_r, qsj)
                 ca = dmh.dm_mx256_dp_scale(vs_r, dosj)
                 ldb = sLD_addr + par * 1024
+                if const_expr(self.kn == "ld" and self.unsafe):
+                    ldb = sLD_addr
                 if tidx < 128:
                     st_shared_f32(ldb + tidx * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
                 else:
                     st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
                 cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
+                if const_expr(self.kn == "ld"):
+                    if warp == 3:
+                        spin(self.DLY)
                 ce = cd_p.acquire_and_advance()           # code / SFA stage free (commit after dK(t-2))
                 stg = ce.index
+                if const_expr(self.kn == "cd" and self.unsafe):
+                    ce.commit()                           # UNSAFE: published before the codes / SFA are written
+                    spin(self.DLY)
                 sf = s_c.wait_and_advance()
                 tc_fence_after()
+                if const_expr(self.kn == "s"):
+                    if const_expr(self.unsafe):
+                        sf.release()                      # UNSAFE: slot released before the loads
+                    spin(self.DLY)
                 sv = tmem_ld32(tb + self.COL_S + 32 * hf)
                 dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
                 cute.arch.fence_view_async_tmem_load()
                 tc_fence_before()
-                sf.release()
+                if const_expr(not (self.kn == "s" and self.unsafe)):
+                    sf.release()
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 for i in cutlass.range_constexpr(0, 32, 4):
@@ -426,6 +462,9 @@ class DmHd256Kv2:
                     lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + q0) * 32)
                 # ---- exchange: p_sb byte per (row, q-block); |dS| warp max per warp ----
                 xp = sXP_addr + par * 1024
+                if const_expr(self.kn == "ex"):
+                    if warp == 6:
+                        spin(self.DLY)
                 dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
                 amd = Float32(0.0)
                 for i in cutlass.range_constexpr(32):
@@ -434,7 +473,8 @@ class DmHd256Kv2:
                 if lane == 0:
                     st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
                 cute.arch.fence_view_async_shared()
-                cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
+                if const_expr(not (self.kn == "ex" and self.unsafe)):
+                    cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
                 g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
                 xs = sXS_addr + par * 32
                 m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
@@ -488,9 +528,15 @@ class DmHd256Kv2:
                     cute.arch.fence_view_async_tmem_store()
                 cute.arch.fence_view_async_shared()
                 tc_fence_before()
-                ce.commit()
+                if const_expr(self.kn == "cd"):
+                    if const_expr(not self.unsafe):
+                        spin(self.DLY)
+                if const_expr(not (self.kn == "cd" and self.unsafe)):
+                    ce.commit()
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
-            fw = f_c.wait_and_advance()
+            fw = None
+            if const_expr(not (self.kn == "fin" and self.unsafe)):
+                fw = f_c.wait_and_advance()
             tc_fence_after()
             d0 = 128 * (qd // 2) + 64 * hf
             for which in cutlass.range_constexpr(2):
@@ -506,6 +552,8 @@ class DmHd256Kv2:
                             w[q] = bf16x2(ov[i + 2 * q], ov[i + 2 * q + 1])
                         st_global_v4(ob + (32 * cb + i) * 2, w[0], w[1], w[2], w[3])
             tc_fence_before()
+            if const_expr(self.kn == "fin" and self.unsafe):
+                fw = f_c.wait_and_advance()               # UNSAFE: dK / dV were read before the final commit
             fw.release()
             cd_p.tail()
 

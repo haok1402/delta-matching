@@ -40,10 +40,10 @@ TRACE = {}   # DEBUG (DM_HD256_FWD_TRACE=1): "buf" = the last call's int64 event
 
 def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=None):
     """q8 (B,N,H,256) e4m3 (sm baked), k8 / v8 (B,N,Hk,256) e4m3; qs (B,H,N/32) fp32 pow2 (quant.quant_qkv2).
-    kvw: (B,Hk,N/64) int32 packed UE8M0 K/V words (fwd.pack_kv_scales), or the K scales ks (B,Hk,N/32) fp32 together
+    kvw: (B,Hk,N/64) int32 packed UE8M0 K/V words (attention_fwd_hd128_sm100.pack_kv_scales), or the K scales ks (B,Hk,N/32) fp32 together
     with vs= (packed here, same words). Returns O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
     if kvw.dtype != torch.int32:
-        from .fwd import pack_kv_scales
+        from .attention_fwd_hd128_sm100 import pack_kv_scales
         kvw = pack_kv_scales(kvw, vs)
     B, N, H, D = q8.shape
     Hk = k8.shape[2]

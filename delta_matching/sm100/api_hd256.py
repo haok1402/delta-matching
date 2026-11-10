@@ -8,7 +8,7 @@ backward: dO -> quant.quant_do_delta(dO, None) -> delta (matched: pass-0 kernel 
 q (B, N, H, 256) bf16, k / v (B, N, Hk, 256) bf16 -> o (B, N, H, 256) bf16. N % 128 == 0, softmax scale 256^-0.5 (= 2^-4)."""
 import torch
 
-from .fwd import pack_kv_scales  # noqa: F401
+from .attention_fwd_hd128_sm100 import pack_kv_scales  # noqa: F401
 from .fwd_hd256 import dm_fwd_hd256_mx
 from .quant import quant_qkv2, quant_do_delta
 from .pass0_hd256 import dm_delta_hd256

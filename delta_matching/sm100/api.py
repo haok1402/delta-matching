@@ -1,6 +1,6 @@
 """sm100 (GB200) hd128 Delta-Matching attention, sm100-mx numerics: dm_attn_func(q, k, v, causal, mode).
 
-forward : quant_qkv2 (fused producers) -> dm_fwd (C1: fp8 QK, MXFP8 PV)
+forward : quant_qkv2 (fused producers) -> attention_fwd_hd128 (C1: fp8 QK, MXFP8 PV)
 backward: dO quant -> delta (matched: pass-0 kernel dm_delta, sum P dP / sum P; stale: rowsum(dO * O))
           -> dm_bwd_main (B1: 2-CTA, MXFP8 dV / dK / dQ, deterministic)
 q (B, N, H, 128) bf16, k / v (B, N, Hk, 128) bf16 -> o (B, N, H, 128) bf16.  N % 128 == 0, softmax scale 128^-0.5.
@@ -10,7 +10,7 @@ import os
 import torch
 
 from .quant import quant_qkv2, quant_do_delta
-from .fwd import dm_fwd
+from .attention_fwd_hd128_sm100 import attention_fwd_hd128
 from .bwd import dm_bwd_main, dm_bwd_prestage
 from .pass0 import dm_delta
 from .launch_cache_sm100 import env as _env
@@ -28,7 +28,7 @@ class _DMAttnSm100(torch.autograd.Function):
     def forward(ctx, q, k, v, causal, mode, det):
         sm = D ** -0.5
         q8, qs, k8, ks, v8, vs, kvw, _ = quant_qkv2(q, k, v, sm)
-        o, lse = dm_fwd(q8, qs, k8, kvw, v8, None, causal)
+        o, lse = attention_fwd_hd128(q8, qs, k8, kvw, v8, None, causal)
         ctx.save_for_backward(q8, qs, k8, ks, v8, vs, o, lse)
         ctx.causal, ctx.mode, ctx.det = causal, mode, det
         return o
@@ -80,7 +80,7 @@ def dm_attn_debug(q, k, v, do, causal=True, mode="matched", identity=None, deter
     sm = D ** -0.5
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
     q8, qs, k8, ks, v8, vs, kvw, _ = quant_qkv2(q, k, v, sm)
-    o, lse = dm_fwd(q8, qs, k8, kvw, v8, None, causal)
+    o, lse = attention_fwd_hd128(q8, qs, k8, kvw, v8, None, causal)
     do8, dos, delta = quant_do_delta(do.contiguous(), o if mode == "stale" else None)
     if mode == "matched":
         delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)

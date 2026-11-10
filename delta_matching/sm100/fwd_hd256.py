@@ -113,6 +113,9 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     g1 = int(os.environ.get("DM_HD256_FWD_G1", "0"))   # hd256-fwd3 G1 critical-path trims (bitmask, see DMFwdHd256MxSm100); 0 = C6
     if g1:
         key = key + (f"g1_{g1}",)
+    c8 = os.environ.get("DM_HD256_FWD_C8", "0") == "1"   # hd256-fwd3 C8 column split (implies G1a); 0 = C6
+    if c8:
+        key = key + ("c8",)
     trace = os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"   # DEBUG (hd256-fwd3): per-event %clock64 trace -> TRACE["buf"]
     dbg = None
     if trace:
@@ -129,7 +132,7 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (AOT it first in a gpupool --gpus 0 run with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split, trace=trace, g1=g1)
+                                 split=split, trace=trace, g1=g1, c8=c8)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

@@ -31,7 +31,11 @@ fn = getattr(mod, func or "attn")
 sup = getattr(mod, "SUPPORTS", {}) or {}
 m = int(sup.get("seqlen_multiple", 128))
 up = lambda n: max(m, (n + m - 1) // m * m)  # noqa: E731
+_D = int(os.environ.get("DMVAL_SAN_D", "128"))            # hd256: DMVAL_SAN_D=256 (GQA ratio 4 shapes, the hd256 targets)
+_FWD = os.environ.get("DMVAL_SAN_FWD") == "1"             # forward only (no backward landed): one call per (shape, causal)
 SHAPES = [(1, 4, 4, up(1152)), (1, 4, 1, up(384)), (1, 8, 2, up(1408)), (2, 2, 2, up(128)), (1, 4, 4, up(1024))]
+if _D == 256:
+    SHAPES = [(1, 8, 2, up(1152)), (1, 4, 1, up(384)), (1, 16, 4, up(1408)), (2, 8, 2, up(128)), (1, 8, 2, up(1024))]
 import time as _t
 _sel = os.environ.get("DMVAL_SAN_SHAPE")                 # shard: run one shape only (racecheck shards fit the 20-min lease cap)
 _t0 = _t.time()
@@ -44,15 +48,18 @@ for _i, (B, H, Hk, N) in enumerate(SHAPES):
         if _cs is not None and str(int(causal)) != _cs:
             continue
         g = torch.Generator(device="cuda").manual_seed(N + H)
-        q, k, v, do = [torch.randn(B, N, h, 128, device="cuda", generator=g).bfloat16() for h in (H, Hk, Hk, H)]
+        q, k, v, do = [torch.randn(B, N, h, _D, device="cuda", generator=g).bfloat16() for h in (H, Hk, Hk, H)]
         modes = ["matched", "stale"] if causal or sup.get("matched_noncausal") else ["stale"]
+        if _FWD:
+            modes = ["matched"]
         _ms = os.environ.get("DMVAL_SAN_MODE")            # finest shard: one of matched / stale
         for mode in (modes if _ms is None else [m_ for m_ in modes if m_ == _ms]):
             l = [x.clone().requires_grad_(True) for x in (q, k, v)]
             o = fn(*l, causal=causal, mode=mode)
             o = o[0] if isinstance(o, (tuple, list)) else o
-            o.backward(do)
-            if mode == "matched" and hasattr(mod, "debug"):
+            if not _FWD:
+                o.backward(do)
+            if mode == "matched" and hasattr(mod, "debug") and not _FWD:
                 mod.debug(q, k, v, do, causal, mode)
             torch.cuda.synchronize()
             print(f"  mode {mode} done t={_t.time() - _t0:.0f}s", flush=True)

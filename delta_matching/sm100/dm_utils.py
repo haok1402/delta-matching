@@ -9,7 +9,7 @@ from cutlass._mlir.dialects import llvm
 def _f32_unary(asm, x, loc=None, ip=None):
     return Float32(llvm.inline_asm(T.f32(), [Float32(x).ir_value(loc=loc, ip=ip)], asm, "=f,f",
                                    has_side_effects=False, is_align_stack=False,
-                                   asm_dialect=llvm.AsmDialect.AD_ATT))
+                                   asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 import os as _os_impl
@@ -50,7 +50,7 @@ def ue8m0_byte(e: Float32, *, loc=None, ip=None) -> Int32:
         "max.s32 i, i, 0;\n\t"
         "min.s32 i, i, 254;\n\t"
         "mov.b32 $0, i;\n\t}",
-        "=r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -58,7 +58,7 @@ def byte_shl23_f32(b: Int32, *, loc=None, ip=None) -> Float32:
     """bitcast(b << 23): 2^(b - 127) for a UE8M0 byte b in [1, 254], +0 for b == 0 (= exp2i_f32 of the same e)."""
     return Float32(llvm.inline_asm(T.f32(), [Int32(b).ir_value(loc=loc, ip=ip)], "shl.b32 $0, $1, 23;", "=f,r",
                                    has_side_effects=False, is_align_stack=False,
-                                   asm_dialect=llvm.AsmDialect.AD_ATT))
+                                   asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -67,7 +67,7 @@ def pow2_exponent_byte(s: Float32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(
         T.i32(), [Float32(s).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .b32 i;\n\tmov.b32 i, $1;\n\tbfe.u32 $0, i, 23, 8;\n\t}",
-        "=r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -78,14 +78,14 @@ def pack_bytes4(b0: Int32, b1: Int32, b2: Int32, b3: Int32, *, loc=None, ip=None
         "prmt.b32 t0, $1, $2, 0x0040;\n\t"     # bytes: [b0.0, b1.0, -, -]
         "prmt.b32 t1, $3, $4, 0x0040;\n\t"
         "prmt.b32 $0, t0, t1, 0x5410;\n\t}",
-        "=r,r,r,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=r,r,r,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
 def bitcast_i32_f32(x: Int32, *, loc=None, ip=None) -> Float32:
     return Float32(llvm.inline_asm(T.f32(), [Int32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=f,r",
                                    has_side_effects=False, is_align_stack=False,
-                                   asm_dialect=llvm.AsmDialect.AD_ATT))
+                                   asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 def _bs_idesc(idesc_plain: int, k: int) -> int:
@@ -97,7 +97,7 @@ def _bs_idesc(idesc_plain: int, k: int) -> int:
 
 def gemm_ptx_bs_ts(
     op, acc_tmem_addr, tCrA, tCrB, sB, sfa_tmem_addr, sfb_tmem_addr,
-    mbar_ptr=None, mbar_phase=None, split_arrive=None, zero_init=False, tA_addr=None, cta_group: int = 1,
+    mbar_ptr=None, mbar_phase=None, split_arrive=None, zero_init=False, tA_addr=None, cta_group: int = 1, offs_a=None,
 ):
     """TS block-scaled MMA: A (e4m3) from TMEM, B (e4m3) from smem, SFA/SFB (UE8M0) in TMEM.
     One 32-bit SF word per row holds the 4 k-step scales; k-step k selects byte k via sf_id (idesc).
@@ -114,7 +114,7 @@ def gemm_ptx_bs_ts(
         sm100_desc.Major.K if op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K else sm100_desc.Major.MN)
     smem_desc_base_b_lo, smem_desc_b_hi = i64_to_i32x2(smem_desc_base_b)
     tCrA_layout = cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
-    offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)]
+    offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)] if offs_a is None else list(offs_a)
     offset_b = [cute.crd2idx((0, 0, k), tCrB.layout) for k in range(nk)]
     smem_desc_start_b_lo = Int32(smem_desc_base_b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
     pred_str = "p" if isinstance(zero_init, cutlass.Boolean) else "0" if zero_init else "1"
@@ -178,7 +178,7 @@ def pow2_sb(amax: Float32, *, loc=None, ip=None) -> Int32:
         "min.s32 e, e, 254;\n\t"
         "setp.eq.b32 pz, a, 0;\n\t"
         "selp.b32 $0, 127, e, pz;\n\t}",
-        "=r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=r,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -187,7 +187,7 @@ def inv_pow2_from_sb(sb: Int32, *, loc=None, ip=None) -> Float32:
     return Float32(llvm.inline_asm(
         T.f32(), [Int32(sb).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .b32 t;\n\tsub.s32 t, 254, $1;\n\tshl.b32 $0, t, 23;\n\t}",
-        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -196,7 +196,7 @@ def add_sb_clamp(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(
         T.i32(), [Int32(a).ir_value(loc=loc, ip=ip), Int32(b).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .s32 t;\n\tadd.s32 t, $1, $2;\n\tsub.s32 t, t, 127;\n\tmax.s32 t, t, 0;\n\tmin.s32 $0, t, 254;\n\t}",
-        "=r,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=r,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -205,7 +205,7 @@ def redux_max_abs_f32(x: Float32, *, loc=None, ip=None) -> Float32:
     return Float32(llvm.inline_asm(
         T.f32(), [Float32(x).ir_value(loc=loc, ip=ip)],
         "redux.sync.max.abs.f32 $0, $1, 0xffffffff;",
-        "=f,f", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=f,f", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 def gemm_ptx_bs(
@@ -287,14 +287,14 @@ def tmem_st_x1(addr: Int32, w: Int32, *, loc=None, ip=None):
     """tcgen05.st.32x32b.x1: this thread's lane, one 32-bit column at addr (lane base in bits 16+)."""
     llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip), Int32(w).ir_value(loc=loc, ip=ip)],
                     "tcgen05.st.sync.aligned.32x32b.x1.b32 [$0], {$1};", "r,r",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def tmem_st_x4(addr: Int32, w0: Int32, w1: Int32, w2: Int32, w3: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (addr, w0, w1, w2, w3)],
                     "tcgen05.st.sync.aligned.32x32b.x4.b32 [$0], {$1, $2, $3, $4};", "r,r,r,r,r",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -303,7 +303,7 @@ def bytes4_same(b: Int32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [Int32(b).ir_value(loc=loc, ip=ip)],
                                  "{\n\t.reg .b32 t;\n\tand.b32 t, $1, 0xff;\n\tmul.lo.u32 $0, t, 0x01010101;\n\t}",
                                  "=r,r", has_side_effects=False, is_align_stack=False,
-                                 asm_dialect=llvm.AsmDialect.AD_ATT))
+                                 asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -315,14 +315,14 @@ def st_async_peer_b32(local_addr: Int32, local_mbar: Int32, peer_rank: Int32, va
                     "mapa.shared::cluster.u32 ra, $0, $2;\n\t"
                     "mapa.shared::cluster.u32 rm, $1, $2;\n\t"
                     "st.async.shared::cluster.mbarrier::complete_tx::bytes.b32 [ra], $3, [rm];\n\t}",
-                    "r,r,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    "r,r,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def mbar_arrive_expect_tx(mbar: Int32, nbytes: int, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
                     f"mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [$0], {nbytes};", "r",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -332,7 +332,7 @@ def mbar_wait_parity_nh(mbar: Int32, phase: Int32, *, loc=None, ip=None):
                     "{\n\t.reg .pred P1;\n\tDM_WAITN:\n\t"
                     "mbarrier.try_wait.parity.shared::cta.b64 P1, [$0], $1;\n\t"
                     "@P1 bra DM_DONEN;\n\tbra DM_WAITN;\n\tDM_DONEN:\n\t}",
-                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -341,21 +341,24 @@ def mbar_wait_parity(mbar: Int32, phase: Int32, *, loc=None, ip=None):
                     "{\n\t.reg .pred P1;\n\tDM_WAIT:\n\t"
                     "mbarrier.try_wait.parity.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
                     "@P1 bra DM_DONE;\n\tbra DM_WAIT;\n\tDM_DONE:\n\t}",
-                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def ld_shared_b32(addr: Int32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [Int32(addr).ir_value(loc=loc, ip=ip)], "ld.volatile.shared.b32 $0, [$1];",
                                  "=r,r", has_side_effects=True, is_align_stack=False,
-                                 asm_dialect=llvm.AsmDialect.AD_ATT))
+                                 asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
 def st_shared_b32(addr: Int32, val: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
                     "st.volatile.shared.b32 [$0], $1;", "r,r",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def exp2_h2_e4m3x4(x0: Float32, x1: Float32, x2: Float32, x3: Float32, *, loc=None, ip=None):
     """4 x (fp32 -> f16, ex2.approx.f16x2, -> e4m3).  Returns (word of 4 e4m3 codes [x0 in byte 0],
     f16x2 exp of (x0, x1), f16x2 exp of (x2, x3)) as Int32 bit patterns."""
@@ -371,16 +374,16 @@ def exp2_h2_e4m3x4(x0: Float32, x1: Float32, x2: Float32, x3: Float32, *, loc=No
         "cvt.rn.satfinite.e4m3x2.f16x2 c1, e1;\n\t"
         "mov.b32 $0, {c0, c1};\n\t"
         "mov.b32 $1, e0;\n\tmov.b32 $2, e1;\n\t}",
-        "=r,=r,=r,f,f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
-    return (Int32(llvm.extractvalue(T.i32(), res, [0])), Int32(llvm.extractvalue(T.i32(), res, [1])),
-            Int32(llvm.extractvalue(T.i32(), res, [2])))
+        "=r,=r,=r,f,f,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return (Int32(llvm.extractvalue(T.i32(), res, [0], loc=loc, ip=ip)), Int32(llvm.extractvalue(T.i32(), res, [1], loc=loc, ip=ip)),
+            Int32(llvm.extractvalue(T.i32(), res, [2], loc=loc, ip=ip)))
 
 
 @dsl_user_op
 def hadd2(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [Int32(a).ir_value(loc=loc, ip=ip), Int32(b).ir_value(loc=loc, ip=ip)],
                                  "add.rn.f16x2 $0, $1, $2;", "=r,r,r", has_side_effects=False, is_align_stack=False,
-                                 asm_dialect=llvm.AsmDialect.AD_ATT))
+                                 asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -390,7 +393,7 @@ def h2_sum_f32(a: Int32, *, loc=None, ip=None) -> Float32:
         T.f32(), [Int32(a).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .b16 l, h;\n\t.reg .f32 fl, fh;\n\tmov.b32 {l, h}, $1;\n\t"
         "cvt.f32.f16 fl, l;\n\tcvt.f32.f16 fh, h;\n\tadd.f32 $0, fl, fh;\n\t}",
-        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 def hadd2_tree(hs):
@@ -406,7 +409,16 @@ def byte_pow2_f32(word: Int32, j: int, *, loc=None, ip=None) -> Float32:
     return Float32(llvm.inline_asm(
         T.f32(), [Int32(word).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .b32 t;\n\t" f"bfe.u32 t, $1, {8 * j}, 8;\n\t" "shl.b32 $0, t, 23;\n\t}",
-        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+        "=f,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def byte_pow2_f32_rt(word: Int32, pos: Int32, *, loc=None, ip=None) -> Float32:
+    """byte_pow2_f32 with a runtime bit position pos = 8 j (same bfe/shl -> same value)."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [Int32(word).ir_value(loc=loc, ip=ip), Int32(pos).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 t;\n\tbfe.u32 t, $1, $2, 8;\n\tshl.b32 $0, t, 23;\n\t}",
+        "=f,r,r", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -419,14 +431,14 @@ def absf(x: Float32, *, loc=None, ip=None) -> Float32:
 def clock64(*, loc=None, ip=None) -> cutlass.Int64:
     return cutlass.Int64(llvm.inline_asm(T.i64(), [], "mov.u64 $0, %clock64;", "=l",
                                          has_side_effects=True, is_align_stack=False,
-                                         asm_dialect=llvm.AsmDialect.AD_ATT))
+                                         asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
 def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), cutlass.Int64(val).ir_value(loc=loc, ip=ip)],
                     "red.global.add.u64 [$0], $1;", "l,l", has_side_effects=True, is_align_stack=False,
-                    asm_dialect=llvm.AsmDialect.AD_ATT)
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -434,20 +446,20 @@ def red_add_f64_from_f32(addr: cutlass.Int64, val: Float32, *, loc=None, ip=None
     """debug: red.global.add.f64 of an fp32 value (exactly widened)."""
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Float32(val).ir_value(loc=loc, ip=ip)],
                     "{\n\t.reg .f64 d;\n\tcvt.f64.f32 d, $1;\n\tred.global.add.f64 [$0], d;\n\t}", "l,f",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def st_sys_u32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
                     "st.relaxed.sys.global.u32 [$0], $1;", "l,r", has_side_effects=True, is_align_stack=False,
-                    asm_dialect=llvm.AsmDialect.AD_ATT)
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def clock32(*, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %clock;", "=r",
-                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 # 2^f on [0, 1), fp32 Horner, degree 5: max rel error 1.7e-7 (= MUFU ex2.approx accuracy); fitted IRLS minimax
@@ -505,7 +517,7 @@ def cpasync_bulk_store_s2g(smem_ptr, gmem_ptr, store_bytes, *, loc=None, ip=None
         "l,r,r",
         has_side_effects=True,
         is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
+        asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip,
     )
 
 
@@ -513,13 +525,13 @@ def cpasync_bulk_store_s2g(smem_ptr, gmem_ptr, store_bytes, *, loc=None, ip=None
 def globaltimer(*, loc=None, ip=None) -> cutlass.Int64:
     return cutlass.Int64(llvm.inline_asm(T.i64(), [], "mov.u64 $0, %globaltimer;", "=l",
                                          has_side_effects=True, is_align_stack=False,
-                                         asm_dialect=llvm.AsmDialect.AD_ATT))
+                                         asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
 def smid(*, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [], "mov.u32 $0, %smid;", "=r",
-                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -529,21 +541,21 @@ def mbar_arrive_rank(mbar: Int32, rank: Int32, *, loc=None, ip=None):
                     "{\n\t.reg .b32 rm;\n\t"
                     "mapa.shared::cluster.u32 rm, $0, $1;\n\t"
                     "mbarrier.arrive.release.cluster.shared::cluster.b64 _, [rm];\n\t}",
-                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def mbar_arrive_local(mbar: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
                     "mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];",
-                    "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def atom_add_global_u32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
                                  "atom.relaxed.gpu.global.add.u32 $0, [$1], $2;", "=r,l,r",
-                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+                                 has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -552,7 +564,7 @@ def mbar_wait_parity_cluster(mbar: Int32, phase: Int32, *, loc=None, ip=None):
                     "{\n\t.reg .pred P1;\n\tDM_WAITC:\n\t"
                     "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, 10000000;\n\t"
                     "@P1 bra DM_DONEC;\n\tbra DM_WAITC;\n\tDM_DONEC:\n\t}",
-                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -653,13 +665,13 @@ def f32_is_subnormal(x: Float32, *, loc=None, ip=None) -> Int32:
 @dsl_user_op
 def mbar_init(mbar: Int32, count: int, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)], f"mbarrier.init.shared::cta.b64 [$0], {count};", "r",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def mbar_arrive(mbar: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)], "mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];",
-                    "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -668,40 +680,40 @@ def tc_commit(mbar: Int32, *, loc=None, ip=None):
     have completed; tcgen05.ld / st are NOT tracked (they use tcgen05.wait::ld / ::st)."""
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
                     "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [$0];", "r",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def st_shared_v4_b32(addr: Int32, a: Int32, b: Int32, c: Int32, d: Int32, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (addr, a, b, c, d)],
                     "st.shared.v4.b32 [$0], {$1, $2, $3, $4};", "r,r,r,r,r",
-                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def bitcast_f32_i32(x: Float32, *, loc=None, ip=None) -> Int32:
     return Int32(llvm.inline_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=r,f",
-                                 has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT))
+                                 has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 
 @dsl_user_op
 def red_add_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
     """red.global.add.v4.f32 (sm_90+): 4 contiguous fp32 adds, 16-byte aligned address."""
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
                     "red.relaxed.gpu.global.add.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f", has_side_effects=True,
-                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def st_v4_f32(addr: cutlass.Int64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
                     "st.global.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f", has_side_effects=True,
-                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT)
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
 def fence_acq_rel_gpu(*, loc=None, ip=None):
     llvm.inline_asm(None, [], "fence.acq_rel.gpu;", "", has_side_effects=True, is_align_stack=False,
-                    asm_dialect=llvm.AsmDialect.AD_ATT)
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -712,7 +724,7 @@ def tc_fence_after(*, loc=None, ip=None):
         _nv.tcgen05_fence(_nv.Tcgen05FenceKind.AFTER_THREAD_SYNC, loc=loc, ip=ip)
         return
     llvm.inline_asm(None, [], "tcgen05.fence::after_thread_sync;", "", has_side_effects=True, is_align_stack=False,
-                    asm_dialect=llvm.AsmDialect.AD_ATT)
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 @dsl_user_op
@@ -723,7 +735,7 @@ def tc_fence_before(*, loc=None, ip=None):
         _nv.tcgen05_fence(_nv.Tcgen05FenceKind.BEFORE_THREAD_SYNC, loc=loc, ip=ip)
         return
     llvm.inline_asm(None, [], "tcgen05.fence::before_thread_sync;", "", has_side_effects=True, is_align_stack=False,
-                    asm_dialect=llvm.AsmDialect.AD_ATT)
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
 # ---- kda-sm100-fwdfence: tcgen05 thread-sync fences on every cross-thread hand-off (default on) ----
@@ -909,3 +921,8 @@ _tcf_raw_sync_warp = [None]
 
 _tcf_install()
 _tcf_install_min()
+@dsl_user_op
+def nanosleep_1us(*, loc=None, ip=None):
+    """DEBUG only: nanosleep ~1 us (used to widen race windows in positive controls)."""
+    llvm.inline_asm(None, [], "nanosleep.u32 1000;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)

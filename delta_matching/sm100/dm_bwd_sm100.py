@@ -2587,7 +2587,7 @@ class DMBackwardSm100:
                 )
                 process_tile = num_iters > Int32(0)
 
-            if process_tile:
+            if process_tile and const_expr(not self.dm_dqr0):   # DM dqr0: no dS exchange to relay
                 for _ in cutlass.range(num_iters, unroll=1):
                     # Wait for dS_xchg from peer CTA
                     cute.arch.mbarrier_wait(dS_cluster_full_mbar_ptr, phase=dS_cluster_phase)

@@ -24,6 +24,8 @@ FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_s
 REGS = dict(softmax=208, correction=32, other=64)  # P0: correction warps idle -> registers to softmax
 _c3r = _env("DM_P0_C3REGS", "168,96,64").split(",")   # +c3: correction WG computes chunk 3
 REGS_C3 = dict(softmax=int(_c3r[0]), correction=int(_c3r[1]), other=int(_c3r[2]))
+_tlr = _env("DM_P0_TLREGS", "112,112,32").split(",")   # +tl: 640 threads (96-reg launch), per SMSP 4 compute warps + 1 other
+REGS_TL = dict(softmax=int(_tlr[0]), correction=int(_tlr[1]), other=int(_tlr[2]))
 
 
 def _make_cache():
@@ -62,7 +64,7 @@ def _aux(t: torch.Tensor, leading_dim: int):
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
              exp_variant: str | None = None):
     if exp_variant is None:
-        exp_variant = _env("DM_P0_EXP", "p3_16_0+ma+h2+pf+sq+ts")   # P0-v9 (small): +ts double-float TwoSum cross-tile sums replace the per-tile fp64 flush (identity equal to +f64 on 49 cases, pass 0 +2-3%). P0-v8 (p0floor): +pf scale prefetch, +sq per-stage specialized code (both bitwise). P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
+        exp_variant = _env("DM_P0_EXP", "p3_16_0+ma+h2+pf+sq+ts+tl")   # P0-v10 (track AG): +tl two lanes per row, 4 compute warps/SMSP, bitwise (pass 0 -8..-12%). P0-v9 (small): +ts double-float TwoSum cross-tile sums replace the per-tile fp64 flush (identity equal to +f64 on 49 cases, pass 0 +2-3%). P0-v8 (p0floor): +pf scale prefetch, +sq per-stage specialized code (both bitwise). P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
     if dm_common.b6_m() > 0 and "+b6_" not in exp_variant:
         exp_variant = exp_variant + f"+b6_{dm_common.b6_m()}"
     over = dict(FORCE)
@@ -107,6 +109,9 @@ def _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant):
         cfg = orig[2](inputs)
         cfg = dataclasses.replace(cfg, **{k: v for k, v in over.items() if hasattr(cfg, k) and k != "registers"})
         regs = over.get("registers", REGS_C3 if "c3" in exp_variant.split("+")[1:] else REGS)
+        if "tl" in exp_variant.split("+")[1:]:
+            regs = REGS_TL
+            assert 4 * regs["softmax"] + regs["other"] <= 480 and regs["softmax"] == regs["correction"], "tl regs"
         for fl in exp_variant.split("+")[1:]:      # +r<softmax>_<correction>: register split (other = 64)
             if fl.startswith("r") and "_" in fl and fl[1:].split("_")[0].isdigit():
                 r_ = [int(x) for x in fl[1:].split("_")]

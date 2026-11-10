@@ -73,6 +73,9 @@ def dm_fwd_hd256(q8, qs, k8, ks, v8, vs, causal: bool, kv_stage: int = 4):
 # ---------------------------------------------------------------------------------------------------------------------
 # sm100-mx (USER DECISION 2026-11-10: the sm100 spec at both head dims; validator preset sm100-mx-d256). The [64,32]
 # option-(a) path above (dm_fwd_hd256) is retired history, opt-in only.
+TRACE = {}   # DEBUG (DM_HD256_FWD_TRACE=1): "buf" = the last call's int64 event buffer (see DMFwdHd256MxSm100.tr)
+
+
 def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=None):
     """q8 (B,N,H,256) e4m3 (sm baked), k8 / v8 (B,N,Hk,256) e4m3; qs (B,H,N/32) fp32 pow2 (quant_hd256.quant_qkv_mx256).
     kvw: (B,Hk,N/64) int32 packed UE8M0 K/V words (fwd.pack_kv_scales), or the K scales ks (B,Hk,N/32) fp32 together
@@ -107,19 +110,32 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     assert split in (0, 2), split
     if split:
         key = key + (f"split{split}",)
+    trace = os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"   # DEBUG (hd256-fwd3): per-event %clock64 trace -> TRACE["buf"]
+    dbg = None
+    if trace:
+        key = key + ("trace",)
+        n_m = N // 128
+        dbg = torch.zeros(n_m * H * B, n_m + 1, 32, device=q8.device, dtype=torch.int64)
+        TRACE["buf"] = dbg
     cache = _cache()
     if key not in cache:
         if os.environ.get("DM_H256_NO_COMPILE", "0") == "1":
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (AOT it first in a gpupool --gpus 0 run with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split)
+                                 split=split, trace=trace)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-        cache[key] = cute.compile(kern, *args, stream, options="--enable-tvm-ffi")
+        if trace:
+            cache[key] = cute.compile(kern, *args, stream, to_cute_tensor(dbg), options="--enable-tvm-ffi")
+        else:
+            cache[key] = cute.compile(kern, *args, stream, options="--enable-tvm-ffi")
     if is_fake_mode():
         return o, lse
     u8 = torch.uint8
-    cache[key](q8.view(u8), k8.view(u8), v8.view(u8), o, lse, qs, kvw)
+    if trace:
+        cache[key](q8.view(u8), k8.view(u8), v8.view(u8), o, lse, qs, kvw, dbg)
+    else:
+        cache[key](q8.view(u8), k8.view(u8), v8.view(u8), o, lse, qs, kvw)
     return o, lse

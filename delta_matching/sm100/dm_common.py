@@ -130,7 +130,7 @@ def expoff_spec(var: str):
     if not v:
         return None
     deg, r, m = (int(t) for t in v.split(":"))
-    assert deg in (3, 5, 6) and 0 < r <= m, f"{var}={v}"   # r == m: every block (diagnostic)
+    assert deg in (0, 3, 5, 6) and 0 < r <= m, f"{var}={v}"   # r == m: every block (diagnostic)
     return deg, r, m
 
 
@@ -149,6 +149,8 @@ def expoff_ex2_pair(x0: Float32, x1: Float32, deg: int):
     """The polynomial exp2 of a pair for expoff (identical op sequence in every kernel that calls it)."""
     from . import dm_utils
     from flash_attn.cute import utils as fa_utils
+    if deg == 0:   # diagnostic: MUFU in the "poly" branch too (branch + restructure cost only)
+        return cute.math.exp2(x0, fastmath=True), cute.math.exp2(x1, fastmath=True)
     if deg == 3:
         return fa_utils.ex2_emulation_2(x0, x1)
     if deg == 5:
@@ -158,4 +160,7 @@ def expoff_ex2_pair(x0: Float32, x1: Float32, deg: int):
 
 def expoff_uses_poly(qb, kb, r: int, m: int):
     """Element (q, k) uses the polynomial iff its 32x32 block (qb, kb) = (q // 32, k // 32) has (qb + kb) % m < r."""
+    import os
+    if os.environ.get("DM_EXPOFF_DIAG", "") == "nobr":   # diagnostic: no branch, every block MUFU (restructure cost only)
+        return False
     return cute.arch.make_warp_uniform((qb + kb) % m) < r   # warp-uniform in both kernels -> uniform branch

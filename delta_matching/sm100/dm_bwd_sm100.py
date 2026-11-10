@@ -705,6 +705,17 @@ class DMBackwardSm100:
         # MMA warp's smem descriptor starts keeps ptxas from hoisting every per-k-step 64-bit descriptor into the
         # uniform registers (UR exhaustion -> 69 STL/LDL in the 48-register MMA warp in det). Same MMAs: bitwise.
         self.dm_d3nh = "d3nh" in self.dm_opts or (self.deterministic and "nod3nh" not in self.dm_opts)
+        # ordinv (kda/docs/ordinv-design.md, OPT-IN, default off). 2-CTA pipelined schedule: dV(t) reads its SFA/SFB scale
+        # factors from TMEM cols in the S region (P 0..31, SF 32..51) and the next S^T MMA overwrites the S region; dK(t)
+        # reads SFA/SFB_dk at dS_offset + 32.. (dP region) and the next dP^T MMA overwrites it. PTX ISA 9.7.18.6.2 pipelines
+        # MMA A/metadata reads -> later MMA D writes, not scale-factor reads, so issue order alone is not a guarantee.
+        # 'ordw': tcgen05.commit after dV / dK -> mbarrier ord[0] / ord[1]; the MMA warp waits it (+ fence::after) before
+        # the next S^T / dP^T MMA. 'ordw=v' / 'ordw=k': only the dV->S / dK->dP site. Same MMAs: bitwise.
+        _ow = next((x for x in self.dm_opts if x == "ordw" or x.startswith("ordw=")), None)
+        self.dm_ordw_v = _ow is not None and _ow in ("ordw", "ordw=v")
+        self.dm_ordw_k = _ow is not None and _ow in ("ordw", "ordw=k")
+        if self.dm_ordw_v or self.dm_ordw_k:
+            assert self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED and "rdo" not in self.dm_opts, "ordw: 2-CTA pipelined only"
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
         # DM dsq (track L, kda/docs/bwdalt-design.md): the dS tile amax / pow2 scale / e4m3 quantization / dS code+SF stores /
         # dQ SF word + peer dS exchange move from the 8 compute warps to the 4 reduce (dQ drain) warps. Reduce warp q owns
@@ -1512,7 +1523,7 @@ class DMBackwardSm100:
                 dS_cluster_empty_mbar_ptr: cutlass.Int64
                 dS_cluster_full_mbar_ptr: cutlass.Int64
                 dS_cluster_leader_mbar_ptr: cutlass.Int64
-                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 11]
+                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 11 + (2 if (self.dm_ordw_v or self.dm_ordw_k) else 0)]
                 dQaccum_empty_mbar_ptr: cutlass.Int64
 
                 sQ: cute.struct.Align[
@@ -1904,6 +1915,10 @@ class DMBackwardSm100:
                 # warp (dQ(t) may overwrite the S tail; the reduce warps then commit pipeline_dS(t))
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 9, len(self.compute_warp_ids))
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 10, len(self.compute_warp_ids))
+                if const_expr(self.dm_ordw_v or self.dm_ordw_k):
+                    # ordinv ordw: [11] dV(t) complete, [12] dK(t) complete (tcgen05.commit by the leader's MMA warp)
+                    cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 11, 1)
+                    cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 12, 1)
 
         if const_expr(self.cluster_reduce_dQ):
             if warp_idx == 4:
@@ -2220,6 +2235,8 @@ class DMBackwardSm100:
 
         AttentionMaskCls = self._generate_attention_mask_cls(window_size_left, window_size_right)
         self.dm_kvfree_mbar = storage.dm_xchg_mbar.data_ptr() + 2
+        if const_expr(self.dm_ordw_v or self.dm_ordw_k):
+            self.dm_ord_ptr = storage.dm_xchg_mbar.data_ptr() + 11
         self.dm_prog_addr = None
         if const_expr("prog" in self.dm_opts):
             self.dm_prog_addr = aux_data.tensors[4].iterator.toint() + 2048
@@ -3693,6 +3710,8 @@ class DMBackwardSm100:
 
         cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         dS_cluster_phase = Int32(0)
+        dm_dvn = Int32(0)   # ordinv ordw: dV MMAs committed to ord[0] so far
+        dm_dkn = Int32(0)   # ordinv ordw: dK MMAs committed to ord[1] so far
 
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
@@ -3816,6 +3835,8 @@ class DMBackwardSm100:
                         # wait until the reduce warps drained it (the main loop's S waits the same way)
                         pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(4))
+                    if const_expr(self.dm_ordw_v):
+                        self._dm_ord_wait(0, dm_dvn)   # previous work tile's last dV (SF in the S region)
                     mma_qk_fn(B_idx=consumer_state_Q.index)
                     pipeline_S_P.sync_object_full.arrive(0, pipeline_S_P.producer_mask, cta_group)
                     pipeline_Q.consumer_release(consumer_state_Q)
@@ -3826,6 +3847,8 @@ class DMBackwardSm100:
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(5))
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(6))
+                    if const_expr(self.dm_ordw_k):
+                        self._dm_ord_wait(1, dm_dkn)   # previous work tile's last dK (SF in the dP region)
                     mma_dov_fn(B_idx=consumer_state_dO.index)
                     pipeline_dP.sync_object_full.arrive(0, pipeline_dP.producer_mask, cta_group)
 
@@ -3834,6 +3857,9 @@ class DMBackwardSm100:
                     pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(7))
                     mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=True)
+                    if const_expr(self.dm_ordw_v):
+                        self._dm_ord_commit(0, cta_group, cta_rank_in_cluster)
+                        dm_dvn += 1
                     pipeline_dO.consumer_release(consumer_state_dO)
                     consumer_state_dO.advance()
 
@@ -3874,6 +3900,9 @@ class DMBackwardSm100:
                         if const_expr(dm_trace is not None):
                             dm_acc1 = dm_acc1 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 1, True)
+                        if const_expr(self.dm_ordw_v):
+                            # ordinv C0: dV(t) read SFA/SFB_dv (S region cols 32..51); S^T(t+1) overwrites the S region
+                            self._dm_ord_wait(0, dm_dvn)
                         mma_qk_fn(B_idx=consumer_state_Q.index, dz=dmz)
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
@@ -3896,6 +3925,9 @@ class DMBackwardSm100:
                             dm_acc3 = dm_acc3 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 3, True)
                         mma_dsq_fn(B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK, dz=dmz)
+                        if const_expr(self.dm_ordw_k):
+                            self._dm_ord_commit(1, cta_group, cta_rank_in_cluster)
+                            dm_dkn += 1
                         accumulate_dK = True
                         pipeline_Qt.consumer_release(consumer_state_Qt)
                         consumer_state_Qt.advance()
@@ -3907,6 +3939,9 @@ class DMBackwardSm100:
                         if const_expr(dm_trace is not None):
                             dm_acc4 = dm_acc4 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 4, True)
+                        if const_expr(self.dm_ordw_k):
+                            # ordinv C0: dK(t) read SFA/SFB_dk (dP region cols dS+32..); dP^T(t+1) overwrites the dP region
+                            self._dm_ord_wait(1, dm_dkn)
                         mma_dov_fn(B_idx=consumer_state_dO.index, dz=dmz)
                         pipeline_dP.sync_object_full.arrive(0, pipeline_dP.producer_mask, cta_group)
 
@@ -3955,6 +3990,9 @@ class DMBackwardSm100:
                         self._tlev(dm_trace, dm_mi, 7, True)
                         if const_expr("rdo" not in self.dm_opts):
                             mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False, dz=dmz)
+                            if const_expr(self.dm_ordw_v):
+                                self._dm_ord_commit(0, cta_group, cta_rank_in_cluster)
+                                dm_dvn += 1
                         else:
                             if dm_dv_first <= 0:
                                 mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False, dz=dmz)
@@ -3986,6 +4024,9 @@ class DMBackwardSm100:
                     pipeline_dP.sync_object_empty.wait(0, producer_phase_acc)  # dP -> dS
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(10))
                     mma_dsq_fn(B_idx=consumer_state_Qt.index, zero_init=not accumulate_dK)
+                    if const_expr(self.dm_ordw_k):
+                        self._dm_ord_commit(1, cta_group, cta_rank_in_cluster)
+                        dm_dkn += 1
                     pipeline_Qt.consumer_release(consumer_state_Qt)
                     consumer_state_Qt.advance()
                     # signal to the epilogue that dK is ready
@@ -4182,6 +4223,19 @@ class DMBackwardSm100:
         # pipeline_dP.producer_tail(producer_state_dP)
         # pipeline_dKV.producer_tail(producer_state_dKV)
         # pipeline_dQ.producer_tail(producer_state_dQ)
+
+    @cute.jit
+    def _dm_ord_commit(self, k: int, cta_group, cta_rank):
+        """ordinv ordw: tcgen05.commit (this MMA warp's cta_group) of every prior MMA -> ord[k] of this (leader) CTA."""
+        with cute.arch.elect_one():
+            cute.nvgpu.tcgen05.commit(self.dm_ord_ptr + k, 1 << cta_rank, cta_group)
+
+    @cute.jit
+    def _dm_ord_wait(self, k: int, n: Int32):
+        """ordinv ordw: wait for completion #(n-1) of ord[k] (n = commits issued so far; at most one outstanding)."""
+        if n > 0:
+            cute.arch.mbarrier_wait(self.dm_ord_ptr + k, phase=(n - 1) & 1)
+            dm_utils.tc_fence_after()
 
     def _check_dS_exchange_layouts(self):
         """The dS exchange of the M=64 layout copies the peer's Q-column half of this CTA's

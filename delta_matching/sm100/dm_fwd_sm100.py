@@ -490,6 +490,15 @@ class DMForwardSm100:
             assert 4 * max(_rs - 80, 0) + max(_rc - 80, 0) <= 4 * max(80 - _rs, 0) + max(80 - _rc, 0) + max(80 - _ro, 0), \
                 f"setmaxnreg pool: {self.dm_sl_regs}"
 
+        # ordinv (kda/docs/ordinv-design.md, OPT-IN, default off): ordw=1 makes the PV_s -> QK_s TMEM reuse PTX-ordered.
+        # PV_s reads its SFA/SFB scale factors (block-scaled tcgen05.mma) from S_s's TMEM columns, and the next QK_s
+        # (a different accumulator/shape/kind) overwrites S_s. PTX ISA 9.7.18.6.2 pipelines MMA A/metadata reads ->
+        # later MMA D writes, but not scale-factor reads, so issue order alone is not a guarantee. ordw=1: tcgen05.commit
+        # after every PV_s -> mbarrier ord[s]; the MMA warp waits it (+ fence::after_thread_sync) before the next QK_s.
+        # Same MMAs, same operands: bitwise.
+        self.dm_ordld = self.dm_opts.get("ordld", "0") == "1"   # ordinv: tcgen05.wait::ld before the slice kb arrival
+        self.dm_ordw = (self.dm_opts.get("ordw", "0") == "1" and not self.use_s_ping_pong and not self.dm_sspv
+                        and self.cta_group_size == 1)
         self.num_regs_softmax = config.registers.softmax
         self.num_regs_correction = config.registers.correction
         self.num_regs_other = config.registers.other
@@ -833,6 +842,7 @@ class DMForwardSm100:
         dm_sc = 2 if self.dm_dbs else 1   # dbs: two sScale slots
         dm_sP_size = cute.cosize(self.dm_sP_layout) if self.dm_sspv else 0
         dm_slb = 6 if self.dm_slice else 0      # slice: kbfull[2], bsfull[2], bsempty[2]
+        dm_ordn = 2 if self.dm_ordw else 0      # ordinv ordw: PV_s completion barrier per stage
         dm_slf = 2 * 2 * 4 * self.m_block_size if self.dm_slice else 0   # slice: sX[2][4][128], sB[2][4][128] fp32
 
         @cute.struct
@@ -852,6 +862,7 @@ class DMForwardSm100:
             mbar_dm_pvdone: cute.struct.MemRange[Int64, dm_nb2]
             mbar_dm_cread: cute.struct.MemRange[Int64, dm_nb3]
             mbar_dm_slice: cute.struct.MemRange[Int64, dm_slb]
+            mbar_dm_ord: cute.struct.MemRange[Int64, dm_ordn]
             # Tmem dealloc cluster barrier
             tmem_dealloc_mbar: Int64
             # Tmem holding buffer
@@ -900,6 +911,7 @@ class DMForwardSm100:
             mbar_dm_pvdone: cute.struct.MemRange[Int64, dm_nb2]
             mbar_dm_cread: cute.struct.MemRange[Int64, dm_nb3]
             mbar_dm_slice: cute.struct.MemRange[Int64, dm_slb]
+            mbar_dm_ord: cute.struct.MemRange[Int64, dm_ordn]
             # Tmem dealloc cluster barrier
             tmem_dealloc_mbar: Int64
             # Tmem holding buffer
@@ -1306,6 +1318,12 @@ class DMForwardSm100:
                     dm_utils.mbar_init(self.dm_slbar + 8 * _s, 16)        # kbfull[s]: one arrival per slice warp
                     dm_utils.mbar_init(self.dm_slbar + 16 + 8 * _s, 16)   # bsfull[s]
                     dm_utils.mbar_init(self.dm_slbar + 32 + 8 * _s, 4)    # bsempty[s]: one per correction warp
+                cute.arch.mbarrier_init_fence()
+        if const_expr(self.dm_ordw):
+            self.dm_ord = Int32(storage.mbar_dm_ord.data_ptr().toint())
+            if cute.arch.thread_idx()[0] == 0:
+                dm_utils.mbar_init(self.dm_ord, 1)
+                dm_utils.mbar_init(self.dm_ord + 8, 1)
                 cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cta_layout_vmnk, is_relaxed=True)
 
@@ -2108,6 +2126,7 @@ class DMForwardSm100:
         P_full_O_rescaled_phase = Int32(0)
         if const_expr(self.use_s_ping_pong):
             mma_pv_count = Int32(0)
+        dm_pvn = Int32(0)   # ordinv ordw: PV rounds issued (per stage) by this CTA so far, across work tiles
         if const_expr(self.dm_sspv):
             # fwdrw ss_pv: SS block-scaled PV from sP; dummy pvdone completion #0 per stage (no PV precedes the 1st P store)
             dm_tm_ss = self.dm_tiled_mma_pv_ss.get_slice(0)
@@ -2298,6 +2317,11 @@ class DMForwardSm100:
                         sK_cur = sK[None, None, None, Ki_index]
                         if const_expr(self.uneven_kv_smem):
                             sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
+                        if const_expr(self.dm_ordw):
+                            # ordinv: the previous work tile's last PV_s (reads SF in S_s) must be complete before QK_s
+                            if dm_pvn > 0:
+                                dm_utils.mbar_wait_parity(self.dm_ord + 8 * stage, (dm_pvn - 1) & 1)
+                                dm_utils.tc_fence_after()
                         # gemm_Si[stage](tCrB=tSrKi, sB=sK_cur)
                         gemm_Si[stage](
                             smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
@@ -2345,6 +2369,9 @@ class DMForwardSm100:
                                 mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage) if self.split_P_arrive > 0 else None,
                                 mbar_phase=P_full_O_rescaled_phase,
                             )
+                            if const_expr(self.dm_ordw):
+                                with cute.arch.elect_one():
+                                    dm_utils.tc_commit(self.dm_ord + 8 * stage)   # ordinv: PV_s(i) completion #dm_pvn
                             # Don't need to signal O_full to the correction warps since the
                             # correction warps wait for the softmax warps anyway. By the time the softmax
                             # warps finished, S_i for the next iteration must have been done, so O_i-1
@@ -2370,6 +2397,11 @@ class DMForwardSm100:
                             sK_cur = sK[None, None, None, Ki_index]
                             if const_expr(self.uneven_kv_smem):
                                 sK_cur = self.offset_kv_smem(sK_cur, Ki_index, Ki_phase)
+                            if const_expr(self.dm_ordw):
+                                # ordinv C0: PV_s(i) read SFA/SFB from S_s; wait its completion before QK_s(i+1) overwrites S_s.
+                                # Phase-safe: PV_s(i-1) is complete (P_full(i) needs S_s(i) loaded, whose commit tracks it).
+                                dm_utils.mbar_wait_parity(self.dm_ord + 8 * stage, dm_pvn & 1)
+                                dm_utils.tc_fence_after()
                             # gemm_Si[stage](tCrB=tSrK[None, None, None, Ki_index], sB=sK_cur)
                             gemm_Si[stage](
                                 smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
@@ -2383,6 +2415,7 @@ class DMForwardSm100:
                         mma_kv_consumer_state.advance()
                         P_full_O_rescaled_phase ^= 1
                         O_should_accumulate = True
+                        dm_pvn += 1
                     # End of seqlen_kv loop
 
                     # release Q0 & Q1
@@ -2413,6 +2446,9 @@ class DMForwardSm100:
                             mbar_ptr=pipeline_p_lastsplit.sync_object_full.get_barrier(stage) if self.split_P_arrive > 0 else None,
                             mbar_phase=P_full_O_rescaled_phase,
                         )
+                        if const_expr(self.dm_ordw):
+                            with cute.arch.elect_one():
+                                dm_utils.tc_commit(self.dm_ord + 8 * stage)
                         # 4. release accumulated O0_partial
                         # We do need O_full here since for the last tile, by the time the softmax warp
                         # has signaled to the correction warps, the softmax warp has just finished
@@ -2421,6 +2457,7 @@ class DMForwardSm100:
                         pipeline_o_acc.producer_commit_w_index(stage)
                         # End of GEMM_PV00 (P0 * V0 -> O0_partial)
                     P_full_O_rescaled_phase ^= 1
+                    dm_pvn += 1
                     # 5. release Vi_end
                     pipeline_kv.consumer_release(mma_kv_consumer_state)
                     mma_kv_consumer_state.advance()
@@ -3086,6 +3123,11 @@ class DMForwardSm100:
                 v = utils.fmax(utils.fmax(lm[0], lm[1]), lm[2], lm[3])
             xb = v * c
             dm_utils.st_shared_b32(self.dm_slbuf + 4 * ((s * 4 + q) * self.m_block_size + tidx), dm_utils.bitcast_f32_i32(xb))
+            if const_expr(self.dm_ordld):
+                # ordinv: the correction WG's SF tcgen05.st overwrites S_s cols 16..23 that slice WG 0 loaded; PTX
+                # 9.7.18.6.4.4/.5: a cross-thread ld -> st hand-off needs tcgen05.wait::ld before the fence + arrive
+                # (register use of the loaded values is not a memory ordering)
+                cute.arch.fence_view_async_tmem_load()
             dm_utils.tc_fence_before()     # this warp's S loads ordered before the kb-published arrival (SF overwrites S)
             dm_utils.tcf_relay()   # fwdfence v3: every lane fences + warp sync before the elected leader's release
             cute.arch.sync_warp()

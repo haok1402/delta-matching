@@ -81,6 +81,14 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     if c8 != 1:
         key = key + (f"c8_{c8}",)
     c13 = int(os.environ.get("DM_HD256_FWD_C13", "0"))   # hd256-fwd4 C13: C12 + second MMA issuer (warp 15 PV) (opt-in)
+    # hd256-fwd6 C14: persistent CTAs (CLC claims, cross-item overlap; implies C13; causal T2 order, epi 2, no trace) (opt-in)
+    pers = int(os.environ.get("DM_HD256_FWD_PERS", "0"))
+    if pers and not (causal and tsplit > 0 and epi == 2 and c8 == 1 and split == 0 and kv_stage == 4
+                     and os.environ.get("DM_HD256_FWD_TRACE", "0") != "1"):
+        pers = 0
+    if pers:
+        c13 = 1
+        key = key + (f"pers{pers}",)
     if c13:
         key = key + (f"c13_{c13}",)
     c12 = int(os.environ.get("DM_HD256_FWD_C12", "1"))   # hd256-fwd4 C12 (DEFAULT 1): C10 SF placement + C11 tail in the correction
@@ -110,7 +118,8 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (AOT it first in a gpupool --gpus 0 run with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split, trace=trace, g1=g1, c8=c8, c10=c10, c11=c11, c12=c12, c13=c13, tsplit=tsplit)
+                                 split=split, trace=trace, g1=g1, c8=c8, c10=c10, c11=c11, c12=c12, c13=c13, tsplit=tsplit,
+                                 **({"pers": pers} if pers else {}))
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

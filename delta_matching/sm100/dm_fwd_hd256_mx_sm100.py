@@ -229,6 +229,31 @@ def tr_wait_clock(mbar: Int32, phase: Int32, *, loc=None, ip=None) -> Int64:
 TR_E = 32   # events per row; row 0 = CTA header, row j + 1 = tile j (see DMFwdHd256MxSm100.tr)
 
 
+# ---- C14 persistent CTAs (fork hd256-fwd6; DM_HD256_FWD_PERS=1): cluster launch control (1-CTA clusters) ----
+@dsl_user_op
+def clc_try_cancel(resp: Int32, mbar: Int32, *, loc=None, ip=None):
+    """clusterlaunchcontrol.try_cancel: asynchronously write the 16-byte response for the next not-yet-launched CTA into
+    resp (16-B aligned SMEM), completing 16 tx bytes on mbar (the caller arrives with expect_tx(16) first)."""
+    llvm.inline_asm(None, [Int32(resp).ir_value(loc=loc, ip=ip), Int32(mbar).ir_value(loc=loc, ip=ip)],
+                    "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes.b128 [$0], [$1];",
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def clc_decode(resp: Int32, *, loc=None, ip=None):
+    """(valid, x, y, z) of a try_cancel response in SMEM; the ctaid is extracted ONLY for a canceled (valid) response
+    (PTX: get_first_ctaid of a failed response is undefined), else x = y = z = 0."""
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4), [Int32(resp).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b128 r;\n\t.reg .pred p;\n\t.reg .b64 lo, hi;\n\t.reg .b32 w;\n\t"
+        "ld.shared.v2.b64 {lo, hi}, [$4];\n\tmov.b128 r, {lo, hi};\n\t"
+        "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p, r;\n\t"
+        "selp.u32 $0, 1, 0, p;\n\tmov.u32 $1, 0;\n\tmov.u32 $2, 0;\n\tmov.u32 $3, 0;\n\t"
+        "@p clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {$1, $2, $3, w}, r;\n\t}",
+        "=r,=r,=r,=r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return [Int32(llvm.extractvalue(T.i32(), res, [i], loc=loc, ip=ip)) for i in range(4)]
+
+
 def gemm_qk_ptx(op, acc_tmem_addr, tCrA, tCrB, sA, sB, b_off: int = 0):
     """Plain (non-scaled) tcgen05 kind::f8f6f4 SS MMA chain over all k-steps (k ascending, k-step 0 zero-init), raw PTX.
     op: the MMA op whose instruction descriptor (M, N) is used; tCrA / tCrB / sA / sB: the N=128 QK fragments and smem tensors of
@@ -276,7 +301,32 @@ class DMFwdHd256MxSm100:
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
                  lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0,
-                 c10: int = 0, c11: int = 0, c12: int = 0, c13: int = 0, tsplit: int = 0):
+                 c10: int = 0, c11: int = 0, c12: int = 0, c13: int = 0, tsplit: int = 0, pers: int = 0):
+        # C14 pers (fork hd256-fwd6, DM_HD256_FWD_PERS=1; requires C13, epi 2, causal T2 order; Codex hd256-fwd6-01): persistent CTAs.
+        # The grid is unchanged (one CTA id per item, T2 map); a resident CTA finishes its item and claims the next not-yet-launched
+        # CTA id with clusterlaunchcontrol.try_cancel (load warp 14 issues one claim per item after its loads; 2-slot response ring
+        # clc_full[s] (tx 16 B) / clc_empty[s] (15 warp acks: 8 prefix, 4 correction, QK 12, load 14, PV 15)); every role warp loops
+        # over the same item sequence and stops at the first failed claim.  Item k has a global tile base J0 (sum of earlier cnt):
+        # every slot / ring / barrier phase uses the global tile index J = J0 + j (S slot J&1, rings J%3, O_full / O_done2 / S_empty /
+        # W1L / P_full3 / partial_full3 phases), K/V sequence numbers are 2*J0 + the item-local order, Q one phase per item, O_ready
+        # round J - k - 1; item-local j keeps the semantics (diagonal mask and first tail at j = 0, PV zero-init, last-tile SF at its
+        # own slot +80, key block n_block_max-1-j).  Softmax WG h owns the tiles with J&1 == h.  Values per item are op-for-op C13.
+        # Cross-item edges (pers only): QK(J0) waits PV(J0-2) (not J0-3: PV(J0-1) of the previous item may already have completed on
+        # the same O_done2 parity) and QK(J0+1) waits PV(J0-1) (the previous last tile's SF at own slot +80 is in the slot it
+        # overwrites).  O epilogue staging (two column halves, 128 rows x 256 B XOR-swizzled, in ONE K/V ring stage = the stage of the
+        # next item's gated load g = 2*J0' + (3 if cnt' >= 2 else 1); the next item's first loads are K0, K1, V0, K2 so g is K2 /
+        # V1 / V0): the load warp waits EPI_done (count 128, after the copy-out + fence.proxy.async) before loading sequence g.
+        # The old O TMEM reads are ordered before PV0(next) by the correction's P_full(J0') publication (epilogue -> tail0 in
+        # program order, tcgen05.fence::before_thread_sync before the arrive), so no O_free barrier (Codex fwd6-01 A).
+        # DEBUG PCs (pers): 22 load warp skips the EPI_done wait + correction sleeps 20 us between staging and copy-out of half 0
+        # (the gated TMA overwrites the staged rows) -> must corrupt; 23 QK warp skips the previous-last SF wait (j = 1) + PV warp
+        # sleeps 20 us before PV(last) of every item -> must corrupt; 24 QK warp releases Q before the item's last QK and sleeps
+        # 20 us before it, load warp issues Q before K0 (else Q(k+1) waits behind K0's stage = the last QK's) -> must corrupt.
+        # DEBUG 25 (probe, not a control): row 0 LSE of each item = k + 1000*smid (items per persistent CTA).
+        self.pers = bool(pers)
+        if pers:
+            c13 = 1
+            assert is_causal and tsplit > 0 and epi == 2 and not trace and kv_stage == 4, "pers: causal T2, epi 2, no trace"
         # c8 (fork hd256-fwd3 C8, DM_HD256_FWD_C8=1; Codex hd256-fwd2-02 C, hd256-fwd3-02): column split of every tile over BOTH
         # softmax WGs.  WG h loads S columns 64h..64h+63 (blocks 2h, 2h+1) and runs the m-independent prefix op for op (bmax, kb,
         # bias, FFMA2, ex2, e4m3 codes -> sP, pairwise block sums).  WG1 publishes bmax2/3, bs2/3 (SMEM part[slot][k][128],
@@ -365,6 +415,8 @@ class DMFwdHd256MxSm100:
             self.num_regs_softmax_c11 = 184
             self.num_regs_correction_c11 = 96
         self.n_mbar_dm = 28 if c13 else 26 if c10 else 14
+        if pers:
+            self.n_mbar_dm = 32       # + 216 EPI_done, 224/232 clc_full[s], 240/248 clc_empty[s]
         self.n_stats = 2 * 128 + 2 * 128 + 4 * 128 + ((24 if c11 else 12 if c10 else 8) * 128 if c8 else 0)
         self.part_stride = 1024 if c11 else 512      # floats per part[] buffer (C11: 8 x 128)
         # g1 (fork hd256-fwd3, DM_HD256_FWD_G1 bitmask; profile/hd256-fwd3-tl/REPORT.md): critical-path trims of C6, values bitwise
@@ -531,7 +583,19 @@ class DMFwdHd256MxSm100:
             sK: cute.struct.Align[cute.struct.MemRange[self.q_dtype, sKV_size], self.buffer_align_bytes]
             sP: cute.struct.Align[cute.struct.MemRange[self.q_dtype, cute.cosize(sP_layout)], self.buffer_align_bytes]
 
-        self.shared_storage = SharedStorage
+        @cute.struct
+        class SharedStoragePers:
+            mbar_q: cute.struct.MemRange[Int64, 2]
+            mbar_kv: cute.struct.MemRange[Int64, self.kv_stage * 2]
+            mbar_dm: cute.struct.MemRange[Int64, self.n_mbar_dm]
+            clc_resp: cute.struct.Align[cute.struct.MemRange[Int64, 4], 16]      # C14: 2 x 16-B try_cancel responses
+            tmem_holding_buf: Int32
+            sStats: cute.struct.MemRange[Float32, self.n_stats]
+            sQ: cute.struct.Align[cute.struct.MemRange[self.q_dtype, cute.cosize(sQ_layout)], self.buffer_align_bytes]
+            sK: cute.struct.Align[cute.struct.MemRange[self.q_dtype, sKV_size], self.buffer_align_bytes]
+            sP: cute.struct.Align[cute.struct.MemRange[self.q_dtype, cute.cosize(sP_layout)], self.buffer_align_bytes]
+
+        self.shared_storage = SharedStoragePers if const_expr(self.pers) else SharedStorage
         assert SharedStorage.size_in_bytes() <= 232448, f"SMEM {SharedStorage.size_in_bytes()}"
         n_m = cute.ceil_div(cute.size(mQt.shape[0]), self.m_block_size)
         grid = (n_m, cute.size(mQt.shape[2]), cute.size(mQt.shape[3]))
@@ -636,6 +700,11 @@ class DMFwdHd256MxSm100:
             if const_expr(self.c13):
                 for k in cutlass.range_constexpr(2):
                     dm_utils.mbar_init(mbar + 200 + 8 * k, 1)              # O_done2[parity]: PV(j) complete (warp 15 commit)
+            if const_expr(self.pers):
+                dm_utils.mbar_init(mbar + 216, 128)                        # EPI_done: staged O copied out (correction WG)
+                for k in cutlass.range_constexpr(2):
+                    dm_utils.mbar_init(mbar + 224 + 8 * k, 1)              # clc_full[s]: expect_tx(16) + try_cancel response
+                    dm_utils.mbar_init(mbar + 240 + 8 * k, 15)             # clc_empty[s]: one ack per consuming warp
             if const_expr(self.c10):
                 for k in cutlass.range_constexpr(2):
                     dm_utils.mbar_init(mbar + 112 + 8 * k, 128)            # W1L[slot]: WG1 loaded S(t)
@@ -679,125 +748,130 @@ class DMFwdHd256MxSm100:
                 for j in cutlass.range(cnt, unroll=1):
                     self.tr(j, 29, tr_wait_clock(mbar + 32, j & 1))
 
-        if warp_idx == self.load_warp_id:
-            cute.arch.setmaxregister_decrease(self.num_regs_other)
-            mQ_cur = mQ[None, None, head_idx, batch_idx]
-            mK_cur = mK[None, None, kv_head_idx, batch_idx]
-            mV_cur = mV[None, None, kv_head_idx, batch_idx]
-            gQ = cute.local_tile(mQ_cur, (self.m_block_size, self.head_dim), (m_block, 0))
-            gK = cute.local_tile(mK_cur, (self.n_block_size, self.head_dim), (None, 0))
-            gV = cute.local_tile(mV_cur, (self.head_dim, self.n_block_size), (0, None))
-            tSgQ = thr_mma_qk.partition_A(gQ)
-            tSgK = thr_mma_qk.partition_B(gK)
-            tOgV = thr_mma_pv.partition_B(gV)
-            tQsQ, tQgQ = cpasync.tma_partition(tma_atom_Q, 0, cute.make_layout(1), cute.group_modes(sQ, 0, 3),
-                                               cute.group_modes(tSgQ, 0, 3))
-            tKsK, tKgK = cpasync.tma_partition(tma_atom_K, 0, cute.make_layout(1), cute.group_modes(sK, 0, 3),
-                                               cute.group_modes(tSgK, 0, 3))
-            tVsV, tVgV = cpasync.tma_partition(tma_atom_V, 0, cute.make_layout(1), cute.group_modes(sV, 0, 3),
-                                               cute.group_modes(tOgV, 0, 3))
-            kv_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, self.kv_stage)
-            q_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, 1)
-            if const_expr(self.split != 0 or self.c10):
-                self.load_split(tma_atom_Q, tma_atom_K, tma_atom_V, tQgQ, tQsQ, tKgK, tKsK, tVgV, tVsV, pipeline_q, pipeline_kv,
-                                q_state, n_block_max, cnt)
-            else:
-                pipeline_kv.producer_acquire(kv_state)
-                cute.copy(tma_atom_K, tKgK[None, n_block_max - 1], tKsK[None, kv_state.index],
-                          tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
-                kv_state.advance()
-                pipeline_q.producer_acquire(q_state)
-                cute.copy(tma_atom_Q, tQgQ, tQsQ[None, 0], tma_bar_ptr=pipeline_q.producer_get_barrier(q_state))
-                for i in cutlass.range(cnt - 1, unroll=1):
-                    pipeline_kv.producer_acquire(kv_state)
-                    cute.copy(tma_atom_K, tKgK[None, n_block_max - 2 - i], tKsK[None, kv_state.index],
-                              tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
-                    kv_state.advance()
-                    pipeline_kv.producer_acquire(kv_state)
-                    cute.copy(tma_atom_V, tVgV[None, n_block_max - 1 - i], tVsV[None, kv_state.index],
-                              tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
-                    kv_state.advance()
-                pipeline_kv.producer_acquire(kv_state)
-                cute.copy(tma_atom_V, tVgV[None, 0], tVsV[None, kv_state.index],
-                          tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
-                kv_state.advance()
-            # Ring WAR edge of the F1a/F1c epilogue (accuracy-audit 12:2x Q1; cherry-picked from hd256-8k2 252ece6): the loads above
-            # are this CTA's LAST writes to the K/V ring (non-persistent CTA, 2*cnt TMA loads, all consumed before O_full(PV(last)),
-            # which the correction WG waits before staging O in the ring).
-            if const_expr(self.epi == 10):
-                # DEBUG POSITIVE CONTROL ONLY: an unordered ring writer ("ring released early"): wait final_full, let the last PV
-                # finish, poison the staging rows while the correction WG (epi 10) holds its staged rows -> O must be corrupted.
-                dm_utils.mbar_wait_parity(mbar + 64, Int32(0))
-                for _ in cutlass.range(8, unroll=1):
-                    dm_utils.nanosleep_1us()
-                skb = Int32(sK.iterator.toint())
-                ln = cute.arch.lane_idx()
-                pz = Int32(-1)
-                for r in cutlass.range((128 * 528) // (16 * 32), unroll=1):
-                    st_shared_v4_b32(skb + Int32(16) * (r * 32 + ln), pz, pz, pz, pz)
-
-        if const_expr(self.c13):
-            if warp_idx == 15:
+        if const_expr(self.pers):
+            self.roles_pers(warp_idx, mQ, mK, mV, mO, mLSE, mQS, mKVW, tma_atom_Q, tma_atom_K, tma_atom_V, sQ, sK, sV, sP,
+                            thr_mma_qk, thr_mma_pv, tiled_mma_qk, tiled_mma_pv, acc_pv, pipeline_q, pipeline_kv, mbar, stats,
+                            sp_base, tmem, tmem_alloc_barrier, Int32(storage.clc_resp.data_ptr().toint()), tsd)
+        else:
+            if warp_idx == self.load_warp_id:
                 cute.arch.setmaxregister_decrease(self.num_regs_other)
-                self.mma_c13_pv(tiled_mma_pv, sV, sP, acc_pv, pipeline_kv, mbar, cnt)
-        if warp_idx == self.mma_warp_id:
-            cute.arch.setmaxregister_decrease(self.num_regs_other)
-            tmem.allocate(512)
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            tmem_ptr = tmem.retrieve_ptr(Float32)
-            if const_expr(self.trace):
-                self.tr(-1, 0, Int64(m_block))
-                self.tr(-1, 1, Int64(cnt))
-                self.tr(-1, 2, Int64(dm_utils.smid()))
-                self.tr(-1, 3, dm_utils.globaltimer())
-                self.tr(-1, 4)
-                self.tr(-1, 7, Int64(head_idx))
-                self.tr(-1, 8, Int64(batch_idx))
-            self.mma(tiled_mma_qk, tiled_mma_pv, sQ, sK, sV, sP, acc_qk, acc_pv, pipeline_q, pipeline_kv, mbar, cnt)
-            tmem.relinquish_alloc_permit()
-            if const_expr(self.ord_td):
-                dm_utils.tc_fence_before()
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            if const_expr(self.ord_td):
-                dm_utils.tc_fence_after()
-            tmem.free(tmem_ptr)
-
-        if warp_idx <= self.softmax_warp_ids[-1]:
-            cute.arch.setmaxregister_increase(self.num_regs_softmax)
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            if const_expr(self.c12):
-                self.softmax4(mbar, sp_base, stats, mQS, mKVW, m_block, head_idx, kv_head_idx, batch_idx, n_block_max, cnt)
-            elif const_expr(self.two_wg):
-                if const_expr(self.c8):
-                    self.softmax3(mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx, batch_idx,
-                                  n_block_max, cnt)
+                mQ_cur = mQ[None, None, head_idx, batch_idx]
+                mK_cur = mK[None, None, kv_head_idx, batch_idx]
+                mV_cur = mV[None, None, kv_head_idx, batch_idx]
+                gQ = cute.local_tile(mQ_cur, (self.m_block_size, self.head_dim), (m_block, 0))
+                gK = cute.local_tile(mK_cur, (self.n_block_size, self.head_dim), (None, 0))
+                gV = cute.local_tile(mV_cur, (self.head_dim, self.n_block_size), (0, None))
+                tSgQ = thr_mma_qk.partition_A(gQ)
+                tSgK = thr_mma_qk.partition_B(gK)
+                tOgV = thr_mma_pv.partition_B(gV)
+                tQsQ, tQgQ = cpasync.tma_partition(tma_atom_Q, 0, cute.make_layout(1), cute.group_modes(sQ, 0, 3),
+                                                   cute.group_modes(tSgQ, 0, 3))
+                tKsK, tKgK = cpasync.tma_partition(tma_atom_K, 0, cute.make_layout(1), cute.group_modes(sK, 0, 3),
+                                                   cute.group_modes(tSgK, 0, 3))
+                tVsV, tVgV = cpasync.tma_partition(tma_atom_V, 0, cute.make_layout(1), cute.group_modes(sV, 0, 3),
+                                                   cute.group_modes(tOgV, 0, 3))
+                kv_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, self.kv_stage)
+                q_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, 1)
+                if const_expr(self.split != 0 or self.c10):
+                    self.load_split(tma_atom_Q, tma_atom_K, tma_atom_V, tQgQ, tQsQ, tKgK, tKsK, tVgV, tVsV, pipeline_q, pipeline_kv,
+                                    q_state, n_block_max, cnt)
                 else:
-                    self.softmax2(acc_qk, mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx,
-                              batch_idx, n_block_max, cnt)
-            else:
-                self.softmax(acc_qk, mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx,
-                             batch_idx, n_block_max, cnt)
-            if const_expr(self.ord_td):
-                dm_utils.tc_fence_before()
-            tmem_alloc_barrier.arrive_unaligned()
+                    pipeline_kv.producer_acquire(kv_state)
+                    cute.copy(tma_atom_K, tKgK[None, n_block_max - 1], tKsK[None, kv_state.index],
+                              tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
+                    kv_state.advance()
+                    pipeline_q.producer_acquire(q_state)
+                    cute.copy(tma_atom_Q, tQgQ, tQsQ[None, 0], tma_bar_ptr=pipeline_q.producer_get_barrier(q_state))
+                    for i in cutlass.range(cnt - 1, unroll=1):
+                        pipeline_kv.producer_acquire(kv_state)
+                        cute.copy(tma_atom_K, tKgK[None, n_block_max - 2 - i], tKsK[None, kv_state.index],
+                                  tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
+                        kv_state.advance()
+                        pipeline_kv.producer_acquire(kv_state)
+                        cute.copy(tma_atom_V, tVgV[None, n_block_max - 1 - i], tVsV[None, kv_state.index],
+                                  tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
+                        kv_state.advance()
+                    pipeline_kv.producer_acquire(kv_state)
+                    cute.copy(tma_atom_V, tVgV[None, 0], tVsV[None, kv_state.index],
+                              tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
+                    kv_state.advance()
+                # Ring WAR edge of the F1a/F1c epilogue (accuracy-audit 12:2x Q1; cherry-picked from hd256-8k2 252ece6): the loads above
+                # are this CTA's LAST writes to the K/V ring (non-persistent CTA, 2*cnt TMA loads, all consumed before O_full(PV(last)),
+                # which the correction WG waits before staging O in the ring).
+                if const_expr(self.epi == 10):
+                    # DEBUG POSITIVE CONTROL ONLY: an unordered ring writer ("ring released early"): wait final_full, let the last PV
+                    # finish, poison the staging rows while the correction WG (epi 10) holds its staged rows -> O must be corrupted.
+                    dm_utils.mbar_wait_parity(mbar + 64, Int32(0))
+                    for _ in cutlass.range(8, unroll=1):
+                        dm_utils.nanosleep_1us()
+                    skb = Int32(sK.iterator.toint())
+                    ln = cute.arch.lane_idx()
+                    pz = Int32(-1)
+                    for r in cutlass.range((128 * 528) // (16 * 32), unroll=1):
+                        st_shared_v4_b32(skb + Int32(16) * (r * 32 + ln), pz, pz, pz, pz)
 
-        if warp_idx >= self.correction_warp_ids[0] and warp_idx <= self.correction_warp_ids[-1]:
-            if const_expr(self.num_regs_correction > 128):
-                cute.arch.setmaxregister_increase(self.num_regs_correction)
-            else:
-                cute.arch.setmaxregister_decrease(self.num_regs_correction)
-            tmem_alloc_barrier.arrive_and_wait_unaligned()
-            if const_expr(self.c11):
-                self.correction_c11(mbar, stats, mO, mLSE, mKVW, m_block, head_idx, kv_head_idx, batch_idx, n_block_max, cnt,
-                                    Int32(sK.iterator.toint()))
-            else:
-                self.correction(mbar, stats, mO, m_block, head_idx, batch_idx, cnt, Int32(sK.iterator.toint()))
-            if const_expr(self.trace):
-                self.tr(-1, 5, None, warp_idx == 8)
-                self.tr(-1, 6, dm_utils.globaltimer(), warp_idx == 8)
-            if const_expr(self.ord_td):
-                dm_utils.tc_fence_before()
-            tmem_alloc_barrier.arrive_unaligned()
+            if const_expr(self.c13):
+                if warp_idx == 15:
+                    cute.arch.setmaxregister_decrease(self.num_regs_other)
+                    self.mma_c13_pv(tiled_mma_pv, sV, sP, acc_pv, pipeline_kv, mbar, cnt)
+            if warp_idx == self.mma_warp_id:
+                cute.arch.setmaxregister_decrease(self.num_regs_other)
+                tmem.allocate(512)
+                tmem_alloc_barrier.arrive_and_wait_unaligned()
+                tmem_ptr = tmem.retrieve_ptr(Float32)
+                if const_expr(self.trace):
+                    self.tr(-1, 0, Int64(m_block))
+                    self.tr(-1, 1, Int64(cnt))
+                    self.tr(-1, 2, Int64(dm_utils.smid()))
+                    self.tr(-1, 3, dm_utils.globaltimer())
+                    self.tr(-1, 4)
+                    self.tr(-1, 7, Int64(head_idx))
+                    self.tr(-1, 8, Int64(batch_idx))
+                self.mma(tiled_mma_qk, tiled_mma_pv, sQ, sK, sV, sP, acc_qk, acc_pv, pipeline_q, pipeline_kv, mbar, cnt)
+                tmem.relinquish_alloc_permit()
+                if const_expr(self.ord_td):
+                    dm_utils.tc_fence_before()
+                tmem_alloc_barrier.arrive_and_wait_unaligned()
+                if const_expr(self.ord_td):
+                    dm_utils.tc_fence_after()
+                tmem.free(tmem_ptr)
+
+            if warp_idx <= self.softmax_warp_ids[-1]:
+                cute.arch.setmaxregister_increase(self.num_regs_softmax)
+                tmem_alloc_barrier.arrive_and_wait_unaligned()
+                if const_expr(self.c12):
+                    self.softmax4(mbar, sp_base, stats, mQS, mKVW, m_block, head_idx, kv_head_idx, batch_idx, n_block_max, cnt)
+                elif const_expr(self.two_wg):
+                    if const_expr(self.c8):
+                        self.softmax3(mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx, batch_idx,
+                                      n_block_max, cnt)
+                    else:
+                        self.softmax2(acc_qk, mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx,
+                                  batch_idx, n_block_max, cnt)
+                else:
+                    self.softmax(acc_qk, mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx,
+                                 batch_idx, n_block_max, cnt)
+                if const_expr(self.ord_td):
+                    dm_utils.tc_fence_before()
+                tmem_alloc_barrier.arrive_unaligned()
+
+            if warp_idx >= self.correction_warp_ids[0] and warp_idx <= self.correction_warp_ids[-1]:
+                if const_expr(self.num_regs_correction > 128):
+                    cute.arch.setmaxregister_increase(self.num_regs_correction)
+                else:
+                    cute.arch.setmaxregister_decrease(self.num_regs_correction)
+                tmem_alloc_barrier.arrive_and_wait_unaligned()
+                if const_expr(self.c11):
+                    self.correction_c11(mbar, stats, mO, mLSE, mKVW, m_block, head_idx, kv_head_idx, batch_idx, n_block_max, cnt,
+                                        Int32(sK.iterator.toint()))
+                else:
+                    self.correction(mbar, stats, mO, m_block, head_idx, batch_idx, cnt, Int32(sK.iterator.toint()))
+                if const_expr(self.trace):
+                    self.tr(-1, 5, None, warp_idx == 8)
+                    self.tr(-1, 6, dm_utils.globaltimer(), warp_idx == 8)
+                if const_expr(self.ord_td):
+                    dm_utils.tc_fence_before()
+                tmem_alloc_barrier.arrive_unaligned()
         return
 
     # -----------------------------------------------------------------------------------------------------------------
@@ -1121,6 +1195,11 @@ class DMFwdHd256MxSm100:
         """C10 SFA column of tile j (SFB = +8): slot (j+1)&1 + 64 for j < cnt-1, own slot + 80 for the last tile."""
         c = Int32(Int32(j) + 1 < cnt)
         return c * (((Int32(j) + 1) & 1) * 128 + 64) + (1 - c) * ((Int32(j) & 1) * 128 + 80)
+
+    def sf_col14(self, J, j, cnt):
+        """C14 SFA column of tile j (global J): slot (J+1)&1 + 64 unless j is the item's last tile (own slot J&1 + 80)."""
+        c = Int32(Int32(j) + 1 < cnt)
+        return c * (((Int32(J) + 1) & 1) * 128 + 64) + (1 - c) * ((Int32(J) & 1) * 128 + 80)
 
     def kseq(self, m):
         """C7c ring sequence number of K(m): K0, K1, then K(m) at 2m-2 (each followed by V(m-2))."""
@@ -1797,16 +1876,18 @@ class DMFwdHd256MxSm100:
 
     @cute.jit
     def softmax_step4(self, j, n_block, is_first: cutlass.Constexpr, mbar, stats, sp_base, tidx, lane, qsc, mKVW, kv_head_idx,
-                      batch_idx):
-        """C12 tile step: S(j) load -> S_empty / W1L, 4-block prefix (C6 softmax_step2 expressions), publish part[j%3] + P codes."""
-        slot = j & 1
-        b3 = j % 3
+                      batch_idx, J=None):
+        """C12 tile step: S(j) load -> S_empty / W1L, 4-block prefix (C6 softmax_step2 expressions), publish part[j%3] + P codes.
+        C14 (pers): J = global tile index (slot / ring / phase); j stays item-local (trace row)."""
+        Jg = j if const_expr(J is None) else J
+        slot = Jg & 1
+        b3 = Jg % 3
         part = stats + 4 * (1024 + b3 * self.part_stride)
         if const_expr(self.pc_inj == 17):
-            part = stats + 4 * (1024 + (j & 1) * self.part_stride)          # DEBUG PC 17: part ring depth 2 (reuse race)
+            part = stats + 4 * (1024 + (Jg & 1) * self.part_stride)         # DEBUG PC 17: part ring depth 2 (reuse race)
         sb = b3
         if const_expr(self.pc_inj == 16):
-            sb = j & 1                                                       # DEBUG PC 16: sP ring depth 2 (reuse race)
+            sb = Jg & 1                                                      # DEBUG PC 16: sP ring depth 2 (reuse race)
         pfull = mbar + 128 + 8 * b3
         partf = mbar + 176 + 8 * b3
         dm_kw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block])
@@ -1814,7 +1895,7 @@ class DMFwdHd256MxSm100:
         tr_w = (tidx // 32) if const_expr(self.trace) else None
         tro = 8 * (cute.arch.make_warp_uniform(cute.arch.warp_idx()) // 4) if const_expr(self.trace) else 0
         self.tr(j, 10 + tro, None, tr_w == 0)
-        dm_utils.mbar_wait_parity(mbar + 8 * slot, (j >> 1) & 1)          # S_full[slot]
+        dm_utils.mbar_wait_parity(mbar + 8 * slot, (Jg >> 1) & 1)         # S_full[slot]
         dm_utils.tc_fence_after()
         self.tr(j, 11 + tro, None, tr_w == 0)
         sbase = (lane << 16) + slot * 128
@@ -1904,15 +1985,17 @@ class DMFwdHd256MxSm100:
     # -----------------------------------------------------------------------------------------------------------------
     @cute.jit
     def tail_c11(self, j, n_block, is_first: cutlass.Constexpr, mbar, stats, tidx, lane, obase, mKVW, kv_head_idx, batch_idx, cnt,
-                 m_old, row_sum):
-        """C11: the C8 WG0 ordered tail for tile j, run by the correction WG, then the lazy O rescale (C6 correction body)."""
-        b3 = j % 3
+                 m_old, row_sum, J=None):
+        """C11: the C8 WG0 ordered tail for tile j, run by the correction WG, then the lazy O rescale (C6 correction body).
+        C14 (pers): J = global tile index (rings / slots / phases); j, cnt item-local."""
+        Jg = j if const_expr(J is None) else J
+        b3 = Jg % 3
         part = stats + 4 * (1024 + b3 * self.part_stride)
         if const_expr(self.pc_inj == 17):
-            part = stats + 4 * (1024 + (j & 1) * self.part_stride)          # DEBUG PC 17: part ring depth 2
+            part = stats + 4 * (1024 + (Jg & 1) * self.part_stride)         # DEBUG PC 17: part ring depth 2
         dm_vw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block + 1])
         if const_expr(self.pc_inj != 4):
-            dm_utils.mbar_wait_parity(mbar + 176 + 8 * b3, (j // 3) & 1)      # partial_full3[j%3] (both WGs)
+            dm_utils.mbar_wait_parity(mbar + 176 + 8 * b3, (Jg // 3) & 1)     # partial_full3[j%3] (both WGs)
         dm_utils.tc_fence_after()
         if const_expr(self.pc_inj == 17):
             for _d in cutlass.range_constexpr(20):                           # DEBUG PC 17: read part(j) late
@@ -1944,9 +2027,9 @@ class DMFwdHd256MxSm100:
         sfa_word = dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3])
         if j + 1 < cnt:
             if const_expr(self.pc_inj != 14):
-                dm_utils.mbar_wait_parity(mbar + 112 + 8 * ((j + 1) & 1), ((j + 1) >> 1) & 1)   # W1L(j+1)
+                dm_utils.mbar_wait_parity(mbar + 112 + 8 * ((Jg + 1) & 1), ((Jg + 1) >> 1) & 1)   # W1L(j+1)
                 dm_utils.tc_fence_after()
-        sfa_a = (lane << 16) + self.sf_col10(j, cnt)
+        sfa_a = (lane << 16) + (self.sf_col10(j, cnt) if const_expr(J is None) else self.sf_col14(Jg, j, cnt))
         if const_expr(self.pc_inj == 15):
             dm_utils.tc_fence_before()
             dm_utils.mbar_arrive(mbar + 128 + 8 * b3)                          # DEBUG PC 15: P_full before the SF stores
@@ -1962,7 +2045,7 @@ class DMFwdHd256MxSm100:
             dm_utils.mbar_arrive(mbar + 128 + 8 * b3)                          # P_full3[j%3] (SF(j) in TMEM)
         self.tr(j, 25, None, tidx == 0)
         if const_expr(not is_first):
-            dm_utils.mbar_wait_parity(mbar + 32, (j - 1) & 1)                  # O_full(PV(j-1))
+            dm_utils.mbar_wait_parity(mbar + 32, (Jg - 1) & 1)                 # O_full(PV(j-1))
             dm_utils.tc_fence_after()
             if const_expr(self.pc_inj == 10):
                 dm_utils.tc_fence_before()
@@ -2117,3 +2200,401 @@ class DMFwdHd256MxSm100:
                     gaddr = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + rr) * H + head_idx)
                                                           * Int64(self.head_dim * 2)) + Int64(16 * ln)
                     st_global_v4_b32(gaddr, v[0], v[1], v[2], v[3])
+
+    # =================================================================================================================
+    # C14 persistent CTAs (fork hd256-fwd6, DM_HD256_FWD_PERS=1; see __init__ pers).  Only traced when self.pers.
+    # =================================================================================================================
+    @cute.jit
+    def item_t2(self, u, tsd):
+        """T2 split-tail map of linear CTA id u -> (m_block, head, batch) (same expressions as kernel(), without PC 18)."""
+        nb_div, hb_div, h_div, tm, nb = tsd
+        n_m = cute.arch.grid_dim()[0]
+        n_h = cute.arch.grid_dim()[1]
+        n_hb = n_h * cute.arch.grid_dim()[2]
+        pair = Int32(0)
+        m_block = Int32(0)
+        if u < n_hb * nb:
+            pair, r = divmod(u, nb_div)
+            m_block = n_m - 1 - r
+        else:
+            q, r = divmod(u - n_hb * nb, hb_div)
+            pair = r
+            m_block = tm - 1 - q
+            if const_expr(self.pc_inj == 18):
+                m_block = m_block + 1                   # DEBUG PC 18: non-bijective map (hole at m_block 0; in bounds)
+                if m_block > n_m - 1:
+                    m_block = n_m - 1
+        batch_idx, head_idx = divmod(pair, h_div)
+        return m_block, head_idx, batch_idx
+
+    @cute.jit
+    def clc_next(self, mbar, resp_base, k, issuer: cutlass.Constexpr):
+        """Claim for item k+1 (slot k&1, use n = k>>1 of that slot).  issuer (load warp): one thread waits the slot's previous
+        acks (n >= 1), orders the old generic reads before the async response write, arrives expect_tx(16) and issues try_cancel.
+        Every consuming warp: wait full, decode (all lanes), warp sync, lane 0 acks empty.  Returns (u, valid)."""
+        s = k & 1
+        n = k >> 1
+        full = mbar + 224 + 8 * s
+        resp = resp_base + 16 * s
+        if const_expr(issuer):
+            if cute.arch.lane_idx() == 0:
+                if n >= 1:
+                    dm_utils.mbar_wait_parity(mbar + 240 + 8 * s, (n - 1) & 1)
+                fence_proxy_async_shared()
+                dm_utils.mbar_arrive_expect_tx(full, 16)
+                clc_try_cancel(resp, full)
+        dm_utils.mbar_wait_parity(full, n & 1)
+        valid, x, y, z = clc_decode(resp)
+        bar_warp_sync()
+        if cute.arch.lane_idx() == 0:
+            dm_utils.mbar_arrive(mbar + 240 + 8 * s)
+        u = x + cute.arch.grid_dim()[0] * (y + cute.arch.grid_dim()[1] * z)
+        return u, valid
+
+    def kseq14(self, m, cnt):
+        """C14 ring order of an item: K0, K1, V0, K2, then the C7c order (K(m) at 2m-2 for m >= 3); K2 at 3 when cnt >= 3."""
+        return self.kseq(m) + Int32(Int32(m) == 2)
+
+    def vseq14(self, m, cnt):
+        """C14: V0 at 2 when cnt >= 2 (C7c: 3 for cnt >= 3), else the C7c sequence."""
+        return self.vseq(m, cnt) - Int32(Int32(m) == 0) * Int32(Int32(cnt) >= 3)
+
+    @cute.jit
+    def roles_pers(self, warp_idx, mQ, mK, mV, mO, mLSE, mQS, mKVW, tma_atom_Q, tma_atom_K, tma_atom_V, sQ, sK, sV, sP,
+                   thr_mma_qk, thr_mma_pv, tiled_mma_qk, tiled_mma_pv, acc_pv, pipeline_q, pipeline_kv, mbar, stats, sp_base,
+                   tmem, tmem_alloc_barrier, resp_base, tsd):
+        bidx, bidy, bidz = cute.arch.block_idx()
+        u0 = bidx + cute.arch.grid_dim()[0] * (bidy + cute.arch.grid_dim()[1] * bidz)
+        if warp_idx == self.load_warp_id:
+            cute.arch.setmaxregister_decrease(self.num_regs_other)
+            self.load_pers(mQ, mK, mV, tma_atom_Q, tma_atom_K, tma_atom_V, sQ, sK, sV, thr_mma_qk, thr_mma_pv, pipeline_q,
+                           pipeline_kv, mbar, resp_base, u0, tsd)
+        if warp_idx == 15:
+            cute.arch.setmaxregister_decrease(self.num_regs_other)
+            self.pv_pers(tiled_mma_pv, sV, sP, acc_pv, pipeline_kv, mbar, resp_base, u0, tsd)
+        if warp_idx == self.mma_warp_id:
+            cute.arch.setmaxregister_decrease(self.num_regs_other)
+            tmem.allocate(512)
+            tmem_alloc_barrier.arrive_and_wait_unaligned()
+            tmem_ptr = tmem.retrieve_ptr(Float32)
+            self.qk_pers(tiled_mma_qk, sQ, sK, pipeline_q, pipeline_kv, mbar, resp_base, u0, tsd)
+            tmem.relinquish_alloc_permit()
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_before()
+            tmem_alloc_barrier.arrive_and_wait_unaligned()
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_after()
+            tmem.free(tmem_ptr)
+        if warp_idx <= self.softmax_warp_ids[-1]:
+            cute.arch.setmaxregister_increase(self.num_regs_softmax)
+            tmem_alloc_barrier.arrive_and_wait_unaligned()
+            self.softmax_pers(mbar, sp_base, stats, mQS, mKVW, resp_base, u0, tsd)
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_before()
+            tmem_alloc_barrier.arrive_unaligned()
+        if warp_idx >= self.correction_warp_ids[0] and warp_idx <= self.correction_warp_ids[-1]:
+            if const_expr(self.num_regs_correction > 128):
+                cute.arch.setmaxregister_increase(self.num_regs_correction)
+            else:
+                cute.arch.setmaxregister_decrease(self.num_regs_correction)
+            tmem_alloc_barrier.arrive_and_wait_unaligned()
+            self.correction_pers(mbar, stats, mO, mLSE, mKVW, Int32(sK.iterator.toint()), resp_base, u0, tsd)
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_before()
+            tmem_alloc_barrier.arrive_unaligned()
+
+    @cute.jit
+    def load_one14(self, atom, tg, ts, pipeline_kv, mbar, blk, seq, gate, k):
+        """C14 TMA load of global sequence seq; the item's gated sequence (the previous epilogue's staging stage) first waits
+        EPI_done(k-1)."""
+        if k >= 1 and seq == gate:
+            if const_expr(self.pc_inj != 22):
+                dm_utils.mbar_wait_parity(mbar + 216, (k - 1) & 1)          # EPI_done(k-1): staged O copied out
+        self.load_one(atom, tg, ts, pipeline_kv, blk, seq)
+
+    @cute.jit
+    def load_pers(self, mQ, mK, mV, tma_atom_Q, tma_atom_K, tma_atom_V, sQ, sK, sV, thr_mma_qk, thr_mma_pv, pipeline_q,
+                  pipeline_kv, mbar, resp_base, u0, tsd):
+        from flash_attn.cute.pipeline import _make_state
+        k = Int32(0)
+        J0 = Int32(0)
+        u = u0
+        valid = Int32(1)
+        while valid != 0:
+            m_block, head_idx, batch_idx = self.item_t2(u, tsd)
+            kv_head_idx = head_idx // self.qhead_per_kvhead
+            cnt = m_block + 1
+            n_block_max = cnt
+            gQ = cute.local_tile(mQ[None, None, head_idx, batch_idx], (self.m_block_size, self.head_dim), (m_block, 0))
+            gK = cute.local_tile(mK[None, None, kv_head_idx, batch_idx], (self.n_block_size, self.head_dim), (None, 0))
+            gV = cute.local_tile(mV[None, None, kv_head_idx, batch_idx], (self.head_dim, self.n_block_size), (0, None))
+            tQsQ, tQgQ = cpasync.tma_partition(tma_atom_Q, 0, cute.make_layout(1), cute.group_modes(sQ, 0, 3),
+                                               cute.group_modes(thr_mma_qk.partition_A(gQ), 0, 3))
+            tKsK, tKgK = cpasync.tma_partition(tma_atom_K, 0, cute.make_layout(1), cute.group_modes(sK, 0, 3),
+                                               cute.group_modes(thr_mma_qk.partition_B(gK), 0, 3))
+            tVsV, tVgV = cpasync.tma_partition(tma_atom_V, 0, cute.make_layout(1), cute.group_modes(sV, 0, 3),
+                                               cute.group_modes(thr_mma_pv.partition_B(gV), 0, 3))
+            base = 2 * J0
+            gate = base + 1 + 2 * Int32(cnt >= 2)
+            q_st = _make_state(Int32(0), (k & 1) ^ 1)
+            if const_expr(self.pc_inj == 24):                              # DEBUG PC 24: Q first (not behind K0's stage)
+                pipeline_q.producer_acquire(q_st)
+                cute.copy(tma_atom_Q, tQgQ, tQsQ[None, 0], tma_bar_ptr=pipeline_q.producer_get_barrier(q_st))
+            self.load_one14(tma_atom_K, tKgK, tKsK, pipeline_kv, mbar, n_block_max - 1, base, gate, k)
+            if const_expr(self.pc_inj != 24):
+                pipeline_q.producer_acquire(q_st)
+                cute.copy(tma_atom_Q, tQgQ, tQsQ[None, 0], tma_bar_ptr=pipeline_q.producer_get_barrier(q_st))
+            if cnt > 1:
+                self.load_one14(tma_atom_K, tKgK, tKsK, pipeline_kv, mbar, n_block_max - 2, base + 1, gate, k)
+            for i in cutlass.range(cnt, unroll=1):
+                if i == 0:
+                    self.load_one14(tma_atom_V, tVgV, tVsV, pipeline_kv, mbar, n_block_max - 1, base + self.vseq14(0, cnt), gate, k)
+                    if cnt > 2:
+                        self.load_one14(tma_atom_K, tKgK, tKsK, pipeline_kv, mbar, n_block_max - 3, base + 3, gate, k)
+                else:
+                    if i + 2 < cnt:
+                        self.load_one14(tma_atom_K, tKgK, tKsK, pipeline_kv, mbar, n_block_max - 3 - i, base + self.kseq(i + 2),
+                                        gate, k)
+                    self.load_one14(tma_atom_V, tVgV, tVsV, pipeline_kv, mbar, n_block_max - 1 - i, base + self.vseq(i, cnt), gate, k)
+            u_n, valid_n = self.clc_next(mbar, resp_base, k, True)
+            J0 = J0 + cnt
+            k = k + 1
+            u = u_n
+            valid = valid_n
+
+    @cute.jit
+    def qk_pers(self, tiled_mma_qk, sQ, sK, pipeline_q, pipeline_kv, mbar, resp_base, u0, tsd):
+        """C14 warp 12: QK(J) for every tile of every item.  Guards: S_empty(J-2); PV completion dep(J) via O_done2:
+        j >= 2: PV(J-3) (C13); j = 1: PV(J0-1) for k >= 1 (previous last tile's SF at +80 of this slot); j = 0: PV(J0-2)."""
+        from flash_attn.cute.pipeline import _make_state
+        tSrQ = tiled_mma_qk.make_fragment_A(sQ)
+        tSrK = tiled_mma_qk.make_fragment_B(sK)
+        S = self.kv_stage
+        k = Int32(0)
+        J0 = Int32(0)
+        u = u0
+        valid = Int32(1)
+        while valid != 0:
+            m_block, head_idx, batch_idx = self.item_t2(u, tsd)
+            cnt = m_block + 1
+            q_st = _make_state(Int32(0), k & 1)
+            pipeline_q.consumer_wait(q_st)
+            for j in cutlass.range(cnt, unroll=1):
+                J = J0 + j
+                if J >= 2:
+                    if const_expr(self.pc_inj != 6):
+                        dm_utils.mbar_wait_parity(mbar + 96 + 8 * (J & 1), ((J - 2) >> 1) & 1)   # S_empty(J-2)
+                    else:
+                        if J == 2:
+                            dm_utils.mbar_wait_parity(mbar + 96, Int32(0))  # DEBUG PC 6: keep the first wait (as mma_c13_qk)
+                dep = J - 3
+                if j == 0:
+                    dep = J0 - 2
+                if j == 1 and k >= 1:
+                    if const_expr(self.pc_inj != 23):
+                        dep = J0 - 1
+                    else:
+                        dep = J0 - 2
+                if dep >= 0:
+                    dm_utils.mbar_wait_parity(mbar + 200 + 8 * (dep & 1), (dep >> 1) & 1)        # O_done2: PV(dep) done
+                dm_utils.tc_fence_after()
+                ks = 2 * J0 + self.kseq14(j, cnt)
+                self.kv_wait(pipeline_kv, ks)
+                if const_expr(self.pc_inj == 24):
+                    if j == cnt - 1:
+                        pipeline_q.consumer_release(q_st)                   # DEBUG PC 24: Q released before the last QK
+                        for _d in cutlass.range_constexpr(20):
+                            dm_utils.nanosleep_1us()
+                self.qk_ptx(tSrQ, tSrK, sQ, sK, ks % S, J & 1)
+                with cute.arch.elect_one():
+                    dm_utils.tc_commit(mbar + 8 * (J & 1))                  # S_full[J&1]
+                pipeline_kv.consumer_release_w_index(ks % S)
+            if const_expr(self.pc_inj != 24):
+                pipeline_q.consumer_release(q_st)
+            u_n, valid_n = self.clc_next(mbar, resp_base, k, False)
+            J0 = J0 + cnt
+            k = k + 1
+            u = u_n
+            valid = valid_n
+
+    @cute.jit
+    def pv_pers(self, tiled_mma_pv, sV, sP, acc_pv, pipeline_kv, mbar, resp_base, u0, tsd):
+        """C14 warp 15: PV(J) (mma_pv C10/C13 path with global J; zero-init at item-local j = 0)."""
+        tOrP = tiled_mma_pv.make_fragment_A(sP)
+        tOrV = tiled_mma_pv.make_fragment_B(sV)
+        pv_op = cute.make_mma_atom(tiled_mma_pv.op).op
+        S = self.kv_stage
+        k = Int32(0)
+        J0 = Int32(0)
+        u = u0
+        valid = Int32(1)
+        while valid != 0:
+            m_block, head_idx, batch_idx = self.item_t2(u, tsd)
+            cnt = m_block + 1
+            for j in cutlass.range(cnt, unroll=1):
+                J = J0 + j
+                vs = 2 * J0 + self.vseq14(j, cnt)
+                pipeline_kv.consumer_wait_w_index_phase(vs % S, (vs // S) & 1)
+                pb = J % 3
+                dm_utils.mbar_wait_parity(mbar + 128 + 8 * pb, (J // 3) & 1)     # P_full3[J%3]
+                if const_expr(self.pc_inj == 16):
+                    pb = J & 1                                              # DEBUG PC 16: sP ring depth 2, PV(J) issued late
+                    for _d in cutlass.range_constexpr(20):
+                        dm_utils.nanosleep_1us()
+                if j >= 1:
+                    dm_utils.mbar_wait_parity(mbar + 40, (J - k - 1) & 1)        # O_ready(J): round J - k - 1
+                dm_utils.tc_fence_after()
+                if const_expr(self.pc_inj == 23):
+                    if j == cnt - 1:
+                        for _d in cutlass.range_constexpr(20):              # DEBUG PC 23: PV(last) late
+                            dm_utils.nanosleep_1us()
+                sfa_c = self.sf_col14(J, j, cnt)
+                dm_utils.gemm_ptx_bs(
+                    pv_op, self.tmem_o, tOrP[None, None, None, pb], tOrV[None, None, None, vs % S],
+                    sP[None, None, None, pb], sV[None, None, None, vs % S], sfa_c, sfa_c + 8,
+                    tuple((0, kk) for kk in range(4)), tuple((0, kk) for kk in range(4)), zero_init=(j == 0))
+                with cute.arch.elect_one():
+                    dm_utils.tc_commit(mbar + 32)                                # O_full(J)
+                    dm_utils.tc_commit(mbar + 200 + 8 * (J & 1))                 # O_done2[J&1]
+                if const_expr(self.pc_inj in (1, 2)):
+                    if const_expr(self.pc_inj == 2):
+                        dm_utils.mbar_wait_parity(mbar + 32, J & 1)
+                        dm_utils.tc_fence_after()
+                    lane0 = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+                    for r in cutlass.range_constexpr(4):
+                        tmem_st1((lane0 << 16) + sfa_c + r, Int32(-2139062144))   # DEBUG PC 1 / 2: poison SFA(J) (0x80808080)
+                    tmem_wait_st()
+                pipeline_kv.consumer_release_w_index(vs % S)
+            u_n, valid_n = self.clc_next(mbar, resp_base, k, False)
+            J0 = J0 + cnt
+            k = k + 1
+            u = u_n
+            valid = valid_n
+
+    @cute.jit
+    def softmax_pers(self, mbar, sp_base, stats, mQS, mKVW, resp_base, u0, tsd):
+        """C14 softmax WGs: WG h owns the tiles with global J&1 == h (item-local first tile with the diagonal mask)."""
+        tidx = cute.arch.thread_idx()[0] % 128
+        wg = cute.arch.make_warp_uniform(cute.arch.warp_idx()) // 4
+        lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+        k = Int32(0)
+        J0 = Int32(0)
+        u = u0
+        valid = Int32(1)
+        while valid != 0:
+            m_block, head_idx, batch_idx = self.item_t2(u, tsd)
+            kv_head_idx = head_idx // self.qhead_per_kvhead
+            cnt = m_block + 1
+            n_block_max = cnt
+            row = m_block * self.m_block_size + tidx
+            qsc = Float32(mQS[batch_idx, head_idx, row // 32]) * Float32(math.log2(math.e))
+            if ((J0 + wg) & 1) == 0:                                   # this WG owns local tiles 0, 2, ...
+                self.softmax_step4(Int32(0), n_block_max - 1, True, mbar, stats, sp_base, tidx, lane, qsc, mKVW, kv_head_idx,
+                                   batch_idx, J=J0)
+                for i in cutlass.range((cnt - 1) // 2, unroll=1):
+                    j = 2 * i + 2
+                    self.softmax_step4(j, n_block_max - 1 - j, False, mbar, stats, sp_base, tidx, lane, qsc, mKVW, kv_head_idx,
+                                       batch_idx, J=J0 + j)
+            else:
+                for i in cutlass.range(cnt // 2, unroll=1):
+                    j = 2 * i + 1
+                    self.softmax_step4(j, n_block_max - 1 - j, False, mbar, stats, sp_base, tidx, lane, qsc, mKVW, kv_head_idx,
+                                       batch_idx, J=J0 + j)
+            u_n, valid_n = self.clc_next(mbar, resp_base, k, False)
+            J0 = J0 + cnt
+            k = k + 1
+            u = u_n
+            valid = valid_n
+
+    @cute.jit
+    def correction_pers(self, mbar, stats, mO, mLSE, mKVW, sk_base, resp_base, u0, tsd):
+        """C14 correction WG: tails (global J), LSE, then (after reading the next claim) the staged epilogue into the stage
+        of the next item's gated load, EPI_done."""
+        tidx = cute.arch.thread_idx()[0] % 128
+        lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+        obase = (lane << 16) + self.tmem_o
+        k = Int32(0)
+        J0 = Int32(0)
+        u = u0
+        valid = Int32(1)
+        while valid != 0:
+            m_block, head_idx, batch_idx = self.item_t2(u, tsd)
+            kv_head_idx = head_idx // self.qhead_per_kvhead
+            cnt = m_block + 1
+            n_block_max = cnt
+            m_last = -Float32.inf
+            l_last = Float32(0.0)
+            m_last, l_last = self.tail_c11(Int32(0), n_block_max - 1, True, mbar, stats, tidx, lane, obase, mKVW, kv_head_idx,
+                                           batch_idx, cnt, m_last, l_last, J=J0)
+            for i in cutlass.range(cnt - 1, unroll=1):
+                m_last, l_last = self.tail_c11(i + 1, n_block_max - 2 - i, False, mbar, stats, tidx, lane, obase, mKVW,
+                                               kv_head_idx, batch_idx, cnt, m_last, l_last, J=J0 + i + 1)
+            row = m_block * self.m_block_size + tidx
+            row_sum = l_last
+            zero_or_nan = row_sum == Float32(0.0) or row_sum != row_sum
+            scale = cute.arch.rcp_approx(row_sum if not zero_or_nan else Float32(1.0))
+            LN2_ = math.log(2.0)
+            lse = (m_last * Float32(1.0) + (cute.math.log2(row_sum, fastmath=True) - Float32(0.0))) * LN2_ \
+                if not zero_or_nan else -Float32.inf
+            mLSE[batch_idx, head_idx, row] = lse
+            if const_expr(self.pc_inj == 25):
+                if tidx == 0:
+                    mLSE[batch_idx, head_idx, row] = Float32(k) + Float32(1000.0) * Float32(dm_utils.smid())   # DEBUG 25: item k of CTA
+            u_n, valid_n = self.clc_next(mbar, resp_base, k, False)
+            J0n = J0 + cnt
+            cnt_n = Int32(3)
+            if valid_n != 0:
+                mb_n, h_n, b_n = self.item_t2(u_n, tsd)
+                cnt_n = mb_n + 1
+            stage = (2 * J0n + 1 + 2 * Int32(cnt_n >= 2)) % self.kv_stage
+            self.epilogue_pers(mbar, mO, m_block, head_idx, batch_idx, J0n - 1, sk_base + stage * (self.tma_bytes_kv), tidx,
+                               obase, scale)
+            J0 = J0n
+            k = k + 1
+            u = u_n
+            valid = valid_n
+
+    @cute.jit
+    def epilogue_pers(self, mbar, mO, m_block, head_idx, batch_idx, Jlast, stg, tidx, obase, scale):
+        """C14 O epilogue: O_full(PV(Jlast)), then per column half h (TMEM chunks 4h..4h+3, chunk c+1 loaded while c is
+        converted): bf16 rows (mul.rn + cvt, = epi 2 bits) into this warp's 8 KiB of the stage (row r: 256 B, 16-B chunk q at
+        q ^ (r & 15)), bar.warp.sync, coalesced copy-out (2 rows x 256 B per instruction), bar.warp.sync.  Then
+        fence.proxy.async + EPI_done (the load warp's gated TMA into this stage)."""
+        dm_utils.mbar_wait_parity(mbar + 32, Jlast & 1)                         # O_full(PV(last))
+        dm_utils.tc_fence_after()
+        fence_proxy_async_shared()                                              # ring last written by TMA (async proxy)
+        N = mO.shape[1]
+        H = mO.shape[2]
+        ln = tidx % 32
+        w0 = tidx - ln
+        wbase = stg + Int32(256) * w0                                           # this warp's 32 rows x 256 B
+        srow = wbase + Int32(256) * ln
+        sw = ln & 15
+        rsub = ln >> 4                                                          # copy-out: row 2r + rsub, chunk ln & 15
+        gbase = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + w0) * H + head_idx)
+                                              * Int64(self.head_dim * 2)) + Int64(16 * (ln & 15))
+        rstride = Int64(H * self.head_dim * 2)
+        o = tmem_ld32(obase)
+        tmem_wait_ld()
+        for h in cutlass.range_constexpr(2):
+            for cc in cutlass.range_constexpr(4):
+                c = 4 * h + cc
+                if const_expr(c < 7):
+                    on = tmem_ld32(obase + 32 * (c + 1))
+                for q in cutlass.range_constexpr(4):
+                    wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
+                    st_shared_v4_b32(srow + ((Int32(4 * cc + q) ^ sw) << 4), wv[0], wv[1], wv[2], wv[3])
+                if const_expr(c < 7):
+                    tmem_wait_ld()
+                    o = on
+            bar_warp_sync()
+            if const_expr(self.pc_inj == 22 and h == 0):
+                for _d in cutlass.range_constexpr(20):                          # DEBUG PC 22: copy-out late (TMA lands first)
+                    dm_utils.nanosleep_1us()
+            for r in cutlass.range(16, unroll=4):
+                rr = 2 * r + rsub
+                v = ld_shared_v4_b32(wbase + Int32(256) * rr + (((ln & 15) ^ (rr & 15)) << 4))
+                st_global_v4_b32(gbase + Int64(rr) * rstride + Int64(256 * h), v[0], v[1], v[2], v[3])
+            bar_warp_sync()
+        fence_proxy_async_shared()
+        dm_utils.mbar_arrive(mbar + 216)                                        # EPI_done

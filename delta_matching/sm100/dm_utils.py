@@ -998,6 +998,56 @@ _tcf_raw_sync_warp = [None]
 
 _tcf_install()
 _tcf_install_min()
+
+
+# ---- ordinv Part III (accuracy-audit 08:2x, cross-CTA mbarrier scope) ----
+# XS[0] = 1 while a DM kernel that uses cross-CTA hand-offs is traced: every cute.arch.mbarrier_arrive with a peer CTA rank (remote
+#   arrive; cutlass's default scope is .cta even for remote targets) is emitted as mbarrier.arrive.release.cluster.
+# XS[1] = 1 while the 2-CTA backward's MMA warp is traced: every cute.arch mbarrier wait / try_wait is followed by
+#   fence.acq_rel.cluster, so the (.cta-scoped) acquire of a barrier completed by remote releases is cluster-strong.
+# Only the knob-on trace changes; with XS = [0, 0] the wrappers are exact pass-throughs (PTX unchanged).
+XS = [0, 0]
+
+
+@dsl_user_op
+def fence_acq_rel_cluster(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "fence.acq_rel.cluster;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+def _xs_install():
+    import cutlass.cute.arch as _A
+    from cutlass._mlir.dialects import nvvm as _nv
+    f = _A.mbarrier_arrive
+    if not getattr(f, "_dm_xs", False):
+        def mbarrier_arrive(mbar_ptr, peer_cta_rank_in_cluster=None, *a, **kw):
+            if XS[0] and peer_cta_rank_in_cluster is not None and kw.get("scope") is None:
+                kw["scope"] = _nv.MemScopeKind.CLUSTER
+            return f(mbar_ptr, peer_cta_rank_in_cluster, *a, **kw)
+        mbarrier_arrive._dm_xs = True
+        mbarrier_arrive._dm_tcf = getattr(f, "_dm_tcf", False)
+        mbarrier_arrive.__doc__ = f.__doc__
+        _A.mbarrier_arrive = mbarrier_arrive
+    for n in ("mbarrier_wait", "mbarrier_try_wait", "mbarrier_conditional_try_wait"):
+        g = getattr(_A, n, None)
+        if g is None or getattr(g, "_dm_xs", False):
+            continue
+
+        def mk(g):
+            def w(*a, **kw):
+                r = g(*a, **kw)
+                if XS[1]:
+                    fence_acq_rel_cluster()
+                return r
+            w._dm_xs = True
+            w._dm_tcf = getattr(g, "_dm_tcf", False)
+            w.__name__ = getattr(g, "__name__", "w")
+            w.__doc__ = g.__doc__
+            return w
+        setattr(_A, n, mk(g))
+
+
+_xs_install()
 @dsl_user_op
 def nanosleep_1us(*, loc=None, ip=None):
     """DEBUG only: nanosleep ~1 us (used to widen race windows in positive controls)."""

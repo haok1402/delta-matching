@@ -720,6 +720,11 @@ class DMBackwardSm100:
         # ordinv planted controls (DEBUG ONLY): ordpc1 / ordpc3 -> the MMA warp overwrites SFA_dv (S region col 32) / SFA_dk
         # (dP region col dS+32) of its lanes with tcgen05.st (+ wait::st) right before S^T(t+1) / dP^T(t+1), i.e. where the
         # next MMA's overwrite lands; caught unless ordw orders it after dV(t) / dK(t) completed.
+        # ordinv Part III (accuracy-audit 08:2x): cross-CTA mbarrier hand-offs at cluster scope (DEFAULT ON, 'noxscope' = DEBUG ONLY,
+        # the previous .cta-scoped build): remote arrives (pipeline consumer releases / PipelineAsyncUmma commits of the peer CTA's
+        # warps, the dS relay's leader arrive) -> mbarrier.arrive.release.cluster; every mbarrier wait of the leader's MMA warp
+        # (the only consumer of barriers with remote producers that are not TMA complete_tx / tcgen05.commit) -> + fence.acq_rel.cluster.
+        self.dm_xscope = self.use_2cta_instrs and "noxscope" not in self.dm_opts
         self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else (2 if "ordpc2" in self.dm_opts else 0))
         # ordpc2: SFA_dv poison right after dV(t) issue (after dV(t)'s completion wait with ordw): B1's window is closed in
         # practice by the dQ-empty wait before S^T(t+1) (ordpc1 never fires), so ordpc2 shows the harness sees a dV SF overwrite
@@ -1839,7 +1844,8 @@ class DMBackwardSm100:
         fastdiv_mods=(None, None),
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
-        dm_utils.tcf_begin(0 if "notcf" in self.dm_opts else 2 if "tcfb" in self.dm_opts else 1)   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
+        dm_utils.tcf_begin(0 if "notcf" in self.dm_opts else 2 if "tcfb" in self.dm_opts else 1)
+        dm_utils.XS[0] = int(self.dm_xscope)   # ordinv Part III: remote mbarrier arrives at cluster scope   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         bidx, _, _ = cute.arch.block_idx()
         if const_expr("tl2" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
@@ -2506,6 +2512,8 @@ class DMBackwardSm100:
             tmem_alloc_barrier.arrive()
 
         dm_utils.tcf_end()
+        dm_utils.XS[0] = 0
+        dm_utils.XS[1] = 0
         return
 
     @cute.jit
@@ -3571,6 +3579,7 @@ class DMBackwardSm100:
         # kernel (before warp specialization) is a lot slower tha putting them here.
         # Partition smem / tmem tensors
         # S = K @ Q.T
+        dm_utils.XS[1] = int(self.dm_xscope)   # ordinv Part III: fence.acq_rel.cluster after every MMA-warp mbarrier wait
         tSrK = tiled_mma_S.make_fragment_A(sK)
         tSrQ = tiled_mma_S.make_fragment_B(sQ)
         # dP = V @ dOt.T
@@ -4235,6 +4244,7 @@ class DMBackwardSm100:
             dm_pt = dm_pt + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
+        dm_utils.XS[1] = 0
         # Currently it hangs if we have this S_P.producer_tail, will need to understand why
         # pipeline_S_P.producer_tail(producer_state_S_P)
         # pipeline_dP.producer_tail(producer_state_dP)

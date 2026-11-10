@@ -239,19 +239,22 @@ def _prod_fn(q, k, v):
     vq, vk, vv, kal = _vec(q), _vec(k), _vec(v), _tri_aligned(k, Hk)
     if D == 128:
         return _get(("prod_ac", D, vq, vk, vv, kal, True), lambda: qc.ProdAC(D, vq, vk, vv, kal, True),
-                    [("l",)] * 12 + [("i",)] * 13 + [("f",), ("i",)])
+                    [("l",)] * 12 + [("i",)] * 14 + [("f",), ("i",)])
     nw = PRODA_NW[D]
     return _get(("prod_a", D, vq, vk, vv, kal, nw, True), lambda: qc.ProdA(D, vq, vk, vv, kal, nw, True),
-                [("l",)] * 11 + [("i",)] * 13 + [("f",), ("i",)])
+                [("l",)] * 11 + [("i",)] * 14 + [("f",), ("i",)])
 
 
 def _counters(q, st, n):
-    """Per-(device, stream) int32 counters, zero at rest: every counter is reset by the CTA that completes it."""
-    ck = (q.get_device(), st, n)
-    cnt = _CNT.get(ck)
-    if cnt is None:
-        cnt = _CNT[ck] = torch.zeros(n, device=q.device, dtype=torch.int32)
-    return cnt
+    """Per-(device, stream) K-mean arrival counters: n 64-bit words {count, generation} and the next generation.
+    Robustness (cutedo review): a word left non-zero by a launch that died carries an older generation and counts as zero;
+    the completing CTA also resets its word (CUDA-graph replays reuse their captured generation)."""
+    ck = (q.get_device(), st)
+    e = _CNT.get(ck)
+    if e is None or e[0].numel() < n:
+        e = _CNT[ck] = [torch.zeros(max(n, 1024), device=q.device, dtype=torch.int64), 0]
+    e[1] = e[1] % 0x7FFFFFFE + 1           # 1 .. 2^31-2, never 0 (the zero word)
+    return e[0], e[1]
 
 
 def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: int = 2, tr: int = 32):
@@ -291,13 +294,13 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: 
     args = (N, H, Hk, B, sq[0], sq[1], sq[2], sk[0], sk[1], sk[2], sv[0], sv[1], sv[2], float(sm), ROWS, st)
     if D == 128:
         chunks = torch.empty(B * Hk * S * (ROWS // 64), D, device=dev, dtype=torch.float32)
-        cnt = _counters(q, st, B * Hk * S + B * Hk)
+        cnt, gen = _counters(q, st, B * Hk * S + B * Hk)
         fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(), part.data_ptr(),
-           chunks.data_ptr(), cnt.data_ptr(), mean.data_ptr(), *args)
+           chunks.data_ptr(), cnt.data_ptr(), mean.data_ptr(), gen, *args)
     else:
-        cnt = _counters(q, st, B * Hk)
+        cnt, gen = _counters(q, st, B * Hk)
         fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(), part.data_ptr(),
-           cnt.data_ptr(), mean.data_ptr(), *args)
+           cnt.data_ptr(), mean.data_ptr(), gen, *args)
     _tile(k, mean=mean, y=k8, s=ks, wb=kvw, w_off=0)      # K tiles from the final mean (= _prod_b's quantization)
     return q8, qs, k8, ks, v8, vs, kvw, mean
 

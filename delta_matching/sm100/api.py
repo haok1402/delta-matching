@@ -58,6 +58,9 @@ def _check_nd(det):
 def dm_attn_func(q, k, v, causal=True, mode="matched", deterministic=None):
     """deterministic: None -> env DM_DETERMINISTIC / DM_BWD_DET (default deterministic); False -> non-deterministic
     backward (unordered dQ / GQA dK,dV accumulation). Either way delta and dS use bitwise the same P/dP."""
+    if q.shape[-1] == 256:   # hd256 (kda-hd256, api_hd256.py); the hd128 path below is unchanged
+        from .api_hd256 import dm_attn_func_hd256
+        return dm_attn_func_hd256(q, k, v, causal, mode, deterministic)
     assert q.shape[-1] == D and q.dtype == torch.bfloat16 and q.shape[1] % 128 == 0
     assert mode in ("matched", "stale")
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
@@ -75,6 +78,9 @@ def dm_attn_debug(q, k, v, do, causal=True, mode="matched", identity=None, deter
       "rowsum_dS":   (B,H,N) fp32  sum_j dS_ij,  dS_ij = P_ij * fma(dPacc_ij, a, -delta_i)  exactly as the backward
       "sum_abs_PdP": (B,H,N) fp32  sum_j |P_ij * (dPacc_ij * a)|
     The production path (dm_attn_func) is unchanged."""
+    if q.shape[-1] == 256:   # hd256 (kda-hd256, api_hd256.py); the hd128 path below is unchanged
+        from .api_hd256 import dm_attn_debug_hd256
+        return dm_attn_debug_hd256(q, k, v, do, causal, mode, identity, deterministic)
     sm = D ** -0.5
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
     q8, qs, k8, ks, v8, vs, kvw, _ = quant_qkv2(q, k, v, sm)

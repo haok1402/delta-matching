@@ -180,7 +180,13 @@ class DMFwdHd256MxSm100:
     Out: O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
-                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False):
+                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
+                 lpt: bool = False):
+        # lpt (fork hd256-8k L1; host default DM_HD256_FWD_LPT=1): causal CTA order = GLOBAL longest-first. Linear CTA id u
+        # (x fastest) -> m_block = n_m-1 - u // (H*B), (head, batch) from u % (H*B). Each CTA still computes exactly one
+        # (m_block, head, batch) with the same code (bitwise); only which CTA id gets which row block changes.
+        # False = the per-(head, batch) longest-first order (m_block = n_m-1-bidx, head = bidy, batch = bidz).
+        self.lpt = lpt
         # ord_td (fork hd256-ordinv, site FW15 of kda/hd256/ordinv-hd256.md; opt-in DM_HD256_ORDT=1): tcgen05 fence pair around
         # the TMEM teardown barrier (users: fence::before_thread_sync before their arrive; allocator: before + after around its
         # arrive_and_wait, then dealloc).  Host default True (DM_HD256_ORDT); False = the pre-fix code (32e0ecd PTX), debug only.
@@ -303,6 +309,13 @@ class DMFwdHd256MxSm100:
         m_block = n_m - 1 - bidx if const_expr(self.is_causal) else bidx
         head_idx = bidy
         batch_idx = bidz
+        if const_expr(self.is_causal and self.lpt):
+            n_h = cute.arch.grid_dim()[1]
+            n_hb = n_h * cute.arch.grid_dim()[2]
+            u = bidx + n_m * (bidy + n_h * bidz)
+            m_block = n_m - 1 - u // n_hb
+            head_idx = (u % n_hb) % n_h
+            batch_idx = (u % n_hb) // n_h
         kv_head_idx = head_idx // self.qhead_per_kvhead
         n_block_max = m_block + 1 if const_expr(self.is_causal) else n_m
         cnt = n_block_max

@@ -97,12 +97,15 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     otd = os.environ.get("DM_HD256_ORDT", "1") != "0"           # hd256-ordinv FW15: teardown fence pair (DEFAULT; 0 = DEBUG pre-fix)
     if not otd:
         key = key + ("noordt",)
+    lpt = bool(causal) and os.environ.get("DM_HD256_FWD_LPT", "1") != "0"   # hd256-8k L1: global longest-first CTA order (DEFAULT)
+    if causal and not lpt:
+        key = key + ("nolpt",)
     cache = _cache()
     if key not in cache:
         if os.environ.get("DM_H256_NO_COMPILE", "0") == "1":
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (AOT it first in a gpupool --gpus 0 run with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
-        kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd)
+        kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

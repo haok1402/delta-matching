@@ -28,7 +28,8 @@ DETERMINISTIC = True
 # "8" = impl 5 + xs (X3 exchange read), "9" = impl 5 + sp (Q4 split out around dP) (fork hd256-dqopt candidates, codex/hd256-dqopt-02-q3lpt.md)
 IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(dqopt=True, lpt="g"), "6": dict(dqopt=True, lpt="1"),
               "7": dict(dqopt=True, q3=True, lpt="g"), "8": dict(dqopt=True, lpt="g", xs=True),
-              "9": dict(dqopt=True, lpt="g", sp=True)}
+              "9": dict(dqopt=True, lpt="g", sp=True), "10": dict(dqopt=True, lpt="g", x2=True),
+              "11": dict(dqopt=True, lpt="g", esf=True), "12": dict(dqopt=True, lpt="g", x2=True, esf=True)}
 IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "5"}   # Q12 + causal global LPT (HD256-DQ-LPTG) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}

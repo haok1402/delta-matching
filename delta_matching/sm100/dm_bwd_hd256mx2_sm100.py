@@ -57,7 +57,7 @@ class DmHd256Mx2:
     DLY = 1 << 15
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
-                 q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False):
+                 q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -80,6 +80,15 @@ class DmHd256Mx2:
         # sp (Q4 split out): out(t-1) k-steps 0-1 -> dP(t) (committed) -> out(t-1) k-steps 2-3 (non-q3 order only).
         self.xs = bool(xs) and self.dqopt
         self.sp = bool(sp) and self.dqopt and not self.q3
+        # fork hd256-dq3 (codex/hd256-dq3-01-x2.md), dq + dqopt + non-q3, bitwise by construction:
+        # x2: S(t+1) chunk 0 (score cols col0 .. +31) read between the per-half exchange loads and their use (blocking sc full
+        #     wait on the NEXT phase without advancing, tcgen05.ld + wait::ld), carried in registers; the loop top then reads only
+        #     chunk 1 and releases as before (tile 0: chunk 0 read before the loop).  Same S values, same release point.
+        # esf: the SFA word (sfw) is stored to TMEM right after the cd acquire, before the code quantization / st.shared
+        #     (was after them); same completion (wait::st), fences and commit.
+        self.x2 = bool(x2) and self.dqopt and not self.q3 and not self.xs
+        self.esf = bool(esf) and self.dqopt and not self.q3
+        assert not (self.x2 and knob.replace("_safe", "") in ("s1", "sc")), knob    # s1 / sc not relocated for x2 (screen build)
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
@@ -514,6 +523,13 @@ class DmHd256Mx2:
             # q3 interior controls (codex/hd256-dqopt-03-combo.md): tile t-1's delayed code / SFA stores carried into tile t
             pend_c = [(Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)) for _ in range(4)]
             sfw_c = Int32(0)
+            sx0 = [Float32(0.0)] * 32         # x2: S chunk 0 of the next tile (carried)
+            if const_expr(self.x2):
+                sc_c.wait()                   # S(0) full (not advanced: the loop top's wait_and_advance consumes it)
+                if const_expr(self.ordf):
+                    tc_fence_after()
+                sx0 = tmem_ld32(tb + col0)
+                cute.arch.fence_view_async_tmem_load()
             for t in cutlass.range(total, unroll=1):
                 hi = t // ncs
                 ct = c_lo + t - hi * ncs
@@ -576,6 +592,12 @@ class DmHd256Mx2:
                     sf = sc_c.wait_and_advance()
                     if const_expr(self.ordf):
                         tc_fence_after()
+                elif const_expr(self.x2):
+                    sf = sc_c.wait_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_after()                       # BW1
+                    sv = [sx0, tmem_ld32(tb + col0 + 32)]      # chunk 0 read early (previous tile's exchange / prologue)
+                    cute.arch.fence_view_async_tmem_load()
                 else:
                     sf = sc_c.wait_and_advance()
                     if const_expr(self.ordf):
@@ -809,6 +831,19 @@ class DmHd256Mx2:
                         xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=2))   # lane 4c: max(max(m0, m1), max(m2, m3))
                         sbs[0] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=0))
                         sbs[1] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=4))
+                    elif const_expr(self.dqopt and self.x2):
+                        sball = [Int32(0)] * 4
+                        m4s = [ld_shared_v4f(xb + (2 * hf + jj) * 16) for jj in range(2)]
+                        if t + 1 < total:
+                            # x2: S(t+1) chunk 0 while the exchange loads are in flight (S(t+1) issued at dP(t)'s release)
+                            sc_c.wait()
+                            if const_expr(self.ordf):
+                                tc_fence_after()               # BW1
+                            sx0 = tmem_ld32(tb + col0)
+                            cute.arch.fence_view_async_tmem_load()
+                        for jj in cutlass.range_constexpr(2):
+                            m4 = m4s[jj]
+                            sbs[jj] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
                     elif const_expr(self.dqopt):
                         sball = [Int32(0)] * 4
                         for jj in cutlass.range_constexpr(2):
@@ -854,6 +889,13 @@ class DmHd256Mx2:
                         ce = cd_p.acquire_and_advance()
                         if const_expr(self.ordf):
                             tc_fence_after()                   # BW3
+                if const_expr(self.esf and self.kn not in ("cw0", "cw1", "sf0", "sf1")):
+                    # esf: this thread's SFA word first (after the cd acquire + BW3 fence above), completed with the codes below
+                    v0e = dm_utils.add_sb_clamp(sbs[0], osbo[0])
+                    v1e = dm_utils.add_sb_clamp(sbs[1], osbo[1])
+                    ze = Int32(0)
+                    sfe = sel_eq_i32(hf, Int32(0), pack4(v0e, v1e, ze, ze), pack4(ze, ze, v0e, v1e))
+                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfe)
                 # ---- codes -> smem stage stg (own two chunks) ----
                 cbase = crow + stg * self.bytes_c
                 pend = []                    # control cw<h>: code stores deferred (emitted below), else stored here
@@ -969,7 +1011,7 @@ class DmHd256Mx2:
                         else:
                             sfw_c = sfw
                 else:
-                    if const_expr(self.dqopt):
+                    if const_expr(self.dqopt and not self.esf):
                         dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
                     elif hf == 0:
                         sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),

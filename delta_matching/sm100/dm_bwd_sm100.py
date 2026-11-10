@@ -6224,6 +6224,23 @@ class DMBackwardSm100:
                                         gdQaccum_cur[None, stage + stage_offset].iterator,
                                         self.tma_copy_bytes["dQ"] // 1,
                                     )
+                                if const_expr("dqx2d" in self.dm_abl):
+                                    # abl:dqx2d (track BC control, timing only, WRONG dQ): the second add goes to the neighbouring
+                                    # query block's rows (m_block ^ 1, clamped), i.e. different addresses that OTHER CTAs also add to
+                                    # (1-CTA-like cross-SM pattern) instead of an immediate same-address repeat
+                                    copy_utils.cpasync_reduce_bulk_add_f32(
+                                        sdQaccum[None, smem_idx].iterator,
+                                        gdQaccum[None, stage + stage_offset, cutlass.min(m_block ^ 1, m_block_max - 1)].iterator,
+                                        self.tma_copy_bytes["dQ"] // 1,
+                                    )
+                                elif const_expr("dqx2" in self.dm_abl):
+                                    # abl:dqx2 (track BC, timing only, WRONG dQ): a second identical bulk add per staged chunk
+                                    # = the doubled dQ global read-modify-write traffic of a 1-CTA backward (128-key dQ partials)
+                                    copy_utils.cpasync_reduce_bulk_add_f32(
+                                        sdQaccum[None, smem_idx].iterator,
+                                        gdQaccum_cur[None, stage + stage_offset].iterator,
+                                        self.tma_copy_bytes["dQ"] // 1,
+                                    )
                             cute.arch.cp_async_bulk_commit_group()
                             if const_expr("nodqrd" not in self.dm_opts and self.deterministic and self.sdQaccum_stage > 1):   # dqrd default (bitwise)
                                 # DM dqrd: staging-buffer reuse only needs the older bulk adds to have READ smem;

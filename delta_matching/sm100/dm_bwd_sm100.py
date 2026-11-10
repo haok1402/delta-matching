@@ -2280,7 +2280,10 @@ class DMBackwardSm100:
         # Compute
         # (4, 5, 6, 7, 8, 9, 10, 11) --> 8 warps
         if warp_idx >= self.compute_warp_ids[0] and warp_idx <= self.compute_warp_ids[-1]:
-            self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
+            if const_expr(self.num_regs_compute < self.dm_launch_regs):   # track BB: cap compute below the launch allocation
+                self._dm_setmaxreg_dec(self.num_regs_compute)
+            else:
+                self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.compute_loop(
@@ -4689,9 +4692,9 @@ class DMBackwardSm100:
                 dm_qoff = dm_qoff + dm_qoff   # cwg4: one stage per thread (second slot unused)
             dm_m0 = m_block_min * (self.tile_m // 32)
             dm_qs0 = Float32(aux_data.tensors[0][batch_idx, head_idx, dm_m0 + dm_qoff[0]])
-            dm_qs1 = Float32(aux_data.tensors[0][batch_idx, head_idx, dm_m0 + dm_qoff[1]])
+            dm_qs1 = dm_qs0 if const_expr(dm_nst == 1 and "meta1" in self.dm_opts) else Float32(aux_data.tensors[0][batch_idx, head_idx, dm_m0 + dm_qoff[1]])   # track BB meta1: cwg4 uses one stage
             dm_dos0 = Float32(aux_data.tensors[3][batch_idx, head_idx, dm_m0 + dm_qoff[0]])
-            dm_dos1 = Float32(aux_data.tensors[3][batch_idx, head_idx, dm_m0 + dm_qoff[1]])
+            dm_dos1 = dm_dos0 if const_expr(dm_nst == 1 and "meta1" in self.dm_opts) else Float32(aux_data.tensors[3][batch_idx, head_idx, dm_m0 + dm_qoff[1]])
             # Mainloop
             # Block sparsity: iterate over sparse m_block count and derive actual m_block
             # from Q_IDX/FULL_Q_IDX tensors. Dense: iterate m_block_min..m_block_max directly.
@@ -4815,7 +4818,8 @@ class DMBackwardSm100:
                                   if cute.arch.lane_idx() == 0:
                                       dm_utils.mbar_arrive(dm_mbar + 8 * 10)
                               else:
-                                  self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
+                                  if const_expr(not (self.dm_cwg4 and "q1sf" in self.dm_opts)) or (cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0]) < 4:
+                                      self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)   # track BB q1sf: cwg4 -> one warp per TMEM lane quadrant installs the (identical) dQ SFs
                                   cute.arch.fence_view_async_tmem_store()
                                   dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                                   with cute.arch.elect_one():
@@ -4905,9 +4909,9 @@ class DMBackwardSm100:
                       dm_mn = m_block_min + dm_itn - dm_gn * dm_L
                       dm_hn = dm_head0 + dm_gn
                   dm_qs0 = Float32(aux_data.tensors[0][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[0]])
-                  dm_qs1 = Float32(aux_data.tensors[0][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
+                  dm_qs1 = dm_qs0 if const_expr(dm_nst == 1 and "meta1" in self.dm_opts) else Float32(aux_data.tensors[0][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
                   dm_dos0 = Float32(aux_data.tensors[3][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[0]])
-                  dm_dos1 = Float32(aux_data.tensors[3][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
+                  dm_dos1 = dm_dos0 if const_expr(dm_nst == 1 and "meta1" in self.dm_opts) else Float32(aux_data.tensors[3][batch_idx, dm_hn, dm_mn * (self.tile_m // 32) + dm_qoff[1]])
                   dm_c = [None] * num_stages
                   dm_a = [None] * num_stages
                   dm_qsb = [None] * num_stages
@@ -5021,6 +5025,10 @@ class DMBackwardSm100:
                                       cute.arch.barrier(
                                           barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
                                           number_of_threads=64)
+                                  elif const_expr(self.dm_cwg4 and "qbar" in self.dm_opts and "fullbar" not in self.dm_opts):
+                                      # track BB: cwg4 -> the 4 warps sharing a TMEM lane quadrant (w, w+4, w+8, w+12) own its S/P/dP/dS lanes
+                                      # and the dS scale block (32 keys x 128 queries): a 128-thread per-quadrant barrier (ids 12..15, unused in cwg4)
+                                      cute.arch.barrier(barrier_id=12 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4, number_of_threads=128)
                                   else:
                                       self.compute_sync_barrier.arrive_and_wait()
                                   if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
@@ -5033,7 +5041,8 @@ class DMBackwardSm100:
                                               if cute.arch.lane_idx() == 0:
                                                   dm_utils.mbar_arrive(dm_mbar + 8 * 10)
                                           else:
-                                              self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
+                                              if const_expr(not (self.dm_cwg4 and "q1sf" in self.dm_opts)) or (cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0]) < 4:
+                                                  self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)   # track BB q1sf: cwg4 -> one warp per TMEM lane quadrant installs the (identical) dQ SFs
                                               cute.arch.fence_view_async_tmem_store()
                                               dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                                               with cute.arch.elect_one():
@@ -5062,6 +5071,10 @@ class DMBackwardSm100:
                               cute.arch.barrier(
                                   barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
                                   number_of_threads=64)
+                          elif const_expr(self.dm_cwg4 and "qbar" in self.dm_opts and "fullbar" not in self.dm_opts):
+                              # track BB: cwg4 -> the 4 warps sharing a TMEM lane quadrant (w, w+4, w+8, w+12) own its S/P/dP/dS lanes
+                              # and the dS scale block (32 keys x 128 queries): a 128-thread per-quadrant barrier (ids 12..15, unused in cwg4)
+                              cute.arch.barrier(barrier_id=12 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4, number_of_threads=128)
                           else:
                               self.compute_sync_barrier.arrive_and_wait()
                           if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
@@ -5074,7 +5087,8 @@ class DMBackwardSm100:
                                       if cute.arch.lane_idx() == 0:
                                           dm_utils.mbar_arrive(dm_mbar + 8 * 10)
                                   else:
-                                      self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
+                                      if const_expr(not (self.dm_cwg4 and "q1sf" in self.dm_opts)) or (cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0]) < 4:
+                                          self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)   # track BB q1sf: cwg4 -> one warp per TMEM lane quadrant installs the (identical) dQ SFs
                                       cute.arch.fence_view_async_tmem_store()
                                       dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                                       with cute.arch.elect_one():
@@ -5148,7 +5162,7 @@ class DMBackwardSm100:
 
                   ##### DM: dS.T = P.T * (dP.T * (vs*dos) - delta), all stages first (tile-wide dS scale)
                   # delta (dPsum) smem loads for all stages issued before the TMEM dP loads (latency overlap)
-                  if const_expr("dpsearly" not in self.dm_opts):
+                  if const_expr("dpsearly" not in self.dm_opts and not (self.dm_cwg4 and "dch" in self.dm_opts)):
                       dm_dps_all = [None] * num_stages
                       for stage in cutlass.range_constexpr(num_stages):
                           tSsdPsum_cur = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
@@ -5165,7 +5179,11 @@ class DMBackwardSm100:
                   for stage in cutlass.range_constexpr(num_stages):
                       tdPrdP_cur = tdPrdP_all[stage][None, 0, 0]
                       tSrS_cur = tSrS_t2r[None, stage, 0, 0]
-                      tSrdPsum = dm_dps_all[stage]
+                      if const_expr(self.dm_cwg4 and "dch" in self.dm_opts):
+                          # track BB dch: read delta straight from SMEM inside the pair loop (same bytes, short live range)
+                          tSrdPsum = tSsdPsum[None, stage, 0, 0, consumer_state_dPsum.index]
+                      else:
+                          tSrdPsum = dm_dps_all[stage]
                       for v in cutlass.range_constexpr(cute.size(tdPrdP_cur) // 2):
                           if const_expr("rsdbg" in self.dm_opts):
                               # DEBUG (kda-sm100-fix0): exact per-query rowsum(dS) and sum |P (dP a)| of THIS kernel's P,
@@ -5232,6 +5250,10 @@ class DMBackwardSm100:
                           # dP/dS lanes and the dS scale block (32 keys x 128 queries) belong to warps w and w+4 only
                           cute.arch.barrier(barrier_id=8 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4,
                                             number_of_threads=64)
+                      elif const_expr(self.dm_cwg4 and "qbar" in self.dm_opts and "fullbar" not in self.dm_opts):
+                          # track BB: cwg4 -> the 4 warps sharing a TMEM lane quadrant (w, w+4, w+8, w+12) own its S/P/dP/dS lanes
+                          # and the dS scale block (32 keys x 128 queries): a 128-thread per-quadrant barrier (ids 12..15, unused in cwg4)
+                          cute.arch.barrier(barrier_id=12 + cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4, number_of_threads=128)
                       else:
                           self.compute_sync_barrier.arrive_and_wait()
                       if const_expr(dm_tr is not None):
@@ -5424,7 +5446,8 @@ class DMBackwardSm100:
             # Final signal for dS smem store completion (DM dsq: the reduce warps commit the last tile)
             if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED and not self.dm_dsq):
                 if process_tile:
-                    self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
+                    if const_expr(not (self.dm_cwg4 and "q1sf" in self.dm_opts)) or (cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0]) < 4:
+                        self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)   # track BB q1sf: cwg4 -> one warp per TMEM lane quadrant installs the (identical) dQ SFs
                     cute.arch.fence_view_async_tmem_store()
                     dm_utils.tcf_relay()   # fwdfence: all lanes fence + warp sync before the leader's arrive
                     with cute.arch.elect_one():

@@ -46,6 +46,14 @@ def byte_of(w: Int32, k: int, *, loc=None, ip=None) -> Int32:
 
 
 @dsl_user_op
+def bulk_g2s(saddr: Int32, gaddr: Int64, nbytes: int, mbar: Int32, *, loc=None, ip=None):
+    """1-D bulk copy gmem -> smem completing nbytes of tx on mbar (wsw: the W tile is already the swizzled smem image)."""
+    _asm(None, [Int32(saddr).ir_value(loc=loc, ip=ip), Int64(gaddr).ir_value(loc=loc, ip=ip), Int32(mbar).ir_value(loc=loc, ip=ip)],
+         f"cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [$0], [$1], {int(nbytes)}, [$2];",
+         "r,l,r", True, loc, ip)
+
+
+@dsl_user_op
 def warp_arrive(mbar: Int32, *, loc=None, ip=None):
     """bar.warp.sync, then lane 0 mbarrier.arrive.release.cta (every lane did its own wait::st + fence::before first)."""
     _asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
@@ -65,7 +73,9 @@ class DmHd256Dqg:
     KNOBS = ("ab", "sf", "sw", "fin")
     DLY = 1 << 15
 
-    def __init__(self, causal: bool, stages: int = 3, knob: str = ""):
+    def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = False):
+        """wsw: W tiles hold the swizzled MN-major SW128 smem image (KV2 opt dqt) -> 1-D bulk copy; else plain rows (dqw) -> TMA."""
+        self.wsw = bool(wsw)
         self.causal = bool(causal)
         self.S = int(stages)
         assert 2 <= self.S <= 4
@@ -80,6 +90,7 @@ class DmHd256Dqg:
                  n_t: Int32, H: Int32, Hk: Int32, stream):
         D = self.D
         # static 128 x 128 tile modes (TMA needs a static first mode): W viewed as (q, key, T), q contiguous
+        mW = mA
         mA = cute.make_tensor(mA.iterator, cute.make_layout((self.TM, self.TN, cute.size(mA, mode=[2])),
                                                             stride=(1, self.TM, self.TM * self.TN)))
         o_tiler = (self.TM, D, self.TN)               # M = 128 queries, N = 256 d, K = 128 keys
@@ -105,12 +116,12 @@ class DmHd256Dqg:
             sT: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(t_l)], 1024]
         self.SS = SS
         nbz = cute.size(mdQ, mode=[0])
-        self.kernel(mma_o, tma_A, tA, tma_T, tT, a_l, t_l, mWsb, mKs, mdQ, n_t, H, Hk).launch(
+        self.kernel(mma_o, tma_A, tA, tma_T, tT, a_l, t_l, mW, mWsb, mKs, mdQ, n_t, H, Hk).launch(
             grid=[n_t * H * nbz, 1, 1], block=[self.threads, 1, 1], smem=SS.size_in_bytes(), stream=stream)
 
     @cute.kernel
     def kernel(self, mma_o: cute.TiledMma, tma_A: cute.CopyAtom, mA: cute.Tensor, tma_T: cute.CopyAtom, mKt: cute.Tensor,
-               a_l: cute.ComposedLayout, t_l: cute.ComposedLayout, mWsb: cute.Tensor, mKs: cute.Tensor, mdQ: cute.Tensor,
+               a_l: cute.ComposedLayout, t_l: cute.ComposedLayout, mW: cute.Tensor, mWsb: cute.Tensor, mKs: cute.Tensor, mdQ: cute.Tensor,
                n_t: Int32, H: Int32, Hk: Int32):
         D = self.D
         S = self.S
@@ -168,6 +179,9 @@ class DmHd256Dqg:
         # ------------------------------------------------------------------ TMA warp
         if warp == self.LOAD_WARP:
             thr_o = mma_o.get_slice(0)
+            sA_addr = Int32(st.sA.data_ptr().toint())
+            a_stage = cute.cosize(a_l) // S
+            wbase = _gaddr(mW)
             tAs, tAg = cpasync.tma_partition(tma_A, 0, cute.make_layout(1), cute.group_modes(sA, 0, 3),
                                              cute.group_modes(thr_o.partition_A(mA), 0, 3))
             gT = cute.local_tile(mKt[None, None, hk, b], (D, self.TN), (0, None))
@@ -175,7 +189,11 @@ class DmHd256Dqg:
                                              cute.group_modes(thr_o.partition_B(gT), 0, 3))
             for kt in cutlass.range(total, unroll=1):
                 e = ab_p.acquire_and_advance()
-                cute.copy(tma_A, tAg[(None, Int32(tbase + kt))], tAs[(None, e.index)], tma_bar_ptr=e.barrier)
+                if const_expr(self.wsw):
+                    if lane == 0:
+                        bulk_g2s(sA_addr + e.index * a_stage, wbase + (tbase + kt) * 16384, 16384, Int32(e.barrier.toint()))
+                else:
+                    cute.copy(tma_A, tAg[(None, Int32(tbase + kt))], tAs[(None, e.index)], tma_bar_ptr=e.barrier)
                 cute.copy(tma_T, tTg[(None, kt)], tTs[(None, e.index)], tma_bar_ptr=e.barrier)
             ab_p.tail()
 

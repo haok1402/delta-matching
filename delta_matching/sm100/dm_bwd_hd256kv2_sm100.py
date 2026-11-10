@@ -84,6 +84,20 @@ def warp_arrive_local(mbar: Int32, *, loc=None, ip=None):
          "setp.eq.u32 p, l, 0;\n\t@p mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];\n\t}", "r", True, loc, ip)
 
 
+@dsl_user_op
+def bulk_s2g_wait(gaddr: Int64, saddr: Int32, nbytes: int, *, loc=None, ip=None):
+    """opt dqt: cp.async.bulk smem -> gmem (bulk_group), commit, then wait until the smem SOURCE has been read
+    (cp.async.bulk.wait_group.read 0): after this the stage may be overwritten."""
+    _asm(None, [Int64(gaddr).ir_value(loc=loc, ip=ip), Int32(saddr).ir_value(loc=loc, ip=ip)],
+         f"cp.async.bulk.global.shared::cta.bulk_group [$0], [$1], {int(nbytes)};\n\t"
+         "cp.async.bulk.commit_group;\n\tcp.async.bulk.wait_group.read 0;", "l,r", True, loc, ip)
+
+
+@dsl_user_op
+def bulk_wait_all(*, loc=None, ip=None):
+    _asm(None, [], "cp.async.bulk.wait_group 0;", "", True, loc, ip)
+
+
 def _coop(n):
     return pipeline.CooperativeGroup(pipeline.Agent.Thread, n)
 
@@ -106,7 +120,12 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt")
+    # dqt (fork hd256-dqr): as dqw, but the dS codes reach W by a 1-D bulk copy of each CTA's staged 8 KiB codes image (sCS stage,
+    # SW128 swizzled bytes) issued by a store warp per CTA (CTA 0 warp 11, CTA 1 warp 8) -> W tile T = [CTA 0 image | CTA 1 image]
+    # (the MN-major SW128 A image of the dQ GEMM).  New hand-offs: wr (codes written -> bulk read: the existing codes-ready
+    # barrier, CTA 0 F_cd / CTA 1 relay L_cd) and ww (bulk read done -> compute rewrites the stage: new local mbarrier SD[stg]).
+    DQTCTL = ("wr", "ww")
     # dqw (fork hd256-dqr): also store the dS codes + raw dS block exponents to a dQ workspace for the dQ GEMM kernel DmHd256Dqg
     # (dm_bwd_hd256dqg_sm100.py). The workspace tensors are passed in the mCodesS / mSBS slots (dbg 2 must be off):
     #   mCodesS = W  uint8 (T, 128, 128): tile T = (l, q tile ct, key tile kt) [key in tile][query in tile] (plain row-major,
@@ -135,13 +154,16 @@ class DmHd256Kv2:
     def __init__(self, causal: bool, dbg: int = 0, knob: str = "", opts=None):
         self.opts = tuple(sorted((self.DEFAULT_OPTS if opts is None else opts).replace(",", " ").split()))
         assert all(o in self.OPTS for o in self.opts), self.opts
-        assert not ("dqw" in self.opts and (int(dbg) & 2)), "dqw reuses the dbg-2 codes slots"
+        assert not (("dqw" in self.opts or "dqt" in self.opts) and (int(dbg) & 2)), "dqw/dqt reuse the dbg-2 codes slots"
         self.nqs = 2 if "qb2" in self.opts else 1
         self.causal = bool(causal)
         self.dbg = int(dbg)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")
-        assert self.kn in ("",) + self.KNOBS, knob
+        assert self.kn in ("",) + self.KNOBS + self.DQTCTL, knob
+        assert not ("dqt" in self.opts and "dqw" in self.opts)
+        assert "dqt" not in self.opts or "rly" in self.opts
+        self.wsp = "dqw" in self.opts or "dqt" in self.opts
         self.threads = 384
 
     @cute.jit
@@ -182,7 +204,7 @@ class DmHd256Kv2:
             bars: cute.struct.MemRange[cutlass.Int64, 32]
             # cross-CTA hand-offs with ordinary / tcgen05.st / ld data (accuracy-audit 08:2x): raw mbarriers, arrive.release.cluster on
             # the leader + try_wait.acquire.cluster there; [F_s, E_s, F_cd0, F_cd1, E_cd0, E_cd1, F_f, E_f]
-            kb: cute.struct.Align[cute.struct.MemRange[cutlass.Int64, 12], 8]   # + relay [L_s, L_cd0, L_cd1, L_f]
+            kb: cute.struct.Align[cute.struct.MemRange[cutlass.Int64, 14 if "dqt" in self.opts else 12], 8]   # + relay [L_s, L_cd0, L_cd1, L_f] (+ dqt SD0, SD1)
             tmem_hold: Int32
             tmem_dealloc: cutlass.Int64
             sLD: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 2 * 128], 16]     # [par][l2 | delta][q]
@@ -279,6 +301,9 @@ class DmHd256Kv2:
                     dm_utils.mbar_init(kbar + 32 + 8 * i_, 1)
                 dm_utils.mbar_init(F_F, 1)
                 dm_utils.mbar_init(E_F, ncw)
+                if const_expr("dqt" in self.opts):
+                    for i_ in cutlass.range_constexpr(2):
+                        dm_utils.mbar_init(kbar + 96 + 8 * i_, 1)                                       # SD (local)
         m_p, m_c = pipeline.PipelineAsync.create(num_stages=2, producer_group=_coop(32), consumer_group=comp1,
                                                  barrier_storage=bars + 18, defer_sync=True).make_participants()
         cute.arch.mbarrier_init_fence()
@@ -382,6 +407,37 @@ class DmHd256Kv2:
                         warp_arrive_c0(kbar + 16 + 8 * stg, sc_)
                     dm_utils.mbar_wait_parity(kbar + 88, Int32(0))            # CTA-1 epilogue readers done
                     warp_arrive_c0(E_F, sc_)
+
+        # ------------------------------------------------------------------ dqt store warp (CTA 0 warp 11, CTA 1 warp 8)
+        if const_expr("dqt" in self.opts):
+            if (crank % 2 == 0 and warp == self.RELAY_WARP) or (crank % 2 == 1 and warp == self.MMA_WARP):
+                rdy = kbar + 16 + 56 * (crank % 2)       # CTA 0: F_cd[stg] (all codes of the pair written); CTA 1: relay L_cd[stg]
+                wbase = _gaddr(mCodesS) + 8192 * (crank % 2)
+                for t in cutlass.range(total, unroll=1):
+                    hi = t // ncs
+                    ct = c_lo + t - hi * ncs
+                    l = b * H + hx * rep + hi
+                    stg = t & 1
+                    wtile = Int64(0)
+                    if const_expr(self.causal):
+                        wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
+                    else:
+                        wtile = (Int64(l) * n_t + ct) * n_t + kt
+                    if const_expr(self.kn == "wr" and self.unsafe):
+                        if t > 0:          # UNSAFE wr: t == 0 is stored without waiting for its codes (compute delayed at t == 0)
+                            dm_utils.mbar_wait_parity_cluster(rdy + 8 * stg, (t >> 1) & 1)
+                    else:
+                        dm_utils.mbar_wait_parity_cluster(rdy + 8 * stg, (t >> 1) & 1)   # acquire.cluster (CTA 0: remote relay arrive)
+                    if const_expr(self.kn == "ww"):
+                        if t == 0:
+                            spin(self.DLY)
+                    if lane == 0:
+                        bulk_s2g_wait(wbase + wtile * 16384, sCS_addr + stg * cstage_bytes, 8192)
+                    cute.arch.sync_warp()
+                    if lane == 0:
+                        dm_utils.mbar_arrive_local(kbar + 96 + 8 * stg)
+                if lane == 0:
+                    bulk_wait_all()
 
         # ------------------------------------------------------------------ MMA warp (leader CTA issues)
         if warp == self.MMA_WARP:
@@ -496,7 +552,7 @@ class DmHd256Kv2:
                 q0 = ctok0 + 32 * jb                      # first query of this thread's block
                 ldb = sLD_addr + par * 1024
                 wtile = Int64(0)
-                if const_expr("dqw" in self.opts):
+                if const_expr(self.wsp):
                     if const_expr(self.causal):
                         wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
                     else:
@@ -530,6 +586,19 @@ class DmHd256Kv2:
                 ca = dmh.dm_mx256_dp_scale(vs_r, dosj)
                 stg = t & 1
                 dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
+                if const_expr("dqt" in self.opts):
+                    if t >= 2:
+                        if const_expr(self.kn == "ww"):
+                            if const_expr(self.unsafe):
+                                if t > 2:      # UNSAFE: the first reuse skips the bulk-read wait (store warp delayed at t == 0)
+                                    dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
+                            else:
+                                dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
+                        else:
+                            dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)   # bulk read of t-2 done
+                if const_expr(self.kn == "wr"):
+                    if t == 0:
+                        spin(self.DLY)                    # codes of t = 0 written late (wr: the store warp must wait for them)
                 if const_expr(self.kn == "cd" and self.unsafe):
                     self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)   # UNSAFE: published before the codes are written
                     spin(self.DLY)
@@ -665,7 +734,7 @@ class DmHd256Kv2:
                                 cp_ = cp_ + Int64(N)
                 if const_expr(self.dbg & 2):
                     mSBS[l, key, ct * 4 + jb] = dsb
-                if const_expr("dqw" in self.opts):
+                if const_expr(self.wsp):
                     if warp < 2:
                         if lane == 0:
                             st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)

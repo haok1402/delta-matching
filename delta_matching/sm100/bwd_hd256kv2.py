@@ -62,7 +62,7 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
         ph = _ph(dev)
         dump, cp_, cs_, sbp, sbs, hh = ph["dump"], ph["c"], ph["c"], ph["sb"], ph["sb"], ph["h"]
     ot = DmHd256Kv2.DEFAULT_OPTS if opts is None else opts
-    assert (dqw is not None) == ("dqw" in ot.split()), (ot, dqw is None)
+    assert (dqw is not None) == ("dqw" in ot.split() or "dqt" in ot.split()), (ot, dqw is None)
     if dqw is not None:
         assert not big
         cs_, sbs = dqw

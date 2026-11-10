@@ -16,10 +16,10 @@ DETERMINISTIC = True
 
 def _cfg():
     from .fastpath import env as _env
-    return float(_env("DM_H256_DQW_GB", "9")), int(_env("DM_H256_DQG_STAGES", "3"))
+    return float(_env("DM_H256_DQW_GB", "9")), int(_env("DM_H256_DQG_STAGES", "3")), _env("DM_H256_DQW_MODE", "dqt")
 
 
-def dqg_launch(W, Wsb, k8, ks, B, N, H, causal, *, knob="", stages=None):
+def dqg_launch(W, Wsb, k8, ks, B, N, H, causal, *, knob="", stages=None, wsw=None):
     Hk = k8.shape[2]
     st = _cfg()[1] if stages is None else int(stages)
     f8 = torch.float8_e4m3fn
@@ -28,8 +28,9 @@ def dqg_launch(W, Wsb, k8, ks, B, N, H, causal, *, knob="", stages=None):
     mKt = k8.view(f8).permute(3, 1, 2, 0)                  # (B, N, Hk, 256) -> (256, N, Hk, B): MN-major B (as yr / tt)
     ten = [mA, mKt, Wsb, ks, dq]
     lds = [0, 0, 2, 2, 3]
-    key = ("dqg", bool(causal), st, knob)
-    _mx._run(key, lambda: DmHd256Dqg(bool(causal), st, knob), ten, lds, [N // 128, H, Hk], mode="dqg")
+    wsw = _cfg()[2] == "dqt" if wsw is None else bool(wsw)
+    key = ("dqg", bool(causal), st, knob, wsw)
+    _mx._run(key, lambda: DmHd256Dqg(bool(causal), st, knob, wsw), ten, lds, [N // 128, H, Hk], mode="dqg")
     return dq
 
 
@@ -44,8 +45,8 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
     causal = bool(causal)
     if dbg or not dqw_fits(B, H, N, causal):
         return _kv.dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=dbg, knob=knob, opts=opts)
-    ot = (_kv.DmHd256Kv2.DEFAULT_OPTS if opts is None else opts) + " dqw"
+    ot = (_kv.DmHd256Kv2.DEFAULT_OPTS if opts is None else opts) + " " + _cfg()[2]
     W, Wsb = _kv.dqw_alloc(B, H, N, causal, q8.device)
     dk, dv, _ = _kv.kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, knob=knob, opts=ot, dqw=(W, Wsb))
-    dq = dqg_launch(W, Wsb, k8, ks, B, N, H, causal, knob=dqg_knob)
+    dq = dqg_launch(W, Wsb, k8, ks, B, N, H, causal, knob=dqg_knob, wsw=_cfg()[2] == "dqt")
     return dq, dk, dv

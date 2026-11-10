@@ -58,7 +58,7 @@ def dm_attn_func_hd256(q, k, v, causal=True, mode="matched", deterministic=None)
 
 
 @torch.no_grad()
-def dm_attn_debug_hd256(q, k, v, do, causal=True, mode="matched", identity=None, deterministic=None):
+def dm_attn_debug_hd256(q, k, v, do, causal=True, mode="matched", identity=None, deterministic=None, lockstep=None):
     """Validator hook at hd256 (same contract as api.dm_attn_debug): delta + LSE the backward consumes; with identity
     (matched mode) also the backward's IN-KERNEL pre-quant rowsum(dS) and sum|P dP| (dbg=1 build, same arithmetic)."""
     import os
@@ -74,4 +74,18 @@ def dm_attn_debug_hd256(q, k, v, do, causal=True, mode="matched", identity=None,
         idt = aux["ident"].reshape(B, H, N, 4)
         out["rowsum_dS"] = idt[..., 0].float().contiguous()
         out["sum_abs_PdP"] = idt[..., 1].float().contiguous()
+    if lockstep is None:
+        lockstep = os.environ.get("DM_DEBUG_LOCKSTEP", "0") == "1"
+    if lockstep:
+        # dbg 8 build (compiled out by default): per query row, from EACH kernel, order-free checksums
+        #   [..., 0] P fp32 bits (dv, dq kernels), [..., 1] pre-quant dS fp32 bits (dk, dq), [..., 2] dS e4m3 code + E8M0 SF
+        #   (dk, dq): u64 wrapping sums of a mixed u32 hash of (q, k, value); [..., 3] fp64 rowsum of pre-quant dS (dk:
+        #   atomic adds -> compare to round-off only; the hashes are the bitwise gate).
+        _, _, _, aux = dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=8)
+        B, N, H, _ = q8.shape
+        for m in ("dq", "dk", "dv"):
+            hsh = aux[m]["hash"].view(B, H, N, 4)
+            out[f"lockstep_{m}_kernel"] = dict(P_hash=hsh[..., 0].contiguous(), dS_hash=hsh[..., 1].contiguous(),
+                                                code_sf_hash=hsh[..., 2].contiguous(),
+                                                rowsum_dS=hsh[..., 3].view(torch.float64).contiguous())
     return out

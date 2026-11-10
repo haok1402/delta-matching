@@ -92,7 +92,7 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     L = B * H
     ident = torch.zeros(L, N, 4, device=dev, dtype=torch.float64) if dbg & 1 else torch.zeros(1, 1, 4, device=dev, dtype=torch.float64)
     dumps = {}
-    lds_tail = [2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 3]
+    lds_tail = [2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 2]
     hsh = dbg & 8
     n_t = N // 128
     for mode in modes:
@@ -105,8 +105,9 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         dump = torch.zeros(L, N, N, 4, device=dev) if big else torch.zeros(1, 1, 1, 4, device=dev)
         codes = torch.zeros(L, N, N, device=dev, dtype=torch.uint8) if big else torch.zeros(1, 1, 16, device=dev, dtype=torch.uint8)
         sb = torch.zeros(L, N, N // 32, device=dev, dtype=torch.int32) if big else torch.zeros(1, 1, 4, device=dev, dtype=torch.int32)
-        hh = (torch.zeros(L, N // 32, N // 32, 4, device=dev, dtype=torch.int32) if hsh
-              else torch.zeros(1, 1, 1, 4, device=dev, dtype=torch.int32))
+        # dbg 8 lockstep: per query row [P-bits hash, dS-bits hash, dS code|SF hash (u64 wrapping sums of per-(row,
+        # 32-key block) u32 sums), fp64 rowsum of pre-quant dS (bits)]; zeroed: the keys-on-rows kernels add atomically
+        hh = (torch.zeros(L, N, 4, device=dev, dtype=torch.int64) if hsh else torch.zeros(1, 1, 4, device=dev, dtype=torch.int64))
         ten = [p(X), p(Xb), p(Y), p(Yb), tt(Tw), qs, ks, vs, dos, lse, delta, out, ident, dump, codes, sb, hh]
         lds = [1, 1, 1, 1, 0] + lds_tail
         kd = dbg & 11 if mode == "dq" else dbg & 10
@@ -132,8 +133,8 @@ def delta_test(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal):
     ten = [p(q8), p(do8), p(k8), p(v8), k8.view(f8).permute(3, 1, 2, 0), qs, ks, vs, dos, lse, lse,
            torch.zeros(1, 1, 1, D, device=dev, dtype=torch.bfloat16), nd,
            z, torch.zeros(1, 1, 16, device=dev, dtype=torch.uint8), torch.zeros(1, 1, 4, device=dev, dtype=torch.int32),
-           torch.zeros(1, 1, 1, 4, device=dev, dtype=torch.int32)]
-    lds = [1, 1, 1, 1, 0, 2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 3]
+           torch.zeros(1, 1, 4, device=dev, dtype=torch.int64)]
+    lds = [1, 1, 1, 1, 0, 2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 2]
     _run(("delta", bool(causal)), lambda: DmHd256Mx("dq", bool(causal), 4), ten, lds, [N // 128, H, Hk])
     num, den = nd[..., 0], nd[..., 1]
     return torch.where(den > 0, num / den, torch.zeros_like(num)).float().view(B, H, N), nd

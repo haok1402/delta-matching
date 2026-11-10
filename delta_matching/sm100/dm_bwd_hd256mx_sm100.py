@@ -142,6 +142,69 @@ def redux_add_u32(x: Int32, *, loc=None, ip=None) -> Int32:
                       True, loc, ip))
 
 
+@dsl_user_op
+def zext64(x: Int32, *, loc=None, ip=None) -> Int64:
+    return Int64(_asm(T.i64(), [Int32(x).ir_value(loc=loc, ip=ip)], "cvt.u64.u32 $0, $1;", "=l,r", False, loc, ip))
+
+
+@dsl_user_op
+def red_add_u64(addr: Int64, v: Int64, *, loc=None, ip=None):
+    _asm(None, [Int64(addr).ir_value(loc=loc, ip=ip), Int64(v).ir_value(loc=loc, ip=ip)],
+         "red.global.add.u64 [$0], $1;", "l,l", True, loc, ip)
+
+
+@dsl_user_op
+def red_add_f64(addr: Int64, v: Float64, *, loc=None, ip=None):
+    _asm(None, [Int64(addr).ir_value(loc=loc, ip=ip), Float64(v).ir_value(loc=loc, ip=ip)],
+         "red.global.add.f64 [$0], $1;", "l,d", True, loc, ip)
+
+
+@dsl_user_op
+def bfly_sum_f64(x: Float64, *, loc=None, ip=None) -> Float64:
+    """warp butterfly fp64 sum (fixed order per lane; dbg only)."""
+    body = "{\n\t.reg .b32 lo, hi, olo, ohi;\n\t.reg .f64 a, o;\n\tmov.f64 a, $1;\n\t"
+    for m in (16, 8, 4, 2, 1):
+        body += ("mov.b64 {lo, hi}, a;\n\t"
+                 f"shfl.sync.bfly.b32 olo, lo, {m}, 31, 0xffffffff;\n\tshfl.sync.bfly.b32 ohi, hi, {m}, 31, 0xffffffff;\n\t"
+                 "mov.b64 o, {olo, ohi};\n\tadd.rn.f64 a, a, o;\n\t")
+    body += "mov.f64 $0, a;\n\t}"
+    return Float64(_asm(T.f64(), [Float64(x).ir_value(loc=loc, ip=ip)], body, "=d,d", True, loc, ip))
+
+
+@dsl_user_op
+def sel_eq_i32(x: Int32, y: Int32, a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
+    """a if x == y else b"""
+    return Int32(_asm(T.i32(), [Int32(v).ir_value(loc=loc, ip=ip) for v in (x, y, a, b)],
+                      "{\n\t.reg .pred p;\n\tsetp.eq.s32 p, $1, $2;\n\tselp.b32 $0, $3, $4, p;\n\t}", "=r,r,r,r,r",
+                      False, loc, ip))
+
+
+@dsl_user_op
+def sel_eq_f64(x: Int32, y: Int32, a: Float64, b: Float64, *, loc=None, ip=None) -> Float64:
+    return Float64(_asm(T.f64(), [Int32(x).ir_value(loc=loc, ip=ip), Int32(y).ir_value(loc=loc, ip=ip),
+                                  Float64(a).ir_value(loc=loc, ip=ip), Float64(b).ir_value(loc=loc, ip=ip)],
+                        "{\n\t.reg .pred p;\n\tsetp.eq.s32 p, $1, $2;\n\tselp.f64 $0, $3, $4, p;\n\t}", "=d,r,r,d,d",
+                        False, loc, ip))
+
+
+def lk_cols_u32(hl, lane, addr0):
+    """dbg 8, keys-on-rows: per query column i of a 32-col chunk, the wrapping u32 sum over this warp's 32 key lanes,
+    zero-extended and added (u64, order-free) at addr0 + 32 i (lane i adds column i)."""
+    mine = Int32(0)
+    for i in range(32):
+        s_ = redux_add_u32(hl[i])
+        mine = sel_eq_i32(lane, Int32(i), s_, mine)
+    red_add_u64(addr0 + Int64(lane) * 32, zext64(mine))
+
+
+def lk_cols_f64(vals32, lane, addr0):
+    mine = Float64(0.0)
+    for i in range(32):
+        x_ = bfly_sum_f64(Float64(vals32[i]))
+        mine = sel_eq_f64(lane, Int32(i), x_, mine)
+    red_add_f64(addr0 + Int64(lane) * 32, mine)
+
+
 def hidx(q, k):
     """element index for the dbg 8 hash (wraps mod 2^32; identical in every kernel)."""
     return q * 65599 + k
@@ -151,7 +214,7 @@ class DmHd256Mx:
     TM, TN, D = 128, 128, 256
     COL_DP, COL_SFA, COL_SFB, COL_OUT = 128, 128, 132, 256
 
-    KNOBS = ("acc", "cd", "od", "tw", "fin", "ld", "am")
+    KNOBS = ("acc", "cd", "od", "tw", "fin", "ld", "am", "lsk")
     DLY = 1 << 15
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = ""):
@@ -477,6 +540,10 @@ class DmHd256Mx:
             idn = Float64(0.0)
             idd = Float64(0.0)
             idp = Float64(0.0)
+            lk_p = Int64(0)
+            lk_s = Int64(0)
+            lk_c = Int64(0)
+            lk_r = Float64(0.0)
             # codes smem: row r, 16-byte chunk v of the 128-byte K row at SW128 K-major position
             crow = sC_addr + (r // 8) * 1024 + (r % 8) * 128
             rsw = r % 8
@@ -543,7 +610,7 @@ class DmHd256Mx:
                     id1 = Float32(0.0)
                     id2 = Float32(0.0)
                     id3 = Float32(0.0)
-                    hp = Int32(0)
+                    hpl = [Int32(0)] * 32
                     for i in cutlass.range_constexpr(0, 32, 4):
                         l2v = [l2r] * 4
                         dlv = [dlr] * 4
@@ -572,9 +639,9 @@ class DmHd256Mx:
                             for q in cutlass.range_constexpr(4):
                                 ce_ = ctok0 + 32 * j + i + q
                                 if const_expr(self.rows_are_keys):
-                                    hp = hp + hmix(f2i(pv[q]), hidx(ce_, rtok))
+                                    hpl[i + q] = hmix(f2i(pv[q]), hidx(ce_, rtok))
                                 else:
-                                    hp = hp + hmix(f2i(pv[q]), hidx(rtok, ce_))
+                                    hpl[i + q] = hmix(f2i(pv[q]), hidx(rtok, ce_))
                         for q2 in cutlass.range_constexpr(0, 4, 2):
                             if const_expr(self.mode == "dv"):
                                 vals[i + q2] = pv[q2]
@@ -596,12 +663,13 @@ class DmHd256Mx:
                                 id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dv_[i + q], ca[j]))))
                                 id3 = add_f32(id3, pv[q])
                     if const_expr((self.dbg & 8) and self.mode != "dk"):
-                        hb = redux_add_u32(hp)
-                        if lane == 0:
-                            if const_expr(self.rows_are_keys):
-                                mHash[l, ct * 4 + j, rtok // 32, 0] = hb
-                            else:
-                                mHash[l, rtok // 32, ct * 4 + j, 0] = hb
+                        if const_expr(self.rows_are_keys):
+                            lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + ctok0 + 32 * j) * 32)
+                        else:
+                            hs_ = Int32(0)
+                            for i in cutlass.range_constexpr(32):
+                                hs_ = hs_ + hpl[i]
+                            lk_p = lk_p + zext64(hs_)
                     if const_expr((self.dbg & 2) and self.has_dp and not self.delta_only):
                         qi0 = rtok
                         ki0 = ctok0 + 32 * j
@@ -616,7 +684,6 @@ class DmHd256Mx:
                             pa = pa + stp
                     if const_expr(self.mode == "dv"):
                         # P^T codes of this (key, 32-query) block right away
-                        hcd = Int32(0)
                         am = Float32(0.0)
                         for i in cutlass.range_constexpr(32):
                             am = cute.arch.fmax(am, vals[i])
@@ -630,15 +697,6 @@ class DmHd256Mx:
                                 y2, y3 = cute.arch.mul_packed_f32x2((vals[i0 + 2], vals[i0 + 3]), (inv, inv))
                                 w[u] = e4m3x4(y0, y1, y2, y3)
                             st_shared_v4(crow + (((2 * j + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
-                            if const_expr(self.dbg & 8):
-                                for u in cutlass.range_constexpr(4):
-                                    for q in cutlass.range_constexpr(4):
-                                        hcd = hcd + hmix(((w[u] >> (8 * q)) & 255) | (sbs[j] << 8),
-                                                         hidx(ctok0 + 32 * j + 16 * hv + 4 * u + q, rtok))
-                        if const_expr(self.dbg & 8):
-                            hb = redux_add_u32(hcd)
-                            if lane == 0:
-                                mHash[l, ct * 4 + j, rtok // 32, 3] = hb
                     elif const_expr(not self.delta_only):
                         am = Float32(0.0)
                         for i in cutlass.range_constexpr(32):
@@ -722,8 +780,8 @@ class DmHd256Mx:
                             inv = dm_utils.inv_pow2_from_sb(sbs[j])
                             dsj = tmem_ld32(stash + 32 * j)
                             cute.arch.fence_view_async_tmem_load()
-                            hsd = Int32(0)
-                            hcd = Int32(0)
+                            hsl = [Int32(0)] * 32
+                            hcl = [Int32(0)] * 32
                             for hv in cutlass.range_constexpr(2):
                                 w = [None] * 4
                                 for u in cutlass.range_constexpr(4):
@@ -731,6 +789,10 @@ class DmHd256Mx:
                                     y0, y1 = cute.arch.mul_packed_f32x2((dsj[i0], dsj[i0 + 1]), (inv, inv))
                                     y2, y3 = cute.arch.mul_packed_f32x2((dsj[i0 + 2], dsj[i0 + 3]), (inv, inv))
                                     w[u] = e4m3x4(y0, y1, y2, y3)
+                                if const_expr(self.kn == "lsk" and self.unsafe and self.mode == "dk"):
+                                    # planted control: flip the low bit of ONE dS code (b 0, kv head 0, key 0, first tile)
+                                    if const_expr(hv == 0 and j == 0):
+                                        w[0] = w[0] ^ sel_eq_i32(t + rtok + hx + b, Int32(0), Int32(1), Int32(0))
                                 st_shared_v4(crow + (((2 * j + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
                                 if const_expr(self.dbg & 8):
                                     for u in cutlass.range_constexpr(4):
@@ -739,18 +801,25 @@ class DmHd256Mx:
                                             ix = hidx(rtok, ce_)
                                             if const_expr(self.rows_are_keys):
                                                 ix = hidx(ce_, rtok)
-                                            hsd = hsd + hmix(f2i(dsj[16 * hv + 4 * u + q]), ix)
-                                            hcd = hcd + hmix(((w[u] >> (8 * q)) & 255) | (sbs[j] << 8), ix)
+                                            hsl[16 * hv + 4 * u + q] = hmix(f2i(dsj[16 * hv + 4 * u + q]), ix)
+                                            hcl[16 * hv + 4 * u + q] = hmix(((w[u] >> (8 * q)) & 255) | (sbs[j] << 8), ix)
                             if const_expr(self.dbg & 8):
-                                hb1 = redux_add_u32(hsd)
-                                hb2 = redux_add_u32(hcd)
-                                if lane == 0:
-                                    if const_expr(self.rows_are_keys):
-                                        mHash[l, ct * 4 + j, rtok // 32, 1] = hb1
-                                        mHash[l, ct * 4 + j, rtok // 32, 2] = hb2
-                                    else:
-                                        mHash[l, rtok // 32, ct * 4 + j, 1] = hb1
-                                        mHash[l, rtok // 32, ct * 4 + j, 2] = hb2
+                                if const_expr(self.rows_are_keys):
+                                    a0_ = _gaddr(mHash) + (Int64(l) * N + ctok0 + 32 * j) * 32
+                                    lk_cols_u32(hsl, lane, a0_ + 8)
+                                    lk_cols_u32(hcl, lane, a0_ + 16)
+                                    lk_cols_f64(dsj, lane, a0_ + 24)
+                                else:
+                                    hs_ = Int32(0)
+                                    hc_ = Int32(0)
+                                    rs_ = Float64(0.0)
+                                    for i in cutlass.range_constexpr(32):
+                                        hs_ = hs_ + hsl[i]
+                                        hc_ = hc_ + hcl[i]
+                                        rs_ = rs_ + Float64(dsj[i])
+                                    lk_s = lk_s + zext64(hs_)
+                                    lk_c = lk_c + zext64(hc_)
+                                    lk_r = lk_r + rs_
                         if const_expr(self.dbg & 2):
                             mSB[l, rtok, ct * 4 + j] = sbs[j]
                     if const_expr(self.dbg & 2):
@@ -785,6 +854,12 @@ class DmHd256Mx:
                 fw.release()
                 st_global_f64x2(_gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 16, num, den)
             else:
+                if const_expr((self.dbg & 8) and self.mode == "dq"):
+                    ha = _gaddr(mHash) + (Int64(b * H + hx) * N + rtok) * 32
+                    red_add_u64(ha, lk_p)
+                    red_add_u64(ha + 8, lk_s)
+                    red_add_u64(ha + 16, lk_c)
+                    red_add_f64(ha + 24, lk_r)
                 if const_expr((self.dbg & 1) and self.mode == "dq"):
                     ia = _gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 32
                     st_global_f64x2(ia, idn, idd)

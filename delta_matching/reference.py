@@ -244,9 +244,10 @@ PRESETS["mxfp8-all"] = PRESETS["mxfp8"]
 # (hd128 was [128,64]). Inputs exact to that contract; the P / dS sites reuse the hd128 sm90 model (an approximation until the
 # d256 P-hat / dS tiling is analysed) - used as the hd256 ACCURACY FLOOR, not as a bitwise spec.
 _register(Preset("sm90-d256", q="blockrows:64", k="blockrows:32", v="blockrows:32", do="blockrows_mul:64",
-                 p_fwd="sm90_pfwd", p_bwd="sm90_pbwd", ds="sm90_ds",
-                 notes="sm90 hd256 input contract [64,32] (Q / dO 64 rows, K / V 32 keys per fp32 scale); P / dS as the hd128 "
-                       "sm90 model (approximation); hd256 accuracy floor"))
+                 p_fwd="sm90d256_pfwd", p_bwd="sm90_pbwd", ds="sm90d256_ds",
+                 notes="sm90 hd256 (kda/docs/sm90-numerics-spec-hd256.md): [64,32] fp32 input scales, P-hat per (row, 32-key group) "
+                       "under a descending 128-key online max (12-binade floor), P' = 2^8 P, dS psi per 64x64, delta = sum P dP "
+                       "(no /sum P); F2b psi floor not modelled (as at hd128); hd256 accuracy floor"))
 
 
 def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,
@@ -408,7 +409,8 @@ def dm_reference(q, k, v, do, causal=True, mode="matched", preset="sm90", q_bloc
         c0 = _Ctx(role="input")
         Qa = _site(p.q, qh, c0, p)                           # operand of S = Q K^T
         Ka = _site(p.k, kh, c0, p)
-        kscale = quant_blockrows(kh, 64)[1].repeat_interleave(64, -1)[..., :N] if N % 64 == 0 else None   # (B, Hk, N)
+        _kb = int(p.k.split(":")[1]) if p.k.startswith("blockrows:") else 64      # K scale block (hd128 sm90: 64, hd256: 32)
+        kscale = quant_blockrows(kh, _kb)[1].repeat_interleave(_kb, -1)[..., :N] if N % _kb == 0 else None   # (B, Hk, N)
         Va = _site(p.v, vh, c0, p)                           # operand of O = P V
         Vd = _site(p.v if p.q2 is None else p.k, vh, c0, p)  # operand of dP = dO V^T (MX: D-blocked like K)
         dOa = _site(p.do, doh, c0, p)                        # operand of dP = dO V^T
@@ -540,16 +542,16 @@ def _pad_to(x, rows, cols, value=0.0):
     return x
 
 
-def sm90_pfwd(P, ctx, p):
+def sm90_pfwd(P, ctx, p, tile=256, group=64):
     """The forward's P codes (NUMERICS-hd128.md section 2): keys in 256-key tiles visited in DESCENDING order with an online
     max m_t (the max over tiles >= t); per (row, 64-key group g) the basis nu_g = max(groupmax_g S, m_t - 12 ln2) and
     code = e4m3(448 * exp(S - nu_g)).  P here is exp(S - m) with m the final row max; returns the dequantized P-hat in the
     same units.  (The row sum l is taken from the unquantized P, which the engine already does.)"""
     S = ctx.S
     R_, C = S.shape[-2:]
-    Sp = _pad_to(S, 1, 256, float("-inf"))
-    T = Sp.shape[-1] // 256
-    g = Sp.reshape(*Sp.shape[:-1], T, 4, 64)
+    Sp = _pad_to(S, 1, tile, float("-inf"))
+    T = Sp.shape[-1] // tile
+    g = Sp.reshape(*Sp.shape[:-1], T, tile // group, group)
     gm = g.amax(-1)                                                    # (..., R, T, 4)
     tm = gm.amax(-1)                                                   # (..., R, T)
     mt = tm.flip(-1).cummax(-1).values.flip(-1)                        # running max when tile t is processed
@@ -561,16 +563,16 @@ def sm90_pfwd(P, ctx, p):
     return ph.reshape(Sp.shape)[..., :C]
 
 
-def sm90_ds(dS, ctx, p):
+def sm90_ds(dS, ctx, p, tr=64, tc=128):
     """dS codes of pass 1 (NUMERICS-hd128.md section 3): dS' = 2^8 * ks_j * dS (ks: the 64-key K scale of key j) is
     quantized with one scale psi = max(amax / 448, 1e-30) per 64-row x 128-key tile; dS-hat = e4m3(dS' / psi) * psi /
     (2^8 ks_j).  (The F2b dominance floor, which coarsens tiles 1e-8 below the key block's largest, is not modelled.)"""
     ks = ctx.kscale                                                    # (..., C) per key
     X = dS * ks.unsqueeze(-2)
     R_, C = X.shape[-2:]
-    Xp = _pad_to(X, 64, 128)
+    Xp = _pad_to(X, tr, tc)
     Rp, Cp = Xp.shape[-2:]
-    t = Xp.reshape(*Xp.shape[:-2], Rp // 64, 64, Cp // 128, 128)
+    t = Xp.reshape(*Xp.shape[:-2], Rp // tr, tr, Cp // tc, tc)
     psi = t.abs().amax(dim=(-3, -1), keepdim=True) * (1.0 / E4M3_MAX)
     zero = psi < TINY
     psi = psi.clamp_min(TINY)
@@ -581,6 +583,10 @@ def sm90_ds(dS, ctx, p):
 SITE_FNS["sm90_pfwd"] = sm90_pfwd
 SITE_FNS["sm90_pbwd"] = lambda P, ctx, p: e4m3_round(P.clamp(max=16.0) * 256.0) / 256.0     # P' = 2^8 P, fixed scale
 SITE_FNS["sm90_ds"] = sm90_ds
+# hd256 (kda/docs/sm90-numerics-spec-hd256.md): P-hat per (row, 32-key group) under a descending 128-key-tile online max with the same
+# 12-binade floor (s2.3); dS' psi per 64 x 64 tile (s4.2); backward P' = 2^8 P (s3, cap 2^12) as hd128
+SITE_FNS["sm90d256_pfwd"] = lambda P, ctx, p: sm90_pfwd(P, ctx, p, tile=128, group=32)
+SITE_FNS["sm90d256_ds"] = lambda dS, ctx, p: sm90_ds(dS, ctx, p, tr=64, tc=64)
 
 
 # kda-sm100's final sm100-mx rules (inbox 2026-11-08 17:40): kda-v1 with dS scaled per (128-query tile x 32 keys)

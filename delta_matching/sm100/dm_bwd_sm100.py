@@ -5055,7 +5055,9 @@ class DMBackwardSm100:
                           cute.arch.fence_view_async_tmem_load()
                           # P overwrites S lanes another warp may still be loading, so
                           # every warp must have loaded S before any stores P.
-                          if const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
+                          if const_expr("nopair" in self.dm_abl):
+                              pass   # abl:nopair (TIMING ONLY, track AR): no S-read -> P-store pair barrier (P may clobber the peer warp's S)
+                          elif const_expr("fullbar" not in self.dm_opts and not self.dm_cwg4):
                               # TMEM lanes are warp-quadrant private: only warps w and w+4 share lanes, and the
                               # dQ SF columns are written per own lanes; the dQ MMA itself waits for every warp's
                               # dS-pipe arrival -> a 64-thread pair barrier is enough

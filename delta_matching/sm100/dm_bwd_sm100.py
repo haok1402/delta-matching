@@ -5466,8 +5466,16 @@ class DMBackwardSm100:
                   dm_lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
                   for stage in cutlass.range_constexpr(num_stages):
                       dm_k = dm_qoff[stage]
-                      dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32,
-                                          dm_utils.bytes4_same(dm_sfa_dv[stage]))
+                      if const_expr(self.dm_xp == "c3"):
+                          # xexempt planted control (DEBUG): CTA 1 publishes ZERO SFA_dv (part of the X3 payload), real SFs ~2 us after S_P-empty
+                          if cta_rank_in_cluster == 1:
+                              dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32, Int32(0))
+                          else:
+                              dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32,
+                                                  dm_utils.bytes4_same(dm_sfa_dv[stage]))
+                      else:
+                          dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_k * 4 + dm_lane // 32,
+                                              dm_utils.bytes4_same(dm_sfa_dv[stage]))
                   dm_one = Int32(0x7F7F7F7F)
                   dm_utils.tmem_st_x4((dm_lane << 16) + self.dm_sfb_dv_col, dm_one, dm_one, dm_one, dm_one)
                   if const_expr(not self.acc_m64):
@@ -5491,6 +5499,14 @@ class DMBackwardSm100:
                       with cute.arch.elect_one():
                           pipeline_S_P.consumer_release(consumer_state_S_P_dP)
                           # pipeline_S_P.sync_object_empty.arrive(0, pipeline_S_P.consumer_mask)
+                      if const_expr(self.dm_xp == "c3"):
+                          if cta_rank_in_cluster == 1:
+                              dm_utils.nanosleep_1us()
+                              dm_utils.nanosleep_1us()
+                              for stage in cutlass.range_constexpr(num_stages):
+                                  dm_utils.tmem_st_x1((dm_lane << 16) + self.dm_sfa_dv_col + dm_qoff[stage] * 4 + dm_lane // 32,
+                                                      dm_utils.bytes4_same(dm_sfa_dv[stage]))
+                              cute.arch.fence_view_async_tmem_store()
                   # Normally we'd need syncwarp here since only 1 thread will signal in
                   # consumer_release, but we already have the barrier or sync_warp before this
                   pipeline_LSE.consumer_release(consumer_state_LSE)
@@ -6594,7 +6610,17 @@ class DMBackwardSm100:
                         self._tlev(dm_tlv, iter_idx, 27, tidx == 0)
                     # TMEM -> RMEM
                     tdQrdQ_t2r = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
-                    if const_expr(not self.dm_dqstream):
+                    if const_expr(not self.dm_dqstream and self.dm_xp == "q6"):
+                        # xexempt planted control (DEBUG, X6 WAR): release dQ-empty BEFORE the dQ TMEM load, load ~2 us later
+                        cute.arch.sync_warp()
+                        with cute.arch.elect_one():
+                            pipeline_dQ.consumer_release(dQ_consumer_state)
+                        dQ_consumer_state.advance()
+                        dm_utils.nanosleep_1us()
+                        dm_utils.nanosleep_1us()
+                        cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
+                        cute.arch.fence_view_async_tmem_load()
+                    elif const_expr(not self.dm_dqstream):
                         cute.copy(thr_copy_t2r, tdQtdQ_t2r, tdQrdQ_t2r)
                         cute.arch.fence_view_async_tmem_load()
                         cute.arch.sync_warp()

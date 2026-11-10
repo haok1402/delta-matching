@@ -17,7 +17,7 @@ has exactly one writer CTA):
              (max over the 4 compute warps: order-free, so the codes / SFs are bitwise the dk mode's), SFA_dQ = ds_sb (+)
              ks_sb; dQ = sm * (dS-codes . K8^T)   (sm = 2^-4 exact).
 Every site is the sm100-mx-d256 rule (= the validated hd128 sm100-mx rule at D=256):
-  inputs: one pow2 scale per 32 tokens over all D (quant_hd256.quant_qkv_mx256 / quant_do_mx256), one code set;
+  inputs: one pow2 scale per 32 tokens over all D (quant.quant_qkv2 / quant.quant_do_delta), one code set;
   P / dP / dS line: dm_common_hd256.dm_mx256_* (= hd128 dm_common.dm_bwd_*: c = (ks*qs)*log2e, l2 = lse*log2e,
   P = ex2.approx.ftz(fma(S_acc, c, -l2)), a = vs*dos, dS = P * fma(dP_acc, a, -delta));  delta = num/den from pass 0;
   quantization: pow2_sb / inv_pow2_from_sb / add_sb_clamp / cvt.rn.satfinite.e4m3 exactly as hd128 dm_bwd_sm100.
@@ -45,10 +45,10 @@ from cutlass._mlir.dialects import llvm
 
 from delta_matching.sm100 import dm_common_hd256 as dmh
 from delta_matching.sm100 import dm_utils
-from delta_matching.sm100.dm_bwd_hd256_sm100 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_v4f,
-                                                     st_global_f32, ld_shared_f32, st_shared_f32, abs_f32, max_f32,
-                                                     add_f32, mul_f32, _asm, _gaddr)
-from delta_matching.sm100.dm_bwd_hd256_sm100 import ld_shared_v4 as dm_utils_ld_shared_v4
+from delta_matching.sm100.dm_common_hd256 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_v4f,
+                                                 st_global_f32, ld_shared_f32, st_shared_f32, abs_f32, max_f32,
+                                                 add_f32, mul_f32, _asm, _gaddr)
+from delta_matching.sm100.dm_common_hd256 import ld_shared_v4 as dm_utils_ld_shared_v4
 
 F8 = cutlass.Float8E4M3FN
 SM = 0.0625          # 256 ** -0.5, exact

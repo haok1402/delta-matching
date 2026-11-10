@@ -3,8 +3,8 @@ dm_bwd_hd256mx_sm100.py; design kda/hd256/bwd-design.md Part B).  hd128's bwd.py
 
 dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal) -> dq (B,N,H,256), dk, dv (B,N,Hk,256) bf16
   q8 / do8 (B, N, H, 256) e4m3, qs / dos (B, H, N/32) fp32 pow2; k8 / v8 (B, N, Hk, 256) e4m3, ks / vs (B, Hk, N/32)
-  (quant_hd256.quant_qkv_mx256 / quant_do_mx256); lse (B, H, N) fp32 natural log; delta (B, H, N) fp32 from pass 0
-  (pass0_hd256.dm_delta_hd256, num/den).
+  (quant.quant_qkv2(q, k, v, 256**-0.5) / quant.quant_do_delta(do, None)); lse (B, H, N) fp32 natural log;
+  delta (B, H, N) fp32 from pass 0 (pass0_hd256.dm_delta_hd256, num/den).
 Three launches, no workspace, no atomics, every output element written once: dV kernel, dK kernel (keys on rows, GQA q-head
 loop inside the CTA), dQ kernel (queries on rows).  Deterministic by construction.
 """

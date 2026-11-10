@@ -3,7 +3,7 @@ Same plumbing as pass0.py (FA4 _flash_attn_fwd with the kernel class swapped); h
 
 dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal) -> delta (B, H, N) fp32, MXFP8 (sm100-mx-d256) contract:
   q8 / do8 (B, N, H, 256) e4m3, qs / dos (B, H, N/32) fp32;  k8 / v8 (B, N, Hk, 256) e4m3, ks / vs (B, Hk, N/32) fp32;
-  every scale an exact power of two per 32 tokens over all D (quant_hd256.quant_qkv_mx256 / quant_do_mx256);
+  every scale an exact power of two per 32 tokens over all D (quant.quant_qkv2 / quant.quant_do_delta);
   lse (B, H, N) fp32 natural log.  P / dP per dm_common_hd256.dm_mx256_*; delta = sum_j P dP / sum_j P (num/den only).
 """
 import dataclasses
@@ -16,7 +16,6 @@ from flash_attn.cute import cache_utils
 from .dm_pass0_hd256_sm100 import DMPass0Hd256Sm100
 from .fwd import _fingerprint
 from . import fastpath
-_env = fastpath.env
 
 D = 256
 _LOCK = threading.Lock()
@@ -48,20 +47,18 @@ def _aux(t: torch.Tensor, leading_dim: int):
     return t
 
 
-def variant_for(delta_form: str | None = None) -> str:
-    form = delta_form or _env("DM_P0H_DELTA", "numden")
-    assert form == "numden", f"hd256 MXFP8 pass 0: delta form num/den only (got {form!r}; the [64,32] floor form is retired)"
+def variant_for() -> str:
+    """The shipped pass-0 variant: delta = num / den (+dnd), the only hd256 MXFP8 delta form."""
     return BASE_VARIANT + "+dnd"
 
 
-def dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, delta_form: str | None = None,
-                   exp_variant: str | None = None):
+def dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, exp_variant: str | None = None):
     B, N, H, Dq = q8.shape
     assert Dq == D and k8.shape[-1] == D and v8.shape[-1] == D and do8.shape == q8.shape and N % 128 == 0
     assert qs.shape == (B, H, N // 32) and dos.shape == (B, H, N // 32), "Q / dO: one pow2 scale per 32 rows (MXFP8)"
     assert ks.shape == (B, k8.shape[2], N // 32) and vs.shape == ks.shape, "K / V: one pow2 scale per 32 keys (MXFP8)"
     if exp_variant is None:
-        exp_variant = variant_for(delta_form)
+        exp_variant = variant_for()
     over = dict(FORCE)
     if "+kv3" in exp_variant:   # hd256-p0opt E4: K/V ring depth 3 (224 KiB raw SMEM); variant token is host-only
         over["kv_stage"] = 3

@@ -38,6 +38,8 @@ dbg bit 16 (identity, bundle 9c; exclusive with bit 8; allowed with dqw / dqt / 
   launch visits of the SAME fp32 dS values this kernel quantizes (dsv) and of |P * (dP_acc * ca)| (the DmHd256Mx dbg-1 definition)
   -> mHash[l, q, 0] / mHash[l, q, 1] as f64 bits (fp64 red.add: order-free up to fp64 round-off).  Compiled out unless set.
 """
+from types import SimpleNamespace
+
 import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline as pipeline
@@ -140,7 +142,13 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "dmk")
+    # dmk (fork hd256-kv3, causal only; no-op if not causal): tile-class specialization of the compute warps.  The compute loop
+    # becomes a nest (q head hi asc; q tile ct asc), the FIRST q tile of every head (ct = c_lo = kt: the diagonal tile) peeled.
+    # Only the peeled iteration applies the causal select s = -inf where key > query; on every other tile key <= kt*128+127 <
+    # ct*128 <= query, so the select never fires there and the unmasked copy runs the identical FFMA / MUFU / FMUL sequence on
+    # identical inputs -> bitwise the same P, dS, codes, SFs.  Iteration order, t numbering, every wait / arrive / fence and every
+    # hand-off are those of the default loop (the body is _citer = the default body verbatim); no new hand-off.
     # dqc (fork hd256-dqr2, requires dqt): EXACT-CARRY chunk of the (q head, q tile) reduction of every key tile.  The launch covers
     # q heads [0, rep) of its (copied) head tensors x q tiles [Q0, Q1) (Q1 = the n_t argument; causal: key tiles 0..Q1-1 = the grid).
     # Chunk descriptor (int32, in the mSBP slot): [Q0, n_t of the full sequence, cin, cout]; cin = 1: this launch continues the
@@ -166,7 +174,7 @@ class DmHd256Kv2:
     RELAY_WARP = 11   # relcl/acqcl: DEBUG: only release / only acquire at cluster   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
-    DEFAULT_OPTS = "meta qb2 xpt rly"      # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes)
+    DEFAULT_OPTS = "meta qb2 xpt rly dmk"  # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes) + dmk (fork hd256-kv3)
 
     def _arr(self, leader_bar, relay_bar, crank):
         """compute-warp arrive for a cross-CTA hand-off (see opt rly)."""
@@ -216,6 +224,260 @@ class DmHd256Kv2:
                     for q in cutlass.range_constexpr(4):
                         w[q] = bf16x2(ov[i + 2 * q], ov[i + 2 * q + 1])
                     st_global_v4(ob + (32 * cb + i) * 2, w[0], w[1], w[2], w[3])
+
+    @cute.jit
+    def _pds(self, sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, masked: cutlass.Constexpr):
+        """opt dmk: the P / dS math of the default loop (same ops, same order); the causal select only if masked."""
+        for i in cutlass.range_constexpr(0, 32, 4):
+            l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
+            dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
+            for q2 in cutlass.range_constexpr(0, 4, 2):
+                s0 = sv[i + q2]
+                s1 = sv[i + q2 + 1]
+                if const_expr(masked):
+                    c0 = q0 + i + q2
+                    s0 = -Float32.inf if key > c0 else s0
+                    s1 = -Float32.inf if key > c0 + 1 else s1
+                p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
+                pv[i + q2] = p0
+                pv[i + q2 + 1] = p1
+                x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
+                                                    (-dlv[q2], -dlv[q2 + 1]))
+                x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
+                dsv[i + q2] = x0
+                dsv[i + q2 + 1] = x1
+
+    @cute.jit
+    def _citer(self, cx, t, hi, ct, mf, masked: cutlass.Constexpr):
+        """opt dmk (fork hd256-kv3): ONE compute-warp iteration (t; q head hi, q tile ct) = the default loop body verbatim, except
+        (a) the meta stage handle mf is acquired by the caller (m_c.wait_and_advance() in the caller's loop, same position relative to
+        every wait below: before the stage-free wait, as in the default body), (b) the P / dS math is self._pds(..., masked).
+        cx = the loop-invariant kernel values (SimpleNamespace)."""
+        E_S, F_S, H, Hk, N, b, c_lo, crank, crow_off, cstage_bytes, hf, hx, jb, kbar, key, ks_r, kt, lane, mCodesP, mCodesS, mDelta, mDump, mHash, mLse, mQs, mSBP, mSBS, mdOs, n_t, ncs, qd, r, rep, rsw, sCP_addr, sCS_addr, sLD_addr, sMeta_addr, sXP_addr, sXS_addr, tb, tidx, vs_r, warp = (cx.E_S, cx.F_S, cx.H, cx.Hk, cx.N, cx.b, cx.c_lo, cx.crank, cx.crow_off, cx.cstage_bytes, cx.hf, cx.hx, cx.jb, cx.kbar, cx.key, cx.ks_r, cx.kt, cx.lane, cx.mCodesP, cx.mCodesS, cx.mDelta, cx.mDump, cx.mHash, cx.mLse, cx.mQs, cx.mSBP, cx.mSBS, cx.mdOs, cx.n_t, cx.ncs, cx.qd, cx.r, cx.rep, cx.rsw, cx.sCP_addr, cx.sCS_addr, cx.sLD_addr, cx.sMeta_addr, cx.sXP_addr, cx.sXS_addr, cx.tb, cx.tidx, cx.vs_r, cx.warp)
+        if const_expr(self.dqc):
+            cq0, nfirst, nfull, tilesb = (cx.cq0, cx.nfirst, cx.nfull, cx.tilesb)
+        h = hx * rep + hi
+        l = b * H + h
+        par = t & 1
+        ctok0 = ct * 128
+        q0 = ctok0 + 32 * jb                      # first query of this thread's block
+        ldb = sLD_addr + par * 1024
+        wtile = Int64(0)
+        if const_expr(self.wsp):
+            if const_expr(self.dqc and self.causal):
+                wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
+            elif const_expr(self.causal):
+                wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
+            else:
+                wtile = (Int64(l) * n_t + ct) * n_t + kt
+        qsj = Float32(0.0)
+        dosj = Float32(0.0)
+        if const_expr("meta" in self.opts):
+            ldb = sMeta_addr + mf.index * self.META_STAGE
+            if const_expr(self.kn == "meta"):
+                if const_expr(self.unsafe):
+                    mf.release()                  # UNSAFE: stage released before it is read
+                spin(self.DLY)
+            qsj = ld_shared_f32(ldb + 1024 + jb * 4)
+            dosj = ld_shared_f32(ldb + 1040 + jb * 4)
+        else:
+            qsj = Float32(mQs[b, h, ct * 4 + jb])
+            dosj = Float32(mdOs[b, h, ct * 4 + jb])
+            if const_expr(self.kn == "ld" and self.unsafe):
+                ldb = sLD_addr
+            if tidx < 128:
+                st_shared_f32(ldb + tidx * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
+            else:
+                st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
+            cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
+            if const_expr(self.kn == "ld"):
+                if warp == 3:
+                    spin(self.DLY)
+        cs = dmh.dm_mx256_c(ks_r, qsj)
+        ca = dmh.dm_mx256_dp_scale(vs_r, dosj)
+        stg = t & 1
+        dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
+        if const_expr("dqt" in self.opts):
+            if t >= 2:
+                if const_expr(self.kn == "ww"):
+                    if const_expr(self.unsafe):
+                        if t > 2:      # UNSAFE: the first reuse skips the bulk-read wait (store warp delayed at t == 0)
+                            dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
+                    else:
+                        dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
+                else:
+                    dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)   # bulk read of t-2 done
+        if const_expr(self.kn == "wr"):
+            if t == 0:
+                spin(self.DLY)                    # codes of t = 0 written late (wr: the store warp must wait for them)
+        if const_expr(self.kn == "cd" and self.unsafe):
+            self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)   # UNSAFE: published before the codes are written
+            spin(self.DLY)
+        dm_utils.mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
+        tc_fence_after()
+        if const_expr(self.kn == "s"):
+            if const_expr(self.unsafe):
+                self._arr(E_S, kbar + 64, crank)   # UNSAFE: slot released before the loads
+            spin(self.DLY)
+        sv = tmem_ld32(tb + self.COL_S + 32 * hf)
+        dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
+        cute.arch.fence_view_async_tmem_load()
+        tc_fence_before()
+        if const_expr(not (self.kn == "s" and self.unsafe)):
+            self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
+        pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
+        dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
+        self._pds(sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, masked)
+        if const_expr(self.dbg & 2):
+            pa = _gaddr(mDump) + ((Int64(l) * N + q0) * N + key) * 16
+            for i in cutlass.range_constexpr(32):
+                st_global_f32(pa, sv[i])
+                st_global_f32(pa + 4, dpv[i])
+                st_global_f32(pa + 8, pv[i])
+                st_global_f32(pa + 12, dsv[i])
+                pa = pa + Int64(N) * 16
+        # ---- P^T codes: pow2 per (key, 32 queries), thread-local ----
+        am = Float32(0.0)
+        for i in cutlass.range_constexpr(32):
+            am = cute.arch.fmax(am, pv[i])
+        psb = dm_utils.pow2_sb(am)
+        inv = dm_utils.inv_pow2_from_sb(psb)
+        crow = sCP_addr + stg * cstage_bytes + crow_off
+        hpl = [Int32(0)] * 32
+        for hv in cutlass.range_constexpr(2):
+            w = [None] * 4
+            for u in cutlass.range_constexpr(4):
+                i0 = 16 * hv + 4 * u
+                y0, y1 = cute.arch.mul_packed_f32x2((pv[i0], pv[i0 + 1]), (inv, inv))
+                y2, y3 = cute.arch.mul_packed_f32x2((pv[i0 + 2], pv[i0 + 3]), (inv, inv))
+                w[u] = e4m3x4(y0, y1, y2, y3)
+            st_shared_v4(crow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+            if const_expr(self.dbg & 2):
+                cp_ = _gaddr(mCodesP) + (Int64(l) * N + q0 + 16 * hv) * N + key
+                for u in cutlass.range_constexpr(4):
+                    for q in cutlass.range_constexpr(4):
+                        st_global_u8(cp_, w[u] >> (8 * q))
+                        cp_ = cp_ + Int64(N)
+        if const_expr(self.dbg & 2):
+            mSBP[l, key, ct * 4 + jb] = psb
+        if const_expr(self.dbg & 8):
+            for i in cutlass.range_constexpr(32):
+                hpl[i] = hmix(f2i(pv[i]), hidx(q0 + i, key))
+            lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + q0) * 32)
+        # ---- exchange: p_sb byte per (row, q-block); |dS| warp max per warp ----
+        xp = sXP_addr + par * 1024
+        if const_expr(self.kn == "ex"):
+            if warp == 6:
+                spin(self.DLY)
+        if const_expr("xpt" in self.opts):
+            dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
+        else:
+            dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
+        amd = Float32(0.0)
+        for i in cutlass.range_constexpr(32):
+            amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
+        wm = dm_utils.redux_max_abs_f32(amd)
+        if lane == 0:
+            if const_expr("xsv" in self.opts):
+                st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
+            else:
+                st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
+        cute.arch.fence_view_async_shared()
+        if const_expr(not (self.kn == "ex" and self.unsafe)):
+            cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
+        g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
+        xs = sXS_addr + par * 32
+        m4 = Float32(0.0)
+        if const_expr("xsv" in self.opts):
+            x4 = ld_shared_v4f(xs + g * 16)
+            m4 = max_f32(max_f32(x4[0], x4[1]), max_f32(x4[2], x4[3]))
+        else:
+            m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
+                         max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
+        dsb = dm_utils.pow2_sb(m4)
+        invs = dm_utils.inv_pow2_from_sb(dsb)
+        srow = sCS_addr + stg * cstage_bytes + crow_off
+        hsl = [Int32(0)] * 32
+        hcl = [Int32(0)] * 32
+        for hv in cutlass.range_constexpr(2):
+            w = [None] * 4
+            for u in cutlass.range_constexpr(4):
+                i0 = 16 * hv + 4 * u
+                y0, y1 = cute.arch.mul_packed_f32x2((dsv[i0], dsv[i0 + 1]), (invs, invs))
+                y2, y3 = cute.arch.mul_packed_f32x2((dsv[i0 + 2], dsv[i0 + 3]), (invs, invs))
+                w[u] = e4m3x4(y0, y1, y2, y3)
+            if const_expr(self.kn == "lsk" and self.unsafe):
+                if const_expr(hv == 0):
+                    w[0] = w[0] ^ sel_eq_i32(t + key + hx + b, Int32(0), Int32(1), Int32(0))
+            st_shared_v4(srow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+            if const_expr("dqw" in self.opts):
+                st_global_v4(_gaddr(mCodesS) + wtile * 16384 + (64 * crank + r) * 128 + 32 * jb + 16 * hv,
+                             w[0], w[1], w[2], w[3])
+            if const_expr(self.dbg & 8):
+                for u in cutlass.range_constexpr(4):
+                    for q in cutlass.range_constexpr(4):
+                        i_ = 16 * hv + 4 * u + q
+                        ix = hidx(q0 + i_, key)
+                        hsl[i_] = hmix(f2i(dsv[i_]), ix)
+                        hcl[i_] = hmix(((w[u] >> (8 * q)) & 255) | (dsb << 8), ix)
+            if const_expr(self.dbg & 2):
+                cp_ = _gaddr(mCodesS) + (Int64(l) * N + q0 + 16 * hv) * N + key
+                for u in cutlass.range_constexpr(4):
+                    for q in cutlass.range_constexpr(4):
+                        st_global_u8(cp_, w[u] >> (8 * q))
+                        cp_ = cp_ + Int64(N)
+        if const_expr(self.dbg & 2):
+            mSBS[l, key, ct * 4 + jb] = dsb
+        if const_expr(self.wsp):
+            if warp < 2:
+                if lane == 0:
+                    st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
+        if const_expr(self.dbg & 8):
+            a0_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
+            lk_cols_u32(hsl, lane, a0_ + 8)
+            lk_cols_u32(hcl, lane, a0_ + 16)
+            lk_cols_f64(dsv, lane, a0_ + 24)
+        if const_expr(self.dbg & 16):
+            a1_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
+            pdl = [abs_f32(mul_f32(pv[i], mul_f32(dpv[i], ca))) for i in range(32)]
+            lk_cols_f64(dsv, lane, a1_)
+            lk_cols_f64(pdl, lane, a1_ + 8)
+        # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
+        if warp < 4:
+            bp = [Int32(0)] * 4
+            bs = [Int32(0)] * 4
+            for j in cutlass.range_constexpr(4):
+                psj = Int32(0)
+                if const_expr("xpt" in self.opts):
+                    psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
+                else:
+                    psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
+                dsc_ = Float32(0.0)
+                qsc_ = Float32(0.0)
+                if const_expr("meta" in self.opts):
+                    dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
+                    qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
+                else:
+                    dsc_ = Float32(mdOs[b, h, ct * 4 + j])
+                    qsc_ = Float32(mQs[b, h, ct * 4 + j])
+                bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
+                bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
+            dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
+            dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
+            cute.arch.fence_view_async_tmem_store()
+        if const_expr("meta" in self.opts and not (self.kn == "meta" and self.unsafe)):
+            mf.release()
+        cute.arch.fence_view_async_shared()
+        tc_fence_before()
+        if const_expr(self.kn == "cd"):
+            if const_expr(not self.unsafe):
+                spin(self.DLY)
+        if const_expr(not (self.kn == "cd" and self.unsafe)):
+            self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)    # release.cluster on the leader's barrier
+        if const_expr(self.dqc and self.kn == "cr" and self.unsafe):
+            if t == 0:       # UNSAFE cr: carry restored after the t = 0 publication + a delay (the first dV / dK MMA runs first)
+                spin(self.DLY)
+                self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
 
     @cute.jit
     def _carry_store(self, tb, mCK, mCV, b, key, hx, Hk, nfull, qd, hf):
@@ -649,250 +911,267 @@ class DmHd256Kv2:
                     spin(self.DLY)               # safe: the same delay, before the restore (and so before the t = 0 publication)
                 if const_expr(not (self.kn == "cr" and self.unsafe)):
                     self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
-            for t in cutlass.range(total, unroll=1):
-                hi = t // ncs
-                ct = c_lo + t - hi * ncs
-                h = hx * rep + hi
-                l = b * H + h
-                par = t & 1
-                ctok0 = ct * 128
-                q0 = ctok0 + 32 * jb                      # first query of this thread's block
-                ldb = sLD_addr + par * 1024
-                wtile = Int64(0)
-                if const_expr(self.wsp):
-                    if const_expr(self.dqc and self.causal):
-                        wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
-                    elif const_expr(self.causal):
-                        wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
-                    else:
-                        wtile = (Int64(l) * n_t + ct) * n_t + kt
-                mf = None
-                qsj = Float32(0.0)
-                dosj = Float32(0.0)
-                if const_expr("meta" in self.opts):
-                    mf = m_c.wait_and_advance()
-                    ldb = sMeta_addr + mf.index * self.META_STAGE
-                    if const_expr(self.kn == "meta"):
-                        if const_expr(self.unsafe):
-                            mf.release()                  # UNSAFE: stage released before it is read
-                        spin(self.DLY)
-                    qsj = ld_shared_f32(ldb + 1024 + jb * 4)
-                    dosj = ld_shared_f32(ldb + 1040 + jb * 4)
-                else:
-                    qsj = Float32(mQs[b, h, ct * 4 + jb])
-                    dosj = Float32(mdOs[b, h, ct * 4 + jb])
-                    if const_expr(self.kn == "ld" and self.unsafe):
-                        ldb = sLD_addr
-                    if tidx < 128:
-                        st_shared_f32(ldb + tidx * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
-                    else:
-                        st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
-                    cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
-                    if const_expr(self.kn == "ld"):
-                        if warp == 3:
-                            spin(self.DLY)
-                cs = dmh.dm_mx256_c(ks_r, qsj)
-                ca = dmh.dm_mx256_dp_scale(vs_r, dosj)
-                stg = t & 1
-                dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
-                if const_expr("dqt" in self.opts):
-                    if t >= 2:
-                        if const_expr(self.kn == "ww"):
+            if const_expr(self.causal and "dmk" in self.opts):
+                # opt dmk: peeled loop nest (q head hi; diagonal tile ct = c_lo first, masked; then the off-diagonal tiles, unmasked)
+                cx = SimpleNamespace(E_S=E_S, F_S=F_S, H=H, Hk=Hk, N=N, b=b, c_lo=c_lo, crank=crank, crow_off=crow_off, cstage_bytes=cstage_bytes, hf=hf, hx=hx, jb=jb, kbar=kbar, key=key, ks_r=ks_r, kt=kt, lane=lane, mCodesP=mCodesP, mCodesS=mCodesS, mDelta=mDelta, mDump=mDump, mHash=mHash, mLse=mLse, mQs=mQs, mSBP=mSBP, mSBS=mSBS, mdOs=mdOs, n_t=n_t, ncs=ncs, qd=qd, r=r, rep=rep, rsw=rsw, sCP_addr=sCP_addr, sCS_addr=sCS_addr, sLD_addr=sLD_addr, sMeta_addr=sMeta_addr, sXP_addr=sXP_addr, sXS_addr=sXS_addr, tb=tb, tidx=tidx, vs_r=vs_r, warp=warp)
+                if const_expr(self.dqc):
+                    cx.cq0, cx.nfirst, cx.nfull, cx.tilesb = cq0, nfirst, nfull, tilesb
+                for hi in cutlass.range(rep, unroll=1):
+                    t_d = hi * ncs
+                    mf_d = None
+                    if const_expr("meta" in self.opts):
+                        mf_d = m_c.wait_and_advance()
+                    self._citer(cx, t_d, hi, c_lo, mf_d, True)
+                    for ci in cutlass.range(1, ncs, unroll=1):
+                        mf_o = None
+                        if const_expr("meta" in self.opts):
+                            mf_o = m_c.wait_and_advance()
+                        self._citer(cx, t_d + ci, hi, c_lo + ci, mf_o, False)
+            else:
+                for t in cutlass.range(total, unroll=1):
+                    hi = t // ncs
+                    ct = c_lo + t - hi * ncs
+                    h = hx * rep + hi
+                    l = b * H + h
+                    par = t & 1
+                    ctok0 = ct * 128
+                    q0 = ctok0 + 32 * jb                      # first query of this thread's block
+                    ldb = sLD_addr + par * 1024
+                    wtile = Int64(0)
+                    if const_expr(self.wsp):
+                        if const_expr(self.dqc and self.causal):
+                            wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
+                        elif const_expr(self.causal):
+                            wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
+                        else:
+                            wtile = (Int64(l) * n_t + ct) * n_t + kt
+                    mf = None
+                    qsj = Float32(0.0)
+                    dosj = Float32(0.0)
+                    if const_expr("meta" in self.opts):
+                        mf = m_c.wait_and_advance()
+                        ldb = sMeta_addr + mf.index * self.META_STAGE
+                        if const_expr(self.kn == "meta"):
                             if const_expr(self.unsafe):
-                                if t > 2:      # UNSAFE: the first reuse skips the bulk-read wait (store warp delayed at t == 0)
+                                mf.release()                  # UNSAFE: stage released before it is read
+                            spin(self.DLY)
+                        qsj = ld_shared_f32(ldb + 1024 + jb * 4)
+                        dosj = ld_shared_f32(ldb + 1040 + jb * 4)
+                    else:
+                        qsj = Float32(mQs[b, h, ct * 4 + jb])
+                        dosj = Float32(mdOs[b, h, ct * 4 + jb])
+                        if const_expr(self.kn == "ld" and self.unsafe):
+                            ldb = sLD_addr
+                        if tidx < 128:
+                            st_shared_f32(ldb + tidx * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
+                        else:
+                            st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
+                        cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
+                        if const_expr(self.kn == "ld"):
+                            if warp == 3:
+                                spin(self.DLY)
+                    cs = dmh.dm_mx256_c(ks_r, qsj)
+                    ca = dmh.dm_mx256_dp_scale(vs_r, dosj)
+                    stg = t & 1
+                    dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
+                    if const_expr("dqt" in self.opts):
+                        if t >= 2:
+                            if const_expr(self.kn == "ww"):
+                                if const_expr(self.unsafe):
+                                    if t > 2:      # UNSAFE: the first reuse skips the bulk-read wait (store warp delayed at t == 0)
+                                        dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
+                                else:
                                     dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
                             else:
-                                dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
-                        else:
-                            dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)   # bulk read of t-2 done
-                if const_expr(self.kn == "wr"):
-                    if t == 0:
-                        spin(self.DLY)                    # codes of t = 0 written late (wr: the store warp must wait for them)
-                if const_expr(self.kn == "cd" and self.unsafe):
-                    self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)   # UNSAFE: published before the codes are written
-                    spin(self.DLY)
-                dm_utils.mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
-                tc_fence_after()
-                if const_expr(self.kn == "s"):
-                    if const_expr(self.unsafe):
-                        self._arr(E_S, kbar + 64, crank)   # UNSAFE: slot released before the loads
-                    spin(self.DLY)
-                sv = tmem_ld32(tb + self.COL_S + 32 * hf)
-                dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
-                cute.arch.fence_view_async_tmem_load()
-                tc_fence_before()
-                if const_expr(not (self.kn == "s" and self.unsafe)):
-                    self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
-                pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
-                dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
-                for i in cutlass.range_constexpr(0, 32, 4):
-                    l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
-                    dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
-                    for q2 in cutlass.range_constexpr(0, 4, 2):
-                        s0 = sv[i + q2]
-                        s1 = sv[i + q2 + 1]
-                        if const_expr(self.causal):
-                            c0 = q0 + i + q2
-                            s0 = -Float32.inf if key > c0 else s0
-                            s1 = -Float32.inf if key > c0 + 1 else s1
-                        p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
-                        pv[i + q2] = p0
-                        pv[i + q2 + 1] = p1
-                        x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
-                                                            (-dlv[q2], -dlv[q2 + 1]))
-                        x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
-                        dsv[i + q2] = x0
-                        dsv[i + q2 + 1] = x1
-                if const_expr(self.dbg & 2):
-                    pa = _gaddr(mDump) + ((Int64(l) * N + q0) * N + key) * 16
-                    for i in cutlass.range_constexpr(32):
-                        st_global_f32(pa, sv[i])
-                        st_global_f32(pa + 4, dpv[i])
-                        st_global_f32(pa + 8, pv[i])
-                        st_global_f32(pa + 12, dsv[i])
-                        pa = pa + Int64(N) * 16
-                # ---- P^T codes: pow2 per (key, 32 queries), thread-local ----
-                am = Float32(0.0)
-                for i in cutlass.range_constexpr(32):
-                    am = cute.arch.fmax(am, pv[i])
-                psb = dm_utils.pow2_sb(am)
-                inv = dm_utils.inv_pow2_from_sb(psb)
-                crow = sCP_addr + stg * cstage_bytes + crow_off
-                hpl = [Int32(0)] * 32
-                for hv in cutlass.range_constexpr(2):
-                    w = [None] * 4
-                    for u in cutlass.range_constexpr(4):
-                        i0 = 16 * hv + 4 * u
-                        y0, y1 = cute.arch.mul_packed_f32x2((pv[i0], pv[i0 + 1]), (inv, inv))
-                        y2, y3 = cute.arch.mul_packed_f32x2((pv[i0 + 2], pv[i0 + 3]), (inv, inv))
-                        w[u] = e4m3x4(y0, y1, y2, y3)
-                    st_shared_v4(crow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
-                    if const_expr(self.dbg & 2):
-                        cp_ = _gaddr(mCodesP) + (Int64(l) * N + q0 + 16 * hv) * N + key
-                        for u in cutlass.range_constexpr(4):
-                            for q in cutlass.range_constexpr(4):
-                                st_global_u8(cp_, w[u] >> (8 * q))
-                                cp_ = cp_ + Int64(N)
-                if const_expr(self.dbg & 2):
-                    mSBP[l, key, ct * 4 + jb] = psb
-                if const_expr(self.dbg & 8):
-                    for i in cutlass.range_constexpr(32):
-                        hpl[i] = hmix(f2i(pv[i]), hidx(q0 + i, key))
-                    lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + q0) * 32)
-                # ---- exchange: p_sb byte per (row, q-block); |dS| warp max per warp ----
-                xp = sXP_addr + par * 1024
-                if const_expr(self.kn == "ex"):
-                    if warp == 6:
+                                dm_utils.mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)   # bulk read of t-2 done
+                    if const_expr(self.kn == "wr"):
+                        if t == 0:
+                            spin(self.DLY)                    # codes of t = 0 written late (wr: the store warp must wait for them)
+                    if const_expr(self.kn == "cd" and self.unsafe):
+                        self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)   # UNSAFE: published before the codes are written
                         spin(self.DLY)
-                if const_expr("xpt" in self.opts):
-                    dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
-                else:
-                    dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
-                amd = Float32(0.0)
-                for i in cutlass.range_constexpr(32):
-                    amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
-                wm = dm_utils.redux_max_abs_f32(amd)
-                if lane == 0:
-                    if const_expr("xsv" in self.opts):
-                        st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
-                    else:
-                        st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
-                cute.arch.fence_view_async_shared()
-                if const_expr(not (self.kn == "ex" and self.unsafe)):
-                    cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
-                g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
-                xs = sXS_addr + par * 32
-                m4 = Float32(0.0)
-                if const_expr("xsv" in self.opts):
-                    x4 = ld_shared_v4f(xs + g * 16)
-                    m4 = max_f32(max_f32(x4[0], x4[1]), max_f32(x4[2], x4[3]))
-                else:
-                    m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
-                                 max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
-                dsb = dm_utils.pow2_sb(m4)
-                invs = dm_utils.inv_pow2_from_sb(dsb)
-                srow = sCS_addr + stg * cstage_bytes + crow_off
-                hsl = [Int32(0)] * 32
-                hcl = [Int32(0)] * 32
-                for hv in cutlass.range_constexpr(2):
-                    w = [None] * 4
-                    for u in cutlass.range_constexpr(4):
-                        i0 = 16 * hv + 4 * u
-                        y0, y1 = cute.arch.mul_packed_f32x2((dsv[i0], dsv[i0 + 1]), (invs, invs))
-                        y2, y3 = cute.arch.mul_packed_f32x2((dsv[i0 + 2], dsv[i0 + 3]), (invs, invs))
-                        w[u] = e4m3x4(y0, y1, y2, y3)
-                    if const_expr(self.kn == "lsk" and self.unsafe):
-                        if const_expr(hv == 0):
-                            w[0] = w[0] ^ sel_eq_i32(t + key + hx + b, Int32(0), Int32(1), Int32(0))
-                    st_shared_v4(srow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
-                    if const_expr("dqw" in self.opts):
-                        st_global_v4(_gaddr(mCodesS) + wtile * 16384 + (64 * crank + r) * 128 + 32 * jb + 16 * hv,
-                                     w[0], w[1], w[2], w[3])
+                    dm_utils.mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
+                    tc_fence_after()
+                    if const_expr(self.kn == "s"):
+                        if const_expr(self.unsafe):
+                            self._arr(E_S, kbar + 64, crank)   # UNSAFE: slot released before the loads
+                        spin(self.DLY)
+                    sv = tmem_ld32(tb + self.COL_S + 32 * hf)
+                    dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
+                    cute.arch.fence_view_async_tmem_load()
+                    tc_fence_before()
+                    if const_expr(not (self.kn == "s" and self.unsafe)):
+                        self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
+                    pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
+                    dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
+                    for i in cutlass.range_constexpr(0, 32, 4):
+                        l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
+                        dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
+                        for q2 in cutlass.range_constexpr(0, 4, 2):
+                            s0 = sv[i + q2]
+                            s1 = sv[i + q2 + 1]
+                            if const_expr(self.causal):
+                                c0 = q0 + i + q2
+                                s0 = -Float32.inf if key > c0 else s0
+                                s1 = -Float32.inf if key > c0 + 1 else s1
+                            p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
+                            pv[i + q2] = p0
+                            pv[i + q2 + 1] = p1
+                            x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
+                                                                (-dlv[q2], -dlv[q2 + 1]))
+                            x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
+                            dsv[i + q2] = x0
+                            dsv[i + q2 + 1] = x1
+                    if const_expr(self.dbg & 2):
+                        pa = _gaddr(mDump) + ((Int64(l) * N + q0) * N + key) * 16
+                        for i in cutlass.range_constexpr(32):
+                            st_global_f32(pa, sv[i])
+                            st_global_f32(pa + 4, dpv[i])
+                            st_global_f32(pa + 8, pv[i])
+                            st_global_f32(pa + 12, dsv[i])
+                            pa = pa + Int64(N) * 16
+                    # ---- P^T codes: pow2 per (key, 32 queries), thread-local ----
+                    am = Float32(0.0)
+                    for i in cutlass.range_constexpr(32):
+                        am = cute.arch.fmax(am, pv[i])
+                    psb = dm_utils.pow2_sb(am)
+                    inv = dm_utils.inv_pow2_from_sb(psb)
+                    crow = sCP_addr + stg * cstage_bytes + crow_off
+                    hpl = [Int32(0)] * 32
+                    for hv in cutlass.range_constexpr(2):
+                        w = [None] * 4
+                        for u in cutlass.range_constexpr(4):
+                            i0 = 16 * hv + 4 * u
+                            y0, y1 = cute.arch.mul_packed_f32x2((pv[i0], pv[i0 + 1]), (inv, inv))
+                            y2, y3 = cute.arch.mul_packed_f32x2((pv[i0 + 2], pv[i0 + 3]), (inv, inv))
+                            w[u] = e4m3x4(y0, y1, y2, y3)
+                        st_shared_v4(crow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                        if const_expr(self.dbg & 2):
+                            cp_ = _gaddr(mCodesP) + (Int64(l) * N + q0 + 16 * hv) * N + key
+                            for u in cutlass.range_constexpr(4):
+                                for q in cutlass.range_constexpr(4):
+                                    st_global_u8(cp_, w[u] >> (8 * q))
+                                    cp_ = cp_ + Int64(N)
+                    if const_expr(self.dbg & 2):
+                        mSBP[l, key, ct * 4 + jb] = psb
                     if const_expr(self.dbg & 8):
+                        for i in cutlass.range_constexpr(32):
+                            hpl[i] = hmix(f2i(pv[i]), hidx(q0 + i, key))
+                        lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + q0) * 32)
+                    # ---- exchange: p_sb byte per (row, q-block); |dS| warp max per warp ----
+                    xp = sXP_addr + par * 1024
+                    if const_expr(self.kn == "ex"):
+                        if warp == 6:
+                            spin(self.DLY)
+                    if const_expr("xpt" in self.opts):
+                        dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
+                    else:
+                        dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
+                    amd = Float32(0.0)
+                    for i in cutlass.range_constexpr(32):
+                        amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
+                    wm = dm_utils.redux_max_abs_f32(amd)
+                    if lane == 0:
+                        if const_expr("xsv" in self.opts):
+                            st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
+                        else:
+                            st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
+                    cute.arch.fence_view_async_shared()
+                    if const_expr(not (self.kn == "ex" and self.unsafe)):
+                        cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
+                    g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
+                    xs = sXS_addr + par * 32
+                    m4 = Float32(0.0)
+                    if const_expr("xsv" in self.opts):
+                        x4 = ld_shared_v4f(xs + g * 16)
+                        m4 = max_f32(max_f32(x4[0], x4[1]), max_f32(x4[2], x4[3]))
+                    else:
+                        m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
+                                     max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
+                    dsb = dm_utils.pow2_sb(m4)
+                    invs = dm_utils.inv_pow2_from_sb(dsb)
+                    srow = sCS_addr + stg * cstage_bytes + crow_off
+                    hsl = [Int32(0)] * 32
+                    hcl = [Int32(0)] * 32
+                    for hv in cutlass.range_constexpr(2):
+                        w = [None] * 4
                         for u in cutlass.range_constexpr(4):
-                            for q in cutlass.range_constexpr(4):
-                                i_ = 16 * hv + 4 * u + q
-                                ix = hidx(q0 + i_, key)
-                                hsl[i_] = hmix(f2i(dsv[i_]), ix)
-                                hcl[i_] = hmix(((w[u] >> (8 * q)) & 255) | (dsb << 8), ix)
+                            i0 = 16 * hv + 4 * u
+                            y0, y1 = cute.arch.mul_packed_f32x2((dsv[i0], dsv[i0 + 1]), (invs, invs))
+                            y2, y3 = cute.arch.mul_packed_f32x2((dsv[i0 + 2], dsv[i0 + 3]), (invs, invs))
+                            w[u] = e4m3x4(y0, y1, y2, y3)
+                        if const_expr(self.kn == "lsk" and self.unsafe):
+                            if const_expr(hv == 0):
+                                w[0] = w[0] ^ sel_eq_i32(t + key + hx + b, Int32(0), Int32(1), Int32(0))
+                        st_shared_v4(srow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                        if const_expr("dqw" in self.opts):
+                            st_global_v4(_gaddr(mCodesS) + wtile * 16384 + (64 * crank + r) * 128 + 32 * jb + 16 * hv,
+                                         w[0], w[1], w[2], w[3])
+                        if const_expr(self.dbg & 8):
+                            for u in cutlass.range_constexpr(4):
+                                for q in cutlass.range_constexpr(4):
+                                    i_ = 16 * hv + 4 * u + q
+                                    ix = hidx(q0 + i_, key)
+                                    hsl[i_] = hmix(f2i(dsv[i_]), ix)
+                                    hcl[i_] = hmix(((w[u] >> (8 * q)) & 255) | (dsb << 8), ix)
+                        if const_expr(self.dbg & 2):
+                            cp_ = _gaddr(mCodesS) + (Int64(l) * N + q0 + 16 * hv) * N + key
+                            for u in cutlass.range_constexpr(4):
+                                for q in cutlass.range_constexpr(4):
+                                    st_global_u8(cp_, w[u] >> (8 * q))
+                                    cp_ = cp_ + Int64(N)
                     if const_expr(self.dbg & 2):
-                        cp_ = _gaddr(mCodesS) + (Int64(l) * N + q0 + 16 * hv) * N + key
-                        for u in cutlass.range_constexpr(4):
-                            for q in cutlass.range_constexpr(4):
-                                st_global_u8(cp_, w[u] >> (8 * q))
-                                cp_ = cp_ + Int64(N)
-                if const_expr(self.dbg & 2):
-                    mSBS[l, key, ct * 4 + jb] = dsb
-                if const_expr(self.wsp):
-                    if warp < 2:
-                        if lane == 0:
-                            st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
-                if const_expr(self.dbg & 8):
-                    a0_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
-                    lk_cols_u32(hsl, lane, a0_ + 8)
-                    lk_cols_u32(hcl, lane, a0_ + 16)
-                    lk_cols_f64(dsv, lane, a0_ + 24)
-                if const_expr(self.dbg & 16):
-                    a1_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
-                    pdl = [abs_f32(mul_f32(pv[i], mul_f32(dpv[i], ca))) for i in range(32)]
-                    lk_cols_f64(dsv, lane, a1_)
-                    lk_cols_f64(pdl, lane, a1_ + 8)
-                # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
-                if warp < 4:
-                    bp = [Int32(0)] * 4
-                    bs = [Int32(0)] * 4
-                    for j in cutlass.range_constexpr(4):
-                        psj = Int32(0)
-                        if const_expr("xpt" in self.opts):
-                            psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
-                        else:
-                            psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
-                        dsc_ = Float32(0.0)
-                        qsc_ = Float32(0.0)
-                        if const_expr("meta" in self.opts):
-                            dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
-                            qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
-                        else:
-                            dsc_ = Float32(mdOs[b, h, ct * 4 + j])
-                            qsc_ = Float32(mQs[b, h, ct * 4 + j])
-                        bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
-                        bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
-                    dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
-                    dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
-                    cute.arch.fence_view_async_tmem_store()
-                if const_expr("meta" in self.opts and not (self.kn == "meta" and self.unsafe)):
-                    mf.release()
-                cute.arch.fence_view_async_shared()
-                tc_fence_before()
-                if const_expr(self.kn == "cd"):
-                    if const_expr(not self.unsafe):
-                        spin(self.DLY)
-                if const_expr(not (self.kn == "cd" and self.unsafe)):
-                    self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)    # release.cluster on the leader's barrier
-                if const_expr(self.dqc and self.kn == "cr" and self.unsafe):
-                    if t == 0:       # UNSAFE cr: carry restored after the t = 0 publication + a delay (the first dV / dK MMA runs first)
-                        spin(self.DLY)
-                        self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
+                        mSBS[l, key, ct * 4 + jb] = dsb
+                    if const_expr(self.wsp):
+                        if warp < 2:
+                            if lane == 0:
+                                st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
+                    if const_expr(self.dbg & 8):
+                        a0_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
+                        lk_cols_u32(hsl, lane, a0_ + 8)
+                        lk_cols_u32(hcl, lane, a0_ + 16)
+                        lk_cols_f64(dsv, lane, a0_ + 24)
+                    if const_expr(self.dbg & 16):
+                        a1_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
+                        pdl = [abs_f32(mul_f32(pv[i], mul_f32(dpv[i], ca))) for i in range(32)]
+                        lk_cols_f64(dsv, lane, a1_)
+                        lk_cols_f64(pdl, lane, a1_ + 8)
+                    # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
+                    if warp < 4:
+                        bp = [Int32(0)] * 4
+                        bs = [Int32(0)] * 4
+                        for j in cutlass.range_constexpr(4):
+                            psj = Int32(0)
+                            if const_expr("xpt" in self.opts):
+                                psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
+                            else:
+                                psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
+                            dsc_ = Float32(0.0)
+                            qsc_ = Float32(0.0)
+                            if const_expr("meta" in self.opts):
+                                dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
+                                qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
+                            else:
+                                dsc_ = Float32(mdOs[b, h, ct * 4 + j])
+                                qsc_ = Float32(mQs[b, h, ct * 4 + j])
+                            bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
+                            bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
+                        dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
+                        dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
+                        cute.arch.fence_view_async_tmem_store()
+                    if const_expr("meta" in self.opts and not (self.kn == "meta" and self.unsafe)):
+                        mf.release()
+                    cute.arch.fence_view_async_shared()
+                    tc_fence_before()
+                    if const_expr(self.kn == "cd"):
+                        if const_expr(not self.unsafe):
+                            spin(self.DLY)
+                    if const_expr(not (self.kn == "cd" and self.unsafe)):
+                        self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)    # release.cluster on the leader's barrier
+                    if const_expr(self.dqc and self.kn == "cr" and self.unsafe):
+                        if t == 0:       # UNSAFE cr: carry restored after the t = 0 publication + a delay (the first dV / dK MMA runs first)
+                            spin(self.DLY)
+                            self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
             if const_expr(not (self.kn == "fin" and self.unsafe)):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))

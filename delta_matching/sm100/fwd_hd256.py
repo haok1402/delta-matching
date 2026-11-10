@@ -115,8 +115,11 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     if trace:
         key = key + ("trace",)
         n_m = N // 128
-        dbg = torch.zeros(n_m * H * B, n_m + 1, 32, device=q8.device, dtype=torch.int64)
-        TRACE["buf"] = dbg
+        dbg = TRACE.get("buf")
+        if dbg is None or is_fake_mode() or dbg.shape != (n_m * H * B, n_m + 1, 32) or dbg.device != q8.device:
+            dbg = torch.zeros(n_m * H * B, n_m + 1, 32, device=q8.device, dtype=torch.int64)   # reused (not re-zeroed) per call
+            if not is_fake_mode():
+                TRACE["buf"] = dbg
     cache = _cache()
     if key not in cache:
         if os.environ.get("DM_H256_NO_COMPILE", "0") == "1":

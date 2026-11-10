@@ -135,7 +135,9 @@ class DmHd256Kv2:
     #   q: Q/dO smem released before the S/dP MMAs; d: Qd/dOd released before dV/dK; s: S/dP TMEM released before the
     #   compute loads; cd: codes/SFA published before they are written; ex: exchange barrier dropped; ld: l2/delta single
     #   buffer; fin: epilogue reads dK/dV before the final commit.
-    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta")
+    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta", "dmk")
+    # dmk (fork hd256-kv3, sensitivity control of opt dmk, causal): UNSAFE = the peeled diagonal tile runs the UNMASKED copy (must
+    # corrupt dK / dV); _safe = shipped (masked) -> bitwise the default.
     DLY = 1 << 15
 
     # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e); meta: warp 10 stages l2/delta/qs/dos per
@@ -921,7 +923,7 @@ class DmHd256Kv2:
                     mf_d = None
                     if const_expr("meta" in self.opts):
                         mf_d = m_c.wait_and_advance()
-                    self._citer(cx, t_d, hi, c_lo, mf_d, True)
+                    self._citer(cx, t_d, hi, c_lo, mf_d, not (self.kn == "dmk" and self.unsafe))
                     for ci in cutlass.range(1, ncs, unroll=1):
                         mf_o = None
                         if const_expr("meta" in self.opts):

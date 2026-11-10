@@ -224,7 +224,8 @@ class DmHd256Mx:
         assert mode in ("dv", "dk", "dq")
         # ordf (fork hd256-ordinv, kda/hd256/ordinv-hd256.md sites BW1-BW3, BW9): the tcgen05 thread-sync fence pair on every
         # cross-thread TMEM hand-off that lacks it (PTX 9.7.18.6.4.4: [ld; wait::ld; fence::before; arrive] ->
-        # [wait; fence::after; tcgen05 op], and commit -> [wait; fence::after; tcgen05 op]). False = shipped code (PTX unchanged).
+        # [wait; fence::after; tcgen05 op], and commit -> [wait; fence::after; tcgen05 op]). Host default True (DM_HD256_ORDF);
+        # False = the pre-fix code (32e0ecd PTX), debug only.
         self.ordf = bool(ordf)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")

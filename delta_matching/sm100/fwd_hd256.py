@@ -93,9 +93,9 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     two = (not sfb) and os.environ.get("DM_HD256_MX_2WG", "1") != "0"   # C6 two softmax WGs by tile parity (default)
     key = ("fwd_hd256_mx", bool(causal), H // Hk, kv_stage, sfw) + ((pc,) if pc else ()) + (("c5",) if sfb else ()) \
         + (() if two else ("1wg",))
-    otd = os.environ.get("DM_HD256_ORDT", "0") == "1"           # hd256-ordinv FW15: teardown fence pair (opt-in; default = shipped)
-    if otd:
-        key = key + ("ordt",)
+    otd = os.environ.get("DM_HD256_ORDT", "1") != "0"           # hd256-ordinv FW15: teardown fence pair (DEFAULT; 0 = DEBUG pre-fix)
+    if not otd:
+        key = key + ("noordt",)
     cache = _cache()
     if key not in cache:
         if os.environ.get("DM_H256_NO_COMPILE", "0") == "1":

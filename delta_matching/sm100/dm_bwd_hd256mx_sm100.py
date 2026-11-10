@@ -515,13 +515,17 @@ class DmHd256Mx:
                                 id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dv_[i + q], ca[j]))))
                                 id3 = add_f32(id3, pv[q])
                     if const_expr((self.dbg & 2) and self.has_dp and not self.delta_only):
+                        qi0 = rtok
+                        ki0 = ctok0 + 32 * j
+                        stp = Int64(16)
+                        if const_expr(self.rows_are_keys):
+                            qi0 = ctok0 + 32 * j
+                            ki0 = rtok
+                            stp = Int64(N) * 16
+                        pa = _gaddr(mDump) + ((Int64(l) * N + qi0) * N + ki0) * 16 + 4
                         for i in cutlass.range_constexpr(32):     # raw dP_acc (its TMEM cols get the dS stash)
-                            qi = rtok
-                            ki = ctok0 + 32 * j + i
-                            if const_expr(self.rows_are_keys):
-                                qi = ctok0 + 32 * j + i
-                                ki = rtok
-                            st_global_f32(_gaddr(mDump) + ((Int64(l) * N + qi) * N + ki) * 16 + 4, dv_[i])
+                            st_global_f32(pa, dv_[i])
+                            pa = pa + stp
                     if const_expr(self.mode == "dv"):
                         # P^T codes of this (key, 32-query) block right away
                         am = Float32(0.0)
@@ -560,6 +564,11 @@ class DmHd256Mx:
                         if const_expr(self.has_dp and not self.delta_only):
                             dsj = tmem_ld32(stash + 32 * j)
                         cute.arch.fence_view_async_tmem_load()
+                        dstp = Int64(16)
+                        dpa = _gaddr(mDump) + ((Int64(l) * N + rtok) * N + ctok0 + 32 * j) * 16
+                        if const_expr(self.rows_are_keys):
+                            dstp = Int64(N) * 16
+                            dpa = _gaddr(mDump) + ((Int64(l) * N + ctok0 + 32 * j) * N + rtok) * 16
                         for i in cutlass.range_constexpr(0, 32, 2):
                             c0 = ctok0 + 32 * j + i
                             s0 = sv[i]
@@ -580,15 +589,10 @@ class DmHd256Mx:
                                 p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[j], l2r)
                             pp = [p0, p1]
                             for u in cutlass.range_constexpr(2):
-                                qi = rtok
-                                ki = c0 + u
-                                if const_expr(self.rows_are_keys):
-                                    qi = c0 + u
-                                    ki = rtok
-                                da = _gaddr(mDump) + ((Int64(l) * N + qi) * N + ki) * 16
-                                st_global_f32(da, sv[i + u])
-                                st_global_f32(da + 8, pp[u])
-                                st_global_f32(da + 12, dsj[i + u])
+                                st_global_f32(dpa, sv[i + u])
+                                st_global_f32(dpa + 8, pp[u])
+                                st_global_f32(dpa + 12, dsj[i + u])
+                                dpa = dpa + dstp
                     af.release()
                 if const_expr(self.delta_only):
                     pass
@@ -628,17 +632,18 @@ class DmHd256Mx:
                             mSB[l, rtok, ct * 4 + j] = sbs[j]
                     if const_expr(self.dbg & 2):
                         # codes dump from the own smem row (after all chunks are written)
-                        for v in cutlass.range_constexpr(8):
+                        stc = Int64(1)
+                        ca0 = _gaddr(mCodes) + (Int64(l) * N + rtok) * N + ctok0
+                        if const_expr(self.rows_are_keys):
+                            stc = Int64(N)
+                            ca0 = _gaddr(mCodes) + (Int64(l) * N + ctok0) * N + rtok
+                        for v in cutlass.range(8, unroll=1):
                             x4 = dm_utils_ld_shared_v4(crow + ((v ^ rsw) * 16))
+                            cp = ca0 + Int64(16 * v) * stc
                             for u in cutlass.range_constexpr(4):
                                 for q in cutlass.range_constexpr(4):
-                                    ctok = ctok0 + 16 * v + 4 * u + q
-                                    qi = rtok
-                                    ki = ctok
-                                    if const_expr(self.rows_are_keys):
-                                        qi = ctok
-                                        ki = rtok
-                                    st_global_u8(_gaddr(mCodes) + (Int64(l) * N + qi) * N + ki, x4[u] >> (8 * q))
+                                    st_global_u8(cp, x4[u] >> (8 * q))
+                                    cp = cp + stc
                     sfa = pack4(dm_utils.add_sb_clamp(sbs[0], osb[0]), dm_utils.add_sb_clamp(sbs[1], osb[1]),
                                 dm_utils.add_sb_clamp(sbs[2], osb[2]), dm_utils.add_sb_clamp(sbs[3], osb[3]))
                     # SFA (M=128): row r at lane r, column COL_SFA + r // 32 (findings 2026-11-08 mx_ts_mma.cu);

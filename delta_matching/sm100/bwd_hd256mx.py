@@ -82,7 +82,7 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     (dq "2", dv / dk "1")."""
     if impl is None:
         impl = _env("DM_H256_BWD_IMPL", "")
-        impl = IMPL_DEFAULT if impl == "" else impl
+        impl = (IMPL_DEFAULT if not knob else "1") if impl == "" else impl   # knobs are per class: one impl for all modes
     impls = dict(impl) if isinstance(impl, dict) else {m: str(impl) for m in ("dv", "dk", "dq")}
     assert all(v in ("1", "2") for v in impls.values()), impls
     B, N, H, Dq = q8.shape

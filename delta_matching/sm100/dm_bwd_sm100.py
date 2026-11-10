@@ -751,10 +751,10 @@ class DMBackwardSm100:
         # Planted controls (DEBUG): xd:<roles c d q r> drop CTA 1's 6th signal of that role (bounded leader wait -> trap);
         # xp:d4 / xp:d5 / xp:r = CTA 1 publishes zero dS codes (TMEM, dP empty) / zero own sdS half (dS full) / forwards the relay
         # BEFORE its copy landed, then writes the real data ~2 us after the signal.
-        self.dm_rasy = (6 if "rasyagg" in _xm else 5) if (self.dm_xscope and "rasy" in _xm) else 0
+        self.dm_rasy = (6 if "rasyagg" in _xm else 7 if "rasyc" in _xm else 5) if (self.dm_xscope and "rasy" in _xm) else 0
         self.dm_xd = next((x[3:] for x in self.dm_opts if x.startswith("xd:")), "") if self.dm_rasy else ""
         self.dm_xp = next((x[3:] for x in self.dm_opts if x.startswith("xp:")), "") if self.dm_rasy else ""
-        self.dm_rasy_slots = (0 if not self.dm_rasy else 1 if self.dm_rasy == 5 else 68)
+        self.dm_rasy_slots = (0 if not self.dm_rasy else 68 if self.dm_rasy == 6 else 1)
         if self.dm_rasy:
             self.dm_xs_arrive, self.dm_xs_wait = self.dm_rasy, (3 if (self.dm_xd or self.dm_xp == "r") else 2)   # bounded (trap) leader waits under a control that can stall
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)

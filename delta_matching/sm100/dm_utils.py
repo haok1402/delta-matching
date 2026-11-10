@@ -1095,7 +1095,7 @@ DROPS = "@p atom.relaxed.cta.shared::cta.add.u32 dc, [dk], 1;\n\t@p setp.ne.u32 
 
 
 @dsl_user_op
-def mbar_arrive_rasy(mbar: Int32, rank: Int32, dummy: Int32, drop: bool = False, *, loc=None, ip=None):
+def mbar_arrive_rasy(mbar: Int32, rank: Int32, dummy: Int32, drop: bool = False, cta_arm: bool = False, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(rank).ir_value(loc=loc, ip=ip),
                            Int32(dummy).ir_value(loc=loc, ip=ip)],
                     "{\n\t.reg .b32 rm, rd, me, dk, dc;\n\t.reg .pred p, p2, nd;\n\t"
@@ -1107,9 +1107,11 @@ def mbar_arrive_rasy(mbar: Int32, rank: Int32, dummy: Int32, drop: bool = False,
                     "setp.eq.u32 nd, me, me;\n\t" + (DROPS if drop else "") +
                     "and.pred p2, p, nd;\n\t"
                     "@p2 red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 [rd], 1, [rm];\n\t"
-                    "@!p fence.acq_rel.cta;\n\t"
-                    "@!p mbarrier.expect_tx.relaxed.cluster.shared::cta.b64 [$0], 4;\n\t"
-                    "@!p mbarrier.arrive.relaxed.cluster.shared::cta.b64 _, [$0], 2;\n\t}",
+                    + ("@!p mbarrier.expect_tx.relaxed.cta.shared::cta.b64 [$0], 4;\n\t"
+                       "@!p mbarrier.arrive.release.cta.shared::cta.b64 _, [$0], 2;\n\t}" if cta_arm else
+                       "@!p fence.acq_rel.cta;\n\t"
+                       "@!p mbarrier.expect_tx.relaxed.cluster.shared::cta.b64 [$0], 4;\n\t"
+                       "@!p mbarrier.arrive.relaxed.cluster.shared::cta.b64 _, [$0], 2;\n\t}"),
                     "r,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
@@ -1170,8 +1172,11 @@ def _xs_install():
                 # cluster scope only when the target barrier lives in the OTHER CTA
                 return mbar_arrive_rank_xs(Int32(mbar_ptr.toint()), Int32(peer_cta_rank_in_cluster),
                                            loc=kw.get("loc"), ip=kw.get("ip"))
-            if (XS[0] in (5, 6) and peer_cta_rank_in_cluster is not None and kw.get("scope") is None and not a
+            if (XS[0] in (5, 6, 7) and peer_cta_rank_in_cluster is not None and kw.get("scope") is None and not a
                     and kw.get("arrive_count", 1) == 1 and not kw.get("relaxed", False)):
+                if XS[0] == 7:   # xs:rasyc (MEASUREMENT): CTA 0 arms with expect_tx.relaxed.cta + arrive.release.cta (no fence.acq_rel.cta)
+                    return mbar_arrive_rasy(Int32(mbar_ptr.toint()), Int32(peer_cta_rank_in_cluster), XS_DUMMY[0], bool(XS_DROP[0]), True,
+                                            loc=kw.get("loc"), ip=kw.get("ip"))
                 fn = mbar_arrive_rasy if XS[0] == 5 else mbar_arrive_rasyagg
                 return fn(Int32(mbar_ptr.toint()), Int32(peer_cta_rank_in_cluster), XS_DUMMY[0], bool(XS_DROP[0]),
                           loc=kw.get("loc"), ip=kw.get("ip"))

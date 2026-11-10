@@ -340,9 +340,8 @@ class DmHd256Kv2:
             cout = ld_global_s32(dsc + 12)
             nfirst = cin
             if const_expr(self.causal):
-                c_lo = kt if kt > q0 else q0
-                if kt < q0:
-                    nfirst = Int32(1)
+                c_lo = cutlass.max(kt, q0)
+                nfirst = cutlass.max(cin, Int32(cutlass.select_(kt < q0, Int32(1), Int32(0))))
             tilesb = Int64((n_t * (n_t + 1) - q0 * (q0 + 1)) // 2)
         ncs = n_t - c_lo
         total = rep * ncs

@@ -108,7 +108,6 @@ def _u8(t):
 
 
 TILE_CFG = {128: (2, 1, 0), 256: (4, 1, 1)}   # Tile: (warps per 32-row tile, tiles per CTA, re-convert rows per pass)
-PRODA_NW = {128: 8, 256: 4}             # warps per ProdA CTA (warp pairs: one tile each / one K-mean chunk stream each)
 
 
 def _tile_fn(D, x, o, has_mean, has_pre, w_off, delta, mean_t=None, wb_t=None):
@@ -229,23 +228,38 @@ def quant_qkv(q, k, v, sm: float, mean: torch.Tensor | None = None):
     return q8, qs, k8, ks, v8, vs, kvw, mean
 
 
-def _prod_fns(q, k, v):
-    import cutlass
-    D = q.shape[-1]
-    Hk = k.shape[2]
+PRODA_NW = {256: 4}      # D=256: warp-pair ProdA (one tile / one K-mean chunk stream per pair); D=128: chunked ProdAC
+_CNT = {}
+
+
+def _prod_fn(q, k, v):
+    """The Q/V/K-mean kernel for these inputs (D=128: ProdAC, chunk CTAs; D=256: ProdA, 4 warps), both with the head-level
+    mean fold (the K tiles then only quantize)."""
+    D, Hk = q.shape[-1], k.shape[2]
     vq, vk, vv, kal = _vec(q), _vec(k), _vec(v), _tri_aligned(k, Hk)
+    if D == 128:
+        return _get(("prod_ac", D, vq, vk, vv, kal, True), lambda: qc.ProdAC(D, vq, vk, vv, kal, True),
+                    [("l",)] * 12 + [("i",)] * 13 + [("f",), ("i",)])
     nw = PRODA_NW[D]
-    fa = _get(("prod_a", D, vq, vk, vv, kal, nw), lambda: qc.ProdA(D, vq, vk, vv, kal, nw),
-              [("l",)] * 3 + [("l",)] + [("l",)] * 5 + [("i",)] * 13 + [("f",), ("i",)])
-    fb = _get(("prod_b", D, vk), lambda: qc.ProdB(D, vk),
-              [("l",), ("l",)] + [("l",)] * 4 + [("i",)] * 7)
-    return fa, fb
+    return _get(("prod_a", D, vq, vk, vv, kal, nw, True), lambda: qc.ProdA(D, vq, vk, vv, kal, nw, True),
+                [("l",)] * 11 + [("i",)] * 13 + [("f",), ("i",)])
+
+
+def _counters(q, st, n):
+    """Per-(device, stream) int32 counters, zero at rest: every counter is reset by the CTA that completes it."""
+    ck = (q.get_device(), st, n)
+    cnt = _CNT.get(ck)
+    if cnt is None:
+        cnt = _CNT[ck] = torch.zeros(n, device=q.device, dtype=torch.int32)
+    return cnt
 
 
 def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: int = 2, tr: int = 32):
     """Two-launch fused producer.  Returns (q8, qs, k8, ks, v8, vs, kvw, mean); kvw (B, Hk, N/64) int32 packed UE8M0
     words ([2t] K bytes of 128-key tile t, [2t+1] V bytes).  The K mean is (sequential sum of ROWS-row fp32 partial
-    sums, each a sum of 64-row chunk sums) / N.  Bitwise = quant_rows(...) with that mean."""
+    sums, each a sum of 64-row chunk sums) / N (div.full).  Bitwise = Triton's _prod_a / _prod_b (kda/docs/cutequant-design.md).
+    Launch 1: Q / V tiles + K-mean (chunks or partials; the CTA completing a partial folds its chunks in chunk order, the
+    CTA completing a head's last partial folds the partials in order and writes the mean).  Launch 2: K tiles."""
     B, N, H, D = q.shape
     Hk = k.shape[2]
     sq, sk, sv = q.stride(), k.stride(), v.stride()
@@ -259,10 +273,11 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: 
         ROWS = rows
         while N % ROWS:
             ROWS //= 2
-        assert ROWS % 64 == 0 and ROWS <= 1024, "64-row chunks, <= 16 per partial (ProdA chunk buffer)"
-        e = _FAST[key] = (*_prod_fns(q, k, v), ROWS, N // ROWS)
-    fa, fb, ROWS, S = e
+        assert ROWS % 64 == 0 and ROWS <= 1024, "64-row chunks, <= 16 per partial"
+        e = _FAST[key] = (_prod_fn(q, k, v), ROWS, N // ROWS)
+    fa, ROWS, S = e
     dev = q.device
+    st = _stream(q)
     e4 = torch.float8_e4m3fn
     q8 = torch.empty(B, N, H, D, device=dev, dtype=e4)
     k8 = torch.empty(B, N, Hk, D, device=dev, dtype=e4)
@@ -273,11 +288,17 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: 
     kvw = torch.empty(B, Hk, N // 64, device=dev, dtype=torch.int32)
     part = torch.empty(B * Hk, S, D, device=dev, dtype=torch.float32)
     mean = torch.empty(B, Hk, D, device=dev, dtype=torch.float32)
-    wbp = kvw.data_ptr()
-    st = _stream(q)
-    fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), wbp, part.data_ptr(), N, H, Hk, B,
-       sq[0], sq[1], sq[2], sk[0], sk[1], sk[2], sv[0], sv[1], sv[2], float(sm), ROWS, st)
-    fb(kp, k8.data_ptr(), ks.data_ptr(), wbp, part.data_ptr(), mean.data_ptr(), N, Hk, B, sk[0], sk[1], sk[2], ROWS, st)
+    args = (N, H, Hk, B, sq[0], sq[1], sq[2], sk[0], sk[1], sk[2], sv[0], sv[1], sv[2], float(sm), ROWS, st)
+    if D == 128:
+        chunks = torch.empty(B * Hk * S * (ROWS // 64), D, device=dev, dtype=torch.float32)
+        cnt = _counters(q, st, B * Hk * S + B * Hk)
+        fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(), part.data_ptr(),
+           chunks.data_ptr(), cnt.data_ptr(), mean.data_ptr(), *args)
+    else:
+        cnt = _counters(q, st, B * Hk)
+        fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(), part.data_ptr(),
+           cnt.data_ptr(), mean.data_ptr(), *args)
+    _tile(k, mean=mean, y=k8, s=ks, wb=kvw, w_off=0)      # K tiles from the final mean (= _prod_b's quantization)
     return q8, qs, k8, ks, v8, vs, kvw, mean
 
 

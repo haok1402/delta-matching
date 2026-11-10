@@ -15,7 +15,7 @@ from cutlass._mlir.dialects import llvm
 import cuda.bindings.driver as cuda
 
 NT = 64            # threads per CTA of ProdA (= Triton num_warps 2: its K-mean tree is defined on 2 warps)
-NT4 = 128          # Tile / ProdB: 4 warps on the same 32-row tile (half the rows per thread -> half the live registers;
+NT4 = 128          # Tile at D=256: 4 warps on the same 32-row tile (half the rows per thread -> half the live registers;
                    # codes / scales / bytes are order-free, each row's delta tree stays within one warp's lanes)
 TR = 32            # rows per quant tile (one E8M0 block)
 
@@ -455,26 +455,29 @@ def warps2(ws):
 
 # ---------------------------------------------------------------------------------------------------------------- kernels
 class ProdA:
-    """= _prod_a_kernel: 1-D grid [K-mean partials (ROWS rows) | Q tiles | V tiles], 64 threads."""
+    """= _prod_a_kernel (used at D=256): 1-D grid [K-mean partials (ROWS rows) | Q tile groups | V tile groups]; CTA = nw/2
+    warp pairs (tile roles: one 32-row tile per pair; partial role: one 64-row chunk stream per pair, chunk totals folded
+    in chunk order by pair 0).  headfold: the CTA completing a head's last partial also writes the mean."""
 
-    def __init__(self, D, vq, vk, vv, kal, nw=4):
+    def __init__(self, D, vq, vk, vv, kal, nw=4, headfold=False):
+        self.headfold = headfold
         assert D in (128, 256) and nw in (2, 4, 8)
         self.D, self.vq, self.vk, self.vv, self.kal, self.nw = D, vq, vk, vv, kal, nw
 
     @cute.jit
     def __call__(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64,
-                 mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64,
+                 mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64, mCnt: Int64, mM: Int64,
                  N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32, sqh: Int32, skb: Int32, skn: Int32,
                  skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32, ROWS: Int32, stream: cuda.CUstream):
         ntl = N // TR
         P = self.nw // 2
         total = (B * H * ntl) // P + (B * Hk * ntl) // P + B * Hk * (N // ROWS)
-        self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh, svb, svn, svh,
+        self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, mCnt, mM, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh, svb, svn, svh,
                     sm, ROWS).launch(grid=[total, 1, 1], block=[32 * self.nw, 1, 1], stream=stream)
 
     @cute.kernel
     def kernel(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64,
-               mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64,
+               mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64, mCnt: Int64, mM: Int64,
                N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32, sqh: Int32, skb: Int32, skn: Int32,
                skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32, ROWS: Int32):
         # CTA = P = nw/2 warp pairs.  Tile roles: each pair quantizes its own 32-row tile (per-thread work = the 2-warp
@@ -545,6 +548,19 @@ class ProdA:
                 ok = pub * Int32(pp == 0)
                 st_v4f_if(pa, acc[0], acc[1], acc[2], acc[3], ok)
                 st_v4f_if(pa + Int64(16), acc[4], acc[5], acc[6], acc[7], ok)
+                if const_expr(self.headfold):
+                    # the CTA completing head bh's last partial folds the mean (R2 order, div.full); counters zero at rest
+                    fence_gpu()
+                    bar_sync()
+                    if tid == 0:
+                        old2 = atom_add_gpu(mCnt + Int64(bh) * 4, Int32(1))
+                        sts_i32(cbuf, old2, Int32(1))
+                    bar_sync()
+                    if lds_i32(cbuf) == S - 1:
+                        fence_gpu()
+                        if tid < 64:
+                            fold_head(mP, mM, bh, S, D, tid, N)
+                        st_b32_if(mCnt + Int64(bh) * 4, Int32(0), Int32(tid == 0))
             else:
                 cg = ChunkGeo(D, 2, 64, tid, self.kal)
                 acc = cute.make_rmem_tensor(8, Float32)
@@ -565,69 +581,6 @@ def pair_bar(pp, P):
     if P == 1:
         return bar_sync
     return lambda: bar_named(Int32(1) + pp, 64)
-
-
-class ProdB:
-    """= _prod_b_kernel: grid (N/32, B*Hk): mu = div.full(sequential sum of the S partials, N); K tile codes."""
-
-    def __init__(self, D, vk):
-        assert D in (128, 256)
-        self.D, self.vk = D, vk
-
-    @cute.jit
-    def __call__(self, mK: Int64, mK8: Int64, mKS: Int64, mWB: Int64, mP: Int64,
-                 mM: Int64, N: Int32, Hk: Int32, B: Int32, skb: Int32, skn: Int32, skh: Int32, ROWS: Int32,
-                 stream: cuda.CUstream):
-        self.kernel(mK, mK8, mKS, mWB, mP, mM, N, Hk, skb, skn, skh, ROWS).launch(
-            grid=[N // TR, B * Hk, 1], block=[NT4, 1, 1], stream=stream)
-
-    @cute.kernel
-    def kernel(self, mK: Int64, mK8: Int64, mKS: Int64, mWB: Int64, mP: Int64,
-               mM: Int64, N: Int32, Hk: Int32, skb: Int32, skn: Int32, skh: Int32, ROWS: Int32):
-        D = self.D
-        tid, _, _ = cute.arch.thread_idx()
-        pid_n, bh, _ = cute.arch.block_idx()
-        red = smem_base(4 * 4)
-        mus = smem_base(D * 4)
-        S = N // ROWS
-        nf = i2f(N)
-        pbase = mP + (Int64(bh) * Int64(S) * Int64(D) + Int64(tid)) * 4
-        # R2: acc(+0) + P[0] + P[1] + ... sequentially per column; the loads are batched (FOLD per step, all columns of
-        # this thread) so they are in flight together - the add order is unchanged
-        acc = cute.make_rmem_tensor(D // NT4, Float32)
-        for jj in cutlass.range_constexpr(D // NT4):
-            acc[jj] = Float32(0.0)
-        for sg in cutlass.range(S // FOLD, unroll=1):
-            v = fold_loads(pbase, sg * FOLD, FOLD, D)
-            for i in cutlass.range_constexpr(FOLD):
-                for jj in cutlass.range_constexpr(D // NT4):
-                    acc[jj] = fadd(acc[jj], v[i][jj])
-        for s in cutlass.range(S - (S // FOLD) * FOLD, unroll=1):
-            v = fold_loads(pbase, (S // FOLD) * FOLD + s, 1, D)
-            for jj in cutlass.range_constexpr(D // NT4):
-                acc[jj] = fadd(acc[jj], v[0][jj])
-        for jj in cutlass.range_constexpr(D // NT4):
-            c = tid + jj * NT4
-            mu = fdivfull(acc[jj], nf)
-            sts_f32_if(mus + c * 4, mu, Int32(1))
-            st_f32_if(mM + (Int64(bh) * Int64(D) + Int64(c)) * 4, mu, Int32(pid_n == 0))
-        bar_sync()
-        g = TileGeo(D, tid, 4)
-        b = bh // Hk
-        h = bh % Hk
-        row0 = pid_n * TR
-        raw = load_tile_raw(g, mK, b, h, row0, skb, skn, skh, self.vk)
-        mu16 = [lds_f32(mus + (g.c0 + j) * 4) for j in range(16)]
-        quant_tile(g, row_fn(raw, self.vk, mu16), red, N, h, Hk, bh, row0, mK8, mKS, mWB,
-                   0, b)
-
-
-FOLD = 8
-
-
-def fold_loads(pbase, s0, n, D):
-    """PART rows s0 .. s0+n-1 of this thread's columns (tid + 128 j): n x (D/64) independent fp32 loads."""
-    return [[ld_f32(pbase + (Int64(s0 + i) * Int64(D) + Int64(jj * NT4)) * 4) for jj in range(D // NT4)] for i in range(n)]
 
 
 class Tile:
@@ -768,3 +721,170 @@ def kmp_u_colsum(mK, b, h, row0, sb, sn, sh, tid, D):
 def warps4_01_23(ws):
     """UNALIGNED (contiguous row groups): T32 = (T8(w0) + T8(w1)) + (T8(w2) + T8(w3))."""
     return fadd(fadd(ws[0], ws[1]), fadd(ws[2], ws[3]))
+
+
+# ------------------------------------------------------------------------------------------- ProdA, chunked K mean (dev)
+@dsl_user_op
+def fence_gpu(*, loc=None, ip=None):
+    _asm(None, [], "fence.acq_rel.gpu;", "", side=True, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def atom_add_gpu(addr: Int64, v: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [_v(addr, Int64, loc, ip), _v(v, Int32, loc, ip)],
+                      "atom.add.acq_rel.gpu.global.s32 $0, [$1], $2;", "=r,l,r", side=True, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def ld_cg_f32(addr: Int64, *, loc=None, ip=None) -> Float32:
+    return Float32(_asm(T.f32(), [_v(addr, Int64, loc, ip)], "ld.global.cg.f32 $0, [$1];", "=f,l", side=True,
+                        loc=loc, ip=ip))
+
+
+@dsl_user_op
+def sts_i32(addr: Int32, v: Int32, pred: Int32, *, loc=None, ip=None):
+    _asm(None, [_v(addr, Int32, loc, ip), _v(v, Int32, loc, ip), _v(pred, Int32, loc, ip)],
+         "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\t@p st.shared.b32 [$0], $1;\n\t}", "r,r,r", side=True,
+         loc=loc, ip=ip)
+
+
+@dsl_user_op
+def lds_i32(addr: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [_v(addr, Int32, loc, ip)], "ld.shared.b32 $0, [$1];", "=r,r", side=True, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def st_b32_if(addr: Int64, w: Int32, pred: Int32, *, loc=None, ip=None):
+    _asm(None, [_v(addr, Int64, loc, ip), _v(w, Int32, loc, ip), _v(pred, Int32, loc, ip)],
+         "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $2, 0;\n\t@p st.global.b32 [$0], $1;\n\t}", "l,r,r", side=True,
+         loc=loc, ip=ip)
+
+
+class ProdAC:
+    """= _prod_a_kernel with every CTA a 2-warp unit (Triton's CTA shape): 1-D grid [K-mean CHUNKS | Q tiles | V tiles].
+    A chunk CTA reduces one 64-row chunk of one partial with the exact 2-warp tree (R1), stores the chunk total, and
+    counts in (fence + atomic); the CTA that completes a partial folds its NCH chunk totals in CHUNK ORDER,
+    acc = ((0 + c0) + c1) + ... = Triton's sequential loop, independent of arrival order, and resets the counter."""
+
+    def __init__(self, D, vq, vk, vv, kal, headfold=False):
+        """headfold: the CTA completing a head's last partial also folds the S partials (R2 order) and writes the mean
+        (div.full by N) - ProdB then only quantizes."""
+        assert D in (128, 256)
+        self.D, self.vq, self.vk, self.vv, self.kal, self.headfold = D, vq, vk, vv, kal, headfold
+
+    @cute.jit
+    def __call__(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64, mQS: Int64, mVS: Int64, mWB: Int64,
+                 mP: Int64, mC: Int64, mCnt: Int64, mM: Int64, N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32,
+                 sqh: Int32, skb: Int32, skn: Int32, skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32,
+                 ROWS: Int32, stream: cuda.CUstream):
+        ntl = N // TR
+        total = B * H * ntl + B * Hk * ntl + B * Hk * (N // ROWS) * (ROWS // 64)
+        self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, mC, mCnt, mM, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh,
+                    svb, svn, svh, sm, ROWS).launch(grid=[total, 1, 1], block=[64, 1, 1], stream=stream)
+
+    @cute.kernel
+    def kernel(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64, mQS: Int64, mVS: Int64, mWB: Int64,
+               mP: Int64, mC: Int64, mCnt: Int64, mM: Int64, N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32,
+               sqh: Int32, skb: Int32, skn: Int32, skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32,
+               ROWS: Int32):
+        D = self.D
+        tid, _, _ = cute.arch.thread_idx()
+        bid, _, _ = cute.arch.block_idx()
+        red = smem_base(2 * D * 4)
+        flag = smem_base(16)
+        ntl = N // TR
+        nq = B * H * ntl
+        nv = B * Hk * ntl
+        S = N // ROWS
+        NCH = ROWS // 64
+        nck = B * Hk * S * NCH
+        pid = bid - nck
+        if bid < nck:
+            pid = pid + nq + nv + nck
+        if pid < nq:
+            g = TileGeo(D, tid, 2)
+            bh = pid // ntl
+            b = bh // H
+            h = bh % H
+            row0 = (pid % ntl) * TR
+            raw = load_tile_raw(g, mQ, b, h, row0, sqb, sqn, sqh, self.vq)
+            quant_tile(g, row_fn(raw, self.vq, None, sm), red, N, h, H, bh, row0, mQ8, mQS, None, None, b)
+        elif pid < nq + nv:
+            g = TileGeo(D, tid, 2)
+            p = pid - nq
+            bh = p // ntl
+            b = bh // Hk
+            h = bh % Hk
+            row0 = (p % ntl) * TR
+            raw = load_tile_raw(g, mV, b, h, row0, svb, svn, svh, self.vv)
+            quant_tile(g, row_fn(raw, self.vv), red, N, h, Hk, bh, row0, mV8, mVS, mWB, 1, b)
+        else:
+            cid = pid - nq - nv
+            part = cid // NCH
+            c = cid % NCH
+            bh = part // S
+            s = part % S
+            b = bh // Hk
+            h = bh % Hk
+            cg = ChunkGeo(D, 2, 64, tid, self.kal)
+            tot = chunk_colsum(cg, mK, b, h, s * ROWS + c * 64, skb, skn, skh, self.vk, red, warps2)
+            ca = mC + ((Int64(part) * Int64(NCH) + Int64(c)) * Int64(D) + Int64(cg.c0)) * 4
+            pub = Int32(cg.w == 0) * Int32(cg.l0 == 0)
+            st_v4f_if(ca, tot[0], tot[1], tot[2], tot[3], pub)
+            st_v4f_if(ca + Int64(16), tot[4], tot[5], tot[6], tot[7], pub)
+            fence_gpu()
+            bar_sync()
+            if tid == 0:
+                old = atom_add_gpu(mCnt + Int64(part) * 4, Int32(1))
+                sts_i32(flag, old, Int32(1))
+            bar_sync()
+            if lds_i32(flag) == NCH - 1:
+                fence_gpu()
+                fold_partial(mC, mP, part, NCH, D, tid)
+                st_b32_if(mCnt + Int64(part) * 4, Int32(0), Int32(tid == 0))
+                if const_expr(self.headfold):
+                    # second level: counters [B*Hk*S + bh] count completed partials of head bh
+                    fence_gpu()
+                    bar_sync()
+                    if tid == 0:
+                        old2 = atom_add_gpu(mCnt + (Int64(B) * Int64(Hk) * Int64(S) + Int64(bh)) * 4, Int32(1))
+                        sts_i32(flag + 4, old2, Int32(1))
+                    bar_sync()
+                    if lds_i32(flag + 4) == S - 1:
+                        fence_gpu()
+                        fold_head(mP, mM, bh, S, D, tid, N)
+                        st_b32_if(mCnt + (Int64(B) * Int64(Hk) * Int64(S) + Int64(bh)) * 4, Int32(0), Int32(tid == 0))
+
+
+@cute.jit
+def fold_head(mP: Int64, mM: Int64, bh: Int32, S: Int32, D: cutlass.Constexpr, tid: Int32, N: Int32):
+    """mean[bh] = div.full((0 + P[bh,0]) + P[bh,1] + ..., N)  (R2 order; PART rows of other CTAs read through L2)."""
+    acc = cute.make_rmem_tensor(D // 64, Float32)
+    for j in cutlass.range_constexpr(D // 64):
+        acc[j] = Float32(0.0)
+    base = mP + (Int64(bh) * Int64(S) * Int64(D) + Int64(tid)) * 4
+    for sg in cutlass.range(S // 8, unroll=1):
+        v = [[ld_cg_f32(base + ((Int64(sg) * 8 + Int64(i)) * Int64(D) + Int64(64 * j)) * 4) for j in range(D // 64)]
+             for i in range(8)]
+        for i in cutlass.range_constexpr(8):
+            for j in cutlass.range_constexpr(D // 64):
+                acc[j] = fadd(acc[j], v[i][j])
+    for s in cutlass.range(S - (S // 8) * 8, unroll=1):
+        for j in cutlass.range_constexpr(D // 64):
+            acc[j] = fadd(acc[j], ld_cg_f32(base + ((Int64(S // 8) * 8 + Int64(s)) * Int64(D) + Int64(64 * j)) * 4))
+    nf = i2f(N)
+    for j in cutlass.range_constexpr(D // 64):
+        st_f32_if(mM + (Int64(bh) * Int64(D) + Int64(tid + 64 * j)) * 4, fdivfull(acc[j], nf), Int32(1))
+
+
+@cute.jit
+def fold_partial(mC: Int64, mP: Int64, part: Int32, NCH: Int32, D: cutlass.Constexpr, tid: Int32):
+    acc = cute.make_rmem_tensor(D // 64, Float32)
+    for j in cutlass.range_constexpr(D // 64):
+        acc[j] = Float32(0.0)
+    base = mC + (Int64(part) * Int64(NCH) * Int64(D) + Int64(tid)) * 4
+    for cc in cutlass.range(NCH, unroll=1):
+        for j in cutlass.range_constexpr(D // 64):
+            acc[j] = fadd(acc[j], ld_cg_f32(base + (Int64(cc) * Int64(D) + Int64(64 * j)) * 4))
+    for j in cutlass.range_constexpr(D // 64):
+        st_f32_if(mP + (Int64(part) * Int64(D) + Int64(tid + 64 * j)) * 4, acc[j], Int32(1))

@@ -406,7 +406,12 @@ class DMFwdHd256MxSm100:
         for i in cutlass.range(cnt - 1, unroll=1):
             j = i + 1
             slot = j & 1
-            # slot j&1 last held S(j-2) / SF(j-2): PV(j-2) was issued before (in-order tcgen05 pipe), S(j-2) was read
+            # slot j&1 holds SF(j-2), read by PV(j-2): PTX does not order PV(j-2) (mxf8f6f4, acc O) before QK(j) (f8f6f4,
+            # acc S) by issue order (Codex fwd-01 / PTX 9.7.16.6) -> wait PV(j-2)'s completion. Phase-safe: PV(j-3) is complete
+            # (PV(j-2) waited O_ready(j-2), arrived after O_full(PV(j-3))) and PV(j-1) is not issued yet.
+            if i >= 1:
+                dm_utils.mbar_wait_parity(mbar + 32, (j - 2) & 1)
+                dm_utils.tc_fence_after()
             pipeline_kv.consumer_wait(kv_state)
             self.mma_qk(atom_qk, acc_qk, tSrQ, tSrK, kv_state.index, slot)
             with cute.arch.elect_one():
@@ -505,7 +510,9 @@ class DMFwdHd256MxSm100:
         dm_mcand = dm_utils.ceil_f32(dm_xmax)
         acc_scale = Float32(1.0)
         row_max = dm_mcand
-        if const_expr(not is_first):
+        if const_expr(is_first):
+            acc_scale = Float32(0.0)          # hd128 literal (unused: the first tile has no correction)
+        else:
             row_max = m_old
             if dm_mcand > m_old + Float32(self.rescale_T):
                 row_max = dm_mcand
@@ -570,7 +577,7 @@ class DMFwdHd256MxSm100:
             acc_scale = ld_shared_f32(stats + 4 * (slot * 128 + tidx))
             dm_utils.mbar_wait_parity(mbar + 32, (j - 1) & 1)                       # O_full(PV(j-1))
             dm_utils.tc_fence_after()
-            if cute.arch.vote_ballot_sync(acc_scale != Float32(1.0)) != 0:
+            if cute.arch.vote_ballot_sync(acc_scale < Float32(1.0)) != 0:      # hd128 predicate
                 for c in cutlass.range_constexpr(8):
                     o = list(tmem_ld32(obase + 32 * c))
                     tmem_wait_ld()

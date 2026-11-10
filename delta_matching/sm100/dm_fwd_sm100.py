@@ -1669,6 +1669,7 @@ class DMForwardSm100:
                     thr_mma_qk, thr_mma_pv, tStS, tOtO, mO, mLSE, sO, pipeline_s_p_o, pipeline_o_acc, pipeline_o_epi,
                     pipeline_load_epi, descale_tensors, gmem_tiled_copy_O, block_info, num_splits, SeqlenInfoCls,
                     tile_scheduler=tile_scheduler,
+                    aux_tensors_q=aux_data.tensors if const_expr(self.dm_opts.get("qq8", "0") == "1") else None,
                 )
                 tmem_alloc_barrier.arrive_unaligned()
             else:
@@ -3233,6 +3234,7 @@ class DMForwardSm100:
         num_splits: Int32,
         SeqlenInfoCls: Callable,
         tile_scheduler=None,
+        aux_tensors_q=None,
     ):
         tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * len(self.correction_warp_ids))
         mma_tile_coord_v = thr_mma_qk.thr_idx
@@ -3266,6 +3268,11 @@ class DMForwardSm100:
             stats = [(0.0, -Float32.inf if const_expr(mLSE is not None) else None, True)] * self.q_stage
             total_block_count = n_block_max - n_block_min
             has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
+            if const_expr(self.dm_opts.get("qq8", "0") == "1"):
+                # rw8k 2c (cost check): see correction_loop
+                for qq_stage in cutlass.range_constexpr(self.q_stage):
+                    self._qq8_quant(aux_tensors_q, cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4, cute.arch.lane_idx(),
+                                    self._q_block(work_m, qq_stage), head_idx, batch_idx, seqlen)
             if has_work:
                 cnt[1] = Int32(descale_tensors.k_descale[batch_idx, kv_head_idx, 2 * cutlass.max(n_block_max - 1, 0) + 1])
                 # one step even when the range is empty (seqlen_k == 0): slices and MMA always run the first step (Codex r3 #1)

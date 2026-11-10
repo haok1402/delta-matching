@@ -14,6 +14,20 @@ from .quant_hd256 import quant_do_mx256
 from .quant import quant_do_delta
 from .pass0_hd256 import dm_delta_hd256
 from .bwd_hd256mx import dm_bwd_hd256mx
+from .bwd_hd256kv2 import dm_bwd_hd256kv2, kv2_launch
+from .fastpath import env as _env
+
+BWD_IMPL_DEFAULT = "mx"     # host impl switch (DM_H256_BWD_IMPL): "mx" = DmHd256Mx dv+dk+dq, "kv2" = DmHd256Mx dq + DmHd256Kv2
+
+
+def _bwd_impl():
+    v = _env("DM_H256_BWD_IMPL", BWD_IMPL_DEFAULT)
+    assert v in ("mx", "kv2"), v
+    return v
+
+
+def _bwd(*a, **k):
+    return (dm_bwd_hd256kv2 if _bwd_impl() == "kv2" else dm_bwd_hd256mx)(*a, **k)
 
 D = 256
 
@@ -46,7 +60,7 @@ class _DMAttnHd256Sm100(torch.autograd.Function):
     def backward(ctx, do):
         q8, qs, k8, ks, v8, vs, o, lse = ctx.saved_tensors
         do8, dos, delta = _delta_hd256(q8, qs, k8, ks, v8, vs, lse, o, do.contiguous(), ctx.mode, ctx.causal)
-        dq, dk, dv = dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal)
+        dq, dk, dv = _bwd(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal)
         return dq, dk, dv, None, None, None
 
 
@@ -88,4 +102,9 @@ def dm_attn_debug_hd256(q, k, v, do, causal=True, mode="matched", identity=None,
             out[f"lockstep_{m}_kernel"] = dict(P_hash=hsh[..., 0].contiguous(), dS_hash=hsh[..., 1].contiguous(),
                                                 code_sf_hash=hsh[..., 2].contiguous(),
                                                 rowsum_dS=hsh[..., 3].view(torch.float64).contiguous())
+        # KV2 (fused dK/dV kernel, DM_H256_BWD_IMPL=kv2): P / dS / code|SF hashes from the one KV2 kernel (keys on rows)
+        hk = kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dbg=8)[2]["hash"].view(B, H, N, 4)
+        out["lockstep_kv2_kernel"] = dict(P_hash=hk[..., 0].contiguous(), dS_hash=hk[..., 1].contiguous(),
+                                          code_sf_hash=hk[..., 2].contiguous(),
+                                          rowsum_dS=hk[..., 3].view(torch.float64).contiguous())
     return out

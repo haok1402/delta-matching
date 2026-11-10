@@ -1146,9 +1146,9 @@ def rasy_zero(base: Int32, nwords: int, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(base).ir_value(loc=loc, ip=ip)],
                     "{\n\t.reg .b32 l, a, n;\n\t.reg .pred p;\n\tmov.u32 l, %laneid;\n\t"
                     "shl.b32 a, l, 2;\n\tadd.u32 a, a, $0;\n\tmov.u32 n, l;\n\t"
-                    "LZ%=:\n\tsetp.lt.u32 p, n, " + str(int(nwords)) + ";\n\t"
-                    "@!p bra LZE%=;\n\tst.shared.u32 [a], 0;\n\tadd.u32 a, a, 128;\n\tadd.u32 n, n, 32;\n\tbra LZ%=;\n\t"
-                    "LZE%=:\n\t}",
+                    "DM_LZ:\n\tsetp.lt.u32 p, n, " + str(int(nwords)) + ";\n\t"
+                    "@!p bra DM_LZE;\n\tst.shared.u32 [a], 0;\n\tadd.u32 a, a, 128;\n\tadd.u32 n, n, 32;\n\tbra DM_LZ;\n\t"
+                    "DM_LZE:\n\t}",
                     "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 

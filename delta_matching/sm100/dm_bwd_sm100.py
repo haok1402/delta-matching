@@ -533,6 +533,8 @@ class DMBackwardSm100:
         # R + 2C + max(L, empty) + H <= 512.
         _o = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
         self.dm_dsqw = "dsqw" in _o
+        # commitsrv (track BJ): the reduce warps take the helper's tail (S-read wait, dQ SF install, pipeline_dS commit)
+        self.dm_csrv = self.dm_dsqw and "csrv" in _o
         self.dm_noreg = "dsqnoreg" in _o   # debug: no setmaxnreg at all
         self.dm_dqstream = "dqstream" in _o   # stream the dQ drain in 32-column t2r chunks
         self.dsq_warp_ids = (16, 17, 18, 19) if self.dm_dsqw else ()
@@ -1817,6 +1819,9 @@ class DMBackwardSm100:
                 # warp (dQ(t) may overwrite the S tail; the reduce warps then commit pipeline_dS(t))
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 9, len(self.compute_warp_ids))
                 cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 10, len(self.compute_warp_ids))
+                if const_expr(self.dm_csrv):
+                    # commitsrv: [7] helper issued tile t's dQ codes + SF word + exchange (lane 0 of each dsq warp)
+                    cute.arch.mbarrier_init(storage.dm_xchg_mbar.data_ptr() + 7, len(self.dsq_warp_ids))
 
         if const_expr(self.cluster_reduce_dQ):
             if warp_idx == 4:
@@ -5807,6 +5812,12 @@ class DMBackwardSm100:
             copy_utils.cpasync_bulk_s2cluster(
                 sdS_xchg_src.iterator, sdS.iterator + cta_rank * stage_copy_elems, dS_cluster_full_mbar_ptr,
                 stage_copy_bytes, peer_cta_rank_in_cluster=peer)
+        if const_expr(self.dm_csrv and self.dm_dsqw):
+            # commitsrv: hand the tail (S-read wait, dQ SF install, commit) to the reduce warps. Lane 0 of each warp
+            # arrives after the warpgroup barrier (codes in SMEM, fenced) and, for warp 0, after tidx 0's SF word store.
+            if cute.arch.lane_idx() == 0:
+                dm_utils.mbar_arrive(dm_mbar + 8 * 7)
+            return
         # pipeline_dS(t): dQ(t) overwrites the S tail -> every compute warp must have loaded S(t+1) first
         if const_expr("nosr" not in self.dm_abl):
             if not dsq_last:
@@ -5947,6 +5958,12 @@ class DMBackwardSm100:
             dsq_mbar = dm_xchg_mbar.toint()
             dsq_j = Int32(0)    # tiles quantized (fp32-dS barrier parity, dQ SF word slot)
             dsq_sr = Int32(0)   # S-read barrier completions consumed
+        if const_expr(self.dm_csrv):
+            csrv_dS_state = pipeline.make_pipeline_state(cutlass.pipeline.PipelineUserType.Producer, 1)
+            csrv_sdm = sDm.iterator.toint()
+            csrv_mbar = dm_xchg_mbar.toint()
+            csrv_j = Int32(0)
+            csrv_sr = Int32(0)
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         dQ_consumer_state = pipeline.make_pipeline_state(
@@ -6102,6 +6119,26 @@ class DMBackwardSm100:
                         if not dsq_last:
                             dsq_sr = dsq_sr + 1
                         dsq_j = dsq_j + 1
+                    if const_expr(self.dm_csrv):
+                        # commitsrv: helper issued tile t (codes in SMEM, SF word, exchange) -> S(t+1) read by every compute
+                        # warp (dQ(t) overwrites the S tail) -> install dQ SFs (this warp's TMEM lane quadrant) -> commit dS(t)
+                        csrv_last = iter_idx == loop_count - 1
+                        if const_expr(self.dm_gloop):
+                            csrv_last = csrv_last and dm_g == self.dm_G - 1
+                        dm_utils.mbar_wait_parity(csrv_mbar + 8 * 7, csrv_j & 1)
+                        if not csrv_last:
+                            dm_utils.mbar_wait_parity(csrv_mbar + 8 * 10, csrv_sr & 1)
+                            dm_utils.tc_fence_after()
+                        self._dm_write_dq_sf(csrv_j, csrv_sdm, csrv_mbar, cta_rank_in_cluster)
+                        cute.arch.fence_view_async_tmem_store()
+                        dm_utils.tc_fence_before()
+                        cute.arch.sync_warp()
+                        with cute.arch.elect_one():
+                            pipeline_dS.producer_commit(csrv_dS_state)
+                        csrv_dS_state.advance()
+                        if not csrv_last:
+                            csrv_sr = csrv_sr + 1
+                        csrv_j = csrv_j + 1
                     dm_first = cutlass.Boolean(False)
                     dm_last = cutlass.Boolean(False)
                     lock_value = Int32(0)

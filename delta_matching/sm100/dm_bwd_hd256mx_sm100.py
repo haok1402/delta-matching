@@ -121,6 +121,32 @@ def st_global_f64x2(addr: Int64, a: Float64, b: Float64, *, loc=None, ip=None):
          "st.global.v2.f64 [$0], {$1, $2};", "l,d,d", True, loc, ip)
 
 
+@dsl_user_op
+def f2i(x: Float32, *, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=r,f", False, loc, ip))
+
+
+@dsl_user_op
+def hmix(v: Int32, idx: Int32, *, loc=None, ip=None) -> Int32:
+    """dbg 8 coupling hash of one element (value bits v at element index idx); summed (mod 2^32, order-free) per block."""
+    return Int32(_asm(T.i32(), [Int32(v).ir_value(loc=loc, ip=ip), Int32(idx).ir_value(loc=loc, ip=ip)],
+                      "{\n\t.reg .b32 x, y;\n\tmul.lo.u32 x, $1, 0x9E3779B1;\n\tmul.lo.u32 y, $2, 0x85EBCA6B;\n\t"
+                      "add.u32 x, x, y;\n\tshr.u32 y, x, 15;\n\txor.b32 x, x, y;\n\tmul.lo.u32 x, x, 0x2C1B3C6D;\n\t"
+                      "shr.u32 y, x, 12;\n\txor.b32 x, x, y;\n\tmul.lo.u32 x, x, 0x297A2D39;\n\tshr.u32 y, x, 15;\n\t"
+                      "xor.b32 $0, x, y;\n\t}", "=r,r,r", False, loc, ip))
+
+
+@dsl_user_op
+def redux_add_u32(x: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(_asm(T.i32(), [Int32(x).ir_value(loc=loc, ip=ip)], "redux.sync.add.u32 $0, $1, 0xffffffff;", "=r,r",
+                      True, loc, ip))
+
+
+def hidx(q, k):
+    """element index for the dbg 8 hash (wraps mod 2^32; identical in every kernel)."""
+    return q * 65599 + k
+
+
 class DmHd256Mx:
     TM, TN, D = 128, 128, 256
     COL_DP, COL_SFA, COL_SFB, COL_OUT = 128, 128, 132, 256
@@ -149,7 +175,7 @@ class DmHd256Mx:
     def __call__(self, mXa: cute.Tensor, mXb: cute.Tensor, mYa: cute.Tensor, mYb: cute.Tensor, mT: cute.Tensor,
                  mQs: cute.Tensor, mKs: cute.Tensor, mVs: cute.Tensor, mdOs: cute.Tensor,
                  mLse: cute.Tensor, mDelta: cute.Tensor, mOut: cute.Tensor,
-                 mIdent: cute.Tensor, mDump: cute.Tensor, mCodes: cute.Tensor, mSB: cute.Tensor,
+                 mIdent: cute.Tensor, mDump: cute.Tensor, mCodes: cute.Tensor, mSB: cute.Tensor, mHash: cute.Tensor,
                  n_t: Int32, H: Int32, Hk: Int32, stream):
         D = self.D
         s_tiler = (self.TM, self.TN, D)
@@ -193,7 +219,7 @@ class DmHd256Mx:
         self.SS = SS
         nh = Hk if const_expr(self.rows_are_keys) else H
         self.kernel(mma_s, mma_o, tma_Xa, tXa, tma_Xb, tXb, tma_Ya, tYa, tma_Yb, tYb, tma_T, tT, a_l, b_l, c_l, t_l,
-                    mQs, mKs, mVs, mdOs, mLse, mDelta, mOut, mIdent, mDump, mCodes, mSB, n_t, H, Hk).launch(
+                    mQs, mKs, mVs, mdOs, mLse, mDelta, mOut, mIdent, mDump, mCodes, mSB, mHash, n_t, H, Hk).launch(
             grid=[n_t, nh, cute.size(mXa, mode=[3])], block=[self.threads, 1, 1], smem=SS.size_in_bytes(), stream=stream)
 
     @cute.kernel
@@ -203,7 +229,7 @@ class DmHd256Mx:
                b_l: cute.ComposedLayout, c_l: cute.ComposedLayout, t_l: cute.ComposedLayout,
                mQs: cute.Tensor, mKs: cute.Tensor, mVs: cute.Tensor, mdOs: cute.Tensor, mLse: cute.Tensor,
                mDelta: cute.Tensor, mOut: cute.Tensor, mIdent: cute.Tensor, mDump: cute.Tensor, mCodes: cute.Tensor,
-               mSB: cute.Tensor, n_t: Int32, H: Int32, Hk: Int32):
+               mSB: cute.Tensor, mHash: cute.Tensor, n_t: Int32, H: Int32, Hk: Int32):
         D = self.D
         tidx = cute.arch.thread_idx()[0]
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
@@ -517,6 +543,7 @@ class DmHd256Mx:
                     id1 = Float32(0.0)
                     id2 = Float32(0.0)
                     id3 = Float32(0.0)
+                    hp = Int32(0)
                     for i in cutlass.range_constexpr(0, 32, 4):
                         l2v = [l2r] * 4
                         dlv = [dlr] * 4
@@ -541,6 +568,13 @@ class DmHd256Mx:
                                 p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[j], l2r)
                             pv[q2] = p0
                             pv[q2 + 1] = p1
+                        if const_expr((self.dbg & 8) and self.mode != "dk"):
+                            for q in cutlass.range_constexpr(4):
+                                ce_ = ctok0 + 32 * j + i + q
+                                if const_expr(self.rows_are_keys):
+                                    hp = hp + hmix(f2i(pv[q]), hidx(ce_, rtok))
+                                else:
+                                    hp = hp + hmix(f2i(pv[q]), hidx(rtok, ce_))
                         for q2 in cutlass.range_constexpr(0, 4, 2):
                             if const_expr(self.mode == "dv"):
                                 vals[i + q2] = pv[q2]
@@ -561,6 +595,13 @@ class DmHd256Mx:
                                 id1 = add_f32(id1, vals[i + q])
                                 id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dv_[i + q], ca[j]))))
                                 id3 = add_f32(id3, pv[q])
+                    if const_expr((self.dbg & 8) and self.mode != "dk"):
+                        hb = redux_add_u32(hp)
+                        if lane == 0:
+                            if const_expr(self.rows_are_keys):
+                                mHash[l, ct * 4 + j, rtok // 32, 0] = hb
+                            else:
+                                mHash[l, rtok // 32, ct * 4 + j, 0] = hb
                     if const_expr((self.dbg & 2) and self.has_dp and not self.delta_only):
                         qi0 = rtok
                         ki0 = ctok0 + 32 * j
@@ -575,6 +616,7 @@ class DmHd256Mx:
                             pa = pa + stp
                     if const_expr(self.mode == "dv"):
                         # P^T codes of this (key, 32-query) block right away
+                        hcd = Int32(0)
                         am = Float32(0.0)
                         for i in cutlass.range_constexpr(32):
                             am = cute.arch.fmax(am, vals[i])
@@ -588,6 +630,15 @@ class DmHd256Mx:
                                 y2, y3 = cute.arch.mul_packed_f32x2((vals[i0 + 2], vals[i0 + 3]), (inv, inv))
                                 w[u] = e4m3x4(y0, y1, y2, y3)
                             st_shared_v4(crow + (((2 * j + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                            if const_expr(self.dbg & 8):
+                                for u in cutlass.range_constexpr(4):
+                                    for q in cutlass.range_constexpr(4):
+                                        hcd = hcd + hmix(((w[u] >> (8 * q)) & 255) | (sbs[j] << 8),
+                                                         hidx(ctok0 + 32 * j + 16 * hv + 4 * u + q, rtok))
+                        if const_expr(self.dbg & 8):
+                            hb = redux_add_u32(hcd)
+                            if lane == 0:
+                                mHash[l, ct * 4 + j, rtok // 32, 3] = hb
                     elif const_expr(not self.delta_only):
                         am = Float32(0.0)
                         for i in cutlass.range_constexpr(32):
@@ -671,6 +722,8 @@ class DmHd256Mx:
                             inv = dm_utils.inv_pow2_from_sb(sbs[j])
                             dsj = tmem_ld32(stash + 32 * j)
                             cute.arch.fence_view_async_tmem_load()
+                            hsd = Int32(0)
+                            hcd = Int32(0)
                             for hv in cutlass.range_constexpr(2):
                                 w = [None] * 4
                                 for u in cutlass.range_constexpr(4):
@@ -679,6 +732,25 @@ class DmHd256Mx:
                                     y2, y3 = cute.arch.mul_packed_f32x2((dsj[i0 + 2], dsj[i0 + 3]), (inv, inv))
                                     w[u] = e4m3x4(y0, y1, y2, y3)
                                 st_shared_v4(crow + (((2 * j + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                                if const_expr(self.dbg & 8):
+                                    for u in cutlass.range_constexpr(4):
+                                        for q in cutlass.range_constexpr(4):
+                                            ce_ = ctok0 + 32 * j + 16 * hv + 4 * u + q
+                                            ix = hidx(rtok, ce_)
+                                            if const_expr(self.rows_are_keys):
+                                                ix = hidx(ce_, rtok)
+                                            hsd = hsd + hmix(f2i(dsj[16 * hv + 4 * u + q]), ix)
+                                            hcd = hcd + hmix(((w[u] >> (8 * q)) & 255) | (sbs[j] << 8), ix)
+                            if const_expr(self.dbg & 8):
+                                hb1 = redux_add_u32(hsd)
+                                hb2 = redux_add_u32(hcd)
+                                if lane == 0:
+                                    if const_expr(self.rows_are_keys):
+                                        mHash[l, ct * 4 + j, rtok // 32, 1] = hb1
+                                        mHash[l, ct * 4 + j, rtok // 32, 2] = hb2
+                                    else:
+                                        mHash[l, rtok // 32, ct * 4 + j, 1] = hb1
+                                        mHash[l, rtok // 32, ct * 4 + j, 2] = hb2
                         if const_expr(self.dbg & 2):
                             mSB[l, rtok, ct * 4 + j] = sbs[j]
                     if const_expr(self.dbg & 2):

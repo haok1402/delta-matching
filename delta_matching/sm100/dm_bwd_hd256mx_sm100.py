@@ -48,6 +48,7 @@ from delta_matching.sm100 import dm_utils
 from delta_matching.sm100.dm_bwd_hd256_sm100 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_v4f,
                                                      st_global_f32, ld_shared_f32, st_shared_f32, abs_f32, max_f32,
                                                      add_f32, mul_f32, _asm, _gaddr)
+from delta_matching.sm100.dm_bwd_hd256_sm100 import ld_shared_v4 as dm_utils_ld_shared_v4
 
 F8 = cutlass.Float8E4M3FN
 SM = 0.0625          # 256 ** -0.5, exact
@@ -555,19 +556,23 @@ class DmHd256Mx:
                                 y0, y1 = cute.arch.mul_packed_f32x2((vals[i0], vals[i0 + 1]), (inv, inv))
                                 y2, y3 = cute.arch.mul_packed_f32x2((vals[i0 + 2], vals[i0 + 3]), (inv, inv))
                                 w[u] = e4m3x4(y0, y1, y2, y3)
-                                if const_expr(self.dbg & 2):
-                                    for q in cutlass.range_constexpr(4):
-                                        ctok = ctok0 + i0 + q
-                                        qi = rtok
-                                        ki = ctok
-                                        if const_expr(self.rows_are_keys):
-                                            qi = ctok
-                                            ki = rtok
-                                        st_global_u8(_gaddr(mCodes) + (Int64(l) * N + qi) * N + ki, w[u] >> (8 * q))
                             v = 2 * j + hv
                             st_shared_v4(crow + ((v ^ rsw) * 16), w[0], w[1], w[2], w[3])
                         if const_expr(self.dbg & 2):
                             mSB[l, rtok, ct * 4 + j] = sbs[j]
+                    if const_expr(self.dbg & 2):
+                        # codes dump from the own smem row (after all chunks are written)
+                        for v in cutlass.range_constexpr(8):
+                            x4 = dm_utils_ld_shared_v4(crow + ((v ^ rsw) * 16))
+                            for u in cutlass.range_constexpr(4):
+                                for q in cutlass.range_constexpr(4):
+                                    ctok = ctok0 + 16 * v + 4 * u + q
+                                    qi = rtok
+                                    ki = ctok
+                                    if const_expr(self.rows_are_keys):
+                                        qi = ctok
+                                        ki = rtok
+                                    st_global_u8(_gaddr(mCodes) + (Int64(l) * N + qi) * N + ki, x4[u] >> (8 * q))
                     sfa = pack4(dm_utils.add_sb_clamp(sbs[0], osb[0]), dm_utils.add_sb_clamp(sbs[1], osb[1]),
                                 dm_utils.add_sb_clamp(sbs[2], osb[2]), dm_utils.add_sb_clamp(sbs[3], osb[3]))
                     dm_utils.tmem_st_x1(tb + self.COL_SFA, sfa)

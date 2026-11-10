@@ -31,10 +31,10 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 
 from delta_matching.sm100 import dm_common_hd256 as dmh
 from delta_matching.sm100 import dm_utils
-from delta_matching.sm100.dm_bwd_hd256_sm100 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_f32,
-                                                     ld_shared_f32, st_shared_f32, abs_f32, max_f32, add_f32, mul_f32,
-                                                     _gaddr)
-from delta_matching.sm100.dm_bwd_hd256_sm100 import ld_shared_v4 as ld_shared_v4i
+from delta_matching.sm100.dm_common_hd256 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_f32,
+                                                 ld_shared_f32, st_shared_f32, abs_f32, max_f32, add_f32, mul_f32,
+                                                 _gaddr)
+from delta_matching.sm100.dm_common_hd256 import ld_shared_v4 as ld_shared_v4i
 from delta_matching.sm100.dm_bwd_hd256mx_sm100 import (st_shared_v4, ld_shared_v4f, spin, sb_of, pack4, tc_fence_before,
                                                        tc_fence_after, st_global_u8, st_global_f64x2, f2i, hmix, hidx,
                                                        zext64, red_add_u64, red_add_f64, lk_cols_u32, lk_cols_f64,

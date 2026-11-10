@@ -1,17 +1,15 @@
 """hd256 route of dm_attn_func (api.py branches here on q.shape[-1] == 256 before any hd128 code).
 Numerics: sm100-mx at D=256 (USER DECISION 2026-11-10, validator preset sm100-mx-d256).
-forward : quant_hd256.quant_qkv_mx256 (hd128 quant.py producers at D=256) -> fwd_hd256.dm_fwd_hd256_mx
-backward: dO -> quant_do_mx256 -> delta (matched: pass-0 kernel pass0_hd256.dm_delta_hd256, num/den; stale: quant.quant_do_delta(dO, O))
+forward : quant.quant_qkv2(q, k, v, 256**-0.5) (the D-generic quant.py producers) -> fwd_hd256.dm_fwd_hd256_mx
+backward: dO -> quant.quant_do_delta(dO, None) -> delta (matched: pass-0 kernel pass0_hd256.dm_delta_hd256, num/den; stale: quant.quant_do_delta(dO, O))
           -> bwd_hd256mx.dm_bwd_hd256mx (dv / dk / dq kernels, deterministic, MXFP8 out-MMAs).  Same calls as dm-validator's
           validated glue (validate/cands/vm8a2_det.py, 06:2x PASS), so values are bitwise those of that run.
 q (B, N, H, 256) bf16, k / v (B, N, Hk, 256) bf16 -> o (B, N, H, 256) bf16. N % 128 == 0, softmax scale 256^-0.5 (= 2^-4)."""
 import torch
 
-from .quant_hd256 import quant_qkv_mx256, quant_qkv_mx256_kvw  # noqa: F401
 from .fwd import pack_kv_scales  # noqa: F401
 from .fwd_hd256 import dm_fwd_hd256_mx
-from .quant_hd256 import quant_do_mx256
-from .quant import quant_do_delta
+from .quant import quant_qkv2, quant_do_delta
 from .pass0_hd256 import dm_delta_hd256
 from .bwd_hd256mx import dm_bwd_hd256mx
 from .bwd_hd256kv2 import dm_bwd_hd256kv2, kv2_launch
@@ -30,11 +28,12 @@ def _bwd(*a, **k):
     return (dm_bwd_hd256kv2 if _bwd_impl() == "kv2" else dm_bwd_hd256mx)(*a, **k)
 
 D = 256
+SM = D ** -0.5     # softmax scale baked into Q by quant_qkv2 (= 2^-4, exact)
 
 
 def dm_fwd_hd256_from_bf16(q, k, v, causal):
     """(o, lse, saved) for bf16 inputs: the exact forward dm_attn_func runs at hd256."""
-    q8, qs, k8, ks, v8, vs, mean, kvw = quant_qkv_mx256_kvw(q, k, v)   # kvw == pack_kv_scales(ks, vs) (hd256-8k G1)
+    q8, qs, k8, ks, v8, vs, kvw, mean = quant_qkv2(q, k, v, SM)   # kvw == pack_kv_scales(ks, vs) (hd256-8k G1)
     o, lse = dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal)
     return o, lse, (q8, qs, k8, ks, v8, vs, mean)
 
@@ -43,7 +42,7 @@ def _delta_hd256(q8, qs, k8, ks, v8, vs, lse, o, do, mode, causal):
     """(do8, dos, delta) exactly as the backward consumes them. matched: num/den pass 0 (bitwise the bwd's P/dP)."""
     if mode == "stale":
         return quant_do_delta(do, o)
-    do8, dos = quant_do_mx256(do)
+    do8, dos, _ = quant_do_delta(do, None)
     return do8, dos, dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
 
 

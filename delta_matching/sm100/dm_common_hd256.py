@@ -16,57 +16,19 @@ The scales are on the MMAs' non-contraction dims (rows / cols of S and dP) and a
 post-MMA multiply equals the kind::mxf8f6f4 block-scaled product with uniform SFs; like hd128's pass 0, no SF TMEM is used.
 The backward must compute P with dm_mx256_p_pair from bitwise the same S_acc, c, l2 (and dP_acc, a).
 
-=== RETIRED: [64,32] fp32 contract ("Delta-Matching-256 v1" floor) -> dm_p0h_* (kept only so older branches import) ===
-Contract (spec kda/docs/sm90-numerics-spec-hd256.md §3 / §4.1 / §8.2), per element (row i = query, col j = key):
-  S_acc  = raw fp32 accumulator of tcgen05.mma kind::f8f6f4 over D=256 as 8 K=32 steps in increasing d order
-           (zero-init), masked entries set to -inf on the raw accumulator.
-  dsc    = fmax((q8s[i//64] * k8s[j//32]) * log2(e), FLT_MIN)    (this association; FLT_MIN floor = spec §2.2/§8.2,
-                                                                  bitwise-neutral for healthy scales)
-  l2     = lse[i] * log2(e)                                        (FMUL RN; lse natural log, fp32)
-  x      = FFMA(S_acc, dsc, -l2)        (fma_packed_f32x2 = FFMA2, per-element bitwise = scalar FFMA RN)
-  x      = FADD(x, 8.0)
-  x      = FMNMX(x, 12.0)               (min, NaN-quiet minimumNumber like fminf)
-  P_hat  = MUFU.EX2(x)                  (ex2.approx.ftz.f32)          = 2^8 * exp(S - LSE), capped at 2^12
-  dp     = do8s[i//64] * v8s[j//32]                                  (this association)
-  dP     = dP_acc * dp                  (dP_acc = raw f8f6f4 accumulator of dO8 V8^T, same instruction shape as S)
-The backward must compute P_hat with dm_p0h_phat_pair (same function) from bitwise the same S_acc, dsc, l2.
+=== PTX helpers (inline asm) of the hd256 backward kernels (DmHd256Mx, DmHd256Mx2, DmHd256Kv2) ===
+Moved verbatim (hd256-clean) from the deleted pre-MXFP8 backward module; hd128's dm_utils is untouched.
 """
 import math
 
 import cutlass.cute as cute
-from cutlass import Float32
+from cutlass import Float32, Int32, Int64
+from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass._mlir.dialects import llvm
 
 from delta_matching.sm100 import dm_common
 
 LOG2E = math.log2(math.e)
-FLT_MIN = 1.1754943508222875e-38
-PHAT_SHIFT = 8.0     # P_hat = 2^8 * P (spec "MO", +8 in exp2)
-PHAT_CAP = 12.0      # spec F1 cap: exp2 argument <= 12
-INV_PHAT = 1.0 / 256.0
-
-
-def dm_p0h_dsc(qs: Float32, ks: Float32) -> Float32:
-    """dsc = fmax((q8s * k8s) * log2(e), FLT_MIN)  (this association)."""
-    return cute.arch.fmax((qs * ks) * Float32(LOG2E), Float32(FLT_MIN))
-
-
-def dm_p0h_dp_scale(dos: Float32, vs: Float32) -> Float32:
-    """dp = do8s * v8s  (this association); dP = dP_acc * dp."""
-    return dos * vs
-
-
-def dm_p0h_l2(lse: Float32) -> Float32:
-    """l2 = lse * log2(e) (FMUL RN)."""
-    return lse * Float32(LOG2E)
-
-
-def dm_p0h_phat_pair(s0: Float32, s1: Float32, dsc: Float32, l2: Float32):
-    """(P_hat0, P_hat1) = ex2.approx.ftz(fmin(fma((s0, s1), dsc, -l2) + 8, 12))."""
-    x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (dsc, dsc), (-l2, -l2))
-    x0, x1 = cute.arch.add_packed_f32x2((x0, x1), (Float32(PHAT_SHIFT), Float32(PHAT_SHIFT)))
-    x0 = cute.arch.fmin(x0, Float32(PHAT_CAP))
-    x1 = cute.arch.fmin(x1, Float32(PHAT_CAP))
-    return cute.math.exp2(x0, approx=True, ftz=True), cute.math.exp2(x1, approx=True, ftz=True)
 
 
 # ---------------------------------------------------------------------------------- MXFP8 (sm100-mx-d256) = THE spec
@@ -96,3 +58,101 @@ def dm_mx256_p_pair2(s0: Float32, s1: Float32, c: Float32, l20: Float32, l21: Fl
     MUFU.EX2 as dm_mx256_p_pair (fma_packed_f32x2 is per-element FFMA RN), hence bitwise the same P."""
     x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (c, c), (-l20, -l21))
     return cute.math.exp2(x0, fastmath=True), cute.math.exp2(x1, fastmath=True)
+
+
+# ---------------------------------------------------------------- PTX helpers (local; hd128's dm_utils untouched)
+def _asm(ret, args, asm, cons, side=False, loc=None, ip=None):
+    return llvm.inline_asm(ret, args, asm, cons, has_side_effects=side, is_align_stack=False,
+                           asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def tmem_ld32(addr: Int32, *, loc=None, ip=None):
+    """tcgen05.ld.32x32b.x32: thread t of warp w gets TMEM lane (addr.lane + t), columns addr.col .. +31."""
+    regs = ",".join(f"${i}" for i in range(32))
+    res = _asm(llvm.StructType.get_literal([T.f32()] * 32), [Int32(addr).ir_value(loc=loc, ip=ip)],
+               "tcgen05.ld.sync.aligned.32x32b.x32.b32 {" + regs + "}, [$32];", ",".join(["=f"] * 32) + ",r", True,
+               loc, ip)
+    return [Float32(llvm.extractvalue(T.f32(), res, [i], loc=loc, ip=ip)) for i in range(32)]
+
+
+@dsl_user_op
+def mul_f32(a: Float32, b: Float32, *, loc=None, ip=None) -> Float32:
+    """FMUL RN, never contracted with a following add."""
+    return Float32(_asm(T.f32(), [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b)],
+                        "mul.rn.f32 $0, $1, $2;", "=f,f,f", False, loc, ip))
+
+
+@dsl_user_op
+def add_f32(a: Float32, b: Float32, *, loc=None, ip=None) -> Float32:
+    return Float32(_asm(T.f32(), [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b)],
+                        "add.rn.f32 $0, $1, $2;", "=f,f,f", False, loc, ip))
+
+
+@dsl_user_op
+def abs_f32(a: Float32, *, loc=None, ip=None) -> Float32:
+    return Float32(_asm(T.f32(), [Float32(a).ir_value(loc=loc, ip=ip)], "abs.f32 $0, $1;", "=f,f", False, loc, ip))
+
+
+@dsl_user_op
+def max_f32(a: Float32, b: Float32, *, loc=None, ip=None) -> Float32:
+    """fmaxf (IEEE maxNum: NaN-ignoring)."""
+    return Float32(_asm(T.f32(), [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b)],
+                        "max.f32 $0, $1, $2;", "=f,f,f", False, loc, ip))
+
+
+@dsl_user_op
+def e4m3x4(x0: Float32, x1: Float32, x2: Float32, x3: Float32, *, loc=None, ip=None) -> Int32:
+    """cvt.rn.satfinite.e4m3x2.f32 x2: bytes [x0, x1, x2, x3] little-endian."""
+    return Int32(_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip) for x in (x0, x1, x2, x3)],
+                      "{\n\t.reg .b16 lo, hi;\n\tcvt.rn.satfinite.e4m3x2.f32 lo, $2, $1;\n\t"
+                      "cvt.rn.satfinite.e4m3x2.f32 hi, $4, $3;\n\tmov.b32 $0, {lo, hi};\n\t}",
+                      "=r,f,f,f,f", False, loc, ip))
+
+
+@dsl_user_op
+def bf16x2(x0: Float32, x1: Float32, *, loc=None, ip=None) -> Int32:
+    """cvt.rn.bf16x2.f32: low half x0, high half x1."""
+    return Int32(_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip) for x in (x0, x1)],
+                      "cvt.rn.bf16x2.f32 $0, $2, $1;", "=r,f,f", False, loc, ip))
+
+
+@dsl_user_op
+def st_shared_f32(addr: Int32, v: Float32, *, loc=None, ip=None):
+    _asm(None, [Int32(addr).ir_value(loc=loc, ip=ip), Float32(v).ir_value(loc=loc, ip=ip)],
+         "st.shared.f32 [$0], $1;", "r,f", True, loc, ip)
+
+
+@dsl_user_op
+def ld_shared_f32(addr: Int32, *, loc=None, ip=None) -> Float32:
+    return Float32(_asm(T.f32(), [Int32(addr).ir_value(loc=loc, ip=ip)], "ld.shared.f32 $0, [$1];", "=f,r", True,
+                        loc, ip))
+
+
+@dsl_user_op
+def ld_shared_v4(addr: Int32, *, loc=None, ip=None):
+    res = _asm(llvm.StructType.get_literal([T.i32()] * 4), [Int32(addr).ir_value(loc=loc, ip=ip)],
+               "ld.shared.v4.b32 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,r", True, loc, ip)
+    return [Int32(llvm.extractvalue(T.i32(), res, [i], loc=loc, ip=ip)) for i in range(4)]
+
+
+@dsl_user_op
+def st_global_v4(addr: Int64, a: Int32, b: Int32, c: Int32, d: Int32, *, loc=None, ip=None):
+    _asm(None, [Int64(addr).ir_value(loc=loc, ip=ip)] + [Int32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+         "st.global.v4.b32 [$0], {$1, $2, $3, $4};", "l,r,r,r,r", True, loc, ip)
+
+
+@dsl_user_op
+def st_global_v4f(addr: Int64, a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None):
+    _asm(None, [Int64(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+         "st.global.v4.f32 [$0], {$1, $2, $3, $4};", "l,f,f,f,f", True, loc, ip)
+
+
+@dsl_user_op
+def st_global_f32(addr: Int64, v: Float32, *, loc=None, ip=None):
+    _asm(None, [Int64(addr).ir_value(loc=loc, ip=ip), Float32(v).ir_value(loc=loc, ip=ip)],
+         "st.global.f32 [$0], $1;", "l,f", True, loc, ip)
+
+
+def _gaddr(t: cute.Tensor) -> Int64:
+    return Int64(t.iterator.toint())

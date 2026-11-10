@@ -6021,7 +6021,8 @@ class DMBackwardSm100:
         ).get_slice(tidx)
         tdQsdQ = thr_copy_dQaccum_r2s.partition_D(sdQaccum)
 
-        read_flag = const_expr(not self.deterministic)
+        # DM abl:nofull (timing only, breaks the det ordering guarantee): never wait for bulk-add COMPLETION, only smem reads
+        read_flag = const_expr(not self.deterministic or "nofull" in self.dm_abl)
 
         if const_expr(self.dm_dsq and not self.dm_dsqw):
             dsq = self._dsq_setup(tidx, thr_mma_S, tdPtdP, sdS, sdS_xchg)
@@ -6347,7 +6348,7 @@ class DMBackwardSm100:
                                 # completion (visibility in global) is needed only before the semaphore release of
                                 # the previous m_block (below, stage 0) and at tile end. Same adds, same order: bitwise.
                                 cute.arch.cp_async_bulk_wait_group(self.sdQaccum_stage - 1, read=True)
-                                if const_expr(stage == 0 and delay_semaphore_release):
+                                if const_expr(stage == 0 and delay_semaphore_release and "nofull" not in self.dm_abl):
                                     cute.arch.cp_async_bulk_wait_group(1, read=False)
                             else:
                                 cute.arch.cp_async_bulk_wait_group(self.sdQaccum_stage - 1, read=read_flag)
@@ -6927,7 +6928,7 @@ class DMBackwardSm100:
             tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(self.dK_reduce_ncol)), Float32
         )
 
-        read_flag = const_expr(not deterministic_KV)
+        read_flag = const_expr(not deterministic_KV or "nofull" in self.dm_abl)
 
         pipeline_dKV.consumer_wait(consumer_state_dKV)
         if const_expr(dm_tlp is not None):

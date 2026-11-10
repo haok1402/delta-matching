@@ -23,6 +23,7 @@ import numpy as np
 import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Int64, const_expr
+from cutlass.cute import FastDivmodDivisorV2
 from cutlass.cute.nvgpu import cpasync
 import cutlass.cute.nvgpu.tcgen05 as tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
@@ -538,13 +539,26 @@ class DMFwdHd256MxSm100:
                  sQ_layout, sK_layout, sV_layout, sP_layout, tiled_mma_qk, tiled_mma_pv]
         if const_expr(self.trace):
             kargs.append(mDbg)
+        tsd = None
+        if const_expr(self.tsplit > 0):
+            # hd256-fwd5 T2: host-side FastDivmod divisors for the split-tail map (the in-kernel 32-bit divisions cost ~0.35 us per CTA
+            # before the CTA barrier; trace analysis/gap_4014d81.txt).  tm = min(T, n_m), nb = n_m - tm (divisor max(nb, 1): only
+            # used when nb > 0), n_hb = H * B, H.
+            n_h = cute.size(mQt.shape[2])
+            n_hb = n_h * cute.size(mQt.shape[3])
+            tm = cutlass.min(Int32(self.tsplit), n_m)
+            nb = n_m - tm
+            tsd = (FastDivmodDivisorV2(cutlass.max(nb, Int32(1))), FastDivmodDivisorV2(n_hb), FastDivmodDivisorV2(n_h), tm, nb)
+        if const_expr(not self.trace):
+            kargs.append(None)
+        kargs.append(tsd)
         self.kernel(*kargs).launch(
             grid=grid, block=[self.threads_per_cta, 1, 1], stream=stream, min_blocks_per_mp=1)
 
     @cute.kernel
     def kernel(self, mQ, mK, mV, mO, mLSE, mQS, mKVW, tma_atom_Q, tma_atom_K, tma_atom_V,
                sQ_layout: cute.ComposedLayout, sK_layout: cute.ComposedLayout, sV_layout: cute.ComposedLayout,
-               sP_layout: cute.ComposedLayout, tiled_mma_qk: cute.TiledMma, tiled_mma_pv: cute.TiledMma, mDbg=None):
+               sP_layout: cute.ComposedLayout, tiled_mma_qk: cute.TiledMma, tiled_mma_pv: cute.TiledMma, mDbg=None, tsd=None):
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         if warp_idx == 0:
             for a in (tma_atom_Q, tma_atom_K, tma_atom_V):
@@ -562,27 +576,23 @@ class DMFwdHd256MxSm100:
             head_idx = (u % n_hb) % n_h
             batch_idx = (u % n_hb) // n_h
         if const_expr(self.tsplit > 0):
+            nb_div, hb_div, h_div, tm, nb = tsd             # host FastDivmod (T2): nb = n_m - tm, n_hb = H*B, H
             n_h = cute.arch.grid_dim()[1]
             n_hb = n_h * cute.arch.grid_dim()[2]
             u = bidx + n_m * (bidy + n_h * bidz)
-            tm = Int32(self.tsplit)
-            if tm > n_m:
-                tm = n_m
-            nb = n_m - tm                                   # bulk items per (head, batch) pair
             pair = Int32(0)
             if u < n_hb * nb:
-                pair = u // nb
-                m_block = n_m - 1 - u % nb
+                pair, r = divmod(u, nb_div)                 # bulk: per-pair longest-first over m_block >= tm
+                m_block = n_m - 1 - r
             else:
-                v = u - n_hb * nb
-                pair = v % n_hb
-                m_block = tm - 1 - v // n_hb
+                q, r = divmod(u - n_hb * nb, hb_div)        # tail: m_block < tm, globally longest-first, pair fastest
+                pair = r
+                m_block = tm - 1 - q
                 if const_expr(self.pc_inj == 18):
                     m_block = m_block + 1                   # DEBUG PC 18: non-bijective map (hole at m_block 0; in bounds)
                     if m_block > n_m - 1:
                         m_block = n_m - 1
-            head_idx = pair % n_h
-            batch_idx = pair // n_h
+            batch_idx, head_idx = divmod(pair, h_div)
         kv_head_idx = head_idx // self.qhead_per_kvhead
         n_block_max = m_block + 1 if const_expr(self.is_causal) else n_m
         cnt = n_block_max

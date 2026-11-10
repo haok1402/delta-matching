@@ -212,7 +212,7 @@ def run_case(mod, fn, case, dev):
                     # whole-tensor, per-128-row-block and per-element deviation from the first call, and keep every
                     # call's outputs for small cases so the parent can judge accuracy on the WORST call
                     n = int(kind.split(":")[1])
-                    # concurrent load on the same GPU perturbs timing: the nondet race of 6a313b0 (forward O off by 3e-2)
+                    # concurrent load on the same GPU perturbs timing: a past nondet forward race (O off by 3e-2)
                     # showed up only this way (2/1200 calls, 0/2400 unloaded).  DMVAL_STRESS_LOAD=0 turns it off.
                     load = None
                     if os.environ.get("DMVAL_STRESS_LOAD", "1") != "0":

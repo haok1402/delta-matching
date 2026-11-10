@@ -94,7 +94,7 @@ REG_MEDIAN = 3.4e-4           # paired: per metric, median over cases of err / b
 # rule: "i don't find the particular need for any part to force deterministic ... the zero-sum
 # invariant, and the accuracy, however, must be preserved": no output must be bitwise run-to-run deterministic; repeat /
 # view / stress calls must be finite and within this relative distance of the first call (fp32 summation-order noise)
-# run-to-run spread limits, calibrated on the sm100 non-deterministic backward (43db3c7, deterministic=False):
+# run-to-run spread limits, calibrated on the sm100 non-deterministic backward (deterministic=False):
 # measured worst whole-tensor 1.7e-5 (quick-tier repeat), per-128-row block 5.2e-5 and per element 2.4e-3 of the row max
 # (GQA 32/8 8k, 10 calls; bf16 rounding flips); limits ~10x the measured worst. Deterministic
 # kernels measure exactly 0, so their binding stays effectively bitwise.
@@ -407,7 +407,7 @@ def build_cases(tier, supports, seed):
         shapes += [(1, 32, 4, up(65536), True, ["stress"]), (1, 16, 4, up(65536), True, ["stress"]),
                    (1, 32, 4, up(131072), True, ["stress"]), (1, 16, 4, up(131072), True, ["stress"])]   # + 128k
     if tier != "quick":
-        # 6a313b0's forward race (ss_pv defaults) changed one O tile on ~1% of calls at B8 H32/8 N4096 and was invisible
+        # A past forward race (ss_pv defaults) changed one O tile on ~1% of calls at B8 H32/8 N4096 and was invisible
         # to 8-call stress: many calls on a multi-batch GQA shape with several CTAs per SM, causal and non-causal
         # also on rescale-triggering inputs (ramp / growing-max rows), and the rescale families in accuracy
         # headline GQA 32/4 (8:1) replaces 32/8; 16/4 (4:1) added
@@ -492,7 +492,7 @@ def check_case(case, cr, preset, dev, verbose):
             chk(f"{key}:close_every_call", st.get("rel_max", 0.0) <= NONDET_REL,
                 f"outputs varied by up to {st.get('rel_max', 0.0):.2e} rel between calls (allowed {NONDET_REL:.0e})")
             # a race corrupting one block hides in the whole-tensor norm -> per block / element
-            blk_lim = SPREAD_BLK if st.get("vs") == "det" or CAND_DETERMINISTIC[0] else 2 * SPREAD_BLK   # audit 20:00
+            blk_lim = SPREAD_BLK if st.get("vs") == "det" or CAND_DETERMINISTIC[0] else 2 * SPREAD_BLK
             chk(f"{key}:block_spread", st.get("block_rel_max", 0.0) <= blk_lim,
                 f"a 128-row block varied by {st.get('block_rel_max', 0.0):.2e} rel vs the {'det build' if st.get('vs') == 'det' else 'first call'} (allowed {blk_lim:.0e})"
                 + (f" at {st['where']['block']}" if st.get("where", {}).get("block") else ""))
@@ -855,7 +855,7 @@ def main():
     out = _run_runner(a.candidate, jp, op)
     missing = [f for f in files if not os.path.exists(f + ".out")]
     if missing and "fatal" not in out:
-        # the candidate process produced no output for some cases (seen once on 77f470e quick, not reproducible): re-run
+        # the candidate process produced no output for some cases (seen once, not reproducible): re-run
         # exactly those cases once in a fresh process; the retry is reported (deterministic kernels give the same result)
         print(f"WARNING: runner produced no output for {len(missing)} case(s); re-running them in a fresh process "
               f"(see {RUNNER_LOG[0]})", flush=True)

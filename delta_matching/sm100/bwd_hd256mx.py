@@ -34,7 +34,7 @@ IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(d
               "9": dict(dqopt=True, lpt="g", sp=True), "10": dict(dqopt=True, lpt="g", x2=True),
               "11": dict(dqopt=True, lpt="g", esf=True), "12": dict(dqopt=True, lpt="g", x2=True, esf=True),
               "13": dict(dqopt=True, lpt="g", yr=True), "14": dict(dqopt=True, lpt="g", yr=True, esf=True)}
-IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "13"}  # Q12 + causal global LPT + Ya reuse (HD256-DQ-YR) for dq only; dv / dk -> KV2 in bundle 3
+IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "13"}  # dq: impl 13 (causal global longest-first order + Ya reuse); dv / dk run in KV2
 _LOCK = threading.Lock()
 _CACHE = {}
 PROF = []
@@ -104,7 +104,7 @@ def twins(q8, do8, k8):
 
 def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, modes=("dv", "dk", "dq"), tw=None,
                    knob="", impl=None):
-    """impl per mode: "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values).
+    """impl per mode: "1" = DmHd256Mx (original schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values).
     impl "1" / "2" = all modes; a dict mode -> impl; None = env DM_H256_MX_IMPL if set, else IMPL_DEFAULT
     (dq "5" = DmHd256Mx2 + dqopt + causal global LPT order, dv / dk "1"; the api's default dK/dV is KV2)."""
     if impl is None:
@@ -132,8 +132,8 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     lds_tail = [2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 2]
     hsh = dbg & 8
     n_t = N // 128
-    # tcgen05 fence pair on the acc / cd / teardown hand-offs sites BW1-BW3, BW9;
-    # DEFAULT since bundle 2, coordinator 07:5x). DEBUG opt-out DM_HD256_ORDF=0 = the pre-fix kernels (32e0ecd PTX).
+    # tcgen05 fence pair on the acc / cd / teardown hand-offs (sites BW1-BW3, BW9;
+    # default on). DEBUG opt-out DM_HD256_ORDF=0 = the kernels without the fence pair.
     ordf = _env("DM_HD256_ORDF", "1") != "0"
     for mode in modes:
         if mode == "dv":

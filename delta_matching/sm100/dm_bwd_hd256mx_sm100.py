@@ -225,7 +225,7 @@ class DmHd256Mx:
         # ordf (sites BW1-BW3, BW9): the tcgen05 thread-sync fence pair on every
         # cross-thread TMEM hand-off that lacks it (PTX 9.7.18.6.4.4: [ld; wait::ld; fence::before; arrive] ->
         # [wait; fence::after; tcgen05 op], and commit -> [wait; fence::after; tcgen05 op]). Host default True (DM_HD256_ORDF);
-        # False = the pre-fix code (32e0ecd PTX), debug only.
+        # False = the code without the fence pair, debug only.
         self.ordf = bool(ordf)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")

@@ -101,7 +101,7 @@ def _auto_opts_impl(q8, k8, causal=False):
     # 'nodsqw' disables. Not combined with the layouts it does not support.
     if "nodsqw" not in ol and not any(o in ol for o in ("dsq", "dsqw", "cwg4", "ilp2", "early_dq")):
         ol = ol + ["dsqw", "dsqr=72:136:48:88"]
-    gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "4096"))   # k8 fork: harness GQA 4k bwd 0.94x, 8k +0.1..1% slower
+    gN = int(next((o[7:] for o in ol if o.startswith("gloopN=")), "4096"))   # GQA long-loop variant only above this N: 4k bwd 0.94x, 8k +0.1..1% slower
     if q8.shape[2] > k8.shape[2] and "gloop" not in ol and "nogloop" not in ol and q8.shape[1] <= gN:
         ol = ol + ["gloop"]
     # DM pers (MHA, auto): persistent grid of 148 CTAs (74 clusters) for short sequences, where the per-CTA
@@ -116,9 +116,9 @@ def _auto_opts_impl(q8, k8, causal=False):
         ol = ol + ["tconv"]
     pN = int(next((o[6:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
     # DM pcN / pdyn REMOVED: the dynamic persistent scheduler no longer compiles, its "+6-8% at causal 8k"
-    # came from the b_ab first-arm bias (BABAUDIT) and measured 0.998x. Fail loudly instead of silently ignoring.
+    # was a first-arm timing bias; re-measured 0.998x. Fail loudly instead of silently ignoring.
     if any(o == "pdyn" or o.startswith("pcN=") for o in ol):
-        raise ValueError("DM_BWD_OPTS pdyn / pcN= were removed (closed: B8-pdyn-auto, BABAUDIT); use pers=N or persN=N")
+        raise ValueError("DM_BWD_OPTS pdyn / pcN= were removed; use pers=N or persN=N")
     if (q8.shape[2] == k8.shape[2] and "nopers" not in ol and not any(o.startswith("pers=") for o in ol)):
         if q8.shape[1] <= pN:
             ol = ol + ["pers=148"]
@@ -415,7 +415,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
             mst.wait_event(s2[2])
 
         return fastpath.call("bwd", inp, (key, _ao, float(sm), bool(deterministic), compile_env()), slow, pre=pre, reset=reset,
-                             loose=() if deterministic else ((0, 1, 2) if q8.shape[2] > k8.shape[2] else (0,)))   # nd: dQ unordered; dK/dV only for GQA (MHA nd dK/dV stay bitwise: audit 16:30)
+                             loose=() if deterministic else ((0, 1, 2) if q8.shape[2] > k8.shape[2] else (0,)))   # nd: dQ unordered; dK/dV only for GQA (MHA nd dK/dV stay bitwise)
     opts0 = _env("DM_BWD_OPTS", "")
     os.environ["DM_BWD_OPTS"] = _ao     # kernel knobs + compile cache follow the effective opts
     if st is not None and st[0] == key and trace is None:

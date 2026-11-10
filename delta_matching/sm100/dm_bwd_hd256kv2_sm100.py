@@ -31,7 +31,7 @@ Hand-offs (every one a PTX completion mechanism):
 
 dbg bit 2: per (query, key) [S_acc, dP_acc, P, dS] -> mDump (L, N, N, 4); P^T codes -> mCodesP, dS codes -> mCodesS (L, N, N)
   [query, key]; unadorned sb -> mSBP / mSBS (L, N, N/32) [key, q-block].
-dbg bit 8: lockstep checksums, definition of DmHd256Mx cb71d63 (keys-on-rows form): per query row [P-bits hash, dS-bits hash,
+dbg bit 8: lockstep checksums, definition of DmHd256Mx (keys-on-rows form): per query row [P-bits hash, dS-bits hash,
   dS code|sb hash, fp64 dS rowsum] -> mHash (L, N, 4).
 dbg bit 16: per query row, fp64 sums over every key this
   launch visits of the SAME fp32 dS values this kernel quantizes (dsv) and of |P * (dP_acc * ca)| (the DmHd256Mx dbg-1 definition)
@@ -416,7 +416,7 @@ class DmHd256Kv2:
                                    barrier_for_retrieve=pipeline.NamedBarrier(barrier_id=1, num_threads=self.threads),
                                    allocator_warp_id=self.LOAD_WARP, is_two_cta=True,
                                    two_cta_tmem_dealloc_mbar_ptr=st.tmem_dealloc.ptr)
-        # bundle-3 racecheck site: tcgen05.alloc.cta_group::2 lowers to a peer handshake (UTCATOMSWS.2CTA,
+        # racecheck site: tcgen05.alloc.cta_group::2 lowers to a peer handshake (UTCATOMSWS.2CTA,
         # remote STAS of the TMEM address + remote SYNCS.ARRIVE on a reserved smem mbarrier). Both CTAs pass a cluster barrier (all their
         # threads, mbarrier inits fenced) before the allocator warps start it, as in the hd128 2-CTA bwd where it runs after the cluster sync.
         cute.arch.cluster_arrive()

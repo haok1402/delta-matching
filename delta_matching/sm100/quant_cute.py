@@ -279,7 +279,7 @@ def load_row8(addr, vec):
 
 
 def row_delta(x, o):
-    """Triton's in-thread tree of sum_j x_j * o_j over 16 columns (cutequant-design R3), packed over column pairs exactly as
+    """Triton's in-thread tree of sum_j x_j * o_j over 16 columns, packed over column pairs exactly as
     its PTX: lane lo = even columns, hi = odd: a_k = fma2(x(4k,4k+1), o(4k,4k+1), x(4k+2,4k+3)*o(4k+2,4k+3)),
     (a0 + a1) + (a2 + a3), then lo + hi."""
     X = [(x[2 * i], x[2 * i + 1]) for i in range(8)]
@@ -385,7 +385,7 @@ def row_fn(raw, packed, mu=None, pre=None, recon=True):
 
 
 class ChunkGeo:
-    """K-mean partial chunk (cutequant-design R1/R4): `rows` rows x D columns on nw warps.
+    """K-mean partial chunk: `rows` rows x D columns on nw warps.
     Lanes l1 own 8 columns each (D/8 lanes); G = groups of rows = 32*nw / (D/8); a group g = w * tpw0 + l0 holds
     reps = rows / G rows: Triton-ALIGNED row r = rep * G + g, UNALIGNED (one thread per column, contiguous) r = g * reps + rep."""
 
@@ -649,7 +649,7 @@ def tile_delta(g, xrow, orow, dl, bh, N, row0):
 
 
 def warps4_02_13(ws):
-    """Triton's 4-warp smem + shfl.bfly 2, 1 combine (cutequant-design R4): (w0 + w2) + (w1 + w3)."""
+    """Triton's 4-warp smem + shfl.bfly 2, 1 combine: (w0 + w2) + (w1 + w3)."""
     return fadd(fadd(ws[0], ws[2]), fadd(ws[1], ws[3]))
 
 

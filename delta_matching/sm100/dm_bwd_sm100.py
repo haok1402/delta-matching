@@ -3605,7 +3605,7 @@ class DMBackwardSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         dm_trace=None,
     ):
-        # [2025-10-21] For reasons I don't understand, putting these partitioning in the main
+        # For reasons I don't understand, putting these partitioning in the main
         # kernel (before warp specialization) is a lot slower tha putting them here.
         # Partition smem / tmem tensors
         # S = K @ Q.T

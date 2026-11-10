@@ -916,7 +916,7 @@ class TcfBuildTrap(RuntimeError):
 
 
 def tcf_begin(on):
-    """0 = off (94ec380 code), 1 = minimal (default: tcgen05 pipelines / barriers marked with tcf_mark, explicit
+    """0 = off (no fences), 1 = minimal (default: tcgen05 pipelines / barriers marked with tcf_mark, explicit
     relay sites), 2 = blanket (every mbarrier / named-barrier wait and arrive, every sync_warp / elect_one)."""
     tcf_verify()
     TCF[0] = int(on)

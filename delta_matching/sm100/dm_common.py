@@ -28,7 +28,7 @@ def dm_bwd_p_pair(s0: Float32, s1: Float32, c: Float32, l2: Float32):
     return cute.math.exp2(x0, fastmath=True), cute.math.exp2(x1, fastmath=True)
 
 
-# ---- candidate exp variants (proposals; switch both kernels together by changing dm_bwd_p_pair) ----
+# ---- alternative exp variants (not used by default; switch both kernels together by changing dm_bwd_p_pair) ----
 from cutlass.cutlass_dsl import T, dsl_user_op  # noqa: E402
 from cutlass._mlir.dialects import llvm  # noqa: E402
 

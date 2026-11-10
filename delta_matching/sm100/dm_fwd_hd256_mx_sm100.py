@@ -334,7 +334,7 @@ class DMFwdHd256MxSm100:
         self.lpt = lpt
         # ord_td (site FW15; DM_HD256_ORDT): tcgen05 fence pair around
         # the TMEM teardown barrier (users: fence::before_thread_sync before their arrive; allocator: before + after around its
-        # arrive_and_wait, then dealloc).  Host default True (DM_HD256_ORDT); False = the pre-fix code (32e0ecd PTX), debug only.
+        # arrive_and_wait, then dealloc).  Host default True (DM_HD256_ORDT); False = the code without the fence pair, debug only.
         self.ord_td = ord_td
         # C6 (two_wg, default): TWO softmax warpgroups by tile parity - WG0 (warps 0-3)
         # owns tiles j = 0, 2, ... (S slot 0), WG1 (warps 4-7) tiles 1, 3, ... (slot 1). Per tile the m-independent prefix (S load,

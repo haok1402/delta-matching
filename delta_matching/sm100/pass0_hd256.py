@@ -22,7 +22,7 @@ _LOCK = threading.Lock()
 FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, use_tma_o=False,
              overlap_sO_sQ=False, kv_stage=2, q_stage=2, tile_m=128, tile_n=128)
 REGS_TL = dict(softmax=112, correction=112, other=32)   # 640 threads: per SMSP 4 compute warps + 1 other (4x112+32=480)
-BASE_VARIANT = "p3_16_0+ma+h2+pf+sq+ts+tl+es"   # +es: E1 (early S-slot release), bitwise = 9be8d94
+BASE_VARIANT = "p3_16_0+ma+h2+pf+sq+ts+tl+es"   # +es: E1 (early S-slot release), bitwise the same values
 
 _CACHES = {}
 _CLASSES = {}

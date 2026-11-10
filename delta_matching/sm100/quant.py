@@ -89,7 +89,7 @@ def _vec(t, ndim=3):
 
 
 def _tri_aligned(t, nheads):
-    """Triton's specialization picks the 16-byte K layout (cutequant-design R1): pointer % 16, the batch / token strides
+    """Triton's specialization picks the 16-byte K layout: pointer % 16, the batch / token strides
     % 16 (elements), the head stride % 16 unless nheads == 1 (specialized away)."""
     sb, sn, sh = t.stride()[:3]
     return t.data_ptr() % 16 == 0 and sb % 16 == 0 and sn % 16 == 0 and (nheads == 1 or sh % 16 == 0)

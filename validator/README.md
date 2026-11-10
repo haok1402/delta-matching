@@ -74,7 +74,7 @@ F2b 1e-8 dominance floor; they move a correct kernel ~1e-3 away from the emulati
 > conclusions about real LLM training - in particular not about matched vs stale or fp8 vs bf16 quality - and must not
 > be cited as evidence. The validation verdicts rest on the per-call tiers above.
 
-## Training tier calibration (toy smoke test; GB200, 2026-11-08; `validator/train_check.py none --arms bf16,emul,emul_stale,emul_nodelta`)
+## Training tier calibration (toy smoke test; GB200; `validator/train_check.py none --arms bf16,emul,emul_stale,emul_nodelta`)
 Final-20% mean loss, same seed (same init and batches), sm90 emulation:
 | steps | bf16 | fp8 matched (emul) | fp8 stale | delta = 0 (broken control) | bf16, other seed |
 |---|---|---|---|---|---|
@@ -85,8 +85,8 @@ max(2%, 0.03 nats) of the same-seed bf16 loss therefore separates them with wide
 why every arm uses the same seed). matched vs stale is NOT separable at this scale: stale's drift shows over long
 training runs, so this tier judges breakage only (a smoke test), not the matched-vs-stale benefit.
 
-### Stale vs matched in toy training (sm100-mx, GB200, 2026-11-08) — observation only, see the TOY SETUP note
-Kernel 6a31419 / 5a912b2: matched healthy on seeds 0-3 (0.59-0.64, at or below bf16); stale diverges on every seed
+### Stale vs matched in toy training (sm100-mx, GB200) — observation only, see the TOY SETUP note
+An early sm100 kernel: matched healthy on seeds 0-3 (0.59-0.64, at or below bf16); stale diverges on every seed
 (3.1-3.3, onset steps 400-600) and under every forward variant (MUFU exps, eager rescale). The emulation's stale is
 healthy (seeds 0-3) only because the emulation is exactly self-consistent (forward and backward use bitwise the same fp32
 S and exact exp). Perturbing the emulation's FORWARD S by 1e-4 relative (the size of an MMA accumulation-order
@@ -97,7 +97,7 @@ Random backward-P error (P_bwd *= 1 + U(-a, a), emulation, 2000 steps): matched 
 under both sm100-mx and sm100-mx-x. Under sm100-mx-x such noise reads 1e-3..4e-2 on the direct
 identity check, i.e. that check is stricter than training needs for random (non-systematic) error; kept strict by design.
 
-### Toy training at N = 8192 (batch 2, 2000 steps, kernel 3fec800, GB200, 2026-11-09) - observation only
+### Toy training at N = 8192 (batch 2, 2000 steps, GB200) - observation only
 | seed | bf16 | matched | stale |
 |---|---|---|---|
 | 0 | 0.6710 | 0.6810 (+0.010) | 3.120 (diverged from ~step 400) |

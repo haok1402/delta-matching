@@ -146,7 +146,7 @@ from flash_attn.cute.flash_fwd_sm100 import DescaleTensors  # same class as inte
 class DMPass0Hd256Sm100:
     dm_exp_variant = "mufu"  # dm_common contract (proposal variants: "f16x2", "poly")
     """hd256 MXFP8 (sm100-mx at D=256, preset sm100-mx-d256) matched-delta pass 0 (P1 = 1-CTA, q_stage 2,
-    kv_stage 2, +tl only). Copied from dm_pass0_sm100.DMPass0Sm100 (hd128, 7d63434); changes vs hd128: dP TMEM slots placed
+    kv_stage 2, +tl only). Copied from dm_pass0_sm100.DMPass0Sm100 (hd128); changes vs hd128: dP TMEM slots placed
     by n_block (256 + 128*i), no sO buffer, head_dim 256 (S / dP = 8 K=32 f8f6f4 steps, increasing d). Numerics are the
     hd128 sm100-mx ones verbatim: Q / K / V / dO pow2 (UE8M0) scale per 32 tokens over all D, so the scales sit on the
     MMAs' non-contraction dims and multiply the fp32 accumulator after the plain f8f6f4 MMA (exactly as hd128 pass 0; no
@@ -301,7 +301,7 @@ class DMPass0Hd256Sm100:
         # +ni: the correction WG and non-scheduler empty warps have no per-tile work in pass 0: they leave the
         # dynamic-scheduler consumer group and skip the schedule walk (no CLC-response spin stealing issue slots)
         self.dm_ni = "ni" in _fl0
-        # +es: tl_loop loads both S halves and releases the S slot before the exps (ncu: the S-slot
+        # +es: tl_loop loads both S halves and releases the S slot before the exps (profiled: the S-slot
         # release waited on dP(n), stalling the MMA warp's S(n+1)); bitwise the same P / dP / num / den / delta
         self.dm_es = "es" in _fl0
         self.dm_es2 = "es2" in _fl0   # S half 1 loaded + S released after the h0 exps, before the dP wait

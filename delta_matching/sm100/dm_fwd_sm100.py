@@ -405,13 +405,13 @@ class DMForwardSm100:
         # det2 defaults (bitwise, fwdrw R6): ss_pv=1 (P codes in SMEM, SS PV), kvs=6 (smem budget), lean=1; an explicit
         # DM_FWD_OPTS value overrides (e.g. "ss_pv=0,lean=0,kvs=99" = the previous forward)
         # (only where ss_pv is supported: q_stage == 2, 1-CTA, no S ping-pong; short N picks q_stage = 1 -> old path)
-        # Re-enabled after the fix (b5bcce3: sScale read/write handshake mbar_dm_cread +
-        # tcgen05 thread-sync fences); the 07:10 revert was for the sScale WAR race. Ordering: handshake + fences.
+        # Re-enabled after the fix (sScale read/write handshake mbar_dm_cread +
+        # tcgen05 thread-sync fences); an earlier revert was for the sScale WAR race. Ordering: handshake + fences.
         # (an explicit pipe=1 debug variant keeps the old path: pipe=1 bypasses the SS-PV P/SF protocol)
         if (self.q_stage == 2 and not self.use_s_ping_pong and self.cta_group_size == 1
                 and self.dm_opts.get("pipe", "0") != "1"):
-            # ss_pv default OFF. Every race-free sScale hand-off measured +34..45% fwd (crd, dbs, late;
-            # fwdrw-design 6.9), and racy ss_pv was only 0.1-0.6% faster than the old path with lean=1,kvs=6 (bitwise, no
+            # ss_pv default OFF. Every race-free sScale hand-off measured +34..45% fwd (crd, dbs, late),
+            # and racy ss_pv was only 0.1-0.6% faster than the old path with lean=1,kvs=6 (bitwise, no
             # new hand-off). dbs (+2 KB SMEM) needs one K/V ring stage less: kvs=5.
             for _k, _v in (("ss_pv", "0"), ("kvs", "5" if (self.dm_opts.get("ss_pv", "0") == "1" and self.dm_opts.get("dbs", "0") == "1") else "6"), ("lean", "1")):
                 self.dm_opts.setdefault(_k, _v)
@@ -437,7 +437,7 @@ class DMForwardSm100:
         # softmax behind the correction: +35% fwd). dbs=0 restores the crd protocol.
         self.dm_dbs = self.dm_sspv and self.dm_opts.get("dbs", "0") == "1"
         # late (ss_pv default protocol): sScale write + stats arrival moved after the softmax's pvdone_s(k-1) wait, so the slot reuse is
-        # ordered by the existing chain read(k-1) -> O-rescaled(k-1) -> PV(k-1) -> pvdone; no extra handshake (fwdrw-design 6.9)
+        # ordered by the existing chain read(k-1) -> O-rescaled(k-1) -> PV(k-1) -> pvdone; no extra handshake
         self.dm_late = self.dm_sspv and not self.dm_dbs and self.dm_opts.get("late", "1") == "1"
         self.dm_crd = self.dm_sspv and not self.dm_dbs and not self.dm_late and self.dm_opts.get("crd", "1") == "1"
         self.dm_trc = int(self.dm_opts.get("trc", "0")) if self.dm_sspv else 0   # DEBUG ONLY: LSE <- correction clock counters (1 stats sync, 2 pvdone wait, 3 loop total)

@@ -1,4 +1,4 @@
-"""hd256 MXFP8 backward, schedule O1.  Same numerics as DmHd256Mx (dm_bwd_hd256mx_sm100.py, 14df86c), bitwise: every S / dP
+"""hd256 MXFP8 backward, schedule O1.  Same numerics as DmHd256Mx (dm_bwd_hd256mx_sm100.py), bitwise: every S / dP
 is the same M=128 N=128 K=256 kind::f8f6f4 chain (8 ascending K=32 steps, zero init), P / dS via the same dm_mx256_* helpers
 in the same fp32 op order, the same quantization blocks (dv: P^T per (key, 32 q); dk / dq: one pow2 per (128 q x 32 keys),
 an order-free max), the same out MMA (kind::mxf8f6f4 M=128 N=256, 4 ascending K=32 steps, zero-init on t == 0), the same
@@ -71,7 +71,7 @@ class DmHd256Mx2:
         # Same scale bytes, same MMA order: bitwise.
         self.dqopt = bool(dqopt) and mode == "dq"
         self.SFB_OFF = 8 if self.dqopt else 4
-        # candidates, dq + dqopt only, bitwise by construction:
+        # variants, dq + dqopt only, bitwise by construction:
         # q3: MMA order per tile S(t) -> dP(t) -> out(t-1) (was S(t) -> out(t-1) -> dP(t)); the TMA warp issues in that consumer
         #     order Ya(t), Yb(t), T(t-1) and drains T(last) after the loop.
         # lpt (causal): "g" = global longest-first CTA order (L = x + n_t (y + H z) -> rt = n_t-1 - L // (H B)), "1" = per head
@@ -91,7 +91,7 @@ class DmHd256Mx2:
         #     (was after them); same completion (wait::st), fences and commit.
         self.x2 = bool(x2) and self.dqopt and not self.q3 and not self.xs
         self.esf = bool(esf) and self.dqopt and not self.q3
-        assert not (self.x2 and knob.replace("_safe", "") in ("s1", "sc")), knob    # s1 / sc not relocated for x2 (screen build)
+        assert not (self.x2 and knob.replace("_safe", "") in ("s1", "sc")), knob    # s1 / sc not relocated for x2
         # yr (Ya reuse): the out MMA's B operand (K, MN-major, N = d, K = keys) is read from the
         #     Ya stage that S used (K-major K tile): T's smem layout make_smem_layout_b(mma_o) is ((1, 16384), 128) x k-step 4096 =
         #     byte d % 128 + 16384 (d // 128) + 128 key, Ya's is ((128, 1), (32, 16384)) = the same map, same swizzle S<3,4,3>

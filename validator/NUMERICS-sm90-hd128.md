@@ -1,6 +1,6 @@
 # Delta-Matching sm90 fp8 attention: head_dim 128 numerics (branch `main`)
 
-This is a read-only analysis of `delta-matching@main` (51ea382). `dm_flagset.h` reduces the sources to the certified flag set,
+This is a read-only analysis of `delta-matching@main` (before PR #2). `dm_flagset.h` reduces the sources to the certified flag set,
 so every `#if` below is resolved with those values.
 Paths are relative to the repo root, and `file:N` means a line on `main`.
 Notation: `fl(x)` means RN-even rounding to fp32. `L2 = float(M_LOG2E) = 1.4426950216293335`.
@@ -82,7 +82,7 @@ goes through the frozen `quant._quant_kernel` (`producers.py:164-171`). On the b
        and `l_thread *= alpha` (`:221-227`).
      - Then `ms_g = fl(fmaxf(fl(gm_g*L2), floor) - fl(log2 448))`, with `floor = fl(m*L2) - 12` (`:230-234`, `:153`).
        **The `m*L2 - 12` may or may not be contracted to an FMA** (see §8).
-  5. P-hat (`:255`): `Pf = ex2(fma(S, L2, -ms_g))`. The FMA contraction on main is confirmed by commit 229bd69's text,
+  5. P-hat (`:255`): `Pf = ex2(fma(S, L2, -ms_g))`. The FMA contraction on main is confirmed by the PR #2 forward commit's text,
      "fma(RN(x g), log2e, -m)".
      - The **effective scale per (row, 64-key group) is `2^ms_g`**: `C = e4m3(448 * exp(S - nu_g))`, with
        `nu_g = max(gm_g, m - 12 ln2)`.
@@ -264,11 +264,11 @@ bitwise identical (`split.py:272-276`).
 
 | commit | change | changes output bits? |
 |---|---|---|
-| 229bd69 | hd128 forward: **BM192 x BN128** (BN256→0, so 2 groups and one rho per 128-key tile; Q scale index per WG). **FWDLAZY**: O is kept against a lagging reference `mref` and rebased only when `abs(m*L2 - mref) > 8`, with factor `min(ex2(mref-m*L2), 256)`; the final scale includes `ex2(mref - m*L2)`. **FWDDFOLD**: on unmasked steps the exp line is `ex2(fma(Sacc, fl(g*L2), -ms))`, with ms built from `max(raw)*g`, replacing `ex2(fma(fl(Sacc*g), L2, -ms))`. The descale is floored at FLT_MIN. The remaining pieces (RHOPRE, SMSC, …) are bitwise. | **Yes**: P codes, O and LSE, and therefore every backward output. |
-| 87ec68d | **EXPBX64** (passes 0 and 1): on 64x64 tiles that pass 0 does not mask, `P' = ex2(fma(Sacc, dsc, -b))` with `b = fma(LSE, L2, -8)` and no clamp. Masked tiles keep main's line. Removing the clamp alone is bitwise. | **Yes**: P', delta, dS', dV, dK, dQ. |
-| 12d3d19 | **P0DEFER/P0LAZY**: per-lane `a = fma(P', dPacc, a)` with no per-element descale; `fl(fl(a0*dp0 + a1*dp1) * 2^-8)` added in fp64 per lane; one fp64 quad reduce at the end (xor 1, then xor 2). **PW32**: the dV promote window becomes 32 m-tiles (2048 rows). | **Yes**: delta (matched) and dV, so also dK and dQ. |
-| 5a512e6 | No `-inf*0`: the descale is floored at FLT_MIN (`1.17549435e-38`) on maskable tiles (pass 0, pass 1, d256 forward). | Only when `fl(qs*ks) < FLT_MIN` (for example all-zero Q and K blocks), where main produces NaN, or `P' = 2^12` on masked entries in the backward. |
-| 43c2585, c50a6cb, 0cd60ee, 644c787 | Pipeline depth, psi prefetch, schedule, strided producers, pass-0 dispatch. | No (bitwise, per the commit text). |
+| Forward (D128) | hd128 forward: **BM192 x BN128** (BN256→0, so 2 groups and one rho per 128-key tile; Q scale index per WG). **FWDLAZY**: O is kept against a lagging reference `mref` and rebased only when `abs(m*L2 - mref) > 8`, with factor `min(ex2(mref-m*L2), 256)`; the final scale includes `ex2(mref - m*L2)`. **FWDDFOLD**: on unmasked steps the exp line is `ex2(fma(Sacc, fl(g*L2), -ms))`, with ms built from `max(raw)*g`, replacing `ex2(fma(fl(Sacc*g), L2, -ms))`. The descale is floored at FLT_MIN. The remaining pieces (RHOPRE, SMSC, …) are bitwise. | **Yes**: P codes, O and LSE, and therefore every backward output. |
+| Passes 0 + 1 exp line (D128) | **EXPBX64** (passes 0 and 1): on 64x64 tiles that pass 0 does not mask, `P' = ex2(fma(Sacc, dsc, -b))` with `b = fma(LSE, L2, -8)` and no clamp. Masked tiles keep main's line. Removing the clamp alone is bitwise. | **Yes**: P', delta, dS', dV, dK, dQ. |
+| Pass 0 row sums; pass 1 dV window | **P0DEFER/P0LAZY**: per-lane `a = fma(P', dPacc, a)` with no per-element descale; `fl(fl(a0*dp0 + a1*dp1) * 2^-8)` added in fp64 per lane; one fp64 quad reduce at the end (xor 1, then xor 2). **PW32**: the dV promote window becomes 32 m-tiles (2048 rows). | **Yes**: delta (matched) and dV, so also dK and dQ. |
+| No -inf * 0 fix | No `-inf*0`: the descale is floored at FLT_MIN (`1.17549435e-38`) on maskable tiles (pass 0, pass 1, d256 forward). | Only when `fl(qs*ks) < FLT_MIN` (for example all-zero Q and K blocks), where main produces NaN, or `P' = 2^12` on masked entries in the backward. |
+| Pass 2, pass 1 schedule, producers, pass 0 dispatch | Pipeline depth, psi prefetch, schedule, strided producers, pass-0 dispatch. | No (bitwise, per the commit text). |
 
 To emulate the sm90 speed-up branch (PR #2) you need a separate pseudocode branch. Everything below describes `main`.
 

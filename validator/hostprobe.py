@@ -67,7 +67,7 @@ for mode in ("matched", "stale"):
             OUT[f"S7_{t}_{j}"] = cpu(r)
         OUT[f"S8_{t}_small"] = cpu(fb(*inputs(20, B=1, N=384, H=4, Hk=1), causal, mode))
         OUT[f"S8_{t}_back"] = cpu(fb(*inputs(1), causal, mode)); torch.cuda.synchronize()
-# S9: odd numbers of 128-row blocks (abf6f87 replay bug: 1152 = 9, 1664 = 13, 4992 = 39 blocks), 3 calls each
+# S9: odd numbers of 128-row blocks (odd block counts once broke host replay plans: 1152 = 9, 1664 = 13, 4992 = 39 blocks), 3 calls each
 for (B, N, H, Hk) in ((1, 1152, 4, 4), (3, 1664, 8, 4), (1, 4992, 32, 8), (2, 1408, 8, 2)):
     for mode in ("matched", "stale"):
         for causal in (True, False):

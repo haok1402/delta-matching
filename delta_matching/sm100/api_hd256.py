@@ -78,7 +78,7 @@ def dm_attn_func_hd256(q, k, v, causal=True, mode="matched", deterministic=None)
 @torch.no_grad()
 def dm_attn_debug_hd256(q, k, v, do, causal=True, mode="matched", identity=None, deterministic=None, lockstep=None):
     """Validator hook at hd256 (same contract as api.dm_attn_debug): delta + LSE the backward consumes; with identity
-    (matched mode) also the backward's IN-KERNEL pre-quant rowsum(dS) and sum|P dP|.  Since bundle 9c these come from the SHIPPED
+    (matched mode) also the backward's IN-KERNEL pre-quant rowsum(dS) and sum|P dP|.  These come from the SHIPPED
     dK/dV kernel KV2 (dbg bit 16 build, same arithmetic: the fp32 dS KV2 quantizes into the codes that dK AND dQ consume, fp64
     sums per row), run through the backward the api would run (DM_H256_BWD_IMPL default dqr: the same chunk plan as the
     production call at the current cap / carry policy; kv2: one KV2 launch).  impl mx: the DmHd256Mx dq kernel's dbg=1 sums."""

@@ -5716,15 +5716,19 @@ class DMBackwardSm100:
         nst = cute.size(dsq[0][2], mode=[1])
         # pass 1: tile amax over this warp's 32 keys x all 128 queries (max is exact: same scale byte as the 2-warp exchange)
         ds_amax = Float32(0.0)
-        for h in cutlass.range_constexpr(2):
-            for st in cutlass.range_constexpr(nst):
-                frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
-                cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
-                cute.arch.fence_view_async_tmem_load()
-                fv = frag[None, 0, 0]
-                for v in cutlass.range_constexpr(cute.size(fv) // 2):
-                    ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
-        ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
+        if const_expr("hq1" in self.dm_abl):
+            # brain6 timing-only ablation (outputs WRONG): skip pass 1 (no amax TMEM pass) = one-pass helper ceiling
+            ds_amax = Float32(1.0)
+        else:
+            for h in cutlass.range_constexpr(2):
+                for st in cutlass.range_constexpr(nst):
+                    frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
+                    cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
+                    cute.arch.fence_view_async_tmem_load()
+                    fv = frag[None, 0, 0]
+                    for v in cutlass.range_constexpr(cute.size(fv) // 2):
+                        ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
+            ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
         ds_sb = dm_utils.pow2_sb(ds_amax)
         ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
         dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
@@ -5793,9 +5797,11 @@ class DMBackwardSm100:
                 sdS_xchg_src.iterator, sdS.iterator + cta_rank * stage_copy_elems, dS_cluster_full_mbar_ptr,
                 stage_copy_bytes, peer_cta_rank_in_cluster=peer)
         # pipeline_dS(t): dQ(t) overwrites the S tail -> every compute warp must have loaded S(t+1) first
-        if not dsq_last:
-            dm_utils.mbar_wait_parity(dm_mbar + 8 * 10, dsq_sr & 1)
-            dm_utils.tc_fence_after()
+        if const_expr("nosr" not in self.dm_abl):
+            if not dsq_last:
+                dm_utils.mbar_wait_parity(dm_mbar + 8 * 10, dsq_sr & 1)
+                dm_utils.tc_fence_after()
+        # brain6 abl:nosr (timing only, outputs WRONG: dQ may overwrite the S tail before S(t+1) is read)
         self._dm_write_dq_sf(dsq_j, dm_sdm, dm_mbar, cta_rank)
         cute.arch.fence_view_async_tmem_store()
         dm_utils.tc_fence_before()

@@ -322,7 +322,10 @@ class DMPass0Hd256Sm100:
         assert head_dim == 256 and head_dim_v == 256, "DMPass0Hd256Sm100 is the head_dim 256 pass 0"
         # +p2 (fork hd256-p0p2, S0 DIAGNOSTIC): 2-CTA cta_group::2 M=256 (FA4 adjacent-q pairing), kvs4, cutlass default remote
         # arrives (NOT the cluster-scope form required by accuracy-audit 08:2x): timing diagnostic only, never a default
-        self.dm_p2 = "p2" in _fl0
+        self.dm_p2 = "p2" in _fl0 or "p2t" in _fl0
+        # +p2t (S0b): +p2 with a per-stage causal key range (stage 0 of an adjacent-q pair skips its fully masked top n-blocks: the
+        # MMA warp keeps one slot phase per stage, tl_loop iterates its own range); skipped tiles only ever added exact +0 to num/den
+        self.dm_p2t = "p2t" in _fl0
         assert self.dm_tl and self.use_2cta_instrs == self.dm_p2 and self.q_stage == 2 and self.n_block_size == 128 \
             and self.m_block_size == 128, "hd256 P1: 1-CTA (P2: +p2 2-CTA), q_stage 2, 128x128 tiles, +tl"
         if self.dm_c3:
@@ -2030,6 +2033,9 @@ class DMPass0Hd256Sm100:
         )
         P_full_O_rescaled_phase = Int32(0)
         dm_slot_empty_phase = Int32(1)  # P0: S/dP slots start empty
+        if const_expr(self.dm_p2t):
+            p2_ph0 = Int32(1)   # +p2t: per-stage slot phases
+            p2_ph1 = Int32(1)
         if const_expr(self.use_s_ping_pong):
             mma_pv_count = Int32(0)
 
@@ -2074,7 +2080,36 @@ class DMPass0Hd256Sm100:
                 for stage in cutlass.range_constexpr(self.q_stage):
                     pipeline_q.consumer_wait_w_index_phase(stage, mma_q_consumer_phase)
                 mma_q_consumer_phase ^= 1
-                for i in cutlass.range(block_iter_count, unroll=1):
+                if const_expr(self.dm_p2t):
+                    nmx0 = self._stage_n_max(seqlen, work_m, 0, n_block_min, n_block_max)
+                    for i in cutlass.range(block_iter_count, unroll=1):
+                        n_block = n_block_max - 1 - i
+                        on0 = n_block < nmx0
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        if on0:
+                            pipeline_s_p_o.producer_acquire_w_index_phase(0, p2_ph0)
+                            gemm_Si[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                            pipeline_s_p_o.producer_commit_w_index(0)
+                        pipeline_s_p_o.producer_acquire_w_index_phase(1, p2_ph1)
+                        gemm_Si[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                        pipeline_s_p_o.producer_commit_w_index(1)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        if on0:
+                            pipeline_o_acc.producer_acquire_w_index_phase(0, p2_ph0)
+                            gemm_dPi[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
+                            pipeline_o_acc.producer_commit_w_index(0)
+                            p2_ph0 ^= 1
+                        pipeline_o_acc.producer_acquire_w_index_phase(1, p2_ph1)
+                        gemm_dPi[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
+                        pipeline_o_acc.producer_commit_w_index(1)
+                        p2_ph1 ^= 1
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                for i in cutlass.range(0 if const_expr(self.dm_p2t) else block_iter_count, unroll=1):
                     pipeline_kv.consumer_wait(mma_kv_consumer_state)
                     sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
                     for stage in cutlass.range_constexpr(self.q_stage):
@@ -2172,6 +2207,16 @@ class DMPass0Hd256Sm100:
         return work_q_block(
             work_m, stage, cta_rank, q_stage=self.q_stage, cta_group_size=self.cta_group_size
         )
+
+    @cute.jit
+    def _stage_n_max(self, seqlen, work_m, stage: int, n_block_min, n_block_max):
+        """+p2t: exclusive key-block end of Q stage `stage` of the work tile (causal), within [n_block_min, n_block_max]."""
+        res = n_block_max
+        if const_expr(self.dm_p2t and self.is_causal):
+            m_idx_max = (work_m * self.q_stage + stage + 1) * self.cta_group_size * self.m_block_size
+            n_idx = m_idx_max + seqlen.seqlen_k - seqlen.seqlen_q
+            res = cutlass.max(cutlass.min(n_block_max, cute.ceil_div(n_idx, self.n_block_size)), n_block_min)
+        return res
 
     # for both softmax0 and softmax1 warp group
     @cute.jit
@@ -2703,6 +2748,8 @@ class DMPass0Hd256Sm100:
                 seqlen, work_m, split_idx=split_idx, num_splits=num_splits,
             )
             has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
+            if const_expr(self.dm_p2t):
+                n_block_max = self._stage_n_max(seqlen, work_m, stage, n_block_min, n_block_max)
             m_block = self._q_block(work_m, stage, cta_rank)
             row = m_block * self.m_block_size + row_in
             rowc = cutlass.min(row, seqlen.seqlen_q - 1)

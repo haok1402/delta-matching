@@ -6180,10 +6180,12 @@ class DMBackwardSm100:
                 nt = cute.size(mdQ_semaphore, mode=[3]) * nh * mt
                 tile = (batch_idx * nh + head_idx) * mt + m
                 base = dm_tcq.iterator.toint()
-                old = dm_utils.atom_add_acqrel_gpu_s32(base + Int64(4) * Int64(1 + nt + tile), Int32(1))
+                # relaxed atomics / store: the queue only orders the converter's work; the converter acquires the det
+                # counters (released by red.async.release.gpu above) before reading the accumulator
+                old = dm_utils.atom_add_relaxed_gpu_s32(base + Int64(4) * Int64(1 + nt + tile), Int32(1))
                 if old == self.cta_group_size - 1:
                     pos = dm_utils.atom_add_relaxed_gpu_s32(base, Int32(1))
-                    dm_utils.st_release_gpu_s32(base + Int64(4) * Int64(1 + pos), tile + 1)
+                    dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + pos), tile + 1)
 
     @cute.jit
     def dQacc_reduce(

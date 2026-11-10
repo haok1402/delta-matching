@@ -559,6 +559,13 @@ def st_release_gpu_s32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def st_relaxed_gpu_s32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
+                    "st.relaxed.gpu.global.s32 [$0], $1;", "l,r", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def poll_acquire_nz_or_trap(addr: cutlass.Int64, limit: Int32, *, loc=None, ip=None) -> Int32:
     """rw8k tconv: spin with ld.acquire.gpu until the int32 at addr is non-zero (trap after `limit` polls); returns it."""
     return Int32(llvm.inline_asm(

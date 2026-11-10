@@ -23,7 +23,7 @@ from .fastpath import env as _env
 D = 256
 NUMERICS = "sm100-mx-d256"
 DETERMINISTIC = True
-IMPL_DEFAULT = "1"
+IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "2"}   # O1 (DmHd256Mx2) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}
 PROF = []
@@ -77,12 +77,14 @@ def twins(q8, do8, k8):
 
 def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, modes=("dv", "dk", "dq"), tw=None,
                    knob="", impl=None):
-    """impl "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values);
-    default from env DM_H256_BWD_IMPL."""
+    """impl per mode: "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values).
+    impl "1" / "2" = all modes; a dict mode -> impl; None = env DM_H256_BWD_IMPL (all modes) if set, else IMPL_DEFAULT
+    (dq "2", dv / dk "1")."""
     if impl is None:
-        impl = _env("DM_H256_BWD_IMPL", IMPL_DEFAULT)
-    impl = str(impl)
-    assert impl in ("1", "2"), impl
+        impl = _env("DM_H256_BWD_IMPL", "")
+        impl = IMPL_DEFAULT if impl == "" else impl
+    impls = dict(impl) if isinstance(impl, dict) else {m: str(impl) for m in ("dv", "dk", "dq")}
+    assert all(v in ("1", "2") for v in impls.values()), impls
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -125,7 +127,7 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         if not ordf:
             key = key + ("noordf",)
         cls = DmHd256Mx
-        if impl == "2":
+        if impls[mode] == "2":
             from .dm_bwd_hd256mx2_sm100 import DmHd256Mx2 as cls  # noqa: N813
             key = ("i2",) + key
         _run(key, lambda: cls(mode, causal, kd, knob, ordf=ordf), ten, lds, [n_t, H, Hk], mode=mode)

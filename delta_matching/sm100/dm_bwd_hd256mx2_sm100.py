@@ -48,7 +48,11 @@ class DmHd256Mx2:
     KNOBS = ("sc", "cd", "ld", "xc", "fin")
     DLY = 1 << 15
 
-    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = ""):
+    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False):
+        """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
+        schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
+        epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
+        self.ordf = bool(ordf)
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
         self.kn = knob.replace("_safe", "")
@@ -249,6 +253,8 @@ class DmHd256Mx2:
                 if t < total:
                     yf = ya_c.wait_and_advance()
                     se = sc_p.acquire_and_advance()            # score region free (compute read dP(t-1) / S(t-1))
+                    if const_expr(self.ordf):
+                        tc_fence_after()                       # BW2
                     mma_s.set(tcgen05.Field.ACCUMULATE, False)
                     for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
                         cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
@@ -278,6 +284,8 @@ class DmHd256Mx2:
                     if t < total:
                         yg = yb_c.wait_and_advance()
                         de = sc_p.acquire_and_advance()        # compute read S(t)
+                        if const_expr(self.ordf):
+                            tc_fence_after()                   # BW2
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
                             cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
@@ -380,6 +388,8 @@ class DmHd256Mx2:
                 xb = xch_addr + par * 1024
                 # ---- S(t) -> registers, release the score region ----
                 sf = sc_c.wait_and_advance()
+                if const_expr(self.ordf):
+                    tc_fence_after()                           # BW1
                 if const_expr(self.kn == "sc"):
                     if const_expr(self.unsafe):
                         sf.release()
@@ -387,6 +397,8 @@ class DmHd256Mx2:
                 sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
                 cute.arch.fence_view_async_tmem_load()
                 if const_expr(not (self.kn == "sc" and self.unsafe)):
+                    if const_expr(self.ordf):
+                        tc_fence_before()                      # BW2
                     sf.release()
                 if const_expr(self.kn == "ld"):
                     if warp == 3:
@@ -449,8 +461,12 @@ class DmHd256Mx2:
                 if const_expr(self.has_dp):
                     # ---- dP(t) -> registers, release; dS = P * fma(dP, a, -delta) ----
                     df = sc_c.wait_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_after()                       # BW1
                     dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
                     cute.arch.fence_view_async_tmem_load()
+                    if const_expr(self.ordf):
+                        tc_fence_before()                      # BW2
                     df.release()
                     am2 = [Float32(0.0)] * 2
                     idc = [[Float32(0.0)] * 3, [Float32(0.0)] * 3]
@@ -546,6 +562,8 @@ class DmHd256Mx2:
                         pass
                     else:
                         ce = cd_p.acquire_and_advance()
+                        if const_expr(self.ordf):
+                            tc_fence_after()                   # BW3
                 else:
                     # dv: P^T codes per (key, 32 queries), own chunks
                     for jj in cutlass.range_constexpr(2):
@@ -572,6 +590,8 @@ class DmHd256Mx2:
                     sball = [sbs[0], sbs[1], hv_ % 256, hv_ // 256]
                     if const_expr(not (self.kn == "cd" and self.unsafe)):
                         ce = cd_p.acquire_and_advance()
+                        if const_expr(self.ordf):
+                            tc_fence_after()                   # BW3
                 # ---- codes -> smem stage stg (own two chunks) ----
                 cbase = crow + stg * self.bytes_c
                 for jj in cutlass.range_constexpr(2):
@@ -676,8 +696,14 @@ class DmHd256Mx2:
                     st_global_v4(ob + (32 * cblk + i) * 2, w[0], w[1], w[2], w[3])
             if const_expr(self.kn == "fin" and self.unsafe):
                 fw = fin_c.wait_and_advance()
+            if const_expr(self.ordf):
+                tc_fence_before()
             fw.release()
 
         tmem.relinquish_alloc_permit()
+        if const_expr(self.ordf):
+            tc_fence_before()                                  # BW9
         cute.arch.barrier(barrier_id=3, number_of_threads=self.threads)
+        if const_expr(self.ordf):
+            tc_fence_after()
         tmem.free(tmem_ptr)

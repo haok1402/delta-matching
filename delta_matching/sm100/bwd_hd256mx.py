@@ -102,6 +102,9 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     lds_tail = [2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 2]
     hsh = dbg & 8
     n_t = N // 128
+    # tcgen05 fence pair on the acc / cd / teardown hand-offs (fork hd256-ordinv, sites BW1-BW3, BW9 of kda/hd256/ordinv-hd256.md;
+    # DEFAULT since bundle 2, coordinator 07:5x). DEBUG opt-out DM_HD256_ORDF=0 = the pre-fix kernels (32e0ecd PTX).
+    ordf = _env("DM_HD256_ORDF", "1") != "0"
     for mode in modes:
         if mode == "dv":
             X, Xb, Y, Yb, Tw, out = k8, k8, q8, q8, do8, dv
@@ -119,11 +122,13 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         lds = [1, 1, 1, 1, 0] + lds_tail
         kd = dbg & 11 if mode == "dq" else dbg & 10
         key = (mode, causal, kd) if not knob else (mode, causal, kd, knob)
+        if not ordf:
+            key = key + ("noordf",)
         cls = DmHd256Mx
         if impl == "2":
             from .dm_bwd_hd256mx2_sm100 import DmHd256Mx2 as cls  # noqa: N813
             key = ("i2",) + key
-        _run(key, lambda: cls(mode, causal, kd, knob), ten, lds, [n_t, H, Hk], mode=mode)
+        _run(key, lambda: cls(mode, causal, kd, knob, ordf=ordf), ten, lds, [n_t, H, Hk], mode=mode)
         if big or hsh:
             dumps[mode] = dict(dump=dump, codes=codes, sb=sb, hash=hh)
     if dbg:

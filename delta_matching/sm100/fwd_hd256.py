@@ -137,8 +137,5 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     if is_fake_mode():
         return o, lse
     u8 = torch.uint8
-    if trace:
-        cache[key](q8.view(u8), k8.view(u8), v8.view(u8), o, lse, qs, kvw, dbg)
-    else:
-        cache[key](q8.view(u8), k8.view(u8), v8.view(u8), o, lse, qs, kvw)
+    cache[key](q8.view(u8), k8.view(u8), v8.view(u8), o, lse, qs, kvw, dbg)   # dbg None unless trace (tvm-ffi slot mDbg)
     return o, lse

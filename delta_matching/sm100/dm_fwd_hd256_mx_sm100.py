@@ -180,12 +180,17 @@ class DMFwdHd256MxSm100:
     Out: O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
-                 sf_wait: bool = True, pc_inj: int = 0):
+                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = True):
+        # C5 (sf_bank, default; Codex hd256-fwd-02 option 1): ONE S buffer [0,128) released by the softmax right after its
+        # tcgen05.ld (S_empty), SF in two dedicated banks [128 + 32 b, +32) (b = tile parity: SFA +0..3, SFB +8..15), O [256,512).
+        # QK never touches SF columns, so there is no PV -> QK WAR; QK(j+1) waits S_empty(j) only. sf_bank=False = C0 layout.
+        self.sf_bank = sf_bank
         # DEBUG positive control for the SF hand-off (default 0 = compiled out, bitwise-neutral):
         #  1: right after issuing PV(i), the MMA warp overwrites SFA(i) of lanes 0-31 (tcgen05.st, byte 0x80 = 2^1) WITHOUT
         #     waiting for PV(i) -> the unsafe class "tcgen05 write of PV's SF after PV issue, before PV completion" (what
         #     QK(i+2) does with SFWAIT=0); must corrupt rows 0-31 of some tiles if the window is real and the stress sees it.
         #  2: the same write AFTER waiting O_full(PV(i)) + fence::after (the C0 protocol) -> must stay bitwise clean.
+        #  3 (sf_bank only): the MMA warp skips the S_empty wait -> QK(j+1) may overwrite S(j) during the softmax load (unsafe).
         self.pc_inj = pc_inj
         self.sf_wait = sf_wait   # False = DEBUG/A-B only: the pre-C0 schedule without the PV(j-2) -> QK(j) completion wait
         self.is_causal = is_causal
@@ -210,6 +215,8 @@ class DMFwdHd256MxSm100:
         self.tmem_o = 256
         self.sfa_col = 32
         self.sfb_col = 64
+        self.sfa_off = 0 if sf_bank else self.sfa_col
+        self.sfb_off = 8 if sf_bank else self.sfb_col
 
     @cute.jit
     def __call__(self, mQ: cute.Tensor, mK: cute.Tensor, mV: cute.Tensor, mO: cute.Tensor, mLSE: cute.Tensor,
@@ -251,7 +258,7 @@ class DMFwdHd256MxSm100:
             mbar_q: cute.struct.MemRange[Int64, 2]
             mbar_kv: cute.struct.MemRange[Int64, self.kv_stage * 2]
             # raw: 0,1 S_full[slot] | 2,3 P_full[slot] | 4 O_full | 5 O_ready | 6,7 stats_full[slot] | 8 final_full
-            mbar_dm: cute.struct.MemRange[Int64, 10]
+            mbar_dm: cute.struct.MemRange[Int64, 12]   # + 9 S_empty (sf_bank)
             tmem_holding_buf: Int32
             sStats: cute.struct.MemRange[Float32, 2 * 128 + 2 * 128]
             sQ: cute.struct.Align[cute.struct.MemRange[self.q_dtype, cute.cosize(sQ_layout)], self.buffer_align_bytes]
@@ -311,6 +318,7 @@ class DMFwdHd256MxSm100:
             dm_utils.mbar_init(mbar + 48, 128)
             dm_utils.mbar_init(mbar + 56, 128)
             dm_utils.mbar_init(mbar + 64, 128)
+            dm_utils.mbar_init(mbar + 72, 128)
             cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=cluster_layout_vmnk, is_relaxed=True)
 
@@ -417,13 +425,19 @@ class DMFwdHd256MxSm100:
             # slot j&1 holds SF(j-2), read by PV(j-2): PTX does not order PV(j-2) (mxf8f6f4, acc O) before QK(j) (f8f6f4,
             # acc S) by issue order (Codex fwd-01 / PTX 9.7.16.6) -> wait PV(j-2)'s completion. Phase-safe: PV(j-3) is complete
             # (PV(j-2) waited O_ready(j-2), arrived after O_full(PV(j-3))) and PV(j-1) is not issued yet.
-            if const_expr(self.sf_wait) and i >= 1:
+            if const_expr(self.sf_bank):
+                # single S buffer: the softmax has loaded S(j-1) (S_empty(j-1), parity (j-1)&1)
+                if const_expr(self.pc_inj != 3):
+                    dm_utils.mbar_wait_parity(mbar + 72, (j - 1) & 1)
+                    dm_utils.tc_fence_after()
+                slot = Int32(0)
+            elif const_expr(self.sf_wait) and i >= 1:
                 dm_utils.mbar_wait_parity(mbar + 32, (j - 2) & 1)
                 dm_utils.tc_fence_after()
             pipeline_kv.consumer_wait(kv_state)
             self.mma_qk(atom_qk, acc_qk, tSrQ, tSrK, kv_state.index, slot)
             with cute.arch.elect_one():
-                dm_utils.tc_commit(mbar + 8 * slot)
+                dm_utils.tc_commit(mbar + 8 * slot)      # S_full (sf_bank: always mbar+0, slot 0)
             pipeline_kv.consumer_release(kv_state)
             kv_state.advance()
             self.mma_pv(pv_op, acc_pv, tOrP, tOrV, sP, sV, pipeline_kv, kv_state, mbar, i)
@@ -447,20 +461,20 @@ class DMFwdHd256MxSm100:
         if i >= 1:
             dm_utils.mbar_wait_parity(mbar + 40, (i - 1) & 1)            # O_ready(i): O rescaled (or not) after PV(i-1)
         dm_utils.tc_fence_after()
-        sf = slot * 128
+        sf = (128 + 32 * slot) if const_expr(self.sf_bank) else slot * 128
         dm_utils.gemm_ptx_bs(
             pv_op, self.tmem_o, tOrP[None, None, None, slot], tOrV[None, None, None, kv_state.index],
-            sP[None, None, None, slot], sV[None, None, None, kv_state.index], sf + self.sfa_col, sf + self.sfb_col,
+            sP[None, None, None, slot], sV[None, None, None, kv_state.index], sf + self.sfa_off, sf + self.sfb_off,
             tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)), zero_init=(i == 0))
         with cute.arch.elect_one():
             dm_utils.tc_commit(mbar + 32)                                   # O_full(i)
-        if const_expr(self.pc_inj > 0):
+        if const_expr(self.pc_inj in (1, 2)):
             if const_expr(self.pc_inj == 2):
                 dm_utils.mbar_wait_parity(mbar + 32, i & 1)
                 dm_utils.tc_fence_after()
             lane0 = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
             for r in cutlass.range_constexpr(4):
-                tmem_st1((lane0 << 16) + sf + self.sfa_col + r, Int32(-2139062144))     # 0x80808080
+                tmem_st1((lane0 << 16) + sf + self.sfa_off + r, Int32(-2139062144))     # 0x80808080
             tmem_wait_st()
         pipeline_kv.consumer_release(kv_state)
 
@@ -501,12 +515,20 @@ class DMFwdHd256MxSm100:
         dm_kw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block])
         dm_vw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block + 1])
         dm_ks = [dm_utils.byte_pow2_f32(dm_kw, b) for b in range(4)]
-        dm_utils.mbar_wait_parity(mbar + 8 * slot, (j >> 1) & 1)
-        dm_utils.tc_fence_after()
-        tStS_cur = cute.make_tensor(tStS.iterator + slot * 128, tStS.layout)
+        if const_expr(self.sf_bank):
+            dm_utils.mbar_wait_parity(mbar + 0, j & 1)                 # S_full (single buffer, one completion per tile)
+            dm_utils.tc_fence_after()
+            tStS_cur = tStS
+        else:
+            dm_utils.mbar_wait_parity(mbar + 8 * slot, (j >> 1) & 1)
+            dm_utils.tc_fence_after()
+            tStS_cur = cute.make_tensor(tStS.iterator + slot * 128, tStS.layout)
         s = cute.make_rmem_tensor(tScS.shape, Float32)
         cute.copy(thr_ld, tStS_cur, s)
         cute.arch.fence_view_async_tmem_load()
+        if const_expr(self.sf_bank):
+            dm_utils.tc_fence_before()
+            dm_utils.mbar_arrive(mbar + 72)                            # S_empty(j): QK(j+1) may overwrite S
         if const_expr(self.is_causal and is_first):
             for c in cutlass.range_constexpr(128):
                 if Int32(c) > tidx:
@@ -544,11 +566,11 @@ class DMFwdHd256MxSm100:
             dm_sfa[b] = dm_utils.ue8m0_byte(e)
             dm_w[b] = dm_utils.byte_shl23_f32(dm_sfa[b])
         sfa_word = dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3])
-        sfbase = (lane << 16) + slot * 128
+        sfbase = (lane << 16) + ((128 + 32 * slot) if const_expr(self.sf_bank) else slot * 128)
         for r in cutlass.range_constexpr(4):
-            tmem_st1(sfbase + self.sfa_col + r, sfa_word)
+            tmem_st1(sfbase + self.sfa_off + r, sfa_word)
         for r in cutlass.range_constexpr(8):
-            tmem_st1(sfbase + self.sfb_col + r, dm_vw)
+            tmem_st1(sfbase + self.sfb_off + r, dm_vw)
         # x = S * c_b + (7 - kb); p = ex2(x); codes -> sP[slot] (K-major SW128: row r at r*128 B, chunk q at (q ^ (r&7))*16)
         for b in cutlass.range_constexpr(4):
             for i in cutlass.range_constexpr(0, 32, 2):

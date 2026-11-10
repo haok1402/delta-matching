@@ -320,8 +320,11 @@ class DMPass0Hd256Sm100:
         self.dm_delta_numden = "dnd" in _fl0
         assert self.dm_delta_numden, "hd256 MXFP8 pass 0: delta form num/den (+dnd) only"
         assert head_dim == 256 and head_dim_v == 256, "DMPass0Hd256Sm100 is the head_dim 256 pass 0"
-        assert self.dm_tl and not self.use_2cta_instrs and self.q_stage == 2 and self.n_block_size == 128 \
-            and self.m_block_size == 128, "hd256 P1: 1-CTA, q_stage 2, 128x128 tiles, +tl"
+        # +p2 (fork hd256-p0p2, S0 DIAGNOSTIC): 2-CTA cta_group::2 M=256 (FA4 adjacent-q pairing), kvs4, cutlass default remote
+        # arrives (NOT the cluster-scope form required by accuracy-audit 08:2x): timing diagnostic only, never a default
+        self.dm_p2 = "p2" in _fl0
+        assert self.dm_tl and self.use_2cta_instrs == self.dm_p2 and self.q_stage == 2 and self.n_block_size == 128 \
+            and self.m_block_size == 128, "hd256 P1: 1-CTA (P2: +p2 2-CTA), q_stage 2, 128x128 tiles, +tl"
         if self.dm_c3:
             _fl = self.dm_exp_variant.split("+")[1:]
             assert not any(f in _fl for f in ("fu", "fa", "sq")), "c3 supports the plain static-mix path only"
@@ -2688,6 +2691,9 @@ class DMPass0Hd256Sm100:
         s_addr = Int32(tSAcc.iterator.toint()) + lane_base
         d_addr = s_addr + Int32(self.tmem_o_offset[0] - self.tmem_s_offset[0])
         s_full_phase = Int32(0)
+        cta_rank = Int32(0)
+        if const_expr(self.use_2cta_instrs):
+            cta_rank = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         work_tile = tile_scheduler.initial_work_tile_info()
         while work_tile.is_valid_tile:
             work_m, head_idx, batch_idx, split_idx = work_tile.tile_idx
@@ -2697,7 +2703,7 @@ class DMPass0Hd256Sm100:
                 seqlen, work_m, split_idx=split_idx, num_splits=num_splits,
             )
             has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
-            m_block = self._q_block(work_m, stage)
+            m_block = self._q_block(work_m, stage, cta_rank)
             row = m_block * self.m_block_size + row_in
             rowc = cutlass.min(row, seqlen.seqlen_q - 1)
             # hd256 MXFP8 (sm100-mx): one pow2 Q / dO scale per 32 rows, one K / V scale per 32 keys (4 per n_block)

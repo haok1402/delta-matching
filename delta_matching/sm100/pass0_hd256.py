@@ -65,6 +65,9 @@ def dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, delta_fo
     over = dict(FORCE)
     if "+kv3" in exp_variant:   # hd256-p0opt E4: K/V ring depth 3 (224 KiB raw SMEM); variant token is host-only
         over["kv_stage"] = 3
+    if "+p2" in exp_variant:   # hd256-p0p2 S0 diagnostic: 2-CTA M=256 (cluster 2), kvs4 (16 KiB K/V halves per CTA)
+        over["use_2cta_instrs"] = True
+        over["kv_stage"] = 4
     aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
            _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2)]
     names = ["qs", "ks", "vs", "dos", "do8", "lse"]

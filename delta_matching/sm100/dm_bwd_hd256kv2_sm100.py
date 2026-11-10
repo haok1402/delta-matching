@@ -628,8 +628,11 @@ class DmHd256Kv2:
             fw.release()
             cd_p.tail()
 
+        # teardown (ordinv K9): every TMEM reader / MMA issuer fences before the CTA + cluster barriers, the deallocator after
+        tc_fence_before()
         cute.arch.barrier(barrier_id=4, number_of_threads=self.threads)
         tmem.relinquish_alloc_permit()
         cute.arch.cluster_arrive()
         cute.arch.cluster_wait()
+        tc_fence_after()
         tmem.free(tmem_ptr)

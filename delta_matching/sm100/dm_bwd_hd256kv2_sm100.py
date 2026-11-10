@@ -128,7 +128,7 @@ class DmHd256Kv2:
         tc_fence_after()
         accS = cute.make_tensor(tmem_ptr + self.COL_S + 64 * ss, acc_l)
         mma_s.set(tcgen05.Field.ACCUMULATE, False)
-        for kb_ in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
+        for kb_ in range(cute.size(tKr, mode=[2])):
             cute.gemm(mma_s, accS, tKr[(None, None, kb_, 0)], tQr[(None, None, kb_, qi)], accS)
             mma_s.set(tcgen05.Field.ACCUMULATE, True)
         with cute.arch.elect_one():
@@ -141,7 +141,7 @@ class DmHd256Kv2:
         self._wcl(B(5), (n & 1) ^ 1)
         tc_fence_after()
         mma_s.set(tcgen05.Field.ACCUMULATE, False)
-        for kb_ in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
+        for kb_ in range(cute.size(tVr, mode=[2])):
             cute.gemm(mma_s, accP, tVr[(None, None, kb_, 0)], tdOr[(None, None, kb_, qi)], accP)
             mma_s.set(tcgen05.Field.ACCUMULATE, True)
         with cute.arch.elect_one():
@@ -155,8 +155,7 @@ class DmHd256Kv2:
         self._wcl(B(6) + 8 * g, (n >> 1) & 1)                  # P codes + SFA of n published
         tc_fence_after()
         if const_expr(self.kn == "fin"):
-            if n == total - 1:
-                spin(self.DLY)
+            spin(self.DLY)                                         # (delays every dV; the last one is the control)
         dm_utils.gemm_ptx_bs(
             mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, g)], tdOdr[(None, None, None, di)],
             sCP[(None, None, None, g)], sdOd[(None, None, None, di)],

@@ -64,6 +64,15 @@ def commit_mc(mbar: Int32, *, loc=None, ip=None):
          "r", True, loc, ip)
 
 
+def warp_arrive_c0(mbar):
+    """Per-warp aggregated cross-CTA arrive: every lane has already done its own tcgen05 wait/fence::before (and proxy fence);
+    bar.warp.sync orders the lanes' memory operations before lane 0's mbarrier.arrive.release.cluster on the leader CTA's barrier
+    (causality: warp barrier at CTA scope, then a cluster-scope release; accuracy-audit 08:2x)."""
+    cute.arch.sync_warp()
+    if cute.arch.lane_idx() == 0:
+        dm_utils.mbar_arrive_rank(mbar, Int32(0))
+
+
 def _coop(n):
     return pipeline.CooperativeGroup(pipeline.Agent.Thread, n)
 
@@ -221,17 +230,17 @@ class DmHd256Kv2:
                                                    cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         kbar = Int32(st.kb.data_ptr().toint())
         F_S, E_S, F_F, E_F = kbar, kbar + 8, kbar + 48, kbar + 56
-        # F_s / E_cd / F_f: one tcgen05.commit (multicast, hardware completion); E_s / F_cd / E_f: 256 compute threads x 2 CTAs
-        # arrive (release.cluster) on the LEADER's barrier; only the leader waits on those (acquire.cluster)
+        # F_s / E_cd / F_f: one tcgen05.commit (multicast, hardware completion); E_s / F_cd / E_f: 8 compute warps x 2 CTAs
+        # arrive (lane 0 after bar.warp.sync, release.cluster) on the LEADER's barrier; only the leader waits on those (acquire.cluster)
         if warp == self.MMA_WARP:
             with cute.arch.elect_one():
                 dm_utils.mbar_init(F_S, 1)
-                dm_utils.mbar_init(E_S, 2 * self.NCOMP)
+                dm_utils.mbar_init(E_S, 2 * self.NCOMP // 32)
                 for i_ in cutlass.range_constexpr(2):
-                    dm_utils.mbar_init(kbar + 16 + 8 * i_, 2 * self.NCOMP)
+                    dm_utils.mbar_init(kbar + 16 + 8 * i_, 2 * self.NCOMP // 32)
                     dm_utils.mbar_init(kbar + 32 + 8 * i_, 1)
                 dm_utils.mbar_init(F_F, 1)
-                dm_utils.mbar_init(E_F, 2 * self.NCOMP)
+                dm_utils.mbar_init(E_F, 2 * self.NCOMP // 32)
         m_p, m_c = pipeline.PipelineAsync.create(num_stages=2, producer_group=_coop(32), consumer_group=comp1,
                                                  barrier_storage=bars + 18, defer_sync=True).make_participants()
         cute.arch.mbarrier_init_fence()
@@ -457,20 +466,20 @@ class DmHd256Kv2:
                 stg = t & 1
                 dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
                 if const_expr(self.kn == "cd" and self.unsafe):
-                    dm_utils.mbar_arrive_rank(kbar + 16 + 8 * stg, Int32(0))   # UNSAFE: published before the codes are written
+                    warp_arrive_c0(kbar + 16 + 8 * stg)   # UNSAFE: published before the codes are written
                     spin(self.DLY)
                 dm_utils.mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
                 tc_fence_after()
                 if const_expr(self.kn == "s"):
                     if const_expr(self.unsafe):
-                        dm_utils.mbar_arrive_rank(E_S, Int32(0))   # UNSAFE: slot released before the loads
+                        warp_arrive_c0(E_S)   # UNSAFE: slot released before the loads
                     spin(self.DLY)
                 sv = tmem_ld32(tb + self.COL_S + 32 * hf)
                 dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
                 cute.arch.fence_view_async_tmem_load()
                 tc_fence_before()
                 if const_expr(not (self.kn == "s" and self.unsafe)):
-                    dm_utils.mbar_arrive_rank(E_S, Int32(0))    # release.cluster on the leader's barrier
+                    warp_arrive_c0(E_S)    # release.cluster on the leader's barrier
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 for i in cutlass.range_constexpr(0, 32, 4):
@@ -624,7 +633,7 @@ class DmHd256Kv2:
                     if const_expr(not self.unsafe):
                         spin(self.DLY)
                 if const_expr(not (self.kn == "cd" and self.unsafe)):
-                    dm_utils.mbar_arrive_rank(kbar + 16 + 8 * stg, Int32(0))    # release.cluster on the leader's barrier
+                    warp_arrive_c0(kbar + 16 + 8 * stg)    # release.cluster on the leader's barrier
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
             if const_expr(not (self.kn == "fin" and self.unsafe)):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))
@@ -645,7 +654,7 @@ class DmHd256Kv2:
             tc_fence_before()
             if const_expr(self.kn == "fin" and self.unsafe):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))  # UNSAFE: dK / dV were read before the final commit
-            dm_utils.mbar_arrive_rank(E_F, Int32(0))
+            warp_arrive_c0(E_F)
             # code-stage tail: the last commit on each stage has landed in this CTA before teardown (no in-flight arrive)
             for s_ in cutlass.range_constexpr(2):
                 nu = (total - s_ + 1) // 2

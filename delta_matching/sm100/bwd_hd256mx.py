@@ -55,6 +55,7 @@ def _run(key, make_obj, ten, lds, ints):
         if key not in c:
             if _env("DM_H256_NO_COMPILE", "0") == "1":
                 raise RuntimeError(f"hd256 mx bwd: {key} is not AOT-compiled (DM_H256_NO_COMPILE=1: no compiling in a GPU lease)")
+            print(f"[bwd_hd256mx] compiling {key}", flush=True)
             cts = [to_cute_tensor(t, assumed_align=16 if t.element_size() <= 2 else 4, leading_dim=ld) for t, ld in zip(ten, lds)]
             stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
             c[key] = cute.compile(make_obj(), *cts, *[Int32(0) for _ in ints], stream, options="--enable-tvm-ffi")

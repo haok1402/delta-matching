@@ -323,7 +323,7 @@ class DMPass0Hd256Sm100:
         assert head_dim == 256 and head_dim_v == 256, "DMPass0Hd256Sm100 is the head_dim 256 pass 0"
         # +p2 (fork hd256-p0p2, S0 DIAGNOSTIC): 2-CTA cta_group::2 M=256 (FA4 adjacent-q pairing), kvs4, cutlass default remote
         # arrives (NOT the cluster-scope form required by accuracy-audit 08:2x): timing diagnostic only, never a default
-        self.dm_p2 = "p2" in _fl0 or "p2t" in _fl0
+        self.dm_p2 = "p2" in _fl0 or "p2t" in _fl0 or "p2c" in _fl0
         # +p2t (S0b): +p2 with a per-stage causal key range (stage 0 of an adjacent-q pair skips its fully masked top n-blocks: the
         # MMA warp keeps one slot phase per stage, tl_loop iterates its own range); skipped tiles only ever added exact +0 to num/den
         self.dm_p2t = "p2t" in _fl0 or "p2c" in _fl0

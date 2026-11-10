@@ -314,7 +314,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
         aux.append(_CTX["dq"])
-    _gc = [o for o in _env("DM_BWD_OPTS", "").split(",") if o in ("gconv", "gconvc", "gconvpc")]
+    _gc = [o for o in _env("DM_BWD_OPTS", "").split(",") if o in ("gconv", "gconvc", "gconvpc", "gconvw", "gconvs")]
     if _gc:
         # DM gconv (kda-sm100-gap8k): the empty warp writes bf16 dQ off the deterministic chain (aux[4]).
         # gconv / gconvpc: real dQ (dQ postprocess skipped via _CTX["dq"]); gconvc: dummy target, postprocess kept.
@@ -322,7 +322,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         assert len(_gc) == 1 and "lwc" not in _ol and not any(o in _ol for o in ("trace", "prog", "rsdbg", "pdump"))
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "gconv: det, sm = D^-0.5"
         _t = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
-        if _gc[0] != "gconvc":
+        if _gc[0] in ("gconv", "gconvpc"):
             _CTX["dq"] = _t
         aux.append(_t)
     _ao = _auto_opts(q8, k8, causal)
@@ -345,7 +345,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     st = _CTX.pop("staged", None)
     lse_c = lse.contiguous()
     if (st is not None and st[0] == key and trace is None and fastpath.ENABLED and "lwc" not in _ao.split(",")
-            and "pdyn" not in _ao.split(",") and not any(o in _ao.split(",") for o in ("gconv", "gconvc", "gconvpc"))):
+            and "pdyn" not in _ao.split(",") and not any(o in _ao.split(",") for o in ("gconv", "gconvc", "gconvpc", "gconvw", "gconvs"))):
         pool, ev, mst = st[1], st[2], st[3]
         N = lse.shape[-1]
 

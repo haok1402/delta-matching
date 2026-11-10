@@ -738,7 +738,10 @@ class DMBackwardSm100:
         # completed + released), then loads the final fp32 dq_accum half and writes bf16 dQ = rn(acc * D^-0.5) itself.
         # gconv: into the real dQ (host skips the dQ postprocess); gconvc: timing-only COST check into a dummy buffer
         # (postprocess kept); gconvpc: PLANTED CONTROL, waits for n_max - 1 (reads before the last write lands).
-        self.dm_gconv = any(o in self.dm_opts for o in ("gconv", "gconvc", "gconvpc"))
+        # gconvw (diag): wait only, no loads/stores; gconvs: nanosleep backoff in the poll (both timing-only, dummy target)
+        self.dm_gconv = any(o in self.dm_opts for o in ("gconv", "gconvc", "gconvpc", "gconvw", "gconvs"))
+        self.dm_gconv_w = "gconvw" in self.dm_opts
+        self.dm_gconv_s = "gconvs" in self.dm_opts
         self.dm_gconv_pc = "gconvpc" in self.dm_opts
         # pers=<CTAs>: persistent grid of that many CTAs (= SM count, a cluster multiple), 0 = single-tile CTAs
         self.dm_pers = int(next((x[5:] for x in self.dm_opts if x.startswith("pers=")), "0"))
@@ -6180,9 +6183,12 @@ class DMBackwardSm100:
                         v = Int32(0)
                         while v < target:   # >= (monotone count; n_max - 1 is transient for gconvpc)
                             v = dm_utils.ld_acquire_gpu_u32(flag)
+                            if const_expr(self.dm_gconv_s):
+                                if v < target:
+                                    cute.arch.nanosleep(sleep_duration=2000)
                     dm_utils.bar_warp_sync_all()
                     dm_utils.fence_proxy_async_global()
-                    for st in cutlass.range_constexpr(n_stage):
+                    for st in cutlass.range_constexpr(0 if const_expr(self.dm_gconv_w) else n_stage):
                         cbase = gdQaccum[None, st + n_stage * cta_rank, m_block].iterator.toint()
                         for u in cutlass.range_constexpr(4):
                             t = lane + 32 * u

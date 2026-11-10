@@ -525,7 +525,7 @@ class DMBackwardSm100:
             self.load_warp_id = 21
             self.relay_warp_id = 22
             self.empty_warp_id = 23
-            regs = [int(x) for x in next((o[5:] for o in os.environ.get("DM_BWD_OPTS", "").split(",") if o.startswith("regs=")), "96/88/64").split("/")]
+            regs = [int(x) for x in next((o[5:] for o in os.environ.get("DM_BWD_OPTS", "").split(",") if o.startswith("regs=")), "96/88/64").replace(":", "/").split("/")]
             registers = type(registers)(reduce=regs[0], compute=regs[1], load=regs[2], mma=regs[2], empty=regs[2])
         self.dm_epi_barrier = 8 if self.dm_cwg4 else int(NamedBarrierBwdSm100.EpilogueWG1)
         # DM dsqw (track L): a dedicated dS-quantization warpgroup (warps 16-19, TMEM lane quadrant = warp % 4) instead of

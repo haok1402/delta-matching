@@ -7,8 +7,8 @@ backward: dO -> quant_do_mx256 -> delta (matched: pass-0 kernel pass0_hd256.dm_d
 q (B, N, H, 256) bf16, k / v (B, N, Hk, 256) bf16 -> o (B, N, H, 256) bf16. N % 128 == 0, softmax scale 256^-0.5 (= 2^-4)."""
 import torch
 
-from .quant_hd256 import quant_qkv_mx256
-from .fwd import pack_kv_scales
+from .quant_hd256 import quant_qkv_mx256, quant_qkv_mx256_kvw  # noqa: F401
+from .fwd import pack_kv_scales  # noqa: F401
 from .fwd_hd256 import dm_fwd_hd256_mx
 from .quant_hd256 import quant_do_mx256
 from .quant import quant_do_delta
@@ -34,8 +34,8 @@ D = 256
 
 def dm_fwd_hd256_from_bf16(q, k, v, causal):
     """(o, lse, saved) for bf16 inputs: the exact forward dm_attn_func runs at hd256."""
-    q8, qs, k8, ks, v8, vs, mean = quant_qkv_mx256(q, k, v)
-    o, lse = dm_fwd_hd256_mx(q8, qs, k8, pack_kv_scales(ks, vs), v8, causal)
+    q8, qs, k8, ks, v8, vs, mean, kvw = quant_qkv_mx256_kvw(q, k, v)   # kvw == pack_kv_scales(ks, vs) (hd256-8k G1)
+    o, lse = dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal)
     return o, lse, (q8, qs, k8, ks, v8, vs, mean)
 
 

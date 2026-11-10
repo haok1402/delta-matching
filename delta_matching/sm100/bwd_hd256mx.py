@@ -73,6 +73,22 @@ def _run(key, make_obj, ten, lds, ints, mode=None):
             PROF.append((mode or key[0], ev))
 
 
+_PH = {}
+
+
+def _ph(dev):
+    """per-device placeholders for the dbg tensors of a dbg-0 build (hd256-8k G1): the dbg writes are compiled out (const_expr
+    on dbg bits), so these are never read or written -> allocated (zeroed) once instead of 5 zero-fill launches per call."""
+    k = str(dev)
+    if k not in _PH:
+        _PH[k] = dict(ident=torch.zeros(1, 1, 4, device=dev, dtype=torch.float64),
+                      dump=torch.zeros(1, 1, 1, 4, device=dev, dtype=torch.float32),
+                      c=torch.zeros(1, 1, 16, device=dev, dtype=torch.uint8),
+                      sb=torch.zeros(1, 1, 4, device=dev, dtype=torch.int32),
+                      h=torch.zeros(1, 1, 4, device=dev, dtype=torch.int64))
+    return _PH[k]
+
+
 def twins(q8, do8, k8):
     """K-major token-contraction operands (layout only): (B*heads, 256, N) contiguous."""
     tw = lambda x: x.permute(0, 2, 3, 1).reshape(x.shape[0] * x.shape[2], D, x.shape[1]).contiguous()  # noqa: E731
@@ -103,7 +119,8 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
     big = dbg & 2
     L = B * H
-    ident = torch.zeros(L, N, 4, device=dev, dtype=torch.float64) if dbg & 1 else torch.zeros(1, 1, 4, device=dev, dtype=torch.float64)
+    ph = _ph(dev)
+    ident = torch.zeros(L, N, 4, device=dev, dtype=torch.float64) if dbg & 1 else ph["ident"]
     dumps = {}
     lds_tail = [2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 2]
     hsh = dbg & 8
@@ -118,12 +135,12 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
             X, Xb, Y, Yb, Tw, out = k8, v8, q8, do8, q8, dk
         else:
             X, Xb, Y, Yb, Tw, out = q8, do8, k8, v8, k8, dq
-        dump = torch.zeros(L, N, N, 4, device=dev) if big else torch.zeros(1, 1, 1, 4, device=dev)
-        codes = torch.zeros(L, N, N, device=dev, dtype=torch.uint8) if big else torch.zeros(1, 1, 16, device=dev, dtype=torch.uint8)
-        sb = torch.zeros(L, N, N // 32, device=dev, dtype=torch.int32) if big else torch.zeros(1, 1, 4, device=dev, dtype=torch.int32)
+        dump = torch.zeros(L, N, N, 4, device=dev) if big else ph["dump"]
+        codes = torch.zeros(L, N, N, device=dev, dtype=torch.uint8) if big else ph["c"]
+        sb = torch.zeros(L, N, N // 32, device=dev, dtype=torch.int32) if big else ph["sb"]
         # dbg 8 lockstep: per query row [P-bits hash, dS-bits hash, dS code|SF hash (u64 wrapping sums of per-(row,
         # 32-key block) u32 sums), fp64 rowsum of pre-quant dS (bits)]; zeroed: the keys-on-rows kernels add atomically
-        hh = (torch.zeros(L, N, 4, device=dev, dtype=torch.int64) if hsh else torch.zeros(1, 1, 4, device=dev, dtype=torch.int64))
+        hh = torch.zeros(L, N, 4, device=dev, dtype=torch.int64) if hsh else ph["h"]
         ten = [p(X), p(Xb), p(Y), p(Yb), tt(Tw), qs, ks, vs, dos, lse, delta, out, ident, dump, codes, sb, hh]
         lds = [1, 1, 1, 1, 0] + lds_tail
         kd = dbg & 11 if mode == "dq" else dbg & 10

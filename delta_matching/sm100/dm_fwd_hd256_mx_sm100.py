@@ -120,6 +120,33 @@ def st_global_v4_b32(addr: Int64, a, b, c, d, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def st_shared_v4_b32(addr: Int32, a, b, c, d, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip)] + [Int32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+                    "st.shared.v4.b32 [$0], {$1, $2, $3, $4};", "r,r,r,r,r", has_side_effects=True,
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def ld_shared_v4_b32(addr: Int32, *, loc=None, ip=None):
+    res = llvm.inline_asm(llvm.StructType.get_literal([T.i32()] * 4), [Int32(addr).ir_value(loc=loc, ip=ip)],
+                          "ld.shared.v4.b32 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,r", has_side_effects=True,
+                          is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return [Int32(llvm.extractvalue(T.i32(), res, [i], loc=loc, ip=ip)) for i in range(4)]
+
+
+@dsl_user_op
+def fence_proxy_async_shared(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "fence.proxy.async.shared::cta;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def bar_warp_sync(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "bar.warp.sync -1;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def st_shared_f32(addr: Int32, v, *, loc=None, ip=None):
     llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip), Float32(v).ir_value(loc=loc, ip=ip)],
                     "st.shared.f32 [$0], $1;", "r,f", has_side_effects=True, is_align_stack=False,
@@ -180,7 +207,20 @@ class DMFwdHd256MxSm100:
     Out: O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
-                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False):
+                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
+                 lpt: bool = False, epi: int = 0):
+        # epi (fork hd256-8k F1a/F1c; host default DM_HD256_FWD_EPI=2): O epilogue through SMEM. 0 = row-per-thread st.global.v4
+        # (each warp store hits 32 rows H*512 B apart). 1 = each correction thread writes its bf16 row (same mul.rn + cvt bits)
+        # into a 528 B-strided staging row in the (by then idle) sK ring, bar.warp.sync, then each warp copies ITS OWN 32 rows
+        # out row by row (lane l -> 16 B chunk l: one 512 B contiguous store per instruction). Values bitwise; store path only.
+        # 2 = 1 + TMEM chunk prefetch (F1c). 8 = DEBUG positive control (deterministic): copy out before staging (stale ring
+        # bytes -> O must be wrong, LSE unchanged). 9 = DEBUG PC (racy): copy the NEIGHBOUR warp's rows without a CTA barrier.
+        self.epi = epi
+        # lpt (fork hd256-8k L1; host default DM_HD256_FWD_LPT=1): causal CTA order = GLOBAL longest-first. Linear CTA id u
+        # (x fastest) -> m_block = n_m-1 - u // (H*B), (head, batch) from u % (H*B). Each CTA still computes exactly one
+        # (m_block, head, batch) with the same code (bitwise); only which CTA id gets which row block changes.
+        # False = the per-(head, batch) longest-first order (m_block = n_m-1-bidx, head = bidy, batch = bidz).
+        self.lpt = lpt
         # ord_td (fork hd256-ordinv, site FW15 of kda/hd256/ordinv-hd256.md; opt-in DM_HD256_ORDT=1): tcgen05 fence pair around
         # the TMEM teardown barrier (users: fence::before_thread_sync before their arrive; allocator: before + after around its
         # arrive_and_wait, then dealloc).  Host default True (DM_HD256_ORDT); False = the pre-fix code (32e0ecd PTX), debug only.
@@ -269,6 +309,7 @@ class DMFwdHd256MxSm100:
         self.tma_bytes_kv = cute.size_in_bytes(self.q_dtype, cute.select(sK_layout, mode=[0, 1, 2]))
         assert self.tma_bytes_kv == cute.size_in_bytes(self.q_dtype, cute.select(sV_layout, mode=[0, 1, 2]))
         sKV_size = cutlass.max(cute.cosize(sK_layout), cute.cosize(sV_layout))
+        assert self.epi == 0 or sKV_size * (self.q_dtype.width // 8) >= 128 * 528, "F1a O staging needs 66 KiB of the K/V ring"
 
         @cute.struct
         class SharedStorage:
@@ -303,6 +344,13 @@ class DMFwdHd256MxSm100:
         m_block = n_m - 1 - bidx if const_expr(self.is_causal) else bidx
         head_idx = bidy
         batch_idx = bidz
+        if const_expr(self.is_causal and self.lpt):
+            n_h = cute.arch.grid_dim()[1]
+            n_hb = n_h * cute.arch.grid_dim()[2]
+            u = bidx + n_m * (bidy + n_h * bidz)
+            m_block = n_m - 1 - u // n_hb
+            head_idx = (u % n_hb) % n_h
+            batch_idx = (u % n_hb) // n_h
         kv_head_idx = head_idx // self.qhead_per_kvhead
         n_block_max = m_block + 1 if const_expr(self.is_causal) else n_m
         cnt = n_block_max
@@ -429,7 +477,7 @@ class DMFwdHd256MxSm100:
             else:
                 cute.arch.setmaxregister_decrease(self.num_regs_correction)
             tmem_alloc_barrier.arrive_and_wait_unaligned()
-            self.correction(mbar, stats, mO, m_block, head_idx, batch_idx, cnt)
+            self.correction(mbar, stats, mO, m_block, head_idx, batch_idx, cnt, Int32(sK.iterator.toint()))
             if const_expr(self.ord_td):
                 dm_utils.tc_fence_before()
             tmem_alloc_barrier.arrive_unaligned()
@@ -786,7 +834,7 @@ class DMFwdHd256MxSm100:
 
     # -----------------------------------------------------------------------------------------------------------------
     @cute.jit
-    def correction(self, mbar, stats, mO, m_block, head_idx, batch_idx, cnt):
+    def correction(self, mbar, stats, mO, m_block, head_idx, batch_idx, cnt, sk_base):
         tidx = cute.arch.thread_idx()[0] % 128
         lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
         obase = (lane << 16) + self.tmem_o
@@ -815,9 +863,56 @@ class DMFwdHd256MxSm100:
         H = mO.shape[2]
         row = m_block * self.m_block_size + tidx
         base = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + row) * H + head_idx) * Int64(self.head_dim * 2))
-        for c in cutlass.range_constexpr(8):
-            o = tmem_ld32(obase + 32 * c)
-            tmem_wait_ld()
-            for q in cutlass.range_constexpr(4):
-                wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
-                st_global_v4_b32(base + Int64(64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
+        if const_expr(self.epi == 0):
+            for c in cutlass.range_constexpr(8):
+                o = tmem_ld32(obase + 32 * c)
+                tmem_wait_ld()
+                for q in cutlass.range_constexpr(4):
+                    wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
+                    st_global_v4_b32(base + Int64(64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
+        else:
+            # F1a: O_full(last) = the last PV (last reader of the sK/sV ring; every TMA load into it was consumed) completed.
+            # The ring was last written by TMA (async proxy): order our generic writes after it.
+            fence_proxy_async_shared()
+            RS = 528                                                     # 512 B row + 16 B pad: conflict-free both ways
+            srow = sk_base + Int32(RS) * tidx
+            ln = tidx % 32
+            w0 = tidx - ln                                               # first row of this warp (TMEM lane quadrant)
+            if const_expr(self.epi == 8):                                # DEBUG PC (deterministic): copy out BEFORE staging
+                for r in cutlass.range(32, unroll=4):
+                    rr = w0 + r
+                    v = ld_shared_v4_b32(sk_base + Int32(RS) * rr + 16 * ln)
+                    gaddr = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + rr) * H
+                                                                + head_idx) * Int64(self.head_dim * 2)) + Int64(16 * ln)
+                    st_global_v4_b32(gaddr, v[0], v[1], v[2], v[3])
+            if const_expr(self.epi == 2):
+                # F1c: TMEM chunk c+1 is loaded while chunk c is converted (wait::ld covers all prior loads, so the next
+                # load is issued only after the previous wait)
+                o = tmem_ld32(obase)
+                tmem_wait_ld()
+                for c in cutlass.range_constexpr(8):
+                    if const_expr(c < 7):
+                        on = tmem_ld32(obase + 32 * (c + 1))
+                    for q in cutlass.range_constexpr(4):
+                        wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
+                        st_shared_v4_b32(srow + (64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
+                    if const_expr(c < 7):
+                        tmem_wait_ld()
+                        o = on
+            else:
+                for c in cutlass.range_constexpr(8):
+                    o = tmem_ld32(obase + 32 * c)
+                    tmem_wait_ld()
+                    for q in cutlass.range_constexpr(4):
+                        wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
+                        st_shared_v4_b32(srow + (64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
+            bar_warp_sync()                                              # warp-local hand-off: a warp copies only its own rows
+            if const_expr(self.epi == 9):
+                w0 = (w0 + 32) % 128                                     # DEBUG PC (racy): another warp's rows, no CTA barrier
+            if const_expr(self.epi != 8):
+                for r in cutlass.range(32, unroll=4):
+                    rr = w0 + r
+                    v = ld_shared_v4_b32(sk_base + Int32(RS) * rr + 16 * ln)
+                    gaddr = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + rr) * H + head_idx)
+                                                          * Int64(self.head_dim * 2)) + Int64(16 * ln)
+                    st_global_v4_b32(gaddr, v[0], v[1], v[2], v[3])

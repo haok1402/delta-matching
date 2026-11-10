@@ -62,3 +62,13 @@ def quant_do_mx256(do):
     assert do.shape[-1] == D
     do8, dos, _ = Q.quant_do_delta(do.contiguous(), None)
     return do8, dos
+
+
+def quant_qkv_mx256_kvw(q, k, v):
+    """quant_qkv_mx256 + the packed UE8M0 K/V words quant_qkv2 writes in the same launches (hd256-8k G1): (q8, qs, k8, ks, v8,
+    vs, mean, kvw), kvw (B, Hk, N/64) int32 == fwd.pack_kv_scales(ks, vs) byte for byte ([2t] K bytes, [2t+1] V bytes of
+    128-key tile t, byte i = biased exponent of 32-key block 4t+i), without the 7 extra elementwise/cat launches."""
+    from . import quant as Q
+    assert q.shape[-1] == D and q.shape[1] % 128 == 0
+    q8, qs, k8, ks, v8, vs, kvw, mean = Q.quant_qkv2(q, k, v, D ** -0.5)
+    return q8, qs, k8, ks, v8, vs, mean, kvw

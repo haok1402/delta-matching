@@ -319,6 +319,8 @@ class DMFwdHd256MxSm100:
         # correction WG runs the ordered tail (C11).  Owner-only barriers: S_empty[slot] and W1L[slot] count 128 (the owner arrives
         # both after its S(j) load), partial_full3 count 128, P_full3 count 256 (owner 128 + correction 128).  The WGs are now
         # independent and naturally staggered by half a cycle, so one WG's latency-bound phases overlap the other's MUFU work.
+        # DEBUG PCs (C12, Codex hd256-fwd4-02 reuse controls): 16 sP ring depth 2 + PV(i) issued 20 us late (P(i+2) overwrites
+        # sP before PV(i) reads it) and 17 part ring depth 2 + correction reads part(j) 20 us late -> both must corrupt.
         # C13 (fork hd256-fwd4, DM_HD256_FWD_C13=1, implies C12): a second MMA issuer.  Warp 12 issues only QK (mma_c13_qk: the
         # mma_c10 QK part), warp 15 only PV (mma_c13_pv).  No cross-warp MMA order is relied on: QK(j+2) waits PV(j-1)'s completion
         # through O_done2[(j-1)&1] (new per-parity barrier, tcgen05.commit by warp 15 after PV(j-1); a parity barrier because PV(j)
@@ -1115,6 +1117,10 @@ class DMFwdHd256MxSm100:
         if const_expr(self.c10):
             pb = i % 3
             dm_utils.mbar_wait_parity(mbar + 128 + 8 * pb, (i // 3) & 1)  # P_full3[i%3]: P(i) codes + SF(i) written
+            if const_expr(self.pc_inj == 16):
+                pb = i & 1                                                  # DEBUG PC 16: sP ring depth 2, PV(i) issued late
+                for _d in cutlass.range_constexpr(20):
+                    dm_utils.nanosleep_1us()
         else:
             dm_utils.mbar_wait_parity(mbar + 16 + 8 * slot, (i >> 1) & 1)     # P_full[slot]: P(i) codes + SF(i) written
         self.tr(i, 6)
@@ -1745,6 +1751,11 @@ class DMFwdHd256MxSm100:
         slot = j & 1
         b3 = j % 3
         part = stats + 4 * (1024 + b3 * self.part_stride)
+        if const_expr(self.pc_inj == 17):
+            part = stats + 4 * (1024 + (j & 1) * self.part_stride)          # DEBUG PC 17: part ring depth 2 (reuse race)
+        sb = b3
+        if const_expr(self.pc_inj == 16):
+            sb = j & 1                                                       # DEBUG PC 16: sP ring depth 2 (reuse race)
         pfull = mbar + 128 + 8 * b3
         partf = mbar + 176 + 8 * b3
         dm_kw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block])
@@ -1794,7 +1805,7 @@ class DMFwdHd256MxSm100:
             for i in cutlass.range_constexpr(0, 32, 2):
                 s[32 * b + i], s[32 * b + i + 1] = cute.arch.fma_packed_f32x2(
                     (s[32 * b + i], s[32 * b + i + 1]), (dm_c[b], dm_c[b]), (dm_bias[b], dm_bias[b]))
-        prow = sp_base + b3 * 16384 + tidx * 128
+        prow = sp_base + sb * 16384 + tidx * 128
         pst = []
         for b in cutlass.range_constexpr(4):
             for i in cutlass.range_constexpr(32):
@@ -1846,10 +1857,15 @@ class DMFwdHd256MxSm100:
         """C11: the C8 WG0 ordered tail for tile j, run by the correction WG, then the lazy O rescale (C6 correction body)."""
         b3 = j % 3
         part = stats + 4 * (1024 + b3 * self.part_stride)
+        if const_expr(self.pc_inj == 17):
+            part = stats + 4 * (1024 + (j & 1) * self.part_stride)          # DEBUG PC 17: part ring depth 2
         dm_vw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block + 1])
         if const_expr(self.pc_inj != 4):
             dm_utils.mbar_wait_parity(mbar + 176 + 8 * b3, (j // 3) & 1)      # partial_full3[j%3] (both WGs)
         dm_utils.tc_fence_after()
+        if const_expr(self.pc_inj == 17):
+            for _d in cutlass.range_constexpr(20):                           # DEBUG PC 17: read part(j) late
+                dm_utils.nanosleep_1us()
         self.tr(j, 24, None, tidx == 0)
         bmax = [ld_shared_f32(part + 4 * (0 * 128 + tidx)), ld_shared_f32(part + 4 * (1 * 128 + tidx)),
                 ld_shared_f32(part + 4 * (4 * 128 + tidx)), ld_shared_f32(part + 4 * (5 * 128 + tidx))]

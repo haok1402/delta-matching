@@ -38,3 +38,28 @@ def quant_do_hd256(do):
     do = do if do.stride(-1) == 1 else do.contiguous()
     do8, dos, _, _ = PR.doq_m17(do, None, H, BLK_Q, want_delta=False, want_twin=False)
     return _bnhd(do8, B, H, N), dos.view(B, H, N // BLK_Q)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# sm100-mx producers at D=256 (USER DECISION 2026-11-10: MXFP8 = the sm100 spec at both head dims; preset sm100-mx-d256).
+# Owner: hd256-fwd. Same scheme as hd128's quant.py (one power-of-2 / UE8M0 scale per 32 tokens over ALL of head_dim, K
+# centered by its fixed-order mean, sm baked into Q), realized by quant.py's D-generic Triton kernels UNCHANGED (they take
+# D as a constexpr; no hd128 code is edited). Returned layouts are the hd128 ones:
+#   quant_qkv_mx_hd256(q, k, v) -> q8 (B,N,H,256), qs (B,H,N/32), k8, ks (B,Hk,N/32), v8, vs (B,Hk,N/32),
+#                                  kvw (B,Hk,N/64) int32 packed UE8M0 words ([2t] K bytes of 128-key tile t, [2t+1] V bytes),
+#                                  kmean (B,Hk,256)
+#   quant_do_mx_hd256(do, o=None) -> do8 (B,N,H,256), dos (B,H,N/32), stale delta (B,H,N) or None
+SM_HD256 = 256 ** -0.5      # = 2^-4 exactly
+
+
+def quant_qkv_mx_hd256(q, k, v):
+    from .quant import quant_qkv2
+    assert q.shape[-1] == D and q.dtype == torch.bfloat16 and q.shape[1] % 128 == 0
+    q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
+    return quant_qkv2(q, k, v, SM_HD256)
+
+
+def quant_do_mx_hd256(do, o=None):
+    from .quant import quant_do_delta
+    assert do.shape[-1] == D and do.dtype == torch.bfloat16
+    return quant_do_delta(do if do.stride(-1) == 1 else do.contiguous(), o)

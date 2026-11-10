@@ -320,33 +320,33 @@ class DmHd256Mx:
                     mma_s.set(tcgen05.Field.ACCUMULATE, True)
             yf.release()
             ae.commit()
-            def issue_s():
-                mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
-                    cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
-                    mma_s.set(tcgen05.Field.ACCUMULATE, True)
-
-            def issue_dp():
-                mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
-                    cute.gemm(mma_s, accP, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accP)
-                    mma_s.set(tcgen05.Field.ACCUMULATE, True)
-
-            def issue_out(t):
-                if const_expr(not self.delta_only):
-                    tf = t_c.wait_and_advance()
-                    cf = cd_c.wait_and_advance()
-                    tc_fence_after()
-                    dm_utils.gemm_ptx_bs(
-                        mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                        sC[(None, None, None, 0)], sT[(None, None, None, 0)],
-                        tmem_base + self.COL_SFA, tmem_base + self.COL_SFB,
-                        tuple((0, k) for k in range(4)), tuple((0, 0) for k in range(4)),
-                        zero_init=cutlass.Boolean(t == 0))
-                    tf.release()
-                    cf.release()
-
             for t in cutlass.range(total, unroll=1):
+                def issue_s():
+                    mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                    for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
+                        cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
+                        mma_s.set(tcgen05.Field.ACCUMULATE, True)
+
+                def issue_dp():
+                    mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                    for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                        cute.gemm(mma_s, accP, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accP)
+                        mma_s.set(tcgen05.Field.ACCUMULATE, True)
+
+                def issue_out():
+                    if const_expr(not self.delta_only):
+                        tf = t_c.wait_and_advance()
+                        cf = cd_c.wait_and_advance()
+                        tc_fence_after()
+                        dm_utils.gemm_ptx_bs(
+                            mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                            sC[(None, None, None, 0)], sT[(None, None, None, 0)],
+                            tmem_base + self.COL_SFA, tmem_base + self.COL_SFB,
+                            tuple((0, k) for k in range(4)), tuple((0, 0) for k in range(4)),
+                            zero_init=cutlass.Boolean(t == 0))
+                        tf.release()
+                        cf.release()
+
                 if t + 1 < total:
                     # S(t+1): its TMEM cols were released by the compute warps (acc) after their S/dP(t) reads
                     yn = y_c.wait_and_advance()
@@ -354,7 +354,7 @@ class DmHd256Mx:
                     issue_s()
                     if const_expr(self.has_dp and self.delta_only):
                         issue_dp()
-                    issue_out(t)
+                    issue_out()
                     if const_expr(self.has_dp and not self.delta_only):
                         # dP(t+1) overwrites the SF words of out(t): wait until out(t) has completed
                         with cute.arch.elect_one():
@@ -365,7 +365,7 @@ class DmHd256Mx:
                     yn.release()
                     an.commit()
                 else:
-                    issue_out(t)
+                    issue_out()
             fe = fin_p.acquire_and_advance()
             fe.commit()
             acc_p.tail()

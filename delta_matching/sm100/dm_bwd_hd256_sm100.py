@@ -669,13 +669,19 @@ class DmHd256Fold:
                         for i in cutlass.range_constexpr(128):
                             acc[i] = add_f32(mul_f32(acc[i], rf), tv[i])
                         fprev = fc
-                        if (c & 7) == 7 or c == c_hi - 1:
+                        if ((c & 7) == 7) | (c == c_hi - 1):
                             for i in cutlass.range_constexpr(128):
                                 a = sbase + ((i ^ lane) * 4)
                                 st_shared_f32(a, fma_f32(acc[i], fprev, ld_shared_f32(a)))
                                 acc[i] = Float32(0.0)
                     else:
-                        if fc != Float32(0.0) and not (fc < psi_max * Float32(1e-8)):
+                        # take = psi_c != 0 && !(psi_c < psi_max * 1e-8)   (fq8_dq_pass2.h:275; psi is never NaN)
+                        take = Int32(1)
+                        if fc == Float32(0.0):
+                            take = Int32(0)
+                        if fc < psi_max * Float32(1e-8):
+                            take = Int32(0)
+                        if take == Int32(1):
                             if psi_w != Float32(0.0):
                                 ratio = min_f32(max_f32(div_approx(psi_w, fc), Float32(1e-8)), Float32(1e8))
                                 for i in cutlass.range_constexpr(128):
@@ -685,7 +691,7 @@ class DmHd256Fold:
                                     acc[i] = tv[i]
                             psi_w = fc
                             psi_max = max_f32(psi_max, fc)
-                        if (c & 7) == 7 or c == c_hi - 1:
+                        if ((c & 7) == 7) | (c == c_hi - 1):
                             if psi_w != Float32(0.0):
                                 for i in cutlass.range_constexpr(128):
                                     a = sbase + ((i ^ lane) * 4)

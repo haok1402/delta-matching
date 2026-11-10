@@ -2737,6 +2737,11 @@ class DMPass0Sm100:
                                 i0 = 16 * j + v
                                 p = dm_common.dm_bwd_p_pair(r[i0], r[i0 + 1], cs[j], l2)
                                 r[i0], r[i0 + 1] = p
+                                if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                    # DEBUG (P/dP dump report on +tl): this lane's P, column kbase + 2*i + par
+                                    if row < seqlen.seqlen_q:
+                                        for e_ in cutlass.range_constexpr(2):
+                                            aux[len(aux) - 2][batch_idx, head_idx, row, kbase + 2 * (i0 + e_) + par] = r[i0 + e_]
                                 if const_expr(v % 4 == 0):
                                     d01 = cute.arch.add_packed_f32x2(d01, p)
                                 else:
@@ -2746,6 +2751,11 @@ class DMPass0Sm100:
                         for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
                             dpv = dm_utils.tmem_ld_16x64b_x16(d_addr + Int32(32 * j))
                             cute.arch.fence_view_async_tmem_load()
+                            if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
+                                # DEBUG (P/dP dump report on +tl): raw dP accumulator, column kbase + 32*j + 2*k + par
+                                if row < seqlen.seqlen_q:
+                                    for k_ in cutlass.range_constexpr(16):
+                                        aux[len(aux) - 1][batch_idx, head_idx, row, kbase + 32 * j + 2 * k_ + par] = dpv[k_]
                             if const_expr(j == 3):
                                 with dm_utils.tcf_site("r1"):
                                     pipeline_dp.consumer_release_w_index(stage)

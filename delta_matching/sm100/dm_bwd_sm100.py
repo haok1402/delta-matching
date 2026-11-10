@@ -185,6 +185,77 @@ def dm_posmajor_once_scheduler(qh: int):
     return DMPosMajOnceScheduler
 
 
+_DM_ONCE_CLS = {}
+
+
+def dm_once_scheduler(base):
+    """DM d3once (det, non-persistent single-tile schedulers: posmaj / hswz / LPT): the SAME CTA -> tile mapping as
+    `base`, computed once at create(); validity is a trace-time Python bool (True, then False after advance), exactly
+    like the nd SingleTileScheduler. Every CTA of these grids has a valid tile (grid = total tiles), so the role
+    `while work_tile.is_valid_tile` loops trace as straight-line code instead of an scf.while that carries every
+    pipeline state / phase / scheduler value around a back-edge (the det-only register pressure that spilled the
+    48-register MMA warp's main loop). Same tiles, same lock orders: bitwise."""
+    if base in _DM_ONCE_CLS:
+        return _DM_ONCE_CLS[base]
+
+    class DMOnceScheduler:
+        Params = base.Params
+
+        def __init__(self, c, v=True, *, loc=None, ip=None):
+            self._c = list(c)
+            self._v = v
+            self._loc = loc
+            self._ip = ip
+
+        @staticmethod
+        def to_underlying_arguments(args, *, scheduling_mode=None, loc=None, ip=None):
+            return base.to_underlying_arguments(args, loc=loc, ip=ip)
+
+        @staticmethod
+        def get_grid_shape(params, *, loc=None, ip=None):
+            return base.get_grid_shape(params, loc=loc, ip=ip)
+
+        @staticmethod
+        @cute.jit
+        def create(params, *, loc=None, ip=None):
+            w = base.create(params, loc=loc, ip=ip).get_current_work()
+            b_, h_, z_, s_ = w.tile_idx
+            return DMOnceScheduler((Int32(b_), Int32(h_), Int32(z_), Int32(s_)), True, loc=loc, ip=ip)
+
+        def get_current_work(self, *, loc=None, ip=None):
+            return _DMWorkTileInfo(tuple(self._c), self._v)
+
+        def initial_work_tile_info(self, *, loc=None, ip=None):
+            return self.get_current_work(loc=loc, ip=ip)
+
+        def prefetch_next_work(self, *, loc=None, ip=None):
+            pass
+
+        def advance_to_next_work(self, *, loc=None, ip=None):
+            self._v = False
+            return self.get_current_work()
+
+        def producer_tail(self, *, loc=None, ip=None):
+            pass
+
+        def __extract_mlir_values__(self):
+            values = []
+            for obj in self._c:
+                values += cutlass.extract_mlir_values(obj)
+            return values
+
+        def __new_from_mlir_values__(self, values):
+            objs = []
+            for obj in self._c:
+                n = len(cutlass.extract_mlir_values(obj))
+                objs.append(cutlass.new_from_mlir_values(obj, values[:n]))
+                values = values[n:]
+            return self.__class__(objs, self._v, loc=self._loc)
+
+    _DM_ONCE_CLS[base] = DMOnceScheduler
+    return DMOnceScheduler
+
+
 _DM_PERS_CLS = {}
 
 
@@ -1399,6 +1470,11 @@ class DMBackwardSm100:
             TileScheduler = SingleTileLPTBwdScheduler
         else:
             TileScheduler = SingleTileScheduler
+        if const_expr(self.deterministic and "d3once" in self.dm_opts and not self.is_varlen_k and (
+                TileScheduler is SingleTileLPTBwdScheduler
+                or (self.qhead_per_kvhead > 1 and TileScheduler in (dm_posmajor_scheduler(self.qhead_per_kvhead),
+                                                                    dm_hswz_scheduler(self.qhead_per_kvhead))))):
+            TileScheduler = dm_once_scheduler(TileScheduler)
         tile_sched_args = TileSchedulerArguments(
             # work tiles of C * tile_n KV rows, see NOTE [SM100 backward work coordinates]
             cute.ceil_div(cute.size(mK.shape[0]), self.cluster_tile_n),  # num_blocks

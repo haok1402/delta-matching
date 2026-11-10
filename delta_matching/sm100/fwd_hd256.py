@@ -69,7 +69,7 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     if epi != 2:
         key = key + (f"epi{epi}",)
     split = int(os.environ.get("DM_HD256_FWD_SPLIT", "0"))  # hd256-fwd2 C7b: SF at slot+112, QK N112+N16, early S release (2); 0 = C6
-    assert split in (0, 2), split
+    assert split in (0, 2, 3), split   # hd256-fwd4: 2 + C8 = C9, 3 = C9r (C8 only)
     if split:
         key = key + (f"split{split}",)
     g1 = int(os.environ.get("DM_HD256_FWD_G1", "0"))   # hd256-fwd3 G1 critical-path trims (bitmask, see DMFwdHd256MxSm100); 0 = C6

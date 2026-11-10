@@ -145,7 +145,7 @@ class DMFwdHd256Sm100:
     q8 (B,N,H,256) e4m3 (sm baked), k8/v8 (B,N,Hk,256) e4m3; qs (B,H,N/64), ks/vs (B,Hk,N/32) fp32 (non-dyadic);
     O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
-    def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, numerics: str = "a"):
+    def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, numerics: str = "a", t_n: int = 64):
         assert numerics == "a", f"DM_HD256_NUMERICS={numerics}: only scheme 'a' (exact sm90 [64,32] floor) exists"
         self.is_causal = is_causal
         self.qhead_per_kvhead = qhead_per_kvhead
@@ -153,6 +153,13 @@ class DMFwdHd256Sm100:
         self.n_block_size = 128
         self.head_dim = 256
         self.kv_stage = kv_stage
+        # PV temp T: N = t_n d-columns per group MMA. t_n=128: one T buffer per slot (8 group/slab MMAs per tile,
+        # MMA and fold strictly alternate). t_n=64: two T buffers per slot (16 MMAs per tile), the MMA of fold f+1 runs
+        # while the correction folds f. Same arithmetic per element (the d-slab split does not change any value).
+        assert t_n in (64, 128)
+        self.t_n = t_n
+        self.t_nbuf = 128 // t_n
+        self.t_nslab = 256 // t_n
         self.mma_tiler_qk = (128, 128, 256)
         self.mma_tiler_pv = (128, 256, 128)      # smem / TMA tile of V; the MMAs use N=128 d-slabs
         self.softmax_warp_ids = (0, 1, 2, 3)
@@ -185,7 +192,7 @@ class DMFwdHd256Sm100:
         tiled_mma_qk = sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype, self.q_dtype, K, K, Float32, cta_group, self.mma_tiler_qk[:2])
         tiled_mma_pv = sm100_utils_basic.make_trivial_tiled_mma(
-            self.q_dtype, self.q_dtype, K, MN, Float32, cta_group, (128, 128))
+            self.q_dtype, self.q_dtype, K, MN, Float32, cta_group, (128, self.t_n))
         cluster_layout_vmnk = cute.tiled_divide(cute.make_layout((1, 1, 1)), (tiled_mma_qk.thr_id.shape,))
 
         sQ_layout = sm100_utils_basic.make_smem_layout_a(tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, 1)
@@ -215,7 +222,7 @@ class DMFwdHd256Sm100:
             mbar_q: cute.struct.MemRange[Int64, 2]
             mbar_kv: cute.struct.MemRange[Int64, self.kv_stage * 2]
             # raw: S_full[2], P_full[2], T_full, T_empty, stats_full[2], final_full, pad
-            mbar_dm: cute.struct.MemRange[Int64, 10]
+            mbar_dm: cute.struct.MemRange[Int64, 12]
             tmem_holding_buf: Int32
             sStats: cute.struct.MemRange[Float32, 2 * 5 * 128 + 128]
             sQ: cute.struct.Align[cute.struct.MemRange[self.q_dtype, cute.cosize(sQ_layout)], self.buffer_align_bytes]
@@ -269,14 +276,17 @@ class DMFwdHd256Sm100:
             barrier_storage=storage.mbar_kv.data_ptr(), num_stages=self.kv_stage, producer_group=tma_warp,
             consumer_group=mma_warp, tx_count=self.tma_bytes_kv, cta_layout_vmnk=cluster_layout_vmnk, defer_sync=True)
         mbar = Int32(storage.mbar_dm.data_ptr().toint())
-        # mbar + 8*i: 0,1 S_full[slot] | 2,3 P_full[slot] | 4 T_full | 5 T_empty | 6,7 stats_full[slot] | 8 final_full
+        # mbar + 8*i: 0,1 S_full[slot] | 2,3 P_full[slot] | 4,5 T_full[buf] | 6,7 stats_full[slot] | 8 final_full |
+        #             9,10 T_empty[buf]
         if cute.arch.thread_idx()[0] == 0:
             dm_utils.mbar_init(mbar + 0, 1)
             dm_utils.mbar_init(mbar + 8, 1)
             dm_utils.mbar_init(mbar + 16, 128)
             dm_utils.mbar_init(mbar + 24, 128)
             dm_utils.mbar_init(mbar + 32, 1)
-            dm_utils.mbar_init(mbar + 40, 128)
+            dm_utils.mbar_init(mbar + 40, 1)
+            dm_utils.mbar_init(mbar + 72, 128)
+            dm_utils.mbar_init(mbar + 80, 128)
             dm_utils.mbar_init(mbar + 48, 128)
             dm_utils.mbar_init(mbar + 56, 128)
             dm_utils.mbar_init(mbar + 64, 128)
@@ -293,7 +303,7 @@ class DMFwdHd256Sm100:
         thr_mma_qk = tiled_mma_qk.get_slice(0)
         thr_mma_pv = tiled_mma_pv.get_slice(0)
         acc_qk = thr_mma_qk.make_fragment_C(thr_mma_qk.partition_shape_C(self.mma_tiler_qk[:2]))
-        acc_pv = thr_mma_pv.make_fragment_C(thr_mma_pv.partition_shape_C((128, 128)))
+        acc_pv = thr_mma_pv.make_fragment_C(thr_mma_pv.partition_shape_C((128, self.t_n)))
 
         pipeline_init_wait(cluster_shape_mn=cluster_layout_vmnk)
 
@@ -394,8 +404,10 @@ class DMFwdHd256Sm100:
             j = i + 1
             slot = j & 1
             if i >= 1:
-                # slot j&1 was the PV temp of tile j-2: wait for its last fold (global fold 8(j-2)+7 -> parity 1)
-                dm_utils.mbar_wait_parity(mbar + 40, Int32(1))
+                # slot j&1 held the PV temps of tile j-2: wait for the last fold of every T buffer (8 uses per buffer
+                # per tile -> the last use has parity 1)
+                for b in cutlass.range_constexpr(self.t_nbuf):
+                    dm_utils.mbar_wait_parity(mbar + 72 + 8 * b, Int32(1))
                 dm_utils.tc_fence_after()
             pipeline_kv.consumer_wait(kv_state)
             self.mma_qk(atom_qk, acc_qk, tSrQ, tSrK, kv_state.index, slot)
@@ -419,26 +431,27 @@ class DMFwdHd256Sm100:
     @cute.jit
     def mma_pv(self, atom_pv, acc_pv, tOrP, tOrV, pipeline_kv, kv_state, mbar, i):
         slot = i & 1
-        tT = cute.make_tensor(acc_pv.iterator + slot * 128, acc_pv.layout)
         pipeline_kv.consumer_wait(kv_state)
         # P(i) in sP[slot] written and S(i) read by the softmax (P_full parity = use count of the slot)
         dm_utils.mbar_wait_parity(mbar + 16 + 8 * slot, (i >> 1) & 1)
         dm_utils.tc_fence_after()
-        for s in cutlass.range_constexpr(2):
-            for g in cutlass.range_constexpr(4):
-                if const_expr(s + g > 0):
-                    # T free: the correction read the previous fold (global fold index 8i + 4s + g - 1)
-                    dm_utils.mbar_wait_parity(mbar + 40, Int32((4 * s + g - 1) & 1))
+        nb = self.t_nbuf
+        for f in cutlass.range_constexpr(4 * self.t_nslab):      # fold f: d-slab s = f // 4, key group g = f % 4
+            s, g, b = f // 4, f % 4, f % nb
+            tT = cute.make_tensor(acc_pv.iterator + slot * 128 + self.t_n * b, acc_pv.layout)
+            if const_expr(f >= nb):
+                # buffer b free: the correction read fold f - nb of this tile (use (f - nb) // nb of the buffer)
+                dm_utils.mbar_wait_parity(mbar + 72 + 8 * b, Int32(((f - nb) // nb) & 1))
+                dm_utils.tc_fence_after()
+            else:
+                # first use of buffer b in tile i: the last use in tile i-1 (other slot) must be read, so that
+                # T_full[b] never runs two phases ahead of the correction (8 uses per tile -> parity 1)
+                if i >= 1:
+                    dm_utils.mbar_wait_parity(mbar + 72 + 8 * b, Int32(1))
                     dm_utils.tc_fence_after()
-                else:
-                    # first T of tile i: previous T user (tile i-1, other slot) must be fully read so that
-                    # T_full never runs two phases ahead of the correction (fold 8i-1 -> parity 1)
-                    if i >= 1:
-                        dm_utils.mbar_wait_parity(mbar + 40, Int32(1))
-                        dm_utils.tc_fence_after()
-                cute.gemm(atom_pv, tT[None, 0, 0], tOrP[None, 0, g, slot], tOrV[None, s, g, kv_state.index], tT[None, 0, 0])
-                with cute.arch.elect_one():
-                    dm_utils.tc_commit(mbar + 32)
+            cute.gemm(atom_pv, tT[None, 0, 0], tOrP[None, 0, g, slot], tOrV[None, s, g, kv_state.index], tT[None, 0, 0])
+            with cute.arch.elect_one():
+                dm_utils.tc_commit(mbar + 32 + 8 * b)
         pipeline_kv.consumer_release(kv_state)
 
     # -----------------------------------------------------------------------------------------------------------------
@@ -554,7 +567,7 @@ class DMFwdHd256Sm100:
     @cute.jit
     def correction(self, acc_pv, mbar, stats, mO, m_block, head_idx, batch_idx, cnt):
         tidx = cute.arch.thread_idx()[0] % 128
-        tAcc = acc_pv[(None, None), 0, 0]
+        tAcc = acc_pv[(None, None), 0, 0]      # (128, t_n)
         tAcc32 = cute.composition(tAcc, cute.make_layout((128, 32)))
         ld_atom = cute.make_copy_atom(tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)), Float32)
         st_atom = cute.make_copy_atom(tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(32)), Float32)
@@ -588,27 +601,28 @@ class DMFwdHd256Sm100:
         sb = stats + 4 * (slot * 640 + tidx)
         alpha = ld_shared_f32(sb)
         w = [ld_shared_f32(sb + 4 * 128 * (g + 1)) for g in range(4)]
-        for s in cutlass.range_constexpr(2):
-            for g in cutlass.range_constexpr(4):
-                dm_utils.mbar_wait_parity(mbar + 32, Int32((4 * s + g) & 1))     # T_full (global fold 8j+4s+g)
-                dm_utils.tc_fence_after()
-                for c in cutlass.range_constexpr(4):
-                    t = cute.make_rmem_tensor(frag_shape, Float32)
-                    cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + slot * 128 + 32 * c, tX_ld.layout), t)
-                    o = cute.make_rmem_tensor(frag_shape, Float32)
-                    o_off = self.tmem_o + 128 * s + 32 * c
-                    if const_expr(is_first and g == 0):
+        nb = self.t_nbuf
+        for f in cutlass.range_constexpr(4 * self.t_nslab):
+            s, g, b = f // 4, f % 4, f % nb
+            dm_utils.mbar_wait_parity(mbar + 32 + 8 * b, Int32((f // nb) & 1))     # T_full[b] (8 uses per tile)
+            dm_utils.tc_fence_after()
+            for c in cutlass.range_constexpr(self.t_n // 32):
+                t = cute.make_rmem_tensor(frag_shape, Float32)
+                cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + slot * 128 + self.t_n * b + 32 * c, tX_ld.layout), t)
+                o = cute.make_rmem_tensor(frag_shape, Float32)
+                o_off = self.tmem_o + self.t_n * s + 32 * c
+                if const_expr(is_first and g == 0):
+                    for k in cutlass.range_constexpr(0, 32, 2):
+                        o[k], o[k + 1] = cute.arch.mul_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]))
+                else:
+                    cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + o_off, tX_ld.layout), o)
+                    if const_expr(g == 0):
                         for k in cutlass.range_constexpr(0, 32, 2):
-                            o[k], o[k + 1] = cute.arch.mul_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]))
-                    else:
-                        cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + o_off, tX_ld.layout), o)
-                        if const_expr(g == 0):
-                            for k in cutlass.range_constexpr(0, 32, 2):
-                                o[k], o[k + 1] = cute.arch.mul_packed_f32x2((o[k], o[k + 1]), (alpha, alpha))
-                        for k in cutlass.range_constexpr(0, 32, 2):
-                            o[k], o[k + 1] = cute.arch.fma_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]),
-                                                                       (o[k], o[k + 1]))
-                    cute.copy(thr_st, o, cute.make_tensor(tX_st.iterator + o_off, tX_st.layout))
-                tmem_wait_st()
-                dm_utils.tc_fence_before()
-                dm_utils.mbar_arrive(mbar + 40)                                   # T_empty
+                            o[k], o[k + 1] = cute.arch.mul_packed_f32x2((o[k], o[k + 1]), (alpha, alpha))
+                    for k in cutlass.range_constexpr(0, 32, 2):
+                        o[k], o[k + 1] = cute.arch.fma_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]),
+                                                                   (o[k], o[k + 1]))
+                cute.copy(thr_st, o, cute.make_tensor(tX_st.iterator + o_off, tX_st.layout))
+            tmem_wait_st()
+            dm_utils.tc_fence_before()
+            dm_utils.mbar_arrive(mbar + 72 + 8 * b)                                # T_empty[b]

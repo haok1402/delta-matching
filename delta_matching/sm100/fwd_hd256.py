@@ -50,10 +50,11 @@ def dm_fwd_hd256(q8, qs, k8, ks, v8, vs, causal: bool, kv_stage: int = 4):
     o = torch.empty(B, N, H, D, device=q8.device, dtype=torch.bfloat16)
     lse = torch.empty(B, H, N, device=q8.device, dtype=torch.float32)
     num = numerics()
-    key = ("fwd_hd256", bool(causal), H // Hk, kv_stage, num)
+    t_n = int(os.environ.get("DM_HD256_FWD_TN", "64"))     # PV temp width: 64 (double-buffered T, default) or 128
+    key = ("fwd_hd256", bool(causal), H // Hk, kv_stage, num, t_n)
     cache = _cache()
     if key not in cache:
-        kern = DMFwdHd256Sm100(bool(causal), H // Hk, kv_stage=kv_stage, numerics=num)
+        kern = DMFwdHd256Sm100(bool(causal), H // Hk, kv_stage=kv_stage, numerics=num, t_n=t_n)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4)]
         args += [to_cute_tensor(t, assumed_align=4) for t in (qs, ks, vs)]

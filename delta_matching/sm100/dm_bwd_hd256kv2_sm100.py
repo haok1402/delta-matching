@@ -144,7 +144,10 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "dmk")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "dmk", "wbal")
+    # wbal (fork hd256-kv3, with dmk; candidate C2): compute-warp balance inside _citer: warps 4-7 (no SFA work by default) write the
+    # SFA_dK words (same bytes, same TMEM lane/column) and the dqt Wsb bytes; warps 0-3 keep only the SFA_dV words.  Same hand-offs
+    # (every compute warp already completes its tcgen05.st / st.shared, fences and arrives on the codes publication).
     # dmk (fork hd256-kv3, causal only; no-op if not causal): tile-class specialization of the compute warps.  The compute loop
     # becomes a nest (q head hi asc; q tile ct asc), the FIRST q tile of every head (ct = c_lo = max(kt, cq0 if dqc): the diagonal
     # tile kt, or a tile above it in a dqc band with cq0 > kt) peeled.  Only the peeled iteration applies the causal select
@@ -432,9 +435,14 @@ class DmHd256Kv2:
         if const_expr(self.dbg & 2):
             mSBS[l, key, ct * 4 + jb] = dsb
         if const_expr(self.wsp):
-            if warp < 2:
-                if lane == 0:
-                    st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
+            if const_expr("wbal" in self.opts):
+                if warp >= 4 and warp < 6:       # wbal: warps 4 / 5 (key groups 0 / 1, same dsb as warps 0 / 1); off the SFA warps
+                    if lane == 0:
+                        st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
+            else:
+                if warp < 2:
+                    if lane == 0:
+                        st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
         if const_expr(self.dbg & 8):
             a0_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
             lk_cols_u32(hsl, lane, a0_ + 8)
@@ -446,7 +454,38 @@ class DmHd256Kv2:
             lk_cols_f64(dsv, lane, a1_)
             lk_cols_f64(pdl, lane, a1_ + 8)
         # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
-        if warp < 4:
+        if const_expr("wbal" in self.opts):
+            # wbal: warps 0-3 write the SFA_dV (P) word, warps 4-7 (same lane quadrant qd = warp % 4, same key rows, same dsb) the
+            # SFA_dK (dS) word: the same bytes at the same TMEM (lane, column) as the default; each writer completes its tcgen05.st
+            # (wait::st) before its own fence::before + codes-publication arrive below (every compute warp arrives, unchanged).
+            if warp < 4:
+                bp = [Int32(0)] * 4
+                for j in cutlass.range_constexpr(4):
+                    psj = Int32(0)
+                    if const_expr("xpt" in self.opts):
+                        psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
+                    else:
+                        psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
+                    dsc_ = Float32(0.0)
+                    if const_expr("meta" in self.opts):
+                        dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
+                    else:
+                        dsc_ = Float32(mdOs[b, h, ct * 4 + j])
+                    bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
+                dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
+                cute.arch.fence_view_async_tmem_store()
+            else:
+                bs = [Int32(0)] * 4
+                for j in cutlass.range_constexpr(4):
+                    qsc_ = Float32(0.0)
+                    if const_expr("meta" in self.opts):
+                        qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
+                    else:
+                        qsc_ = Float32(mQs[b, h, ct * 4 + j])
+                    bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
+                dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
+                cute.arch.fence_view_async_tmem_store()
+        elif warp < 4:
             bp = [Int32(0)] * 4
             bs = [Int32(0)] * 4
             for j in cutlass.range_constexpr(4):

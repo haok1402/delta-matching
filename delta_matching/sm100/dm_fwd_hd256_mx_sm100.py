@@ -213,7 +213,8 @@ class DMFwdHd256MxSm100:
         # (each warp store hits 32 rows H*512 B apart). 1 = each correction thread writes its bf16 row (same mul.rn + cvt bits)
         # into a 528 B-strided staging row in the (by then idle) sK ring, bar.warp.sync, then each warp copies ITS OWN 32 rows
         # out row by row (lane l -> 16 B chunk l: one 512 B contiguous store per instruction). Values bitwise; store path only.
-        # 9 = DEBUG positive control: lanes copy rows of the NEIGHBOUR warp's region without a CTA barrier (must corrupt / race).
+        # 2 = 1 + TMEM chunk prefetch (F1c). 8 = DEBUG positive control (deterministic): copy out before staging (stale ring
+        # bytes -> O must be wrong, LSE unchanged). 9 = DEBUG PC (racy): copy the NEIGHBOUR warp's rows without a CTA barrier.
         self.epi = epi
         # lpt (fork hd256-8k L1; host default DM_HD256_FWD_LPT=1): causal CTA order = GLOBAL longest-first. Linear CTA id u
         # (x fastest) -> m_block = n_m-1 - u // (H*B), (head, batch) from u % (H*B). Each CTA still computes exactly one
@@ -875,20 +876,43 @@ class DMFwdHd256MxSm100:
             fence_proxy_async_shared()
             RS = 528                                                     # 512 B row + 16 B pad: conflict-free both ways
             srow = sk_base + Int32(RS) * tidx
-            for c in cutlass.range_constexpr(8):
-                o = tmem_ld32(obase + 32 * c)
-                tmem_wait_ld()
-                for q in cutlass.range_constexpr(4):
-                    wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
-                    st_shared_v4_b32(srow + (64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
-            bar_warp_sync()                                              # warp-local hand-off: a warp copies only its own rows
             ln = tidx % 32
             w0 = tidx - ln                                               # first row of this warp (TMEM lane quadrant)
+            if const_expr(self.epi == 8):                                # DEBUG PC (deterministic): copy out BEFORE staging
+                for r in cutlass.range(32, unroll=4):
+                    rr = w0 + r
+                    v = ld_shared_v4_b32(sk_base + Int32(RS) * rr + 16 * ln)
+                    gaddr = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + rr) * H
+                                                                + head_idx) * Int64(self.head_dim * 2)) + Int64(16 * ln)
+                    st_global_v4_b32(gaddr, v[0], v[1], v[2], v[3])
+            if const_expr(self.epi == 2):
+                # F1c: TMEM chunk c+1 is loaded while chunk c is converted (wait::ld covers all prior loads, so the next
+                # load is issued only after the previous wait)
+                o = tmem_ld32(obase)
+                tmem_wait_ld()
+                for c in cutlass.range_constexpr(8):
+                    if const_expr(c < 7):
+                        on = tmem_ld32(obase + 32 * (c + 1))
+                    for q in cutlass.range_constexpr(4):
+                        wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
+                        st_shared_v4_b32(srow + (64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
+                    if const_expr(c < 7):
+                        tmem_wait_ld()
+                        o = on
+            else:
+                for c in cutlass.range_constexpr(8):
+                    o = tmem_ld32(obase + 32 * c)
+                    tmem_wait_ld()
+                    for q in cutlass.range_constexpr(4):
+                        wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
+                        st_shared_v4_b32(srow + (64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
+            bar_warp_sync()                                              # warp-local hand-off: a warp copies only its own rows
             if const_expr(self.epi == 9):
-                w0 = (w0 + 32) % 128                                     # DEBUG PC: another warp's rows, no CTA barrier
-            for r in cutlass.range(32, unroll=4):
-                rr = w0 + r
-                v = ld_shared_v4_b32(sk_base + Int32(RS) * rr + 16 * ln)
-                gaddr = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + rr) * H + head_idx)
-                                                      * Int64(self.head_dim * 2)) + Int64(16 * ln)
-                st_global_v4_b32(gaddr, v[0], v[1], v[2], v[3])
+                w0 = (w0 + 32) % 128                                     # DEBUG PC (racy): another warp's rows, no CTA barrier
+            if const_expr(self.epi != 8):
+                for r in cutlass.range(32, unroll=4):
+                    rr = w0 + r
+                    v = ld_shared_v4_b32(sk_base + Int32(RS) * rr + 16 * ln)
+                    gaddr = Int64(mO.iterator.toint()) + (Int64((batch_idx * N + m_block * self.m_block_size + rr) * H + head_idx)
+                                                          * Int64(self.head_dim * 2)) + Int64(16 * ln)
+                    st_global_v4_b32(gaddr, v[0], v[1], v[2], v[3])

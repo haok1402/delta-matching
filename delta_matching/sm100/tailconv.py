@@ -72,7 +72,8 @@ def _patch(src: str) -> str:
             raise RuntimeError(f"tailconv patch anchor not unique/found ({src.count(a)}): {a[:80]!r}")
         src = src.replace(a, b)
     # deferred griddepcontrol.wait at the very end of the kernel (the module ends with the kernel body)
-    src = src.rstrip("\n") + "\n        cute.arch.griddepcontrol_wait()\n"
+    src = src.rstrip("\n") + ("\n        if const_expr(os.environ.get('DM_TCONV_GDCWAIT', '1') == '1'):\n"
+                               "            cute.arch.griddepcontrol_wait()\n")
     return src
 
 
@@ -156,7 +157,7 @@ def _compile(key):
     """Fake-tensor compile (mirrors interface._compile_bwd_postprocess, dense only) + the readiness tensor."""
     from flash_attn.cute.interface import make_fake_bwd_tensors
     (dtype, hdim, block_size, num_threads, atom_layout, swap_ab, use_2cta_instrs, cluster_size, arch, hdim_multiple_of,
-     accum_order, dm_kind, dm_causal, dm_ctn, dm_G, ctl) = key
+     accum_order, dm_kind, dm_causal, dm_ctn, dm_G, ctl, _gdc) = key
     mQ, mK, mV, mO, mdO, mdQ, mdK, mdV, mLSE, mLSElog2, mPdPsum, mdQaccum, mdKaccum, mdVaccum, mScaleP = \
         make_fake_bwd_tensors(dtype, has_gqa=True, varlen_q=False, varlen_k=False)
     from quack.compile_utils import make_fake_tensor as _ft
@@ -181,7 +182,7 @@ def tconv_convert(sem, accum, output, scale, cu_seqlens, seqused, arch, dtype, h
         _CACHE = _cache()
     key = (dtype, hdim, block_size, num_threads, atom_layout, swap_ab, use_2cta_instrs, cluster_size, arch,
            hdim_multiple_of, accum_order, dm_kind, bool(dm_causal), int(dm_ctn), int(dm_G),
-           os.environ.get("DM_TCONV_CTL", ""))
+           os.environ.get("DM_TCONV_CTL", ""), os.environ.get("DM_TCONV_GDCWAIT", "1"))
     if key not in _CACHE:
         _CACHE[key] = _compile(key)
     if not fake_mode:

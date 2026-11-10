@@ -75,9 +75,9 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     g1 = int(os.environ.get("DM_HD256_FWD_G1", "0"))   # hd256-fwd3 G1 critical-path trims (bitmask, see DMFwdHd256MxSm100); 0 = C6
     if g1:
         key = key + (f"g1_{g1}",)
-    c8 = os.environ.get("DM_HD256_FWD_C8", "0") == "1"   # hd256-fwd3 C8 column split (implies G1a); 0 = C6
+    c8 = int(os.environ.get("DM_HD256_FWD_C8", "0"))   # hd256-fwd3 C8 column split (implies G1a): 1 = C8, 2 = C8b; 0 = C6
     if c8:
-        key = key + ("c8",)
+        key = key + (f"c8_{c8}",)
     trace = os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"   # DEBUG (hd256-fwd3): per-event %clock64 trace -> TRACE["buf"]
     dbg = None
     if trace:

@@ -274,7 +274,7 @@ class DMFwdHd256MxSm100:
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
-                 lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: bool = False):
+                 lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0):
         # c8 (fork hd256-fwd3 C8, DM_HD256_FWD_C8=1; Codex hd256-fwd2-02 C, hd256-fwd3-02): column split of every tile over BOTH
         # softmax WGs.  WG h loads S columns 64h..64h+63 (blocks 2h, 2h+1) and runs the m-independent prefix op for op (bmax, kb,
         # bias, FFMA2, ex2, e4m3 codes -> sP, pairwise block sums).  WG1 publishes bmax2/3, bs2/3 (SMEM part[slot][k][128],
@@ -284,6 +284,11 @@ class DMFwdHd256MxSm100:
         # with G1a (stats_full right after the m rule).  MMA warp / correction unchanged.  Values bitwise == C6.
         # DEBUG PCs (c8): 4 WG0 skips the partial wait; 5 WG1 arrives partial before its payload (+20 us); 11 WG1 arrives P_full
         # before its P stores (+20 us); 12 WG0 stores SFB right after S_full while WG1 delays its S load 20 us  -> all must corrupt.
+        # c8 = 2 (C8b): WG1 stores SFB(j) (the m-independent V scale word, columns slot+64..71 = its own S columns) right after its
+        # S load (wait::ld) and completes it (wait::st + fence::before) before P_full; WG0's tail stores only SFA.  Removes the
+        # WG1 S-load -> WG0 SFB-store TMEM edge and 8 stores from WG0's serial tail.  PC 12 (C8b): WG1 stores SFB BEFORE its
+        # S load -> must corrupt.
+        assert c8 in (0, 1, 2)
         self.c8 = c8
         if c8:
             g1 = g1 | 1
@@ -1237,16 +1242,23 @@ class DMFwdHd256MxSm100:
         dm_utils.tc_fence_after()
         self.tr(j, 11 + 8 * h, None, tr_w == 0)
         sfbase = (lane << 16) + slot * 128
-        if const_expr(h == 0 and self.pc_inj == 12):
+        if const_expr(h == 0 and self.c8 == 1 and self.pc_inj == 12):
             for r in cutlass.range_constexpr(8):                             # DEBUG PC 12: SFB before WG1 loaded its columns
                 tmem_st1(sfbase + self.sfb_off + r, dm_vw)
-        if const_expr(h == 1 and self.pc_inj == 12):
+        if const_expr(h == 1 and self.c8 == 1 and self.pc_inj == 12):
             for _d in cutlass.range_constexpr(20):
                 dm_utils.nanosleep_1us()
         c0 = 64 * h
+        if const_expr(h == 1 and self.c8 == 2 and self.pc_inj == 12):
+            for r in cutlass.range_constexpr(8):                             # DEBUG PC 12 (C8b): SFB before our S load
+                tmem_st1(sfbase + self.sfb_off + r, dm_vw)
+            tmem_wait_st()
         s0 = tmem_ld32(sfbase + c0)
         s1 = tmem_ld32(sfbase + c0 + 32)
         tmem_wait_ld()
+        if const_expr(h == 1 and self.c8 == 2 and self.pc_inj != 12):
+            for r in cutlass.range_constexpr(8):                             # C8b: SFB(j) in our own columns after our load
+                tmem_st1(sfbase + self.sfb_off + r, dm_vw)
         s = s0 + s1                                                          # s[c] = S(row, 64 h + c), c = 0..63
         if const_expr(self.is_causal and is_first):
             for c in cutlass.range_constexpr(64):
@@ -1310,6 +1322,8 @@ class DMFwdHd256MxSm100:
                 dm_utils.mbar_arrive(mbar + 80 + 8 * slot)                   # partial_full[slot]
             if const_expr(self.pc_inj != 11):
                 cute.arch.fence_view_async_shared()
+                if const_expr(self.c8 == 2):
+                    tmem_wait_st()                                           # C8b: our SFB stores complete before P_full
                 dm_utils.tc_fence_before()
                 dm_utils.mbar_arrive(mbar + 16 + 8 * slot)                   # P_full[slot] (our P codes)
             else:
@@ -1365,7 +1379,7 @@ class DMFwdHd256MxSm100:
             sfa_word = dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3])
             for r in cutlass.range_constexpr(4):
                 tmem_st1(sfbase + self.sfa_off + r, sfa_word)
-            if const_expr(self.pc_inj != 12):
+            if const_expr(self.c8 == 1 and self.pc_inj != 12):
                 for r in cutlass.range_constexpr(8):
                     tmem_st1(sfbase + self.sfb_off + r, dm_vw)
             cute.arch.fence_view_async_shared()

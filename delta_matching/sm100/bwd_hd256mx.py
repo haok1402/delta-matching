@@ -23,6 +23,7 @@ from .fastpath import env as _env
 D = 256
 NUMERICS = "sm100-mx-d256"
 DETERMINISTIC = True
+IMPL_DEFAULT = "1"
 _LOCK = threading.Lock()
 _CACHE = {}
 PROF = []
@@ -46,7 +47,7 @@ def _u8(t):
     return t.view(torch.uint8) if t.dtype == torch.float8_e4m3fn else t
 
 
-def _run(key, make_obj, ten, lds, ints):
+def _run(key, make_obj, ten, lds, ints, mode=None):
     c = _cache()
     ev = None
     if _env("DM_H256_PROF", "0") == "1" and not _fake():
@@ -65,7 +66,7 @@ def _run(key, make_obj, ten, lds, ints):
         c[key](*[_u8(t) for t in ten], *ints)
         if ev is not None:
             ev[1].record()
-            PROF.append((key[0], ev))
+            PROF.append((mode or key[0], ev))
 
 
 def twins(q8, do8, k8):
@@ -75,7 +76,13 @@ def twins(q8, do8, k8):
 
 
 def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, modes=("dv", "dk", "dq"), tw=None,
-                   knob=""):
+                   knob="", impl=None):
+    """impl "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values);
+    default from env DM_H256_BWD_IMPL."""
+    if impl is None:
+        impl = _env("DM_H256_BWD_IMPL", IMPL_DEFAULT)
+    impl = str(impl)
+    assert impl in ("1", "2"), impl
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -112,7 +119,11 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         lds = [1, 1, 1, 1, 0] + lds_tail
         kd = dbg & 11 if mode == "dq" else dbg & 10
         key = (mode, causal, kd) if not knob else (mode, causal, kd, knob)
-        _run(key, lambda: DmHd256Mx(mode, causal, kd, knob), ten, lds, [n_t, H, Hk])
+        cls = DmHd256Mx
+        if impl == "2":
+            from .dm_bwd_hd256mx2_sm100 import DmHd256Mx2 as cls  # noqa: N813
+            key = ("i2",) + key
+        _run(key, lambda: cls(mode, causal, kd, knob), ten, lds, [n_t, H, Hk], mode=mode)
         if big or hsh:
             dumps[mode] = dict(dump=dump, codes=codes, sb=sb, hash=hh)
     if dbg:

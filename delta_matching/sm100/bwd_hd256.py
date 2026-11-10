@@ -59,8 +59,14 @@ def _ds_args(q8, k8, v8, do8, qs, ks, vs, dos, lse, delta, wPt, wdS, wdSt, wPsi,
     return ten, lds
 
 
+PROF = []
+
+
 def _run(key, make_obj, ten, lds, ints):
     c = _cache()
+    ev = None
+    if _env("DM_H256_PROF", "0") == "1" and not _fake():
+        ev = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
     if key not in c:
         if _env("DM_H256_NO_COMPILE", "0") == "1":
             raise RuntimeError(f"hd256 bwd: {key} is not AOT-compiled (DM_H256_NO_COMPILE=1: no compiling in a GPU lease)")
@@ -68,14 +74,28 @@ def _run(key, make_obj, ten, lds, ints):
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         c[key] = cute.compile(make_obj(), *cts, *[Int32(0) for _ in ints], stream, options="--enable-tvm-ffi")
     if not _fake():
+        if ev is not None:
+            ev[0].record()
         c[key](*[_u8(t) for t in ten], *ints)
+        if ev is not None:
+            ev[1].record()
+            PROF.append((key[:2], ev))
 
 
 def plan_chunks(B, N, H, Hk, budget_gb=None):
     """Heads per workspace chunk: 3 code planes (P~^T, dS', dS'^T) of N x N bytes + psi/g per head (dense layout)."""
-    gb = float(budget_gb if budget_gb is not None else _env("DM_H256_WS_GB", "24"))
+    gb = float(budget_gb if budget_gb is not None else _env("DM_H256_WS_GB", "48"))
     per = B * (3 * N * N + 2 * 4 * (N // 64) ** 2)
-    return max(1, min(H, int(gb * 2 ** 30) // per))
+    cap = max(1, min(H, int(gb * 2 ** 30) // per))
+    if cap >= H:
+        return H
+    rep = H // Hk
+    if cap >= rep:                      # whole kv groups per chunk, equal-sized chunks
+        groups = cap // rep
+        n = -(-Hk // groups)
+        return rep * (-(-Hk // n))
+    n = -(-H // cap)                    # balanced chunks inside a group
+    return -(-H // n)
 
 
 def fold_mode():

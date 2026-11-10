@@ -807,11 +807,12 @@ class DmHd256Kv2:
                 wm = Float32(0.0)
                 if const_expr("sfnoxchg" not in self.opts):
                     wm = dm_utils.redux_max_abs_f32(amd)
-                if lane == 0 and const_expr("sfnoxchg" not in self.opts):
-                    if const_expr("xsv" in self.opts):
-                        st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
-                    else:
-                        st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
+                if const_expr("sfnoxchg" not in self.opts):
+                    if lane == 0:
+                        if const_expr("xsv" in self.opts):
+                            st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
+                        else:
+                            st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
                 if const_expr("sfnoxchg" not in self.opts):
                     cute.arch.fence_view_async_shared()
                 if const_expr(not (self.kn == "ex" and self.unsafe) and "sfnoxchg" not in self.opts):
@@ -876,28 +877,29 @@ class DmHd256Kv2:
                     lk_cols_f64(dsv, lane, a1_)
                     lk_cols_f64(pdl, lane, a1_ + 8)
                 # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
-                if warp < 4 and const_expr("sfnosfa" not in self.opts):
-                    bp = [Int32(0)] * 4
-                    bs = [Int32(0)] * 4
-                    for j in cutlass.range_constexpr(4):
-                        psj = Int32(0)
-                        if const_expr("xpt" in self.opts):
-                            psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
-                        else:
-                            psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
-                        dsc_ = Float32(0.0)
-                        qsc_ = Float32(0.0)
-                        if const_expr("meta" in self.opts):
-                            dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
-                            qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
-                        else:
-                            dsc_ = Float32(mdOs[b, h, ct * 4 + j])
-                            qsc_ = Float32(mQs[b, h, ct * 4 + j])
-                        bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
-                        bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
-                    dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
-                    dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
-                    cute.arch.fence_view_async_tmem_store()
+                if const_expr("sfnosfa" not in self.opts):
+                    if warp < 4:
+                        bp = [Int32(0)] * 4
+                        bs = [Int32(0)] * 4
+                        for j in cutlass.range_constexpr(4):
+                            psj = Int32(0)
+                            if const_expr("xpt" in self.opts):
+                                psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
+                            else:
+                                psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
+                            dsc_ = Float32(0.0)
+                            qsc_ = Float32(0.0)
+                            if const_expr("meta" in self.opts):
+                                dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
+                                qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
+                            else:
+                                dsc_ = Float32(mdOs[b, h, ct * 4 + j])
+                                qsc_ = Float32(mQs[b, h, ct * 4 + j])
+                            bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
+                            bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
+                        dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
+                        dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
+                        cute.arch.fence_view_async_tmem_store()
                 if const_expr("meta" in self.opts and not (self.kn == "meta" and self.unsafe)):
                     mf.release()
                 cute.arch.fence_view_async_shared()

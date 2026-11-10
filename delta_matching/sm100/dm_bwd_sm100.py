@@ -6495,9 +6495,14 @@ class DMBackwardSm100:
                                                 dm_v = gdQaccum_cur[4 * tidx + dm_i + 512 * dm_k, stage + stage_offset] + dm_v
                                             dm_dq[batch_idx, dm_row, head_idx, dm_col0 + dm_j] = dm_dq.element_type(
                                                 dm_v * Float32(self.tile_hdim ** -0.5))
+                        # DM bwdlong timing-only splits of abl:dqtma (wrong outputs): abl:dqodd skips the bulk add of odd m_blocks
+                        # (half the dQ L2 RMW traffic, waits kept); abl:dqnowr keeps every add but never waits for the staging
+                        # read / completion (traffic kept, drain latency removed; smem reuse races).
                         if is_tma_warp and not m_block_oob_upper and not dm_last and const_expr("dqtma" not in self.dm_abl):
                             with cute.arch.elect_one():
-                                if dm_first:
+                                if const_expr("dqodd" in self.dm_abl) and m_block % 2 == 1:
+                                    pass
+                                elif dm_first:
                                     dm_utils.cpasync_bulk_store_s2g(
                                         sdQaccum[None, smem_idx].iterator,
                                         gdQaccum_cur[None, stage + stage_offset].iterator,
@@ -6510,7 +6515,9 @@ class DMBackwardSm100:
                                         self.tma_copy_bytes["dQ"] // 1,
                                     )
                             cute.arch.cp_async_bulk_commit_group()
-                            if const_expr("nodqrd" not in self.dm_opts and self.deterministic and self.sdQaccum_stage > 1):   # dqrd default (bitwise)
+                            if const_expr("dqnowr" in self.dm_abl):
+                                pass
+                            elif const_expr("nodqrd" not in self.dm_opts and self.deterministic and self.sdQaccum_stage > 1):   # dqrd default (bitwise)
                                 # DM dqrd: staging-buffer reuse only needs the older bulk adds to have READ smem;
                                 # completion (visibility in global) is needed only before the semaphore release of
                                 # the previous m_block (below, stage 0) and at tile end. Same adds, same order: bitwise.

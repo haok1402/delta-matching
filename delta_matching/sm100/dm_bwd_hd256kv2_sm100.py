@@ -49,7 +49,7 @@ from delta_matching.sm100.dm_bwd_hd256_sm100 import (tmem_ld32, e4m3x4, bf16x2, 
                                                      ld_shared_f32, st_shared_f32, abs_f32, max_f32, _gaddr)
 from delta_matching.sm100.dm_bwd_hd256mx_sm100 import (st_shared_v4, ld_shared_v4f, spin, sb_of, pack4, tc_fence_before,
                                                        tc_fence_after, st_global_u8, f2i, hmix, hidx, lk_cols_u32,
-                                                       lk_cols_f64)
+                                                       lk_cols_f64, sel_eq_i32)
 
 F8 = cutlass.Float8E4M3FN
 
@@ -64,7 +64,7 @@ class DmHd256Kv2:
     COL_SFB, COL_SFA_P, COL_SFA_S = 384, 392, 394     # + 4 * stage
     NCOMP = 256                          # compute threads per CTA (warps 0-7)
     MMA_WARP, LOAD_WARP = 8, 9
-    KNOBS = ()
+    KNOBS = ("lsk",)       # lsk: planted control (one dS code flipped: b 0, kv head 0, key 0, first tile)
     DLY = 1 << 15
 
     def __init__(self, causal: bool, dbg: int = 0, knob: str = ""):
@@ -451,6 +451,9 @@ class DmHd256Kv2:
                         y0, y1 = cute.arch.mul_packed_f32x2((dsv[i0], dsv[i0 + 1]), (invs, invs))
                         y2, y3 = cute.arch.mul_packed_f32x2((dsv[i0 + 2], dsv[i0 + 3]), (invs, invs))
                         w[u] = e4m3x4(y0, y1, y2, y3)
+                    if const_expr(self.kn == "lsk" and self.unsafe):
+                        if const_expr(hv == 0):
+                            w[0] = w[0] ^ sel_eq_i32(t + key + hx + b, Int32(0), Int32(1), Int32(0))
                     st_shared_v4(srow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
                     if const_expr(self.dbg & 8):
                         for u in cutlass.range_constexpr(4):

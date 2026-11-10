@@ -73,9 +73,14 @@ class DmHd256Dqg:
     KNOBS = ("ab", "sf", "sw", "fin")
     DLY = 1 << 15
 
-    def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = False):
+    def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = False, band: bool = False):
         """wsw: W tiles hold the swizzled MN-major SW128 smem image (KV2 opt dqt) -> 1-D bulk copy; else plain rows (dqw) -> TMA."""
         self.wsw = bool(wsw)
+        # band (fork hd256-dqr2, KV2 opt dqc chunks; causal only): this launch forms dQ of q tiles [q0, q0 + n_t) only (n_t argument =
+        # the band's tile count), from a band-local W (T = l * tiles(q0, q1) + (ct (ct + 1) - q0 (q0 + 1)) / 2 + kt, kt = 0..ct: every
+        # key tile of these q tiles is in the band's W -> complete dQ rows, no carry); dQ rows at their global position (mdQ full N).
+        self.band = bool(band)
+        assert not self.band or causal
         self.causal = bool(causal)
         self.S = int(stages)
         assert 2 <= self.S <= 4
@@ -87,7 +92,7 @@ class DmHd256Dqg:
 
     @cute.jit
     def __call__(self, mA: cute.Tensor, mKt: cute.Tensor, mWsb: cute.Tensor, mKs: cute.Tensor, mdQ: cute.Tensor,
-                 n_t: Int32, H: Int32, Hk: Int32, stream):
+                 n_t: Int32, H: Int32, Hk: Int32, q0: Int32, stream):
         D = self.D
         # static 128 x 128 tile modes (TMA needs a static first mode): W viewed as (q, key, T), q contiguous
         mW = mA
@@ -116,13 +121,13 @@ class DmHd256Dqg:
             sT: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(t_l)], 1024]
         self.SS = SS
         nbz = cute.size(mdQ, mode=[0])
-        self.kernel(mma_o, tma_A, tA, tma_T, tT, a_l, t_l, mW, mWsb, mKs, mdQ, n_t, H, Hk).launch(
+        self.kernel(mma_o, tma_A, tA, tma_T, tT, a_l, t_l, mW, mWsb, mKs, mdQ, n_t, H, Hk, q0).launch(
             grid=[n_t * H * nbz, 1, 1], block=[self.threads, 1, 1], smem=SS.size_in_bytes(), stream=stream)
 
     @cute.kernel
     def kernel(self, mma_o: cute.TiledMma, tma_A: cute.CopyAtom, mA: cute.Tensor, tma_T: cute.CopyAtom, mKt: cute.Tensor,
                a_l: cute.ComposedLayout, t_l: cute.ComposedLayout, mW: cute.Tensor, mWsb: cute.Tensor, mKs: cute.Tensor, mdQ: cute.Tensor,
-               n_t: Int32, H: Int32, Hk: Int32):
+               n_t: Int32, H: Int32, Hk: Int32, q0: Int32):
         D = self.D
         S = self.S
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
@@ -138,7 +143,14 @@ class DmHd256Dqg:
         l = b * H + h
         total = n_t
         tbase = (Int64(l) * n_t + ct) * n_t
-        if const_expr(self.causal):
+        nrow = n_t * 128                 # dQ rows of the sequence (band: the full mdQ length)
+        if const_expr(self.band):
+            ct = ct + q0
+            q1 = q0 + n_t
+            total = ct + 1
+            tbase = Int64(l) * ((q1 * (q1 + 1) - q0 * (q0 + 1)) // 2) + (ct * (ct + 1) - q0 * (q0 + 1)) // 2
+            nrow = cute.size(mdQ, mode=[1])
+        elif const_expr(self.causal):
             total = ct + 1
             tbase = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2
 
@@ -271,7 +283,7 @@ class DmHd256Dqg:
                 dm_utils.mbar_wait_parity(FIN, Int32(0))
             tc_fence_after()
             q = ct * 128 + warp * 32 + lane
-            ob = _gaddr(mdQ) + ((Int64(b) * (n_t * 128) + q) * H + h) * (D * 2)
+            ob = _gaddr(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 2)
             for cb in cutlass.range_constexpr(8):
                 ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
                 cute.arch.fence_view_async_tmem_load()

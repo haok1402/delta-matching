@@ -36,8 +36,10 @@ def dqw_alloc(B, H, N, causal, dev):
     return (torch.empty(T, 128, 128, device=dev, dtype=torch.uint8), torch.empty(T, 1, 4, device=dev, dtype=torch.uint8))
 
 
-def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqw=None, out=None):
-    """dqw = (W, Wsb) from dqw_alloc: KV2 also stores the dS codes / raw block exponents for the dQ GEMM (opts must contain dqw)."""
+def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqw=None, out=None, dqc=None):
+    """dqw = (W, Wsb) from dqw_alloc: KV2 also stores the dS codes / raw block exponents for the dQ GEMM (opts must contain dqw).
+    dqc = (desc, carry_dk, carry_dv, q1) (fork hd256-dqr2, opts must contain dqc): exact-carry chunk, see DmHd256Kv2 opt dqc; desc =
+    int32 device tensor [Q0, n_t, cin, cout] (+ pad), carries fp32 (B, N, Hk, 256); the launch covers q tiles [Q0, q1)."""
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -70,12 +72,19 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     if dqw is not None:
         assert not big
         cs_, sbs = dqw
-        assert cs_.shape == (dqw_tiles(B, H, N // 128, causal), 128, 128) and sbs.shape == (cs_.shape[0], 1, 4)
+        assert (dqc is not None or cs_.shape == (dqw_tiles(B, H, N // 128, causal), 128, 128)) and sbs.shape == (cs_.shape[0], 1, 4)
+    assert (dqc is not None) == ("dqc" in ot.split())
+    nt_arg = N // 128
+    if dqc is not None:
+        desc, ck, cv, nt_arg = dqc
+        assert desc.dtype == torch.int32 and desc.numel() >= 4 and ck.dtype == torch.float32 and ck.shape == (B, N, Hk, D)
+        assert cv.shape == ck.shape and ck.is_contiguous() and cv.is_contiguous() and 1 <= nt_arg <= N // 128
+        dump, cp_, sbp = ck, cv.view(torch.uint8).view(B * N, Hk, D * 4), desc.view(1, 1, -1)
     ten = [p(k8), p(v8), p(q8), p(do8), tt(q8), tt(do8), qs, ks, vs, dos, lse, delta, dk, dv, dump, cp_, cs_, sbp, sbs, hh]
     lds = [1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2]
     kd = dbg & 10
     key = ("kv2", causal, kd, knob, ot)
-    _mx._run(key, lambda: DmHd256Kv2(causal, kd, knob, ot), ten, lds, [N // 128, H, Hk])
+    _mx._run(key, lambda: DmHd256Kv2(causal, kd, knob, ot), ten, lds, [nt_arg, H, Hk])
     extra = dict(dump=dump, codesP=cp_, codesS=cs_, sbP=sbp, sbS=sbs, hash=hh)
     return dk, dv, extra
 

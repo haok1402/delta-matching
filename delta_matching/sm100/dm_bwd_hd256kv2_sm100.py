@@ -46,11 +46,12 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 
 from delta_matching.sm100 import dm_common_hd256 as dmh
 from delta_matching.sm100 import dm_utils
-from delta_matching.sm100.dm_common_hd256 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_f32,
+from delta_matching.sm100.dm_common_hd256 import (tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_f32, st_global_v4f,
                                                  ld_shared_f32, st_shared_f32, abs_f32, max_f32, _gaddr, _asm)
 from delta_matching.sm100.dm_bwd_hd256mx_sm100 import (st_shared_v4, ld_shared_v4f, spin, sb_of, pack4, tc_fence_before,
                                                        tc_fence_after, st_global_u8, f2i, hmix, hidx, lk_cols_u32,
                                                        lk_cols_f64, sel_eq_i32)
+from delta_matching.sm100.dm_bwd_hd256mx_sm100 import tmem_st32 as dmh_st32
 
 F8 = cutlass.Float8E4M3FN
 
@@ -98,6 +99,22 @@ def bulk_wait_all(*, loc=None, ip=None):
     _asm(None, [], "cp.async.bulk.wait_group 0;", "", True, loc, ip)
 
 
+@dsl_user_op
+def ld_global_v4f(addr: Int64, *, loc=None, ip=None):
+    """opt dqc: 4 raw fp32 words of the carry (bits preserved: no arithmetic between this load and the tcgen05.st)."""
+    from cutlass._mlir.dialects import llvm
+    from cutlass.cutlass_dsl import T as _T
+    res = _asm(llvm.StructType.get_literal([_T.f32()] * 4), [Int64(addr).ir_value(loc=loc, ip=ip)],
+               "ld.global.v4.f32 {$0, $1, $2, $3}, [$4];", "=f,=f,=f,=f,l", True, loc, ip)
+    return [Float32(llvm.extractvalue(_T.f32(), res, [i], loc=loc, ip=ip)) for i in range(4)]
+
+
+@dsl_user_op
+def ld_global_s32(addr: Int64, *, loc=None, ip=None) -> Int32:
+    from cutlass.cutlass_dsl import T as _T
+    return Int32(_asm(_T.i32(), [Int64(addr).ir_value(loc=loc, ip=ip)], "ld.global.u32 $0, [$1];", "=r,l", True, loc, ip))
+
+
 def _coop(n):
     return pipeline.CooperativeGroup(pipeline.Agent.Thread, n)
 
@@ -120,12 +137,23 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc")
+    # dqc (fork hd256-dqr2, requires dqt): EXACT-CARRY chunk of the (q head, q tile) reduction of every key tile.  The launch covers
+    # q heads [0, rep) of its (copied) head tensors x q tiles [Q0, Q1) (Q1 = the n_t argument; causal: key tiles 0..Q1-1 = the grid).
+    # Chunk descriptor (int32, in the mSBP slot): [Q0, n_t of the full sequence, cin, cout]; cin = 1: this launch continues the
+    # reduction of EVERY key tile it visits, else of the key tiles kt < Q0 only (causal; non-causal needs Q0 = 0); cout = 1: the
+    # reduction is not finished -> the raw fp32 dK / dV TMEM state is stored instead of the bf16 output.  Carry buffers (fp32, raw
+    # bits, layout (B, N_full, Hk, 256)): dK in the mDump slot, dV in the mCodesP slot.  The carry is restored into the dK / dV TMEM
+    # columns by the compute threads that own them (tcgen05.st + wait::st) BEFORE their t = 0 codes publication (cd hand-off: the
+    # first dV / dK MMA waits for it), and the first MMA then accumulates on it (zero_init only on the globally first contribution)
+    # -> every MMA sees the identical fp32 D as the unchunked launch: bitwise by induction.  W packing per launch: band-local
+    # T = l * tiles(Q0, Q1) + (ct (ct + 1) - Q0 (Q0 + 1)) / 2 + kt.
+    # Positive control cr: carry restored AFTER the t = 0 publication (unsafe) / before it (safe), both after a delay.
     # dqt (fork hd256-dqr): as dqw, but the dS codes reach W by a 1-D bulk copy of each CTA's staged 8 KiB codes image (sCS stage,
     # SW128 swizzled bytes) issued by a store warp per CTA (CTA 0 warp 11, CTA 1 warp 8) -> W tile T = [CTA 0 image | CTA 1 image]
     # (the MN-major SW128 A image of the dQ GEMM).  New hand-offs: wr (codes written -> bulk read: the existing codes-ready
     # barrier, CTA 0 F_cd / CTA 1 relay L_cd) and ww (bulk read done -> compute rewrites the stage: new local mbarrier SD[stg]).
-    DQTCTL = ("wr", "ww")
+    DQTCTL = ("wr", "ww", "cr")
     # dqw (fork hd256-dqr): also store the dS codes + raw dS block exponents to a dQ workspace for the dQ GEMM kernel DmHd256Dqg
     # (dm_bwd_hd256dqg_sm100.py). The workspace tensors are passed in the mCodesS / mSBS slots (dbg 2 must be off):
     #   mCodesS = W  uint8 (T, 128, 128): tile T = (l, q tile ct, key tile kt) [key in tile][query in tile] (plain row-major,
@@ -164,7 +192,58 @@ class DmHd256Kv2:
         assert not ("dqt" in self.opts and "dqw" in self.opts)
         assert "dqt" not in self.opts or "rly" in self.opts
         self.wsp = "dqw" in self.opts or "dqt" in self.opts
+        self.dqc = "dqc" in self.opts
+        assert not self.dqc or ("dqt" in self.opts and self.dbg == 0)
         self.threads = 384
+
+    @cute.jit
+    def _epi_bf16(self, tb, mdK, mdV, b, key, hx, Hk, N, qd, hf):
+        D = self.D
+        d0 = 128 * (qd // 2) + 64 * hf
+        for which in cutlass.range_constexpr(2):
+            col = self.COL_DK if which == 0 else self.COL_DV
+            mOut = mdK if which == 0 else mdV
+            ob = _gaddr(mOut) + (((Int64(b) * N + key) * Hk + hx) * D + d0) * 2
+            for cb in cutlass.range_constexpr(2):
+                ov = tmem_ld32(tb + col + 64 * hf + 32 * cb)
+                cute.arch.fence_view_async_tmem_load()
+                for i in cutlass.range_constexpr(0, 32, 8):
+                    w = [None] * 4
+                    for q in cutlass.range_constexpr(4):
+                        w[q] = bf16x2(ov[i + 2 * q], ov[i + 2 * q + 1])
+                    st_global_v4(ob + (32 * cb + i) * 2, w[0], w[1], w[2], w[3])
+
+    @cute.jit
+    def _carry_store(self, tb, mCK, mCV, b, key, hx, Hk, nfull, qd, hf):
+        """opt dqc, cout: this thread's 64 dK + 64 dV fp32 TMEM words (key row, d0..d0+63) -> carry, raw bits."""
+        D = self.D
+        d0 = 128 * (qd // 2) + 64 * hf
+        for which in cutlass.range_constexpr(2):
+            col = self.COL_DK if which == 0 else self.COL_DV
+            cb_ = _gaddr(mCK if which == 0 else mCV) + (((Int64(b) * nfull * 128 + key) * Hk + hx) * D + d0) * 4
+            for cb in cutlass.range_constexpr(2):
+                ov = tmem_ld32(tb + col + 64 * hf + 32 * cb)
+                cute.arch.fence_view_async_tmem_load()
+                for i in cutlass.range_constexpr(0, 32, 4):
+                    st_global_v4f(cb_ + (32 * cb + i) * 4, ov[i], ov[i + 1], ov[i + 2], ov[i + 3])
+
+    @cute.jit
+    def _carry_restore(self, nfirst, tb, mCK, mCV, b, key, hx, Hk, nfull, qd, hf):
+        """opt dqc: if this launch continues the key tile's reduction, the raw fp32 carry -> the dK / dV TMEM words this thread owns
+        (the same (lane, column) words its epilogue reads), then tcgen05.wait::st; published to the MMA issuer by this thread's t = 0
+        codes publication (fence::before + arrive, cd hand-off)."""
+        D = self.D
+        if nfirst != 0:
+            d0 = 128 * (qd // 2) + 64 * hf
+            for which in cutlass.range_constexpr(2):
+                col = self.COL_DK if which == 0 else self.COL_DV
+                cb_ = _gaddr(mCK if which == 0 else mCV) + (((Int64(b) * nfull * 128 + key) * Hk + hx) * D + d0) * 4
+                for cb in cutlass.range_constexpr(2):
+                    v = []
+                    for i in cutlass.range_constexpr(0, 32, 4):
+                        v = v + ld_global_v4f(cb_ + (32 * cb + i) * 4)
+                    dmh_st32(tb + col + 64 * hf + 32 * cb, v)
+            cute.arch.fence_view_async_tmem_store()
 
     @cute.jit
     def __call__(self, mK: cute.Tensor, mV: cute.Tensor, mQ: cute.Tensor, mdO: cute.Tensor, mQd: cute.Tensor,
@@ -247,6 +326,24 @@ class DmHd256Kv2:
         c_lo = Int32(0)
         if const_expr(self.causal):
             c_lo = kt
+        q0 = Int32(0)
+        nfull = n_t
+        cin = Int32(0)
+        cout = Int32(0)
+        nfirst = Int32(0)        # dqc: 1 = this launch continues the key tile's reduction (carry restore, no zero-init)
+        tilesb = Int64(0)
+        if const_expr(self.dqc):
+            dsc = _gaddr(mSBP)
+            q0 = ld_global_s32(dsc)
+            nfull = ld_global_s32(dsc + 4)
+            cin = ld_global_s32(dsc + 8)
+            cout = ld_global_s32(dsc + 12)
+            nfirst = cin
+            if const_expr(self.causal):
+                c_lo = kt if kt > q0 else q0
+                if kt < q0:
+                    nfirst = Int32(1)
+            tilesb = Int64((n_t * (n_t + 1) - q0 * (q0 + 1)) // 2)
         ncs = n_t - c_lo
         total = rep * ncs
 
@@ -419,7 +516,9 @@ class DmHd256Kv2:
                     l = b * H + hx * rep + hi
                     stg = t & 1
                     wtile = Int64(0)
-                    if const_expr(self.causal):
+                    if const_expr(self.dqc and self.causal):
+                        wtile = Int64(l) * tilesb + (ct * (ct + 1) - q0 * (q0 + 1)) // 2 + kt
+                    elif const_expr(self.causal):
                         wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
                     else:
                         wtile = (Int64(l) * n_t + ct) * n_t + kt
@@ -513,13 +612,13 @@ class DmHd256Kv2:
                         sCP[(None, None, None, stg)], sdOd[(None, None, None, df.index)],
                         tmem_base + self.COL_SFA_P + 4 * stg, tmem_base + self.COL_SFB,
                         tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
-                        zero_init=cutlass.Boolean(t == 0), cta_group=2)
+                        zero_init=cutlass.Boolean((t + nfirst == 0) if const_expr(self.dqc) else (t == 0)), cta_group=2)
                     dm_utils.gemm_ptx_bs(
                         mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, stg)], tQdr[(None, None, None, df.index)],
                         sCS[(None, None, None, stg)], sQd[(None, None, None, df.index)],
                         tmem_base + self.COL_SFA_S + 4 * stg, tmem_base + self.COL_SFB,
                         tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
-                        zero_init=cutlass.Boolean(t == 0), cta_group=2)
+                        zero_init=cutlass.Boolean((t + nfirst == 0) if const_expr(self.dqc) else (t == 0)), cta_group=2)
                     with cute.arch.elect_one():
                         commit_mc(kbar + 32 + 8 * stg)   # after dK(t): covers dV(t) and dK(t) (same issuing thread)
                     if const_expr(not (self.kn == "d" and self.unsafe)):
@@ -542,6 +641,11 @@ class DmHd256Kv2:
             vs_r = Float32(mVs[b, hx, key // 32])
             crow_off = (r // 8) * 1024 + (r % 8) * 128
             rsw = r % 8
+            if const_expr(self.dqc):
+                if const_expr(self.kn == "cr"):
+                    spin(self.DLY)
+                if const_expr(not (self.kn == "cr" and self.unsafe)):
+                    self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
             for t in cutlass.range(total, unroll=1):
                 hi = t // ncs
                 ct = c_lo + t - hi * ncs
@@ -553,7 +657,9 @@ class DmHd256Kv2:
                 ldb = sLD_addr + par * 1024
                 wtile = Int64(0)
                 if const_expr(self.wsp):
-                    if const_expr(self.causal):
+                    if const_expr(self.dqc and self.causal):
+                        wtile = Int64(l) * tilesb + (ct * (ct + 1) - q0 * (q0 + 1)) // 2 + kt
+                    elif const_expr(self.causal):
                         wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
                     else:
                         wtile = (Int64(l) * n_t + ct) * n_t + kt
@@ -775,23 +881,20 @@ class DmHd256Kv2:
                         spin(self.DLY)
                 if const_expr(not (self.kn == "cd" and self.unsafe)):
                     self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)    # release.cluster on the leader's barrier
+                if const_expr(self.dqc and self.kn == "cr" and self.unsafe):
+                    if t == 0:       # UNSAFE cr: carry restored after the t = 0 publication (the first dV / dK MMA may run first)
+                        self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
             if const_expr(not (self.kn == "fin" and self.unsafe)):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))
             tc_fence_after()
-            d0 = 128 * (qd // 2) + 64 * hf
-            for which in cutlass.range_constexpr(2):
-                col = self.COL_DK if which == 0 else self.COL_DV
-                mOut = mdK if which == 0 else mdV
-                ob = _gaddr(mOut) + (((Int64(b) * N + key) * Hk + hx) * D + d0) * 2
-                for cb in cutlass.range_constexpr(2):
-                    ov = tmem_ld32(tb + col + 64 * hf + 32 * cb)
-                    cute.arch.fence_view_async_tmem_load()
-                    for i in cutlass.range_constexpr(0, 32, 8):
-                        w = [None] * 4
-                        for q in cutlass.range_constexpr(4):
-                            w[q] = bf16x2(ov[i + 2 * q], ov[i + 2 * q + 1])
-                        st_global_v4(ob + (32 * cb + i) * 2, w[0], w[1], w[2], w[3])
+            if const_expr(self.dqc):
+                if cout != 0:
+                    self._carry_store(tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
+                else:
+                    self._epi_bf16(tb, mdK, mdV, b, key, hx, Hk, N, qd, hf)
+            else:
+                self._epi_bf16(tb, mdK, mdV, b, key, hx, Hk, N, qd, hf)
             tc_fence_before()
             if const_expr(self.kn == "fin" and self.unsafe):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))  # UNSAFE: dK / dV were read before the final commit

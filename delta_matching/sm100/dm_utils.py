@@ -519,6 +519,25 @@ def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def poll_acquire_ge_or_trap(addr: cutlass.Int64, target: Int32, limit: Int32, *, loc=None, ip=None):
+    """rw8k tconv: spin with ld.acquire.gpu on the int32 at addr until >= target; trap after `limit` polls (a missing
+    release becomes a launch failure, never a silent hang)."""
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(target).ir_value(loc=loc, ip=ip),
+                           Int32(limit).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .pred p;\n\t.reg .b32 v, it;\n\tmov.b32 it, 0;\n"
+                    "DM_POLL:\n\tld.acquire.gpu.global.b32 v, [$0];\n\tsetp.ge.s32 p, v, $1;\n\t@p bra DM_DONE;\n\t"
+                    "add.s32 it, it, 1;\n\tsetp.gt.s32 p, it, $2;\n\t@p trap;\n\tnanosleep.u32 32;\n\tbra DM_POLL;\n"
+                    "DM_DONE:\n\t}",
+                    "l,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def fence_proxy_async_global(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "fence.proxy.async.global;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def red_add_f64_from_f32(addr: cutlass.Int64, val: Float32, *, loc=None, ip=None):
     """debug: red.global.add.f64 of an fp32 value (exactly widened)."""
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Float32(val).ir_value(loc=loc, ip=ip)],

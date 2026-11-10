@@ -737,6 +737,10 @@ class DMBackwardSm100:
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
         self.dm_fws = "nofws" not in self.dm_opts
+        # rw8k tconv: tail converter (tailconv.py) launched with PDL after this kernel: launch_dependents after the TMEM
+        # allocation, fence.proxy.async.global before every det semaphore release (the converter reads the accumulators
+        # with generic loads after an ld.acquire of the semaphore). No arithmetic change.
+        self.dm_tconv = "tconv" in self.dm_opts
         # pers=<CTAs>: persistent grid of that many CTAs (= SM count, a cluster multiple), 0 = single-tile CTAs
         self.dm_pers = int(next((x[5:] for x in self.dm_opts if x.startswith("pers=")), "0"))
         # pdyn: dynamic (atomic-counter) persistent claim order instead of static grid-stride (needs pers=N)
@@ -2343,6 +2347,10 @@ class DMBackwardSm100:
             if const_expr(self.dm_allocf):
                 dm_utils.tc_fence_after()    # allocf: ... and the tmem_hold read (retrieve_ptr) after it
             tmem_ptr = tmem.retrieve_ptr(Float32)
+            if const_expr(self.dm_tconv):
+                # rw8k tconv: this CTA holds its TMEM (its last obstructable resource); the PDL dependent (the tail
+                # converter, which uses no TMEM) may launch once every CTA got here or exited
+                cute.arch.griddepcontrol_launch_dependents()
 
             self.mma(
                 tiled_mma_S,
@@ -6478,6 +6486,8 @@ class DMBackwardSm100:
                         self.reduce_sync_barrier.arrive_and_wait()
                         if const_expr(self.deterministic and delay_semaphore_release):
                             if not release_now and m_block > m_block_min:
+                                if const_expr(self.dm_tconv):
+                                    dm_utils.fence_proxy_async_global()
                                 barrier.arrive_inc_async(
                                     mdQ_semaphore_cur[(m_block - 1, None)].iterator,
                                     tidx,
@@ -6552,6 +6562,8 @@ class DMBackwardSm100:
 
                         if const_expr(self.deterministic and stage == 0 and delay_semaphore_release):
                             if not release_now and m_block > m_block_min:
+                                if const_expr(self.dm_tconv):
+                                    dm_utils.fence_proxy_async_global()
                                 barrier.arrive_inc_async(
                                     mdQ_semaphore_cur[(m_block - 1, None)].iterator,
                                     tidx,
@@ -6581,6 +6593,8 @@ class DMBackwardSm100:
                     # in this role follows their wait_group + barrier, see barrier.arrive_inc_async.
                     if const_expr(self.deterministic):
                         if release_now and not m_block_oob_upper:
+                            if const_expr(self.dm_tconv):
+                                dm_utils.fence_proxy_async_global()
                             barrier.arrive_inc_async(
                                 mdQ_semaphore_cur[m_block, None].iterator,
                                 tidx,
@@ -6595,6 +6609,8 @@ class DMBackwardSm100:
                     # final semaphore release
                     if const_expr(self.deterministic and delay_semaphore_release):
                         if not release_now:
+                            if const_expr(self.dm_tconv):
+                                dm_utils.fence_proxy_async_global()
                             barrier.arrive_inc_async(
                                 mdQ_semaphore_cur[(m_block_max - 1, None)].iterator,
                                 tidx,
@@ -6610,6 +6626,8 @@ class DMBackwardSm100:
                 ):
                     m_block_global_max = cute.ceil_div(seqlen.seqlen_q, self.tile_m)
                     for m_block in cutlass.range(m_block_max, m_block_global_max, unroll=1):
+                        if const_expr(self.dm_tconv):
+                            dm_utils.fence_proxy_async_global()
                         barrier.arrive_inc(
                             mdQ_semaphore_cur[(m_block, None)].iterator, tidx, cta_rank_in_cluster, 1
                         )
@@ -6991,6 +7009,8 @@ class DMBackwardSm100:
                     cute.arch.cp_async_bulk_wait_group(0, read=not deterministic_KV)
                 self.compute_sync_barrier.arrive_and_wait()
             if const_expr(deterministic_KV):
+                if const_expr(self.dm_tconv):
+                    dm_utils.fence_proxy_async_global()
                 barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx_cta, 0, 1)
 
         cute.arch.sync_warp()
@@ -7233,6 +7253,8 @@ class DMBackwardSm100:
                 cute.arch.cp_async_bulk_commit_group()
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
+            if const_expr(self.dm_tconv):
+                dm_utils.fence_proxy_async_global()
             barrier.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
 
         cute.arch.sync_warp()

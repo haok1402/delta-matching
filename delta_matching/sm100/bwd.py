@@ -243,11 +243,11 @@ def _patched_source():
         ("dk_accum, dk, softmax_scale,", "dk_accum, dk, 1.0,"),
         # rw8k tconv: hand each postprocess call its readiness semaphore (det dQ / dK / dV lock counters)
         ("        _bwd_postprocess_convert(\n            dq_accum, dq,",
-         "        _CTX['dm_sem'] = dQ_semaphore\n        _bwd_postprocess_convert(\n            dq_accum, dq,"),
+         "        _CTX['dm_sem'] = ('q', dQ_semaphore, causal, qhead_per_kvhead, cluster_size * tile_n)\n        _bwd_postprocess_convert(\n            dq_accum, dq,"),
         ("            _bwd_postprocess_convert(\n                dk_accum, dk,",
-         "            _CTX['dm_sem'] = dK_semaphore\n            _bwd_postprocess_convert(\n                dk_accum, dk,"),
+         "            _CTX['dm_sem'] = ('kv', dK_semaphore, causal, qhead_per_kvhead, cluster_size * tile_n)\n            _bwd_postprocess_convert(\n                dk_accum, dk,"),
         ("            _bwd_postprocess_convert(\n                dv_accum, dv,",
-         "            _CTX['dm_sem'] = dV_semaphore\n            _bwd_postprocess_convert(\n                dv_accum, dv,"),
+         "            _CTX['dm_sem'] = ('kv', dV_semaphore, causal, qhead_per_kvhead, cluster_size * tile_n)\n            _bwd_postprocess_convert(\n                dv_accum, dv,"),
         ("dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa",
          "dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa and not _dm_gloop()"),
         ("            q.detach(),\n            k.detach(),\n            v.detach(),\n            dout,\n",
@@ -293,8 +293,14 @@ def _dm_post_convert(acc, out, *a, **k):
     sem = _CTX.pop("dm_sem", None)
     if _CTX.get("dq") is not None and out is _CTX["dq"]:
         return
-    if _env("DM_RW8K_SEMDUMP", "0") == "1" and sem is not None and not k.get("fake_mode", False):
-        _CTX.setdefault("semdump", []).append(sem)   # DEBUG (rw8k): readiness counters after the call
+    if _env("DM_RW8K_SEMDUMP", "0") == "1" and sem is not None and sem[1] is not None and not k.get("fake_mode", False):
+        _CTX.setdefault("semdump", []).append(sem[1])   # DEBUG (rw8k): readiness counters after the call
+    if sem is not None and sem[1] is not None and "tconv" in _env("DM_BWD_OPTS", "").split(","):
+        # rw8k tconv: PDL tail converter (tailconv.py): same conversion, each tile as soon as its det counter is final
+        from .tailconv import tconv_convert
+        kind, sem_t, causal_, G, ctn = sem
+        return tconv_convert(sem_t, acc, out, *a, dm_kind=kind, dm_causal=bool(causal_), dm_ctn=int(ctn),
+                             dm_G=int(G), **k)
     return _ORIG_POST(acc, out, *a, **k)
 
 
@@ -360,6 +366,11 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
             os.environ["DM_BWD_OPTS"] = _ao
             pc = fi._bwd_postprocess_convert.compile_cache
             fi._bwd_postprocess_convert.compile_cache = fastpath.RecCache(pc)
+            from . import tailconv as _tc       # rw8k tconv: record the converter launches too
+            if _tc._CACHE is None:
+                _tc._CACHE = _tc._cache()
+            tcc = _tc._CACHE
+            _tc._CACHE = fastpath.RecCache(tcc)
             try:
                 r = _dm_flash_attn_bwd(q8, k8, v8, do8, do8, lse_c, softmax_scale=sm, causal=causal,
                                        deterministic=deterministic, aux_tensors=aux)[:3]
@@ -367,6 +378,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
                 return tuple(r)
             finally:
                 fi._bwd_postprocess_convert.compile_cache = pc
+                _tc._CACHE = tcc
                 os.environ["DM_BWD_OPTS"] = opts0_
                 _CTX.pop("pool", None)
                 _CTX.pop("prestaged", None)

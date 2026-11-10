@@ -99,14 +99,17 @@ class DmHd256Kv2:
     #   q: Q/dO smem released before the S/dP MMAs; d: Qd/dOd released before dV/dK; s: S/dP TMEM released before the
     #   compute loads; cd: codes/SFA published before they are written; ex: exchange barrier dropped; ld: l2/delta single
     #   buffer; fin: epilogue reads dK/dV before the final commit.
-    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta")
+    # fws / fwd (opt fwa): forwarder arrives M_S / M_cd before waiting the leader barrier; compute warps delay S/dP loads / code writes
+    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta", "fws", "fwd")
     DLY = 1 << 15
 
     # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e); meta: warp 10 stages l2/delta/qs/dos per
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly")
+    # fwa: CTA-0 warp 11 waits the cross-CTA leader barriers (acquire.cluster) and forwards to the MMA warp on CTA-local barriers
+    # (release.cta / acquire.cta): no cluster-scope acquire on the MMA issue thread (ncu r2 REPORT s5-7; kv2-draft.md s11)
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "fwa")
     RELAY_WARP = 11   # relcl/acqcl: DEBUG: only release / only acquire at cluster   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
@@ -118,6 +121,13 @@ class DmHd256Kv2:
             warp_arrive_local(leader_bar + (relay_bar - leader_bar) * crank)
         else:
             warp_arrive_c0(leader_bar, ("ctasc" in self.opts or "acqcl" in self.opts))
+
+    def _wmma(self, leader_bar, fwd_bar, ph):
+        """MMA-warp wait for a cross-CTA hand-off: opt fwa -> CTA-local forward barrier (acquire.cta), else the leader barrier."""
+        if const_expr("fwa" in self.opts):
+            dm_utils.mbar_wait_parity(fwd_bar, ph)
+        else:
+            self._wcl(leader_bar, ph)
 
     def _wcl(self, mbar, ph):
         """leader-side wait on a cross-CTA arrive barrier: acquire.cluster (default) / .cta (debug opt ctasc)."""
@@ -175,7 +185,7 @@ class DmHd256Kv2:
             bars: cute.struct.MemRange[cutlass.Int64, 32]
             # cross-CTA hand-offs with ordinary / tcgen05.st / ld data (accuracy-audit 08:2x): raw mbarriers, arrive.release.cluster on
             # the leader + try_wait.acquire.cluster there; [F_s, E_s, F_cd0, F_cd1, E_cd0, E_cd1, F_f, E_f]
-            kb: cute.struct.Align[cute.struct.MemRange[cutlass.Int64, 12], 8]   # + relay [L_s, L_cd0, L_cd1, L_f]
+            kb: cute.struct.Align[cute.struct.MemRange[cutlass.Int64, 16], 8]   # + relay [L_s, L_cd0, L_cd1, L_f] + fwa [M_s, M_cd0, M_cd1, M_f]
             tmem_hold: Int32
             tmem_dealloc: cutlass.Int64
             sLD: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 2 * 128], 16]     # [par][l2 | delta][q]
@@ -263,6 +273,8 @@ class DmHd256Kv2:
         if warp == self.MMA_WARP:
             with cute.arch.elect_one():
                 ncw = (self.NCOMP // 32 + 1) if const_expr("rly" in self.opts) else 2 * self.NCOMP // 32   # arrivals
+                for i_ in cutlass.range_constexpr(4):
+                    dm_utils.mbar_init(kbar + 96 + 8 * i_, 1)                                         # fwa forward (CTA 0)
                 for i_ in cutlass.range_constexpr(4):
                     dm_utils.mbar_init(kbar + 64 + 8 * i_, self.NCOMP // 32)                           # relay (CTA 1)
                 dm_utils.mbar_init(F_S, 1)
@@ -358,6 +370,36 @@ class DmHd256Kv2:
         # ------------------------------------------------------------------ relay warp (CTA 1, opt rly)
         if const_expr("rly" in self.opts):
             if warp == self.RELAY_WARP:
+                if crank % 2 == 0:
+                    if const_expr("fwa" in self.opts):
+                        # forwarder (kv2-draft.md s11): leader barrier (acquire.cluster, all 9 arrivals) -> CTA-local M_* (release.cta)
+                        for t in cutlass.range(total, unroll=1):
+                            if t + 1 < total:
+                                if const_expr(self.kn == "fws" and self.unsafe):
+                                    warp_arrive_local(kbar + 96)                   # UNSAFE: forwarded before the slot is free
+                                    self._wcl(E_S, t & 1)
+                                else:
+                                    self._wcl(E_S, t & 1)
+                                    tc_fence_after()
+                                    tc_fence_before()
+                                    warp_arrive_local(kbar + 96)
+                            stg = t & 1
+                            if const_expr(self.kn == "fwd" and self.unsafe):
+                                warp_arrive_local(kbar + 104 + 8 * stg)            # UNSAFE: forwarded before codes published
+                                self._wcl(kbar + 16 + 8 * stg, (t >> 1) & 1)
+                            else:
+                                self._wcl(kbar + 16 + 8 * stg, (t >> 1) & 1)
+                                tc_fence_after()
+                                tc_fence_before()
+                                warp_arrive_local(kbar + 104 + 8 * stg)
+                        self._wcl(E_S, (total - 1) & 1)
+                        tc_fence_after()
+                        tc_fence_before()
+                        warp_arrive_local(kbar + 96)
+                        self._wcl(E_F, Int32(0))
+                        tc_fence_after()
+                        tc_fence_before()
+                        warp_arrive_local(kbar + 120)
                 if crank % 2 == 1:
                     sc_ = ("ctasc" in self.opts or "acqcl" in self.opts)
                     for t in cutlass.range(total, unroll=1):
@@ -387,7 +429,7 @@ class DmHd256Kv2:
                 kf = kv_c.wait_and_advance()
                 # prologue: S(0), dP(0)
                 qf = q_c.wait_and_advance()
-                self._wcl(E_S, Int32(1))       # fresh slot
+                self._wmma(E_S, kbar + 96, Int32(1))       # fresh slot
                 tc_fence_after()
                 if const_expr(self.kn == "q"):
                     if const_expr(self.unsafe):
@@ -409,7 +451,7 @@ class DmHd256Kv2:
                     if t + 1 < total:
                         # S/dP(t+1): the slot was released by every compute thread of both CTAs after its S/dP(t) loads
                         qf = q_c.wait_and_advance()
-                        self._wcl(E_S, t & 1)    # all 512 readers of S/dP(t) done (release.cluster)
+                        self._wmma(E_S, kbar + 96, t & 1)    # all readers of S/dP(t) done
                         tc_fence_after()
                         if const_expr(self.kn == "q"):
                             if const_expr(self.unsafe):
@@ -429,7 +471,7 @@ class DmHd256Kv2:
                             qf.release()
                     df = d_c.wait_and_advance()
                     stg = t & 1
-                    self._wcl(kbar + 16 + 8 * stg, (t >> 1) & 1)   # codes / SFA of t published
+                    self._wmma(kbar + 16 + 8 * stg, kbar + 104 + 8 * stg, (t >> 1) & 1)   # codes / SFA of t published
                     tc_fence_after()
                     if const_expr(self.kn == "d"):
                         if const_expr(self.unsafe):
@@ -457,8 +499,8 @@ class DmHd256Kv2:
                 with cute.arch.elect_one():
                     commit_mc(F_F)
                 kf.release()
-                self._wcl(E_S, (total - 1) & 1)   # last S/dP slot release arrived
-                self._wcl(E_F, Int32(0))          # epilogue readers done
+                self._wmma(E_S, kbar + 96, (total - 1) & 1)   # last S/dP slot release arrived
+                self._wmma(E_F, kbar + 120, Int32(0))          # epilogue readers done
 
         # ------------------------------------------------------------------ compute warps 0-7 (both CTAs)
         if warp < 8:
@@ -519,6 +561,8 @@ class DmHd256Kv2:
                     if const_expr(self.unsafe):
                         self._arr(E_S, kbar + 64, crank)   # UNSAFE: slot released before the loads
                     spin(self.DLY)
+                if const_expr(self.kn == "fws"):
+                    spin(self.DLY)
                 sv = tmem_ld32(tb + self.COL_S + 32 * hf)
                 dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
                 cute.arch.fence_view_async_tmem_load()
@@ -554,6 +598,8 @@ class DmHd256Kv2:
                         st_global_f32(pa + 12, dsv[i])
                         pa = pa + Int64(N) * 16
                 # ---- P^T codes: pow2 per (key, 32 queries), thread-local ----
+                if const_expr(self.kn == "fwd"):
+                    spin(self.DLY)
                 am = Float32(0.0)
                 for i in cutlass.range_constexpr(32):
                     am = cute.arch.fmax(am, pv[i])

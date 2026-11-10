@@ -1,7 +1,7 @@
 """hd256 Delta-Matching forward for sm100 (GB200), sm100-mx numerics (USER DECISION 2026-11-10: MXFP8 is the sm100 spec at
 both head dims; validator preset sm100-mx-d256).  The hd128 forward's mx path (dm_fwd_sm100.py softmax_step, "DM sm100-mx
 softmax step") at D=256, op for op:
-  inputs   one power-of-2 scale per 32 tokens over ALL 256 d (quant_hd256.quant_qkv_mx_hd256 = quant.quant_qkv2 at D=256)
+  inputs   one power-of-2 scale per 32 tokens over ALL 256 d (quant.quant_qkv2 at D=256)
   S        S_acc = tcgen05 kind::f8f6f4 over D=256 (8 K=32 steps, ascending d); -inf mask on S_acc;
            c_b = (qs[row/32] * log2e) * ks_b (pow2), per 32-key block b: bmax_b = max(S_acc) * c_b
   m        integer running max in log2 units: m_cand = ceil(max_b bmax_b); first tile m = m_cand; later m grows only when

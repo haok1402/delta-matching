@@ -151,7 +151,7 @@ class DMPass0Hd256Sm100:
     hd128 sm100-mx ones verbatim: Q / K / V / dO pow2 (UE8M0) scale per 32 tokens over all D, so the scales sit on the
     MMAs' non-contraction dims and multiply the fp32 accumulator after the plain f8f6f4 MMA (exactly as hd128 pass 0; no
     SF TMEM); P / c / dP-scale from dm_common_hd256.dm_mx256_* (= dm_common.dm_bwd_*); delta = num / den with per-lane
-    TwoSum cross-tile sums and one fp64 combine (+dnd only; the [64,32] floor form +dfl is retired).
+    TwoSum cross-tile sums and one fp64 combine (+dnd: the only hd256 delta form).
     --- hd128 docstring follows ---
     Matched-delta pass 0 (kda-sm100-p0), forked from DMForwardSm100: per KV tile S = Q8 K8^T and dP = dO8 V8^T
     (both kind::f8f6f4, V loaded K-major like K, dP in the forward's O TMEM slots); softmax warps form
@@ -316,7 +316,7 @@ class DMPass0Hd256Sm100:
         if self.dm_tl:
             assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
             assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
-        # hd256 MXFP8: delta = num / den (+dnd) only (accuracy-audit ruling 1; the [64,32] floor form is retired)
+        # hd256 MXFP8: delta = num / den (+dnd) only (accuracy-audit ruling 1)
         self.dm_delta_numden = "dnd" in _fl0
         assert self.dm_delta_numden, "hd256 MXFP8 pass 0: delta form num/den (+dnd) only"
         assert head_dim == 256 and head_dim_v == 256, "DMPass0Hd256Sm100 is the head_dim 256 pass 0"

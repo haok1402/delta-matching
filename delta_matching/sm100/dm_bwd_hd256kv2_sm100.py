@@ -85,21 +85,21 @@ def warp_arrive_local(mbar: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
-def warp_signal_rasy(mbar: Int32, dummy: Int32, crank: Int32, w0: Int32, *, loc=None, ip=None):
+def warp_signal_rasy(mbar: Int32, dummy: Int32, crank: Int32, *, loc=None, ip=None):
     """opt rasy cross-CTA hand-off signal, per warp after bar.warp.sync (lane 0 only):
-    CTA 0: mbarrier.arrive.release.cta on the leader (own CTA) barrier; warp 0's arrive also expects 32 tx bytes (8 CTA-1 warps);
-    CTA 1: red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 into the LEADER CTA (complete-tx has
-    .release semantics at .cluster scope per PTX; non-blocking for the issuing thread)."""
-    _asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (mbar, dummy, crank, w0)],
-         "{\n\t.reg .pred pl, p0, p0e, p0n, p1;\n\t.reg .b32 l, ra, rm;\n\tbar.warp.sync 0xffffffff;\n\t"
-         "mov.u32 l, %laneid;\n\tsetp.eq.u32 pl, l, 0;\n\t"
+    CTA 0: mbarrier.arrive.release.cta on the leader (own CTA) barrier; warp 0 (tid < 32) also expects 32 tx bytes (8 CTA-1 warps);
+    CTA 1: red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 into the LEADER CTA (its complete-tx
+    has .release semantics at .cluster scope per PTX; non-blocking for the issuing thread)."""
+    _asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (mbar, dummy, crank)],
+         "{\n\t.reg .pred pl, p0, p0e, p0n, p1;\n\t.reg .b32 l, ra, rm, tx;\n\tbar.warp.sync 0xffffffff;\n\t"
+         "mov.u32 l, %laneid;\n\tsetp.eq.u32 pl, l, 0;\n\tmov.u32 tx, %tid.x;\n\t"
          "setp.eq.and.u32 p0, $2, 0, pl;\n\tsetp.ne.and.u32 p1, $2, 0, pl;\n\t"
-         "setp.ne.and.u32 p0e, $3, 0, p0;\n\tsetp.eq.and.u32 p0n, $3, 0, p0;\n\t"
+         "setp.lt.and.u32 p0e, tx, 32, p0;\n\tsetp.ge.and.u32 p0n, tx, 32, p0;\n\t"
          "@p0e mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [$0], 32;\n\t"
          "@p0n mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];\n\t"
          "mapa.shared::cluster.u32 ra, $1, 0;\n\tmapa.shared::cluster.u32 rm, $0, 0;\n\t"
          "@p1 red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 [ra], 1, [rm];\n\t}",
-         "r,r,r,r", True, loc, ip)
+         "r,r,r", True, loc, ip)
 
 
 def _coop(n):
@@ -134,10 +134,7 @@ class DmHd256Kv2:
         relay barrier, forwarded by the relay warp with ONE arrive.release.cluster (accuracy-audit 08:2x); opt rasy: CTA 1
         warps red.async complete_tx into the leader barrier directly."""
         if const_expr("rasy" in self.opts):
-            w0 = Int32(0)
-            if cute.arch.make_warp_uniform(cute.arch.warp_idx()) == 0:
-                w0 = Int32(1)
-            warp_signal_rasy(leader_bar, self._dummy, crank, w0)
+            warp_signal_rasy(leader_bar, self._dummy, crank)       # warp 0 of CTA 0 carries expect_tx(32)
         else:
             warp_arrive_local(leader_bar + (relay_bar - leader_bar) * crank)
 
@@ -391,7 +388,7 @@ class DmHd256Kv2:
         NS = self.NS
 
         # ------------------------------------------------------------------ relay warp (CTA 1): local acquire -> release.cluster
-        if const_expr("rasy" not in self.opts and warp == self.RELAY_WARP):
+        if warp == self.RELAY_WARP + (100 if "rasy" in self.opts else 0):    # (no relay warp with rasy)
             if crank % 2 == 1:
                 for t in cutlass.range(total, unroll=1):
                     ss = t % NS

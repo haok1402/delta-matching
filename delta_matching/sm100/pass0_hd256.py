@@ -23,7 +23,7 @@ _LOCK = threading.Lock()
 FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, use_tma_o=False,
              overlap_sO_sQ=False, kv_stage=2, q_stage=2, tile_m=128, tile_n=128)
 REGS_TL = dict(softmax=112, correction=112, other=32)   # 640 threads: per SMSP 4 compute warps + 1 other (4x112+32=480)
-BASE_VARIANT = "p3_16_0+ma+h2+pf+sq+ts+tl"
+BASE_VARIANT = "p3_16_0+ma+h2+pf+sq+ts+tl+es"   # +es: hd256-p0opt E1 (early S-slot release), bitwise = 9be8d94
 
 _CACHES = {}
 _CLASSES = {}
@@ -63,6 +63,8 @@ def dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, delta_fo
     if exp_variant is None:
         exp_variant = variant_for(delta_form)
     over = dict(FORCE)
+    if "+kv3" in exp_variant:   # hd256-p0opt E4: K/V ring depth 3 (224 KiB raw SMEM); variant token is host-only
+        over["kv_stage"] = 3
     aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
            _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2)]
     names = ["qs", "ks", "vs", "dos", "do8", "lse"]

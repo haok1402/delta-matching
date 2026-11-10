@@ -240,24 +240,39 @@ def _prod_fn(q, k, v):
     vq, vk, vv, kal = _vec(q), _vec(k), _vec(v), _tri_aligned(k, Hk)
     if D == 128:
         return _get(("prod_ac", D, vq, vk, vv, kal, True), lambda: qc.ProdAC(D, vq, vk, vv, kal, True),
-                    [("l",)] * 12 + [("i",)] * 14 + [("f",), ("i",)])
+                    [("l",)] * 12 + [("i",)] * 13 + [("f",), ("i",)])
     nw = PRODA_NW[D]
     return _get(("prod_a", D, vq, vk, vv, kal, nw, True), lambda: qc.ProdA(D, vq, vk, vv, kal, nw, True),
-                [("l",)] * 11 + [("i",)] * 14 + [("f",), ("i",)])
+                [("l",)] * 11 + [("i",)] * 13 + [("f",), ("i",)])
 
 
 def _counters(q, st, n):
-    """Per-(device, stream) K-mean arrival counters: n 64-bit words {count, generation} and the next generation.
-    Robustness (cutedo review): a word left non-zero by a launch that died carries an older generation and counts as zero;
-    the completing CTA also resets its word (CUDA-graph replays reuse their captured generation)."""
+    """Per-(device, stream) int32 K-mean arrival counters, zero at rest: every counter is reset by the CTA that completes
+    it (kernel completion orders that before the next launch on the stream).  A launch cannot stop half-way without a
+    sticky CUDA error (device fault -> the context is unusable), and a failed launch never ran; still, any exception from
+    a launch re-zeroes the counters (_guard), and DM_CQ_CHECK=1 asserts they are zero after every call (debug).
+    Grown-from buffers are kept alive (a captured CUDA graph may point at them)."""
     ck = (q.get_device(), st)
     e = _CNT.get(ck)
-    if e is None or e[0].numel() < n:
+    if e is None or e.numel() < n:
         if e is not None:
-            _CNT_KEEP.append(e[0])      # never freed: a captured CUDA graph may still point at the old words
-        e = _CNT[ck] = [torch.zeros(max(n, 1024), device=q.device, dtype=torch.int64), e[1] if e is not None else 0]
-    e[1] = e[1] % 0x7FFFFFFE + 1           # 1 .. 2^31-2, never 0 (the zero word)
-    return e[0], e[1]
+            _CNT_KEEP.append(e)
+        e = _CNT[ck] = torch.zeros(max(n, 1024), device=q.device, dtype=torch.int32)
+    return e
+
+
+_CHECK = __import__("os").environ.get("DM_CQ_CHECK") == "1"     # debug only (read once at import)
+
+
+def _guard(cnt, launch):
+    try:
+        launch()
+    except BaseException:
+        cnt.zero_()
+        raise
+    if _CHECK:
+        torch.cuda.synchronize()
+        assert int(cnt.count_nonzero()) == 0, "cutequant: K-mean counters not zero after a call"
 
 
 def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: int = 2, tr: int = 32):
@@ -297,13 +312,13 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: 
     args = (N, H, Hk, B, sq[0], sq[1], sq[2], sk[0], sk[1], sk[2], sv[0], sv[1], sv[2], float(sm), ROWS, st)
     if D == 128:
         chunks = torch.empty(B * Hk * S * (ROWS // 64), D, device=dev, dtype=torch.float32)
-        cnt, gen = _counters(q, st, B * Hk * S + B * Hk)
-        fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(), part.data_ptr(),
-           chunks.data_ptr(), cnt.data_ptr(), mean.data_ptr(), gen, *args)
+        cnt = _counters(q, st, B * Hk * S + B * Hk)
+        _guard(cnt, lambda: fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(),
+                               part.data_ptr(), chunks.data_ptr(), cnt.data_ptr(), mean.data_ptr(), *args))
     else:
-        cnt, gen = _counters(q, st, B * Hk)
-        fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(), part.data_ptr(),
-           cnt.data_ptr(), mean.data_ptr(), gen, *args)
+        cnt = _counters(q, st, B * Hk)
+        _guard(cnt, lambda: fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), kvw.data_ptr(),
+                               part.data_ptr(), cnt.data_ptr(), mean.data_ptr(), *args))
     _tile(k, mean=mean, y=k8, s=ks, wb=kvw, w_off=0)      # K tiles from the final mean (= _prod_b's quantization)
     return q8, qs, k8, ks, v8, vs, kvw, mean
 

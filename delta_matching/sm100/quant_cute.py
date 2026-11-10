@@ -466,18 +466,18 @@ class ProdA:
 
     @cute.jit
     def __call__(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64,
-                 mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64, mCnt: Int64, mM: Int64, gen: Int32,
+                 mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64, mCnt: Int64, mM: Int64,
                  N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32, sqh: Int32, skb: Int32, skn: Int32,
                  skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32, ROWS: Int32, stream: cuda.CUstream):
         ntl = N // TR
         P = self.nw // 2
         total = (B * H * ntl) // P + (B * Hk * ntl) // P + B * Hk * (N // ROWS)
-        self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, mCnt, mM, gen, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh, svb, svn, svh,
+        self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, mCnt, mM, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh, svb, svn, svh,
                     sm, ROWS).launch(grid=[total, 1, 1], block=[32 * self.nw, 1, 1], stream=stream)
 
     @cute.kernel
     def kernel(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64,
-               mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64, mCnt: Int64, mM: Int64, gen: Int32,
+               mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64, mCnt: Int64, mM: Int64,
                N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32, sqh: Int32, skb: Int32, skn: Int32,
                skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32, ROWS: Int32):
         # CTA = P = nw/2 warp pairs.  Tile roles: each pair quantizes its own 32-row tile (per-thread work = the 2-warp
@@ -553,14 +553,14 @@ class ProdA:
                     fence_gpu()
                     bar_sync()
                     if tid == 0:
-                        old2 = cnt_arrive(mCnt + Int64(bh) * 8, gen)
+                        old2 = atom_add_gpu(mCnt + Int64(bh) * 4, Int32(1)) + Int32(1)
                         sts_i32(cbuf, old2, Int32(1))
                     bar_sync()
                     if lds_i32(cbuf) == S:
                         fence_gpu()
                         if tid < 64:
                             fold_head(mP, mM, bh, S, D, tid, N)
-                        st_b64_zero_if(mCnt + Int64(bh) * 8, Int32(tid == 0))
+                        st_b32_if(mCnt + Int64(bh) * 4, Int32(0), Int32(tid == 0))
             else:
                 cg = ChunkGeo(D, 2, 64, tid, self.kal)
                 acc = cute.make_rmem_tensor(8, Float32)
@@ -736,34 +736,6 @@ def atom_add_gpu(addr: Int64, v: Int32, *, loc=None, ip=None) -> Int32:
 
 
 @dsl_user_op
-def cnt_arrive(addr: Int64, gen: Int32, *, loc=None, ip=None) -> Int32:
-    """Generation-tagged arrival counter: 64-bit word {count (lo), gen (hi)}.  A word carrying another generation (stale:
-    a dead launch, or never used) counts as 0.  CAS loop with acq_rel at gpu scope; returns the new count."""
-    return Int32(_asm(T.i32(), [_v(addr, Int64, loc, ip), _v(gen, Int32, loc, ip)],
-                      "{\n\t.reg .b64 o, n, t;\n\t.reg .b32 c, g;\n\t.reg .pred p, q;\n\t"
-                      "mov.b64 o, 0;\n"
-                      "CQ_ARRIVE_${:uid}:\n\t"
-                      "mov.b64 {c, g}, o;\n\t"
-                      "setp.eq.u32 q, g, $2;\n\t"
-                      "@q add.u32 c, c, 1;\n\t"
-                      "@!q mov.u32 c, 1;\n\t"
-                      "mov.b64 n, {c, $2};\n\t"
-                      "atom.acq_rel.gpu.global.cas.b64 t, [$1], o, n;\n\t"
-                      "setp.ne.b64 p, t, o;\n\t"
-                      "mov.b64 o, t;\n\t"
-                      "@p bra CQ_ARRIVE_${:uid};\n\t"
-                      "mov.b32 $0, c;\n\t}",
-                      "=r,l,r", side=True, loc=loc, ip=ip))
-
-
-@dsl_user_op
-def st_b64_zero_if(addr: Int64, pred: Int32, *, loc=None, ip=None):
-    _asm(None, [_v(addr, Int64, loc, ip), _v(pred, Int32, loc, ip)],
-         "{\n\t.reg .pred p;\n\tsetp.ne.s32 p, $1, 0;\n\t@p st.global.b64 [$0], 0;\n\t}", "l,r", side=True,
-         loc=loc, ip=ip)
-
-
-@dsl_user_op
 def ld_cg_f32(addr: Int64, *, loc=None, ip=None) -> Float32:
     return Float32(_asm(T.f32(), [_v(addr, Int64, loc, ip)], "ld.global.cg.f32 $0, [$1];", "=f,l", side=True,
                         loc=loc, ip=ip))
@@ -802,17 +774,17 @@ class ProdAC:
 
     @cute.jit
     def __call__(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64, mQS: Int64, mVS: Int64, mWB: Int64,
-                 mP: Int64, mC: Int64, mCnt: Int64, mM: Int64, gen: Int32, N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32,
+                 mP: Int64, mC: Int64, mCnt: Int64, mM: Int64, N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32,
                  sqh: Int32, skb: Int32, skn: Int32, skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32,
                  ROWS: Int32, stream: cuda.CUstream):
         ntl = N // TR
         total = B * H * ntl + B * Hk * ntl + B * Hk * (N // ROWS) * (ROWS // 64)
-        self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, mC, mCnt, mM, gen, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh,
+        self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, mC, mCnt, mM, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh,
                     svb, svn, svh, sm, ROWS).launch(grid=[total, 1, 1], block=[64, 1, 1], stream=stream)
 
     @cute.kernel
     def kernel(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64, mQS: Int64, mVS: Int64, mWB: Int64,
-               mP: Int64, mC: Int64, mCnt: Int64, mM: Int64, gen: Int32, N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32,
+               mP: Int64, mC: Int64, mCnt: Int64, mM: Int64, N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32,
                sqh: Int32, skb: Int32, skn: Int32, skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32,
                ROWS: Int32):
         D = self.D
@@ -863,25 +835,25 @@ class ProdAC:
             fence_gpu()
             bar_sync()
             if tid == 0:
-                old = cnt_arrive(mCnt + Int64(part) * 8, gen)
+                old = atom_add_gpu(mCnt + Int64(part) * 4, Int32(1)) + Int32(1)
                 sts_i32(flag, old, Int32(1))
             bar_sync()
             if lds_i32(flag) == NCH:
                 fence_gpu()
                 fold_partial(mC, mP, part, NCH, D, tid)
-                st_b64_zero_if(mCnt + Int64(part) * 8, Int32(tid == 0))
+                st_b32_if(mCnt + Int64(part) * 4, Int32(0), Int32(tid == 0))
                 if const_expr(self.headfold):
                     # second level: counters [B*Hk*S + bh] count completed partials of head bh
                     fence_gpu()
                     bar_sync()
                     if tid == 0:
-                        old2 = cnt_arrive(mCnt + (Int64(B) * Int64(Hk) * Int64(S) + Int64(bh)) * 8, gen)
+                        old2 = atom_add_gpu(mCnt + (Int64(B) * Int64(Hk) * Int64(S) + Int64(bh)) * 4, Int32(1)) + Int32(1)
                         sts_i32(flag + 4, old2, Int32(1))
                     bar_sync()
                     if lds_i32(flag + 4) == S:
                         fence_gpu()
                         fold_head(mP, mM, bh, S, D, tid, N)
-                        st_b64_zero_if(mCnt + (Int64(B) * Int64(Hk) * Int64(S) + Int64(bh)) * 8, Int32(tid == 0))
+                        st_b32_if(mCnt + (Int64(B) * Int64(Hk) * Int64(S) + Int64(bh)) * 4, Int32(0), Int32(tid == 0))
 
 
 @cute.jit

@@ -1085,3 +1085,9 @@ def bar_warp_sync_all(*, loc=None, ip=None):
 def fence_proxy_async_global(*, loc=None, ip=None):
     llvm.inline_asm(None, [], "fence.proxy.async.global;", "", has_side_effects=True, is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def nanosleep_ns(ns: int, *, loc=None, ip=None):
+    llvm.inline_asm(None, [], f"nanosleep.u32 {int(ns)};", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)

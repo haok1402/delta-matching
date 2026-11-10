@@ -6185,7 +6185,7 @@ class DMBackwardSm100:
                             v = dm_utils.ld_acquire_gpu_u32(flag)
                             if const_expr(self.dm_gconv_s):
                                 if v < target:
-                                    cute.arch.nanosleep(sleep_duration=2000)
+                                    dm_utils.nanosleep_ns(2000)
                     dm_utils.bar_warp_sync_all()
                     dm_utils.fence_proxy_async_global()
                     for st in cutlass.range_constexpr(0 if const_expr(self.dm_gconv_w) else n_stage):

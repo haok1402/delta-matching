@@ -77,7 +77,7 @@ class DmHd256Kv2:
     OPTS = ("qb2", "xpt", "meta", "xsv")
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
-    DEFAULT_OPTS = ""
+    DEFAULT_OPTS = "meta qb2 xpt"      # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes)
 
     def __init__(self, causal: bool, dbg: int = 0, knob: str = "", opts=None):
         self.opts = tuple(sorted((self.DEFAULT_OPTS if opts is None else opts).replace(",", " ").split()))

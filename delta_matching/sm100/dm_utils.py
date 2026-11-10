@@ -1040,3 +1040,48 @@ def tmem_ld_16x64b_x16(addr: Int32, *, loc=None, ip=None):
         ",".join(["=f"] * 16) + ",r", has_side_effects=True, is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
     return [Float32(llvm.extractvalue(T.f32(), res, [i], loc=loc, ip=ip)) for i in range(16)]
+
+
+# ---- kda-sm100-gap8k gconv (off-chain dQ converter) helpers ----
+@dsl_user_op
+def ld_v4_f32(addr: cutlass.Int64, *, loc=None, ip=None):
+    """ld.global.v4.f32 (weak; issued after a gpu-scope acquire + bar.warp.sync in gconv)."""
+    st = llvm.inline_asm(llvm.StructType.get_literal([T.f32()] * 4), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)],
+                         "ld.global.v4.f32 {$0, $1, $2, $3}, [$4];", "=f,=f,=f,=f,l", has_side_effects=True,
+                         is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return tuple(Float32(llvm.extractvalue(T.f32(), st, [i], loc=loc, ip=ip)) for i in range(4))
+
+
+@dsl_user_op
+def cvt_bf16x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int32:
+    """cvt.rn.bf16x2.f32 d, hi, lo: lo -> bits 0-15, hi -> bits 16-31 (round to nearest even, as Float32 -> BFloat16)."""
+    return Int32(llvm.inline_asm(T.i32(), [Float32(hi).ir_value(loc=loc, ip=ip), Float32(lo).ir_value(loc=loc, ip=ip)],
+                                 "cvt.rn.bf16x2.f32 $0, $1, $2;", "=r,f,f", has_side_effects=False, is_align_stack=False,
+                                 asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def st_v4_b32(addr: cutlass.Int64, a: Int32, b: Int32, c: Int32, d: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)] + [Int32(x).ir_value(loc=loc, ip=ip) for x in (a, b, c, d)],
+                    "st.global.v4.b32 [$0], {$1, $2, $3, $4};", "l,r,r,r,r", has_side_effects=True,
+                    is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def ld_acquire_gpu_u32(addr: cutlass.Int64, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip)], "ld.global.acquire.gpu.b32 $0, [$1];",
+                                 "=r,l", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT,
+                                 loc=loc, ip=ip))
+
+
+@dsl_user_op
+def bar_warp_sync_all(*, loc=None, ip=None):
+    """bar.warp.sync 0xffffffff: warp barrier that also orders memory among the participating lanes (PTX ISA)."""
+    llvm.inline_asm(None, [], "bar.warp.sync -1;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def fence_proxy_async_global(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "fence.proxy.async.global;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)

@@ -733,6 +733,13 @@ class DMBackwardSm100:
         self.dm_p5 = tuple(int(t) for t in _p5.split(":")) if _p5 else None
         # fws (default on): first-writer-stores dQ accumulation (no dq_accum zero-fill); nofws disables
         self.dm_fws = "nofws" not in self.dm_opts
+        # DM gconv (kda-sm100-gap8k): OFF-chain dQ conversion. The idle empty warp of the LAST writer of each q-tile half
+        # (deterministic order unchanged) waits until that half's dQ semaphore slot reaches n_max (every writer's bulk adds
+        # completed + released), then loads the final fp32 dq_accum half and writes bf16 dQ = rn(acc * D^-0.5) itself.
+        # gconv: into the real dQ (host skips the dQ postprocess); gconvc: timing-only COST check into a dummy buffer
+        # (postprocess kept); gconvpc: PLANTED CONTROL, waits for n_max - 1 (reads before the last write lands).
+        self.dm_gconv = any(o in self.dm_opts for o in ("gconv", "gconvc", "gconvpc"))
+        self.dm_gconv_pc = "gconvpc" in self.dm_opts
         # pers=<CTAs>: persistent grid of that many CTAs (= SM count, a cluster multiple), 0 = single-tile CTAs
         self.dm_pers = int(next((x[5:] for x in self.dm_opts if x.startswith("pers=")), "0"))
         # pdyn: dynamic (atomic-counter) persistent claim order instead of static grid-stride (needs pers=N)
@@ -2250,7 +2257,12 @@ class DMBackwardSm100:
         #  EMPTY
         # (15)
         if warp_idx == self.empty_warp_id:
-            self._dm_setmaxreg_dec(self.num_regs_empty)
+            if const_expr(self.dm_gconv):
+                self._dm_setmaxreg_dec(48)   # dsqw: the empty warp's SMSP slot is budgeted at max(load, 24) = 48
+                self.dm_gconv_loop(mdQaccum, mdQ_semaphore, aux_data.tensors[4], block_info, SeqlenInfoCls,
+                                   TileSchedulerCls)
+            else:
+                self._dm_setmaxreg_dec(self.num_regs_empty)
             if const_expr(self.dm_pdyn):
                 self._dm_claim_loop(tile_sched_params, dm_sbase, aux_data.tensors[-1].iterator.toint())
 
@@ -6127,6 +6139,66 @@ class DMBackwardSm100:
                     if not dsq_last:
                         dsq_sr = dsq_sr + 1
                     dsq_j = dsq_j + 1
+            tile_scheduler.advance_to_next_work()
+            work_tile = tile_scheduler.get_current_work()
+
+    @cute.jit
+    def dm_gconv_loop(self, mdQaccum, mdQ_semaphore, mdQ, block_info, SeqlenInfoCls, TileSchedulerCls):
+        """DM gconv (empty warp, 32 lanes): see __init__. Per (m_block, CTA rank) half tile whose last writer in the
+        deterministic order is this CTA: lane 0 polls the semaphore slot with ld.acquire.gpu until it equals the writer
+        count (each writer releases with red.async.release.gpu after cp.async.bulk.wait_group of its adds), bar.warp.sync
+        (orders memory among the lanes), fence.proxy.async.global (async-proxy bulk adds -> generic loads), then
+        ld.global.v4 of the 4 fp32 chunks of the half and st.global.v4 of bf16 rn(acc * D^-0.5) at the reduce warps'
+        (row, col) map: chunk s, thread t, k -> floats 4t+512k..+3 = row 64*rank + t%64, cols 16s + 64*(t//64) + 4k..+3."""
+        lane = cute.arch.lane_idx()
+        cta_rank = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
+        n_stage = self.dQaccum_reduce_stage // self.cta_group_size
+        ncol = self.dQ_reduce_ncol
+        assert ncol == 16 and self.use_2cta_instrs and self.deterministic and not self.use_block_sparsity
+        assert not self.dm_gloop and not self.dm_pdyn and not self.is_varlen_q and self.tile_hdim == 128
+        H = mdQ.shape[2]
+        Nq = mdQ.shape[1]
+        scale = Float32(self.tile_hdim ** -0.5)
+        tile_scheduler = TileSchedulerCls()
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            (work_n, kv_block, head_idx, kv_head, batch_idx, seqlen, m_block_min, m_block_max,
+             process_tile) = self._work_tile(work_tile, cta_rank, SeqlenInfoCls, block_info)
+            gdQaccum = cute.flat_divide(
+                cute.local_tile(mdQaccum[None, head_idx, batch_idx], (self.tile_m * self.tile_hdim,), (None,)),
+                (self.tile_m * self.tile_hdim // self.dQaccum_reduce_stage,))
+            sem = mdQ_semaphore[None, None, head_idx, batch_idx]
+            for iter_idx in cutlass.range(m_block_max - m_block_min, unroll=1):
+                m_block = m_block_min + iter_idx
+                n_max = block_info.get_n_block_max_for_m_block(seqlen, m_block)
+                lock_value = self._dq_semaphore_lock_value(iter_idx, Int32(0), None, None, None, block_info, seqlen,
+                                                           m_block, work_n)
+                if lock_value == n_max - 1:
+                    target = n_max - 1 if const_expr(self.dm_gconv_pc) else n_max
+                    flag = (sem[(m_block, None)].iterator + cta_rank).toint()
+                    if lane == 0:
+                        v = Int32(0)
+                        while v != target:
+                            v = dm_utils.ld_acquire_gpu_u32(flag)
+                    dm_utils.bar_warp_sync_all()
+                    dm_utils.fence_proxy_async_global()
+                    for st in cutlass.range_constexpr(n_stage):
+                        cbase = gdQaccum[None, st + n_stage * cta_rank, m_block].iterator.toint()
+                        for u in cutlass.range_constexpr(4):
+                            t = lane + 32 * u
+                            row = m_block * self.tile_m + 64 * cta_rank + t % 64
+                            col = ncol * st + 64 * (t // 64)
+                            vals = [None] * 16
+                            for k in cutlass.range_constexpr(4):
+                                q4 = dm_utils.ld_v4_f32(cbase + Int64(16 * t + 2048 * k))
+                                for i in cutlass.range_constexpr(4):
+                                    vals[4 * k + i] = q4[i]
+                            if row < Nq:
+                                w = [dm_utils.cvt_bf16x2(vals[2 * j] * scale, vals[2 * j + 1] * scale) for j in range(8)]
+                                dst = mdQ.iterator.toint() + Int64(2) * (
+                                    ((Int64(batch_idx) * Nq + row) * H + head_idx) * self.tile_hdim + col)
+                                dm_utils.st_v4_b32(dst, w[0], w[1], w[2], w[3])
+                                dm_utils.st_v4_b32(dst + Int64(16), w[4], w[5], w[6], w[7])
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
 

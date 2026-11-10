@@ -79,6 +79,9 @@ class DmHd256Dqg:
     def __call__(self, mA: cute.Tensor, mKt: cute.Tensor, mWsb: cute.Tensor, mKs: cute.Tensor, mdQ: cute.Tensor,
                  n_t: Int32, H: Int32, Hk: Int32, stream):
         D = self.D
+        # static 128 x 128 tile modes (TMA needs a static first mode): W viewed as (q, key, T), q contiguous
+        mA = cute.make_tensor(mA.iterator, cute.make_layout((self.TM, self.TN, cute.size(mA, mode=[2])),
+                                                            stride=(1, self.TM, self.TM * self.TN)))
         o_tiler = (self.TM, D, self.TN)               # M = 128 queries, N = 256 d, K = 128 keys
         mma_o = sm100_utils.make_trivial_tiled_mma(F8, F8, tcgen05.OperandMajorMode.MN, tcgen05.OperandMajorMode.MN,
                                                    Float32, tcgen05.CtaGroup.ONE, o_tiler[:2])

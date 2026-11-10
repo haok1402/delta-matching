@@ -241,6 +241,13 @@ def _patched_source():
         ("fa_bwd_obj = FlashAttentionBackwardSm100(", "fa_bwd_obj = _DMBackwardSm100("),
         ("_flash_attn_bwd.compile_cache", "_dm_bwd_cache()"),
         ("dk_accum, dk, softmax_scale,", "dk_accum, dk, 1.0,"),
+        # rw8k tconv: hand each postprocess call its readiness semaphore (det dQ / dK / dV lock counters)
+        ("        _bwd_postprocess_convert(\n            dq_accum, dq,",
+         "        _CTX['dm_sem'] = dQ_semaphore\n        _bwd_postprocess_convert(\n            dq_accum, dq,"),
+        ("            _bwd_postprocess_convert(\n                dk_accum, dk,",
+         "            _CTX['dm_sem'] = dK_semaphore\n            _bwd_postprocess_convert(\n                dk_accum, dk,"),
+        ("            _bwd_postprocess_convert(\n                dv_accum, dv,",
+         "            _CTX['dm_sem'] = dV_semaphore\n            _bwd_postprocess_convert(\n                dv_accum, dv,"),
         ("dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa",
          "dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa and not _dm_gloop()"),
         ("            q.detach(),\n            k.detach(),\n            v.detach(),\n            dout,\n",
@@ -283,8 +290,11 @@ def _dm_cfg(config):
 _ns = dict(vars(fi))
 def _dm_post_convert(acc, out, *a, **k):
     """FA4 postprocess wrapper: skipped for dQ when the kernel's last writer already wrote bf16 dQ (DM lwc)."""
+    sem = _CTX.pop("dm_sem", None)
     if _CTX.get("dq") is not None and out is _CTX["dq"]:
         return
+    if _env("DM_RW8K_SEMDUMP", "0") == "1" and sem is not None and not k.get("fake_mode", False):
+        _CTX.setdefault("semdump", []).append(sem)   # DEBUG (rw8k): readiness counters after the call
     return _ORIG_POST(acc, out, *a, **k)
 
 

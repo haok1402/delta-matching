@@ -195,8 +195,9 @@ def dm_once_scheduler(base):
     `while work_tile.is_valid_tile` loops trace as straight-line code instead of an scf.while that carries every
     pipeline state / phase / scheduler value around a back-edge (the det-only register pressure that spilled the
     48-register MMA warp's main loop). Same tiles, same lock orders: bitwise."""
-    if base in _DM_ONCE_CLS:
-        return _DM_ONCE_CLS[base]
+    fake = "abl:schedfake" in os.environ.get("DM_BWD_OPTS", "")   # compile-only bisect: cheap WRONG mapping
+    if (base, fake) in _DM_ONCE_CLS:
+        return _DM_ONCE_CLS[(base, fake)]
 
     class DMOnceScheduler:
         Params = base.Params
@@ -218,6 +219,9 @@ def dm_once_scheduler(base):
         @staticmethod
         @cute.jit
         def create(params, *, loc=None, ip=None):
+            if const_expr(fake):
+                bid = cute.arch.block_idx()[0]
+                return DMOnceScheduler((bid & Int32(63), (bid >> 6) & Int32(31), bid >> 11, Int32(0)), True, loc=loc, ip=ip)
             w = base.create(params, loc=loc, ip=ip).get_current_work()
             b_, h_, z_, s_ = w.tile_idx
             return DMOnceScheduler((Int32(b_), Int32(h_), Int32(z_), Int32(s_)), True, loc=loc, ip=ip)
@@ -252,7 +256,7 @@ def dm_once_scheduler(base):
                 values = values[n:]
             return self.__class__(objs, self._v, loc=self._loc)
 
-    _DM_ONCE_CLS[base] = DMOnceScheduler
+    _DM_ONCE_CLS[(base, fake)] = DMOnceScheduler
     return DMOnceScheduler
 
 

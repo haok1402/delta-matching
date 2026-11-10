@@ -119,75 +119,6 @@ class DmHd256Kv2:
         """leader-side wait on a cross-CTA hand-off barrier: try_wait.parity.acquire.cluster."""
         dm_utils.mbar_wait_parity_cluster(mbar, ph)
 
-    def _issue_s(self, X, n, qi):
-        (acc_l, tmem_ptr, mma_s, tKr, tQr, tVr, tdOr, accP, mma_op, tmem_base, tCPr, tdOdr, sCP, sdOd, tCSr, tQdr, sCS, sQd, total, d_empty, kbar,) = X
-        B = lambda i_: kbar + 8 * i_  # noqa: E731
-        NS = self.NS
-        ss = n % NS
-        self._wcl(B(2) + 8 * ss, ((n // NS) & 1) ^ 1)          # S slot free (cluster acquire)
-        tc_fence_after()
-        accS = cute.make_tensor(tmem_ptr + self.COL_S + 64 * ss, acc_l)
-        mma_s.set(tcgen05.Field.ACCUMULATE, False)
-        for kb_ in range(cute.size(tKr, mode=[2])):
-            cute.gemm(mma_s, accS, tKr[(None, None, kb_, 0)], tQr[(None, None, kb_, qi)], accS)
-            mma_s.set(tcgen05.Field.ACCUMULATE, True)
-        with cute.arch.elect_one():
-            commit_mc(B(0) + 8 * ss)
-
-    def _issue_dp(self, X, n, qi):
-        (acc_l, tmem_ptr, mma_s, tKr, tQr, tVr, tdOr, accP, mma_op, tmem_base, tCPr, tdOdr, sCP, sdOd, tCSr, tQdr, sCS, sQd, total, d_empty, kbar,) = X
-        B = lambda i_: kbar + 8 * i_  # noqa: E731
-        NS = self.NS
-        self._wcl(B(5), (n & 1) ^ 1)
-        tc_fence_after()
-        mma_s.set(tcgen05.Field.ACCUMULATE, False)
-        for kb_ in range(cute.size(tVr, mode=[2])):
-            cute.gemm(mma_s, accP, tVr[(None, None, kb_, 0)], tdOr[(None, None, kb_, qi)], accP)
-            mma_s.set(tcgen05.Field.ACCUMULATE, True)
-        with cute.arch.elect_one():
-            commit_mc(B(4))
-
-    def _issue_dv(self, X, n, di):
-        (acc_l, tmem_ptr, mma_s, tKr, tQr, tVr, tdOr, accP, mma_op, tmem_base, tCPr, tdOdr, sCP, sdOd, tCSr, tQdr, sCS, sQd, total, d_empty, kbar,) = X
-        B = lambda i_: kbar + 8 * i_  # noqa: E731
-        NS = self.NS
-        g = n & 1
-        self._wcl(B(6) + 8 * g, (n >> 1) & 1)                  # P codes + SFA of n published
-        tc_fence_after()
-        if const_expr(self.kn == "fin"):
-            spin(self.DLY)                                         # (delays every dV; the last one is the control)
-        dm_utils.gemm_ptx_bs(
-            mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, g)], tdOdr[(None, None, None, di)],
-            sCP[(None, None, None, g)], sdOd[(None, None, None, di)],
-            tmem_base + self.COL_SFA_P + 4 * g, tmem_base + self.COL_SFB,
-            tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
-            zero_init=cutlass.Boolean(n == 0), cta_group=2)
-        with cute.arch.elect_one():
-            commit_mc(B(8) + 8 * g)                            # P stage free after dV(n)
-
-    def _issue_dk(self, X, n, di):
-        (acc_l, tmem_ptr, mma_s, tKr, tQr, tVr, tdOr, accP, mma_op, tmem_base, tCPr, tdOdr, sCP, sdOd, tCSr, tQdr, sCS, sQd, total, d_empty, kbar,) = X
-        B = lambda i_: kbar + 8 * i_  # noqa: E731
-        NS = self.NS
-        g = n & 1
-        self._wcl(B(10) + 8 * g, (n >> 1) & 1)                 # dS codes + SFA of n published
-        tc_fence_after()
-        if const_expr(self.kn == "d"):
-            if const_expr(self.unsafe):
-                with cute.arch.elect_one():
-                    commit_mc(d_empty + 8 * di)                # UNSAFE: Qd stage released before dK reads it
-            spin(self.DLY)
-        dm_utils.gemm_ptx_bs(
-            mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, g)], tQdr[(None, None, None, di)],
-            sCS[(None, None, None, g)], sQd[(None, None, None, di)],
-            tmem_base + self.COL_SFA_S + 4 * g, tmem_base + self.COL_SFB,
-            tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
-            zero_init=cutlass.Boolean(n == 0), cta_group=2)
-        with cute.arch.elect_one():
-            commit_mc(B(12) + 8 * g)                           # dS stage free after dK(n)
-            if const_expr(not (self.kn == "d" and self.unsafe)):
-                commit_mc(d_empty + 8 * di)                    # Qd / dOd stage free after dK(n) (covers dV(n))
-
     def _q_rel(self, qf):
         if const_expr(not (self.kn == "q" and self.unsafe)):
             qf.release()
@@ -470,38 +401,174 @@ class DmHd256Kv2:
                 tdOdr = mma_o.make_fragment_B(sdOd)
                 d_empty = bars_a + 8 * (6 + self.nqs)          # d pipeline (bars + 6): full [6, 6+nqs), empty [6+nqs, 6+2 nqs)
 
-                X = (acc_l, tmem_ptr, mma_s, tKr, tQr, tVr, tdOr, accP, mma_op, tmem_base, tCPr, tdOdr, sCP, sdOd, tCSr, tQdr, sCS, sQd, total, d_empty, kbar,)
                 kf = kv_c.wait_and_advance()
                 if const_expr(NS == 1):
                     # C1c look-ahead order: S(0), dP(0); per t: S(t+1), dP(t+1), dV(t), dK(t)
                     qf = q_c.wait_and_advance()
-                    self._q_unsafe(qf)
-                    self._issue_s(X, Int32(0), qf.index)
-                    self._issue_dp(X, Int32(0), qf.index)
-                    self._q_rel(qf)
+                    if const_expr(self.kn == "q"):
+                        if const_expr(self.unsafe):
+                            qf.release()                                              # UNSAFE: Q / dO released before S / dP read them
+                        spin(self.DLY)
+                    ss_ = (Int32(0)) % NS
+                    self._wcl(B(2) + 8 * ss_, (((Int32(0)) // NS) & 1) ^ 1)          # S slot free (cluster acquire)
+                    tc_fence_after()
+                    accS = cute.make_tensor(tmem_ptr + self.COL_S + 64 * ss_, acc_l)
+                    mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                    for kb_ in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
+                        cute.gemm(mma_s, accS, tKr[(None, None, kb_, 0)], tQr[(None, None, kb_, qf.index)], accS)
+                        mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                    with cute.arch.elect_one():
+                        commit_mc(B(0) + 8 * ss_)
+                    self._wcl(B(5), ((Int32(0)) & 1) ^ 1)                               # dP slot free
+                    tc_fence_after()
+                    mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                    for kb_ in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
+                        cute.gemm(mma_s, accP, tVr[(None, None, kb_, 0)], tdOr[(None, None, kb_, qf.index)], accP)
+                        mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                    with cute.arch.elect_one():
+                        commit_mc(B(4))
+                    if const_expr(not (self.kn == "q" and self.unsafe)):
+                        qf.release()
                     for t in cutlass.range(total, unroll=1):
                         if t + 1 < total:
                             qf = q_c.wait_and_advance()
-                            self._q_unsafe(qf)
-                            self._issue_s(X, t + 1, qf.index)
-                            self._issue_dp(X, t + 1, qf.index)
-                            self._q_rel(qf)
+                            if const_expr(self.kn == "q"):
+                                if const_expr(self.unsafe):
+                                    qf.release()                                              # UNSAFE: Q / dO released before S / dP read them
+                                spin(self.DLY)
+                            ss_ = (t + 1) % NS
+                            self._wcl(B(2) + 8 * ss_, (((t + 1) // NS) & 1) ^ 1)          # S slot free (cluster acquire)
+                            tc_fence_after()
+                            accS = cute.make_tensor(tmem_ptr + self.COL_S + 64 * ss_, acc_l)
+                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                            for kb_ in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
+                                cute.gemm(mma_s, accS, tKr[(None, None, kb_, 0)], tQr[(None, None, kb_, qf.index)], accS)
+                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                            with cute.arch.elect_one():
+                                commit_mc(B(0) + 8 * ss_)
+                            self._wcl(B(5), ((t + 1) & 1) ^ 1)                               # dP slot free
+                            tc_fence_after()
+                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                            for kb_ in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
+                                cute.gemm(mma_s, accP, tVr[(None, None, kb_, 0)], tdOr[(None, None, kb_, qf.index)], accP)
+                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                            with cute.arch.elect_one():
+                                commit_mc(B(4))
+                            if const_expr(not (self.kn == "q" and self.unsafe)):
+                                qf.release()
                         df = d_c.wait_and_advance()
-                        self._issue_dv(X, t, df.index)
-                        self._issue_dk(X, t, df.index)
+                        gv_ = (t) & 1
+                        self._wcl(B(6) + 8 * gv_, ((t) >> 1) & 1)                    # P codes + SFA published
+                        tc_fence_after()
+                        if const_expr(self.kn == "fin"):
+                            if (t) == total - 1:
+                                spin(self.DLY)
+                        dm_utils.gemm_ptx_bs(
+                            mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, gv_)], tdOdr[(None, None, None, df.index)],
+                            sCP[(None, None, None, gv_)], sdOd[(None, None, None, df.index)],
+                            tmem_base + self.COL_SFA_P + 4 * gv_, tmem_base + self.COL_SFB,
+                            tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
+                            zero_init=cutlass.Boolean((t) == 0), cta_group=2)
+                        with cute.arch.elect_one():
+                            commit_mc(B(8) + 8 * gv_)                                     # P stage free after dV
+                        gk_ = (t) & 1
+                        self._wcl(B(10) + 8 * gk_, ((t) >> 1) & 1)                   # dS codes + SFA published
+                        tc_fence_after()
+                        if const_expr(self.kn == "d"):
+                            if const_expr(self.unsafe):
+                                with cute.arch.elect_one():
+                                    commit_mc(d_empty + 8 * (df.index))                       # UNSAFE: Qd stage released before dK reads it
+                            spin(self.DLY)
+                        dm_utils.gemm_ptx_bs(
+                            mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, gk_)], tQdr[(None, None, None, df.index)],
+                            sCS[(None, None, None, gk_)], sQd[(None, None, None, df.index)],
+                            tmem_base + self.COL_SFA_S + 4 * gk_, tmem_base + self.COL_SFB,
+                            tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
+                            zero_init=cutlass.Boolean((t) == 0), cta_group=2)
+                        with cute.arch.elect_one():
+                            commit_mc(B(12) + 8 * gk_)                                    # dS stage free after dK
+                            if const_expr(not (self.kn == "d" and self.unsafe)):
+                                commit_mc(d_empty + 8 * (df.index))                           # Qd / dOd stage free (covers dV)
                 else:
                     # C1d order: S(t), dK(t-1), dP(t), dV(t); drain dK(total-1)
                     for t in cutlass.range(total, unroll=1):
                         qf = q_c.wait_and_advance()
-                        self._q_unsafe(qf)
-                        self._issue_s(X, t, qf.index)
+                        if const_expr(self.kn == "q"):
+                            if const_expr(self.unsafe):
+                                qf.release()                                              # UNSAFE: Q / dO released before S / dP read them
+                            spin(self.DLY)
+                        ss_ = (t) % NS
+                        self._wcl(B(2) + 8 * ss_, (((t) // NS) & 1) ^ 1)          # S slot free (cluster acquire)
+                        tc_fence_after()
+                        accS = cute.make_tensor(tmem_ptr + self.COL_S + 64 * ss_, acc_l)
+                        mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                        for kb_ in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
+                            cute.gemm(mma_s, accS, tKr[(None, None, kb_, 0)], tQr[(None, None, kb_, qf.index)], accS)
+                            mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                        with cute.arch.elect_one():
+                            commit_mc(B(0) + 8 * ss_)
                         if t > 0:
-                            self._issue_dk(X, t - 1, (t - 1) % self.nqs)
-                        self._issue_dp(X, t, qf.index)
-                        self._q_rel(qf)
+                            gk_ = (t - 1) & 1
+                            self._wcl(B(10) + 8 * gk_, ((t - 1) >> 1) & 1)                   # dS codes + SFA published
+                            tc_fence_after()
+                            if const_expr(self.kn == "d"):
+                                if const_expr(self.unsafe):
+                                    with cute.arch.elect_one():
+                                        commit_mc(d_empty + 8 * ((t - 1) % self.nqs))                       # UNSAFE: Qd stage released before dK reads it
+                                spin(self.DLY)
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, gk_)], tQdr[(None, None, None, (t - 1) % self.nqs)],
+                                sCS[(None, None, None, gk_)], sQd[(None, None, None, (t - 1) % self.nqs)],
+                                tmem_base + self.COL_SFA_S + 4 * gk_, tmem_base + self.COL_SFB,
+                                tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
+                                zero_init=cutlass.Boolean((t - 1) == 0), cta_group=2)
+                            with cute.arch.elect_one():
+                                commit_mc(B(12) + 8 * gk_)                                    # dS stage free after dK
+                                if const_expr(not (self.kn == "d" and self.unsafe)):
+                                    commit_mc(d_empty + 8 * ((t - 1) % self.nqs))                           # Qd / dOd stage free (covers dV)
+                        self._wcl(B(5), ((t) & 1) ^ 1)                               # dP slot free
+                        tc_fence_after()
+                        mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                        for kb_ in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
+                            cute.gemm(mma_s, accP, tVr[(None, None, kb_, 0)], tdOr[(None, None, kb_, qf.index)], accP)
+                            mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                        with cute.arch.elect_one():
+                            commit_mc(B(4))
+                        if const_expr(not (self.kn == "q" and self.unsafe)):
+                            qf.release()
                         df = d_c.wait_and_advance()
-                        self._issue_dv(X, t, df.index)
-                    self._issue_dk(X, total - 1, (total - 1) % self.nqs)
+                        gv_ = (t) & 1
+                        self._wcl(B(6) + 8 * gv_, ((t) >> 1) & 1)                    # P codes + SFA published
+                        tc_fence_after()
+                        if const_expr(self.kn == "fin"):
+                            if (t) == total - 1:
+                                spin(self.DLY)
+                        dm_utils.gemm_ptx_bs(
+                            mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, gv_)], tdOdr[(None, None, None, df.index)],
+                            sCP[(None, None, None, gv_)], sdOd[(None, None, None, df.index)],
+                            tmem_base + self.COL_SFA_P + 4 * gv_, tmem_base + self.COL_SFB,
+                            tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
+                            zero_init=cutlass.Boolean((t) == 0), cta_group=2)
+                        with cute.arch.elect_one():
+                            commit_mc(B(8) + 8 * gv_)                                     # P stage free after dV
+                    gk_ = (total - 1) & 1
+                    self._wcl(B(10) + 8 * gk_, ((total - 1) >> 1) & 1)                   # dS codes + SFA published
+                    tc_fence_after()
+                    if const_expr(self.kn == "d"):
+                        if const_expr(self.unsafe):
+                            with cute.arch.elect_one():
+                                commit_mc(d_empty + 8 * ((total - 1) % self.nqs))                       # UNSAFE: Qd stage released before dK reads it
+                        spin(self.DLY)
+                    dm_utils.gemm_ptx_bs(
+                        mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, gk_)], tQdr[(None, None, None, (total - 1) % self.nqs)],
+                        sCS[(None, None, None, gk_)], sQd[(None, None, None, (total - 1) % self.nqs)],
+                        tmem_base + self.COL_SFA_S + 4 * gk_, tmem_base + self.COL_SFB,
+                        tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
+                        zero_init=cutlass.Boolean((total - 1) == 0), cta_group=2)
+                    with cute.arch.elect_one():
+                        commit_mc(B(12) + 8 * gk_)                                    # dS stage free after dK
+                        if const_expr(not (self.kn == "d" and self.unsafe)):
+                            commit_mc(d_empty + 8 * ((total - 1) % self.nqs))                           # Qd / dOd stage free (covers dV)
                 with cute.arch.elect_one():
                     commit_mc(B(14))                                       # F_FIN
                 kf.release()

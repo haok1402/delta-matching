@@ -16,7 +16,9 @@ Layout (bring-up "F1-T", 1-CTA): 16 warps / 512 threads. softmax WG 0-3 (one thr
 (O fold + epilogue), MMA warp 12, load warp 14, the rest idle. Tile 128 q x 128 keys, q_stage 1, S ping-pong.
 TMEM (512 cols): slot0 [0,128), slot1 [128,256), O [256,512) (O is only touched by the correction WG; no MMA writes O).
 Slot j&1 holds S(j) (QK of key tile j); once the softmax has read S(j) the same columns hold the per-(group, d-slab)
-PV temp T of tile j (M=128, N=128 d, K=32 keys). P codes live in SMEM (SS MMA), 2 x 16 KiB.
+PV temps of tile j (default t_n=64: two 64-col buffers, M=128, N=64 d, K=32 keys = one scale group). P codes live in
+SMEM (SS MMA), 2 x 16 KiB. Default fold "slab": each 64-d O slab is loaded once per tile into registers, folded with its 4
+group temps, stored once. Design / ordering / exactness: kda/hd256/fwd-design.md.
 SMEM: sQ 32 KiB, K/V ring kv_stage x 32 KiB, sP 32 KiB, stats 5 KiB.
 """
 import math

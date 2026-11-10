@@ -64,7 +64,11 @@ def _patch(src: str) -> str:
 
 
 _ns = dict(vars(_fpp))
-exec(compile(_patch(_SRC), _fpp.__file__ + ":dm_tailconv", "exec"), _ns)
+_FN = _fpp.__file__.replace(".py", "_dm_tailconv.py")
+_PSRC = _patch(_SRC)
+import linecache  # noqa: E402
+linecache.cache[_FN] = (len(_PSRC), None, _PSRC.splitlines(True), _FN)   # the DSL's AST pass re-reads the source
+exec(compile(_PSRC, _FN, "exec"), _ns)
 _Base = _ns["DMTailConv"]
 
 

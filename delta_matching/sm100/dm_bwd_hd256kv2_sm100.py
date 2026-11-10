@@ -72,7 +72,13 @@ class DmHd256Kv2:
     KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin")
     DLY = 1 << 15
 
-    def __init__(self, causal: bool, dbg: int = 0, knob: str = ""):
+    OPTS = ("qb2", "xpt")   # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e)
+    DEFAULT_OPTS = ""
+
+    def __init__(self, causal: bool, dbg: int = 0, knob: str = "", opts=None):
+        self.opts = tuple(sorted((self.DEFAULT_OPTS if opts is None else opts).replace(",", " ").split()))
+        assert all(o in self.OPTS for o in self.opts), self.opts
+        self.nqs = 2 if "qb2" in self.opts else 1
         self.causal = bool(causal)
         self.dbg = int(dbg)
         self.kn = knob.replace("_safe", "")
@@ -95,9 +101,9 @@ class DmHd256Kv2:
         mma_o = sm100_utils.make_trivial_tiled_mma(F8, F8, tcgen05.OperandMajorMode.K, tcgen05.OperandMajorMode.MN,
                                                    Float32, cg2, o_tiler[:2])
         a_l = sm100_utils.make_smem_layout_a(mma_s, s_tiler, F8, 1)
-        b_l = sm100_utils.make_smem_layout_b(mma_s, s_tiler, F8, 1)
+        b_l = sm100_utils.make_smem_layout_b(mma_s, s_tiler, F8, self.nqs)
         c_l = sm100_utils.make_smem_layout_a(mma_o, o_tiler, F8, 2)       # codes, 2 stages
-        t_l = sm100_utils.make_smem_layout_b(mma_o, o_tiler, F8, 1)
+        t_l = sm100_utils.make_smem_layout_b(mma_o, o_tiler, F8, self.nqs)
         a1 = cute.select(a_l, mode=[0, 1, 2])
         b1 = cute.select(b_l, mode=[0, 1, 2])
         t1 = cute.select(t_l, mode=[0, 1, 2])
@@ -188,20 +194,20 @@ class DmHd256Kv2:
         kv_p, kv_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=one, consumer_group=one,
                                                      tx_count=2 * 2 * self.bytes_a, barrier_storage=bars,
                                                      cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
-        q_p, q_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=one, consumer_group=one,
+        q_p, q_c = pipeline.PipelineTmaUmma.create(num_stages=self.nqs, producer_group=one, consumer_group=one,
                                                    tx_count=2 * 2 * self.bytes_b, barrier_storage=bars + 2,
                                                    cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
-        d_p, d_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=one, consumer_group=one,
-                                                   tx_count=2 * 2 * self.bytes_t, barrier_storage=bars + 4,
+        d_p, d_c = pipeline.PipelineTmaUmma.create(num_stages=self.nqs, producer_group=one, consumer_group=one,
+                                                   tx_count=2 * 2 * self.bytes_t, barrier_storage=bars + 6,
                                                    cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         s_p, s_c = pipeline.PipelineUmmaAsync.create(num_stages=1, producer_group=one, consumer_group=comp2,
-                                                     barrier_storage=bars + 6, cta_layout_vmnk=vmnk,
+                                                     barrier_storage=bars + 10, cta_layout_vmnk=vmnk,
                                                      defer_sync=True).make_participants()
         cd_p, cd_c = pipeline.PipelineAsyncUmma.create(num_stages=2, producer_group=comp2, consumer_group=one,
-                                                       barrier_storage=bars + 8, cta_layout_vmnk=vmnk,
+                                                       barrier_storage=bars + 12, cta_layout_vmnk=vmnk,
                                                        defer_sync=True).make_participants()
         f_p, f_c = pipeline.PipelineUmmaAsync.create(num_stages=1, producer_group=one, consumer_group=comp2,
-                                                     barrier_storage=bars + 12, cta_layout_vmnk=vmnk,
+                                                     barrier_storage=bars + 16, cta_layout_vmnk=vmnk,
                                                      defer_sync=True).make_participants()
         cute.arch.mbarrier_init_fence()
 
@@ -256,11 +262,11 @@ class DmHd256Kv2:
                 for ci in cutlass.range(ncs, unroll=1):
                     ct = c_lo + ci
                     qe = q_p.acquire_and_advance()
-                    cute.copy(tma_Q, tQg[(None, ct)], tQs[(None, 0)], tma_bar_ptr=qe.barrier)
-                    cute.copy(tma_dO, tdOg[(None, ct)], tdOs[(None, 0)], tma_bar_ptr=qe.barrier)
+                    cute.copy(tma_Q, tQg[(None, ct)], tQs[(None, qe.index)], tma_bar_ptr=qe.barrier)
+                    cute.copy(tma_dO, tdOg[(None, ct)], tdOs[(None, qe.index)], tma_bar_ptr=qe.barrier)
                     de = d_p.acquire_and_advance()
-                    cute.copy(tma_Qd, tQdg[(None, ct)], tQds[(None, 0)], tma_bar_ptr=de.barrier)
-                    cute.copy(tma_dOd, tdOdg[(None, ct)], tdOds[(None, 0)], tma_bar_ptr=de.barrier)
+                    cute.copy(tma_Qd, tQdg[(None, ct)], tQds[(None, de.index)], tma_bar_ptr=de.barrier)
+                    cute.copy(tma_dOd, tdOdg[(None, ct)], tdOds[(None, de.index)], tma_bar_ptr=de.barrier)
             kv_p.tail()
             q_p.tail()
             d_p.tail()
@@ -290,11 +296,11 @@ class DmHd256Kv2:
                     spin(self.DLY)
                 mma_s.set(tcgen05.Field.ACCUMULATE, False)
                 for kb in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
-                    cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, 0)], accS)
+                    cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, qf.index)], accS)
                     mma_s.set(tcgen05.Field.ACCUMULATE, True)
                 mma_s.set(tcgen05.Field.ACCUMULATE, False)
                 for kb in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
-                    cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, 0)], accP)
+                    cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, qf.index)], accP)
                     mma_s.set(tcgen05.Field.ACCUMULATE, True)
                 se.commit()
                 if const_expr(not (self.kn == "q" and self.unsafe)):
@@ -311,11 +317,11 @@ class DmHd256Kv2:
                             spin(self.DLY)
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tKr, mode=[2])):
-                            cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, 0)], accS)
+                            cute.gemm(mma_s, accS, tKr[(None, None, kb, 0)], tQr[(None, None, kb, qf.index)], accS)
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tVr, mode=[2])):
-                            cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, 0)], accP)
+                            cute.gemm(mma_s, accP, tVr[(None, None, kb, 0)], tdOr[(None, None, kb, qf.index)], accP)
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
                         se.commit()
                         if const_expr(not (self.kn == "q" and self.unsafe)):
@@ -332,14 +338,14 @@ class DmHd256Kv2:
                         if t == total - 1:
                             spin(self.DLY)
                     dm_utils.gemm_ptx_bs(
-                        mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, stg)], tdOdr[(None, None, None, 0)],
-                        sCP[(None, None, None, stg)], sdOd[(None, None, None, 0)],
+                        mma_op, tmem_base + self.COL_DV, tCPr[(None, None, None, stg)], tdOdr[(None, None, None, df.index)],
+                        sCP[(None, None, None, stg)], sdOd[(None, None, None, df.index)],
                         tmem_base + self.COL_SFA_P + 4 * stg, tmem_base + self.COL_SFB,
                         tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
                         zero_init=cutlass.Boolean(t == 0), cta_group=2)
                     dm_utils.gemm_ptx_bs(
-                        mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, stg)], tQdr[(None, None, None, 0)],
-                        sCS[(None, None, None, stg)], sQd[(None, None, None, 0)],
+                        mma_op, tmem_base + self.COL_DK, tCSr[(None, None, None, stg)], tQdr[(None, None, None, df.index)],
+                        sCS[(None, None, None, stg)], sQd[(None, None, None, df.index)],
                         tmem_base + self.COL_SFA_S + 4 * stg, tmem_base + self.COL_SFB,
                         tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)),
                         zero_init=cutlass.Boolean(t == 0), cta_group=2)
@@ -465,7 +471,10 @@ class DmHd256Kv2:
                 if const_expr(self.kn == "ex"):
                     if warp == 6:
                         spin(self.DLY)
-                dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
+                if const_expr("xpt" in self.opts):
+                    dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
+                else:
+                    dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
                 amd = Float32(0.0)
                 for i in cutlass.range_constexpr(32):
                     amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
@@ -520,7 +529,11 @@ class DmHd256Kv2:
                     bp = [Int32(0)] * 4
                     bs = [Int32(0)] * 4
                     for j in cutlass.range_constexpr(4):
-                        psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
+                        psj = Int32(0)
+                        if const_expr("xpt" in self.opts):
+                            psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
+                        else:
+                            psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
                         bp[j] = dm_utils.add_sb_clamp(psj, sb_of(Float32(mdOs[b, h, ct * 4 + j])))
                         bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(Float32(mQs[b, h, ct * 4 + j])))
                     dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))

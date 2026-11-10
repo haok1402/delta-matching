@@ -5,7 +5,7 @@ Deterministic; no atomics outside the debug builds.
 """
 import torch
 
-from . import bwd_hd256mx as _mx
+from .attention_bwd_dq_hd256_sm100 import run_kernel
 from .dm_bwd_hd256kv2_sm100 import DmHd256Kv2
 
 D = 256
@@ -85,7 +85,7 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     lds = [1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2]
     kd = dbg & 26
     key = ("kv2", causal, kd, knob, ot)
-    _mx._run(key, lambda: DmHd256Kv2(causal, kd, knob, ot), ten, lds, [nt_arg, H, Hk])
+    run_kernel(key, lambda: DmHd256Kv2(causal, kd, knob, ot), ten, lds, [nt_arg, H, Hk])
     extra = dict(dump=dump, codesP=cp_, codesS=cs_, sbP=sbp, sbS=sbs, hash=hh)
     return dk, dv, extra
 

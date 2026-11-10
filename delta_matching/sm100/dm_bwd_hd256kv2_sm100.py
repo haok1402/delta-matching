@@ -42,8 +42,8 @@ import cutlass.cute as cute
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import cutlass.utils.blackwell_helpers as sm100_utils
-from cutlass import Float32, Int32, Int64, const_expr
-from cutlass.cutlass_dsl import dsl_user_op
+from cutlass import Float32, Float64, Int32, Int64, const_expr
+from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.cute.nvgpu import cpasync, tcgen05
 
 from delta_matching.sm100.cute_ptx_sm100 import tmem_ld32, e4m3x4, bf16x2, st_global_v4, st_global_f32, st_global_v4f, ld_shared_f32, st_shared_f32, abs_f32, max_f32, mul_f32, global_address, inline_asm
@@ -52,12 +52,107 @@ from delta_matching.sm100.cute_ptx_sm100 import ld_shared_b32, mbar_init, redux_
 from delta_matching.sm100.fp8_e8m0_scale_sm100 import add_sb_clamp, inv_pow2_from_sb, pow2_sb
 from delta_matching.sm100.mma_sm100 import gemm_ptx_bs
 from delta_matching.sm100.tcgen05_fence_sm100 import mbar_arrive_local, mbar_wait_parity, mbar_wait_parity_cluster
-from delta_matching.sm100.dm_bwd_hd256mx_sm100 import (st_shared_v4, ld_shared_v4f, spin, sb_of, pack4, tc_fence_before,
-                                                       tc_fence_after, st_global_u8, f2i, hmix, hidx, lk_cols_u32,
-                                                       lk_cols_f64, sel_eq_i32)
-from delta_matching.sm100.dm_bwd_hd256mx_sm100 import tmem_st32 as dmh_st32
+from delta_matching.sm100.cute_ptx_sm100 import st_shared_v4_b32 as st_shared_v4, red_add_u64
+from delta_matching.sm100.attention_bwd_dq_hd256_sm100 import ld_shared_v4f, sb_of, pack4, tc_fence_before, tc_fence_after, sel_eq_i32
 
 F8 = cutlass.Float8E4M3FN
+
+
+@dsl_user_op
+def spin(cycles: int, *, loc=None, ip=None):
+    """Busy-wait ~cycles SM clocks (positive-control delay knobs only; never in the default build)."""
+    inline_asm(None, [], "{\n\t.reg .u64 t0, t1;\n\t.reg .pred p;\n\tmov.u64 t0, %clock64;\n\tLSPIN:\n\t"
+         "mov.u64 t1, %clock64;\n\tsub.u64 t1, t1, t0;\n\tsetp.lt.u64 p, t1, " + str(int(cycles)) + ";\n\t"
+         "@p bra LSPIN;\n\t}", "", True, loc, ip)
+
+
+@dsl_user_op
+def tmem_st32(addr: Int32, v, *, loc=None, ip=None):
+    """tcgen05.st.32x32b.x32: this thread's lane, 32 fp32 columns at addr."""
+    regs = ",".join(f"${i + 1}" for i in range(32))
+    inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip)] + [Float32(x).ir_value(loc=loc, ip=ip) for x in v],
+         "tcgen05.st.sync.aligned.32x32b.x32.b32 [$0], {" + regs + "};", ",".join(["r"] + ["f"] * 32), True, loc, ip)
+
+
+@dsl_user_op
+def st_global_u8(addr: Int64, v: Int32, *, loc=None, ip=None):
+    inline_asm(None, [Int64(addr).ir_value(loc=loc, ip=ip), Int32(v).ir_value(loc=loc, ip=ip)],
+         "st.global.u8 [$0], $1;", "l,r", True, loc, ip)
+
+
+@dsl_user_op
+def f2i(x: Float32, *, loc=None, ip=None) -> Int32:
+    return Int32(inline_asm(T.i32(), [Float32(x).ir_value(loc=loc, ip=ip)], "mov.b32 $0, $1;", "=r,f", False, loc, ip))
+
+
+@dsl_user_op
+def hmix(v: Int32, idx: Int32, *, loc=None, ip=None) -> Int32:
+    """dbg 8 coupling hash of one element (value bits v at element index idx); summed (mod 2^32, order-free) per block."""
+    return Int32(inline_asm(T.i32(), [Int32(v).ir_value(loc=loc, ip=ip), Int32(idx).ir_value(loc=loc, ip=ip)],
+                      "{\n\t.reg .b32 x, y;\n\tmul.lo.u32 x, $1, 0x9E3779B1;\n\tmul.lo.u32 y, $2, 0x85EBCA6B;\n\t"
+                      "add.u32 x, x, y;\n\tshr.u32 y, x, 15;\n\txor.b32 x, x, y;\n\tmul.lo.u32 x, x, 0x2C1B3C6D;\n\t"
+                      "shr.u32 y, x, 12;\n\txor.b32 x, x, y;\n\tmul.lo.u32 x, x, 0x297A2D39;\n\tshr.u32 y, x, 15;\n\t"
+                      "xor.b32 $0, x, y;\n\t}", "=r,r,r", False, loc, ip))
+
+
+@dsl_user_op
+def redux_add_u32(x: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(inline_asm(T.i32(), [Int32(x).ir_value(loc=loc, ip=ip)], "redux.sync.add.u32 $0, $1, 0xffffffff;", "=r,r",
+                      True, loc, ip))
+
+
+@dsl_user_op
+def zext64(x: Int32, *, loc=None, ip=None) -> Int64:
+    return Int64(inline_asm(T.i64(), [Int32(x).ir_value(loc=loc, ip=ip)], "cvt.u64.u32 $0, $1;", "=l,r", False, loc, ip))
+
+
+@dsl_user_op
+def red_add_f64(addr: Int64, v: Float64, *, loc=None, ip=None):
+    inline_asm(None, [Int64(addr).ir_value(loc=loc, ip=ip), Float64(v).ir_value(loc=loc, ip=ip)],
+         "red.global.add.f64 [$0], $1;", "l,d", True, loc, ip)
+
+
+@dsl_user_op
+def bfly_sum_f64(x: Float64, *, loc=None, ip=None) -> Float64:
+    """warp butterfly fp64 sum (fixed order per lane; dbg only)."""
+    body = "{\n\t.reg .b32 lo, hi, olo, ohi;\n\t.reg .f64 a, o;\n\tmov.f64 a, $1;\n\t"
+    for m in (16, 8, 4, 2, 1):
+        body += ("mov.b64 {lo, hi}, a;\n\t"
+                 f"shfl.sync.bfly.b32 olo, lo, {m}, 31, 0xffffffff;\n\tshfl.sync.bfly.b32 ohi, hi, {m}, 31, 0xffffffff;\n\t"
+                 "mov.b64 o, {olo, ohi};\n\tadd.rn.f64 a, a, o;\n\t")
+    body += "mov.f64 $0, a;\n\t}"
+    return Float64(inline_asm(T.f64(), [Float64(x).ir_value(loc=loc, ip=ip)], body, "=d,d", True, loc, ip))
+
+
+@dsl_user_op
+def sel_eq_f64(x: Int32, y: Int32, a: Float64, b: Float64, *, loc=None, ip=None) -> Float64:
+    return Float64(inline_asm(T.f64(), [Int32(x).ir_value(loc=loc, ip=ip), Int32(y).ir_value(loc=loc, ip=ip),
+                                  Float64(a).ir_value(loc=loc, ip=ip), Float64(b).ir_value(loc=loc, ip=ip)],
+                        "{\n\t.reg .pred p;\n\tsetp.eq.s32 p, $1, $2;\n\tselp.f64 $0, $3, $4, p;\n\t}", "=d,r,r,d,d",
+                        False, loc, ip))
+
+
+def lk_cols_u32(hl, lane, addr0):
+    """dbg 8, keys-on-rows: per query column i of a 32-col chunk, the wrapping u32 sum over this warp's 32 key lanes,
+    zero-extended and added (u64, order-free) at addr0 + 32 i (lane i adds column i)."""
+    mine = Int32(0)
+    for i in range(32):
+        s_ = redux_add_u32(hl[i])
+        mine = sel_eq_i32(lane, Int32(i), s_, mine)
+    red_add_u64(addr0 + Int64(lane) * 32, zext64(mine))
+
+
+def lk_cols_f64(vals32, lane, addr0):
+    mine = Float64(0.0)
+    for i in range(32):
+        x_ = bfly_sum_f64(Float64(vals32[i]))
+        mine = sel_eq_f64(lane, Int32(i), x_, mine)
+    red_add_f64(addr0 + Int64(lane) * 32, mine)
+
+
+def hidx(q, k):
+    """element index for the dbg 8 hash (wraps mod 2^32; identical in every kernel)."""
+    return q * 65599 + k
 
 
 @dsl_user_op
@@ -252,7 +347,7 @@ class DmHd256Kv2:
                     v = []
                     for i in cutlass.range_constexpr(0, 32, 4):
                         v = v + ld_global_v4f(cb_ + (32 * cb + i) * 4)
-                    dmh_st32(tb + col + 64 * hf + 32 * cb, v)
+                    tmem_st32(tb + col + 64 * hf + 32 * cb, v)
             cute.arch.fence_view_async_tmem_store()
 
     @cute.jit

@@ -11,16 +11,14 @@ without any atomics.
 import torch
 from flash_attn.cute.testing import is_fake_mode
 
-from . import bwd_hd256mx
 from . import bwd_hd256kv2
-from .dm_bwd_hd256dqg_sm100 import DmHd256Dqg
+from .attention_bwd_dq_hd256_sm100 import dq_recompute_launch, dq_workspace_launch
 from .launch_cache_sm100 import env
 
-__all__ = ["attention_bwd_hd256", "plan_backward_chunks", "dqg_launch"]
+__all__ = ["attention_bwd_hd256", "plan_backward_chunks"]
 
 D = 256
 TILE_BYTES = 16384 + 4                  # one workspace tile: 128 x 128 dS codes + 4 block-exponent bytes
-DQG_STAGES = 3
 
 
 def workspace_limit_bytes():
@@ -40,26 +38,6 @@ def head_groups_setting():
     value = str(env("DM_BWD_HEAD_GROUPS", "auto")).strip().lower()
     assert value in ("auto", "off") or value.isdigit(), value
     return value
-
-
-def dqg_launch(W, Wsb, k8, ks, B, N, H, causal, *, out=None, band=None):
-    """
-    dQ (B, N, H, 256) bf16 from the workspace (W codes, Wsb block exponents) and K. With band =
-    (q_start, q_end), only those q tiles, from a band-local workspace, written at their global rows.
-    """
-    Hk = k8.shape[2]
-    f8 = torch.float8_e4m3fn
-    dq = torch.empty(B, N, H, D, device=k8.device, dtype=torch.bfloat16) if out is None else out
-    assert dq.shape == (B, N, H, D) and dq.is_contiguous()
-    mA = W.view(f8).permute(2, 1, 0)                       # (T, key, q) -> (q, key, T): MN-major A (queries contiguous)
-    mKt = k8.view(f8).permute(3, 1, 2, 0)                  # (B, N, Hk, 256) -> (256, N, Hk, B): MN-major B
-    tensors = [mA, mKt, Wsb, ks, dq]
-    leading_dims = [0, 0, 2, 2, 3]
-    has_band = band is not None
-    key = ("dqg", bool(causal), DQG_STAGES, "", True) + (("band",) if has_band else ())
-    num_q_tiles, q_start = (band[1] - band[0], band[0]) if has_band else (N // 128, 0)
-    bwd_hd256mx._run(key, lambda: DmHd256Dqg(bool(causal), DQG_STAGES, "", True, has_band), tensors, leading_dims, [num_q_tiles, H, Hk, q_start], mode="dqg")
-    return dq
 
 
 def num_workspace_tiles(num_q_tiles, q_start, q_end, causal):
@@ -226,18 +204,14 @@ def backward_kv2_path(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, iden
         dk, dv, _ = bwd_hd256kv2.kv2_launch(*inputs, causal)
         side.wait_event(ready)
         with torch.cuda.stream(side):
-            side_result = bwd_hd256mx.dm_bwd_hd256mx(*inputs, causal, modes=("dq",))
-        dq = side_result[0]
+            dq = dq_recompute_launch(*inputs, causal)
         for t in inputs:
             t.record_stream(side)                           # inputs read on side: no reuse before side is done
             t.record_stream(main)                           # and before KV2 on main is done even if they came from another stream
         dq.record_stream(main)                              # side-allocated dq consumed on main
-        del side_result
         main.wait_stream(side)
         return dq, dk, dv
-    result = bwd_hd256mx.dm_bwd_hd256mx(*inputs, causal, modes=("dq",))
-    dq = result[0]
-    del result               # the dq-only call's unused dk / dv buffers go back to the allocator before KV2 allocates
+    dq = dq_recompute_launch(*inputs, causal)
     dk, dv, extra = bwd_hd256kv2.kv2_launch(*inputs, causal, dbg=16 if identity else 0)
     if identity:
         return dq, dk, dv, extra["hash"]
@@ -290,7 +264,7 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
                                             opts=opts, dqw=workspace, out=(batch_slice(dk), batch_slice(dv)))[2]
             if identity:
                 ident[b0 * H:b1 * H].copy_(extra["hash"])
-            dqg_launch(*workspace, batch_slice(k8), batch_slice(ks), num_batch, N, H, causal, out=batch_slice(dq))
+            dq_workspace_launch(*workspace, batch_slice(k8), batch_slice(ks), num_batch, N, H, causal, out=batch_slice(dq))
             continue
         # head-split chunk: contiguous copies of its heads, group-major (g, hi) -> kernel head g_local * num_heads + hi_local
         q_heads = [g * heads_per_group + h for g in range(g0, g1) for h in range(h0, h1)]
@@ -316,7 +290,7 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
             carry_idx += 1
         band = None if (q0 == 0 and q1 == num_q_tiles) else (q0, q1)
         dq_chunk = torch.empty(num_batch, N, num_groups * num_heads, D, device=device, dtype=torch.bfloat16) if band else None
-        dq_chunk = dqg_launch(*workspace, k8_chunk, ks_chunk, num_batch, N, num_groups * num_heads, causal, band=band, out=dq_chunk)
+        dq_chunk = dq_workspace_launch(*workspace, k8_chunk, ks_chunk, num_batch, N, num_groups * num_heads, causal, band=band, out=dq_chunk)
         rows_ = slice(q0 * 128, q1 * 128)
         for j, head in enumerate(q_heads):
             dq[b0:b1, rows_, head].copy_(dq_chunk[:, rows_, j])

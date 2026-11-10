@@ -72,8 +72,15 @@ def _patch(src: str) -> str:
             raise RuntimeError(f"tailconv patch anchor not unique/found ({src.count(a)}): {a[:80]!r}")
         src = src.replace(a, b)
     # deferred griddepcontrol.wait at the very end of the kernel (the module ends with the kernel body)
+    # deferred griddepcontrol.wait, executed by the LAST CTA of the grid only: the converter grid therefore cannot complete
+    # before bwd main has completed and its memory is flushed (stream order for the dK / dV postprocess that follows),
+    # while no other converter CTA holds its SM slot until bwd main ends (that blocked the tail fill: rw8k stage 2).
+    # Every read of bwd main's output (dq_accum) is ordered by the per-tile ld.acquire of the det counters instead.
     src = src.rstrip("\n") + ("\n        if const_expr(self.dm_gdcwait):\n"
-                               "            cute.arch.griddepcontrol_wait()\n")
+                               "            dm_bx, dm_by, dm_bz = cute.arch.block_idx()\n"
+                               "            dm_gx, dm_gy, dm_gz = cute.arch.grid_dim()\n"
+                               "            if dm_bx == dm_gx - 1 and dm_by == dm_gy - 1 and dm_bz == dm_gz - 1:\n"
+                               "                cute.arch.griddepcontrol_wait()\n")
     return src
 
 

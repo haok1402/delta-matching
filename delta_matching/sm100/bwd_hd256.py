@@ -62,6 +62,8 @@ def _ds_args(q8, k8, v8, do8, qs, ks, vs, dos, lse, delta, wPt, wdS, wdSt, wPsi,
 def _run(key, make_obj, ten, lds, ints):
     c = _cache()
     if key not in c:
+        if _env("DM_H256_NO_COMPILE", "0") == "1":
+            raise RuntimeError(f"hd256 bwd: {key} is not AOT-compiled (DM_H256_NO_COMPILE=1: no compiling in a GPU lease)")
         cts = [_ct(t, ld, 16 if t.element_size() == 1 or t.dtype == torch.bfloat16 else 4) for t, ld in zip(ten, lds)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         c[key] = cute.compile(make_obj(), *cts, *[Int32(0) for _ in ints], stream, options="--enable-tvm-ffi")

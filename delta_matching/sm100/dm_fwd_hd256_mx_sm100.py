@@ -923,7 +923,7 @@ class DMFwdHd256MxSm100:
         for j0 in cutlass.range_constexpr(2):
             if j0 < cnt:
                 self.kv_wait(pipeline_kv, Int32(j0))
-                self.qk128(atom_qk, acc_qk, tSrQ, tSrK, sQ, sK, Int32(j0), Int32(j0))
+                self.qk_ptx(tSrQ, tSrK, sQ, sK, Int32(j0), Int32(j0))
                 with cute.arch.elect_one():
                     dm_utils.tc_commit(mbar + 8 * j0)                                   # S_full[j0]
                 pipeline_kv.consumer_release_w_index(Int32(j0))
@@ -940,7 +940,7 @@ class DMFwdHd256MxSm100:
                 ks = self.kseq(j + 2)
                 self.kv_wait(pipeline_kv, ks)
                 self.tr(j + 2, 2)
-                self.qk128(atom_qk, acc_qk, tSrQ, tSrK, sQ, sK, ks % S, j & 1)
+                self.qk_ptx(tSrQ, tSrK, sQ, sK, ks % S, j & 1)
                 with cute.arch.elect_one():
                     dm_utils.tc_commit(mbar + 8 * (j & 1))                              # S_full (tile j+2)
                 self.tr(j + 2, 3)
@@ -948,6 +948,13 @@ class DMFwdHd256MxSm100:
             vs = self.vseq(j, cnt)
             self.mma_pv(pv_op, acc_pv, tOrP, tOrV, sP, sV, pipeline_kv, None, mbar, j, vs % S, (vs // S) & 1, cnt)
         pipeline_q.consumer_release(q_state)
+
+    @cute.jit
+    def qk_ptx(self, tSrQ, tSrK, sQ, sK, stage, slot):
+        """C10: QK(j) N128 as raw PTX (= G1b: the N128 QK op's idesc / descriptors, k ascending, zero-init at k 0; bitwise == cute.gemm,
+        fwd3 G1 arms) - no stateful MMA atom inside the dynamic prologue branch."""
+        gemm_qk_ptx(self.op_q128, Int32(slot) * 128, tSrQ[None, None, None, 0], tSrK[None, None, None, stage],
+                    sQ[None, None, None, 0], sK[None, None, None, stage], 0)
 
     def sf_col10(self, j, cnt):
         """C10 SFA column of tile j (SFB = +8): slot (j+1)&1 + 64 for j < cnt-1, own slot + 80 for the last tile."""

@@ -443,6 +443,23 @@ class DMFwdHd256MxSm100:
             cute.copy(tma_atom_V, tVgV[None, 0], tVsV[None, kv_state.index],
                       tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
             kv_state.advance()
+            # Ring WAR edge of the F1a/F1c epilogue (accuracy-audit 12:2x Q1): the loads above are this CTA's LAST writes to
+            # the K/V ring. The CTA is non-persistent (one Q tile per CTA, grid (n_m, H, B), no tile scheduler), so the
+            # load warp issues exactly 2*cnt TMA loads and no further copy; every one is consumed by an MMA that completes
+            # before O_full(PV(last)), which the correction WG waits before staging O in the ring. No TMA (or any other
+            # writer) touches the ring after the epilogue starts; the next writer is a later CTA after this CTA exits.
+            if const_expr(self.epi == 10):
+                # DEBUG POSITIVE CONTROL ONLY (never a default): an unordered ring writer = "ring released early". The load
+                # warp waits final_full (single-phase), lets the last PV finish, then poisons the staging rows while the
+                # correction WG (epi 10) holds its staged rows 30 us before copying out -> O must come out corrupted.
+                dm_utils.mbar_wait_parity(mbar + 64, Int32(0))
+                for _ in cutlass.range(8, unroll=1):
+                    dm_utils.nanosleep_1us()
+                skb = Int32(sK.iterator.toint())
+                ln = cute.arch.lane_idx()
+                pz = Int32(-1)
+                for r in cutlass.range((128 * 528) // (16 * 32), unroll=1):
+                    st_shared_v4_b32(skb + Int32(16) * (r * 32 + ln), pz, pz, pz, pz)
 
         if warp_idx == self.mma_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
@@ -907,6 +924,9 @@ class DMFwdHd256MxSm100:
                         wv = [bf16x2(mul_rn(o[8 * q + 2 * t], scale), mul_rn(o[8 * q + 2 * t + 1], scale)) for t in range(4)]
                         st_shared_v4_b32(srow + (64 * c + 16 * q), wv[0], wv[1], wv[2], wv[3])
             bar_warp_sync()                                              # warp-local hand-off: a warp copies only its own rows
+            if const_expr(self.epi == 10):                               # DEBUG PC: hold the staged rows (see load warp)
+                for _ in cutlass.range(30, unroll=1):
+                    dm_utils.nanosleep_1us()
             if const_expr(self.epi == 9):
                 w0 = (w0 + 32) % 128                                     # DEBUG PC (racy): another warp's rows, no CTA barrier
             if const_expr(self.epi != 8):

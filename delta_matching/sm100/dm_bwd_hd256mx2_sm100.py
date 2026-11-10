@@ -61,7 +61,7 @@ class DmHd256Mx2:
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
                  q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False,
-                 yr: bool = False, pe: bool = False):
+                 yr: bool = False, pe: int = 0):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -104,7 +104,9 @@ class DmHd256Mx2:
         #     branch into the dS / quant phase.  The dP full barrier is probed (try_wait, not advanced) right after the S release; the
         #     blocking wait then runs only if (probe | dep) == 0 where dep = XOR-fold of all 64 P bit patterns AND (n_t >> 24) (== 0:
         #     N = 128 n_t < 2^31), so the branch depends on every P.  Same barrier, same phase, same acquire + fences + release.
-        self.pe = bool(pe) and self.dqopt and not self.x2
+        #     pe = 2 (impl 16): no early probe (impl 15's probe result conversion was scheduled before the exps and blocked on dP:
+        #     0.87x); the blocking wait (token = dep == 0 -> always waits) is entered only after every P is final.
+        self.pe = int(pe) if (self.dqopt and not self.x2) else 0
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
@@ -672,7 +674,7 @@ class DmHd256Mx2:
                         tc_fence_before()                      # BW2
                     sf.release()
                 pe_tok = Int32(0)
-                if const_expr(self.pe and not (self.kn in ("s3", "s4") and self.unsafe)):
+                if const_expr(self.pe == 1 and not (self.kn in ("s3", "s4") and self.unsafe)):
                     pe_tok = Int32(sc_c.try_wait())            # pe: early non-blocking probe of dP(t) full (not advanced)
                 if const_expr(self.q3 and self.kn in ("sf0", "sf1", "cw0", "cw1")):
                     # q3: out(t-1) runs only after dP(t), i.e. after this release: the window for tile t-1's late stores

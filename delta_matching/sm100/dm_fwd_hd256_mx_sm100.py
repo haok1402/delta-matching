@@ -326,7 +326,7 @@ class DMFwdHd256MxSm100:
         self.pers = bool(pers)
         if pers:
             c13 = 1
-            assert is_causal and tsplit > 0 and epi == 2 and not trace and kv_stage == 4, "pers: causal T2, epi 2, no trace"
+            assert is_causal and tsplit > 0 and epi == 2 and kv_stage == 4, "pers: causal T2, epi 2"
         # c8 (fork hd256-fwd3 C8, DM_HD256_FWD_C8=1; Codex hd256-fwd2-02 C, hd256-fwd3-02): column split of every tile over BOTH
         # softmax WGs.  WG h loads S columns 64h..64h+63 (blocks 2h, 2h+1) and runs the m-independent prefix op for op (bmax, kb,
         # bias, FFMA2, ex2, e4m3 codes -> sP, pairwise block sums).  WG1 publishes bmax2/3, bs2/3 (SMEM part[slot][k][128],
@@ -663,6 +663,9 @@ class DMFwdHd256MxSm100:
         if const_expr(self.trace):
             cta_lin = bidx + n_m * (bidy + cute.arch.grid_dim()[1] * bidz)
             self._tb = Int64(mDbg.iterator.toint()) + Int64(cta_lin) * Int64(mDbg.shape[1] * TR_E * 8)
+            if const_expr(self.pers):
+                self._tbase = Int64(mDbg.iterator.toint())                 # C14: row block of the CURRENT item (tr_item)
+                self._trow = Int64(mDbg.shape[1] * TR_E * 8)
 
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
@@ -730,7 +733,7 @@ class DMFwdHd256MxSm100:
         for w in cutlass.range_constexpr(len(self.idle_warp_ids)):
             if warp_idx == self.idle_warp_ids[w]:
                 cute.arch.setmaxregister_decrease(self.num_regs_other)
-        if const_expr(self.trace and self.c13):
+        if const_expr(self.trace and self.c13 and not self.pers):
             if warp_idx == 13:                     # C13: one observer, pipe order QK(0), QK(1), [QK(j+2)], PV(j)
                 for j0 in cutlass.range_constexpr(2):
                     if j0 < cnt:
@@ -883,7 +886,10 @@ class DMFwdHd256MxSm100:
         13 mailbox seen | 14 P_full arrive | 15 state published | per softmax warp q = warp % 4: 16+q S loaded, 20+q P_full
         arrive | correction warp 8: 24 stats(j) seen | 25 O_full(PV(j-1)) seen | 26 O_ready(j) arrive | observers: 28 S_full(j)
         completion (warp 13) | 29 O_full(PV(j)) completion (warp 15).  Header row 0: 0 m_block 1 cnt 2 smid 3 globaltimer
-        start 4 clock start (MMA warp) 5 clock end 6 globaltimer end (correction warp 8) 7 head 8 batch."""
+        start 4 clock start (MMA warp) 5 clock end 6 globaltimer end (correction warp 8) 7 head 8 batch.
+        C14 (pers, row block = the item's CTA id): header 9 k (item index in its CTA), 10 / 11 load warp claim issued / response seen,
+        12 correction response seen, 13 epilogue O_full(last) seen, 14 staging half 0 done, 15 load warp EPI_done gate passed (item k's gate),
+        16 correction item start (before tail0); tile rows: 1 QK guards passed, 2 K ready, 3 QK issued, 4-8 PV warp as above."""
         if const_expr(self.trace):
             v = dm_utils.clock64() if val is None else val
             tr_st(self._tb + Int64(Int32(j) + 1) * Int64(TR_E * 8) + Int64(ev * 8), v, Int32(en))
@@ -2204,6 +2210,11 @@ class DMFwdHd256MxSm100:
     # =================================================================================================================
     # C14 persistent CTAs (fork hd256-fwd6, DM_HD256_FWD_PERS=1; see __init__ pers).  Only traced when self.pers.
     # =================================================================================================================
+    def tr_item(self, u):
+        """C14 trace: point self._tb at the row block of item u (the item's CTA linear id)."""
+        if const_expr(self.trace):
+            self._tb = self._tbase + Int64(u) * self._trow
+
     @cute.jit
     def item_t2(self, u, tsd):
         """T2 split-tail map of linear CTA id u -> (m_block, head, batch) (same expressions as kernel(), without PC 18)."""
@@ -2310,6 +2321,7 @@ class DMFwdHd256MxSm100:
         if k >= 1 and seq == gate:
             if const_expr(self.pc_inj != 22):
                 dm_utils.mbar_wait_parity(mbar + 216, (k - 1) & 1)          # EPI_done(k-1): staged O copied out
+            self.tr(-1, 15)
         self.load_one(atom, tg, ts, pipeline_kv, blk, seq)
 
     @cute.jit
@@ -2336,6 +2348,7 @@ class DMFwdHd256MxSm100:
                                                cute.group_modes(thr_mma_pv.partition_B(gV), 0, 3))
             base = 2 * J0
             gate = base + 1 + 2 * Int32(cnt >= 2)
+            self.tr_item(u)
             q_st = _make_state(Int32(0), (k & 1) ^ 1)
             if const_expr(self.pc_inj == 24):                              # DEBUG PC 24: Q first (not behind K0's stage)
                 pipeline_q.producer_acquire(q_st)
@@ -2356,7 +2369,9 @@ class DMFwdHd256MxSm100:
                         self.load_one14(tma_atom_K, tKgK, tKsK, pipeline_kv, mbar, n_block_max - 3 - i, base + self.kseq(i + 2),
                                         gate, k)
                     self.load_one14(tma_atom_V, tVgV, tVsV, pipeline_kv, mbar, n_block_max - 1 - i, base + self.vseq(i, cnt), gate, k)
+            self.tr(-1, 10)
             u_n, valid_n = self.clc_next(mbar, resp_base, k, True)
+            self.tr(-1, 11)
             J0 = J0 + cnt
             k = k + 1
             u = u_n
@@ -2377,6 +2392,16 @@ class DMFwdHd256MxSm100:
         while valid != 0:
             m_block, head_idx, batch_idx = self.item_t2(u, tsd)
             cnt = m_block + 1
+            self.tr_item(u)
+            if const_expr(self.trace):
+                self.tr(-1, 0, Int64(m_block))
+                self.tr(-1, 1, Int64(cnt))
+                self.tr(-1, 2, Int64(dm_utils.smid()))
+                self.tr(-1, 3, dm_utils.globaltimer())
+                self.tr(-1, 4)
+                self.tr(-1, 7, Int64(head_idx))
+                self.tr(-1, 8, Int64(batch_idx))
+                self.tr(-1, 9, Int64(k))
             q_st = _make_state(Int32(0), k & 1)
             pipeline_q.consumer_wait(q_st)
             for j in cutlass.range(cnt, unroll=1):
@@ -2398,8 +2423,10 @@ class DMFwdHd256MxSm100:
                 if dep >= 0:
                     dm_utils.mbar_wait_parity(mbar + 200 + 8 * (dep & 1), (dep >> 1) & 1)        # O_done2: PV(dep) done
                 dm_utils.tc_fence_after()
+                self.tr(j, 1)
                 ks = 2 * J0 + self.kseq14(j, cnt)
                 self.kv_wait(pipeline_kv, ks)
+                self.tr(j, 2)
                 if const_expr(self.pc_inj == 24):
                     if j == cnt - 1:
                         pipeline_q.consumer_release(q_st)                   # DEBUG PC 24: Q released before the last QK
@@ -2408,6 +2435,7 @@ class DMFwdHd256MxSm100:
                 self.qk_ptx(tSrQ, tSrK, sQ, sK, ks % S, J & 1)
                 with cute.arch.elect_one():
                     dm_utils.tc_commit(mbar + 8 * (J & 1))                  # S_full[J&1]
+                self.tr(j, 3)
                 pipeline_kv.consumer_release_w_index(ks % S)
             if const_expr(self.pc_inj != 24):
                 pipeline_q.consumer_release(q_st)
@@ -2431,19 +2459,24 @@ class DMFwdHd256MxSm100:
         while valid != 0:
             m_block, head_idx, batch_idx = self.item_t2(u, tsd)
             cnt = m_block + 1
+            self.tr_item(u)
             for j in cutlass.range(cnt, unroll=1):
                 J = J0 + j
                 vs = 2 * J0 + self.vseq14(j, cnt)
+                self.tr(j, 4)
                 pipeline_kv.consumer_wait_w_index_phase(vs % S, (vs // S) & 1)
+                self.tr(j, 5)
                 pb = J % 3
                 dm_utils.mbar_wait_parity(mbar + 128 + 8 * pb, (J // 3) & 1)     # P_full3[J%3]
                 if const_expr(self.pc_inj == 16):
                     pb = J & 1                                              # DEBUG PC 16: sP ring depth 2, PV(J) issued late
                     for _d in cutlass.range_constexpr(20):
                         dm_utils.nanosleep_1us()
+                self.tr(j, 6)
                 if j >= 1:
                     dm_utils.mbar_wait_parity(mbar + 40, (J - k - 1) & 1)        # O_ready(J): round J - k - 1
                 dm_utils.tc_fence_after()
+                self.tr(j, 7)
                 if const_expr(self.pc_inj == 23):
                     if j == cnt - 1:
                         for _d in cutlass.range_constexpr(20):              # DEBUG PC 23: PV(last) late
@@ -2456,6 +2489,7 @@ class DMFwdHd256MxSm100:
                 with cute.arch.elect_one():
                     dm_utils.tc_commit(mbar + 32)                                # O_full(J)
                     dm_utils.tc_commit(mbar + 200 + 8 * (J & 1))                 # O_done2[J&1]
+                self.tr(j, 8)
                 if const_expr(self.pc_inj in (1, 2)):
                     if const_expr(self.pc_inj == 2):
                         dm_utils.mbar_wait_parity(mbar + 32, J & 1)
@@ -2488,6 +2522,7 @@ class DMFwdHd256MxSm100:
             n_block_max = cnt
             row = m_block * self.m_block_size + tidx
             qsc = Float32(mQS[batch_idx, head_idx, row // 32]) * Float32(math.log2(math.e))
+            self.tr_item(u)
             if ((J0 + wg) & 1) == 0:                                   # this WG owns local tiles 0, 2, ...
                 self.softmax_step4(Int32(0), n_block_max - 1, True, mbar, stats, sp_base, tidx, lane, qsc, mKVW, kv_head_idx,
                                    batch_idx, J=J0)
@@ -2524,6 +2559,8 @@ class DMFwdHd256MxSm100:
             n_block_max = cnt
             m_last = -Float32.inf
             l_last = Float32(0.0)
+            self.tr_item(u)
+            self.tr(-1, 16, None, tidx == 0)
             m_last, l_last = self.tail_c11(Int32(0), n_block_max - 1, True, mbar, stats, tidx, lane, obase, mKVW, kv_head_idx,
                                            batch_idx, cnt, m_last, l_last, J=J0)
             for i in cutlass.range(cnt - 1, unroll=1):
@@ -2541,6 +2578,7 @@ class DMFwdHd256MxSm100:
                 if tidx == 0:
                     mLSE[batch_idx, head_idx, row] = Float32(k) + Float32(1000.0) * Float32(dm_utils.smid())   # DEBUG 25: item k of CTA
             u_n, valid_n = self.clc_next(mbar, resp_base, k, False)
+            self.tr(-1, 12, None, tidx == 0)
             J0n = J0 + cnt
             cnt_n = Int32(3)
             if valid_n != 0:
@@ -2549,6 +2587,9 @@ class DMFwdHd256MxSm100:
             stage = (2 * J0n + 1 + 2 * Int32(cnt_n >= 2)) % self.kv_stage
             self.epilogue_pers(mbar, mO, m_block, head_idx, batch_idx, J0n - 1, sk_base + stage * (self.tma_bytes_kv), tidx,
                                obase, scale)
+            if const_expr(self.trace):
+                self.tr(-1, 5, None, tidx == 0)
+                self.tr(-1, 6, dm_utils.globaltimer(), tidx == 0)
             J0 = J0n
             k = k + 1
             u = u_n
@@ -2562,6 +2603,7 @@ class DMFwdHd256MxSm100:
         fence.proxy.async + EPI_done (the load warp's gated TMA into this stage)."""
         dm_utils.mbar_wait_parity(mbar + 32, Jlast & 1)                         # O_full(PV(last))
         dm_utils.tc_fence_after()
+        self.tr(-1, 13, None, tidx == 0)
         fence_proxy_async_shared()                                              # ring last written by TMA (async proxy)
         N = mO.shape[1]
         H = mO.shape[2]
@@ -2588,6 +2630,8 @@ class DMFwdHd256MxSm100:
                     tmem_wait_ld()
                     o = on
             bar_warp_sync()
+            if const_expr(h == 0):
+                self.tr(-1, 14, None, tidx == 0)
             if const_expr(self.pc_inj == 22 and h == 0):
                 for _d in cutlass.range_constexpr(20):                          # DEBUG PC 22: copy-out late (TMA lands first)
                     dm_utils.nanosleep_1us()

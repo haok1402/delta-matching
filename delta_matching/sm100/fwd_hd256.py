@@ -81,10 +81,9 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     if c8 != 1:
         key = key + (f"c8_{c8}",)
     c13 = int(os.environ.get("DM_HD256_FWD_C13", "0"))   # hd256-fwd4 C13: C12 + second MMA issuer (warp 15 PV) (opt-in)
-    # hd256-fwd6 C14: persistent CTAs (CLC claims, cross-item overlap; implies C13; causal T2 order, epi 2, no trace) (opt-in)
+    # hd256-fwd6 C14: persistent CTAs (CLC claims, cross-item overlap; implies C13; causal T2 order, epi 2) (opt-in)
     pers = int(os.environ.get("DM_HD256_FWD_PERS", "0"))
-    if pers and not (causal and tsplit > 0 and epi == 2 and c8 == 1 and split == 0 and kv_stage == 4
-                     and os.environ.get("DM_HD256_FWD_TRACE", "0") != "1"):
+    if pers and not (causal and tsplit > 0 and epi == 2 and c8 == 1 and split == 0 and kv_stage == 4):
         pers = 0
     if pers:
         c13 = 1

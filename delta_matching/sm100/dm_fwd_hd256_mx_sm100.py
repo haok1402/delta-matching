@@ -1120,8 +1120,15 @@ class DMFwdHd256MxSm100:
         if const_expr(self.g1 & 1):
             # G1a: acc_scale(j) -> correction now (stats[slot] reuse: correction(j-2) read it before O_ready(j-2) -> PV(j-2) ->
             # (C0) QK(j) -> S_full(j), which this thread waited)
-            st_shared_f32(stats + 4 * (slot * 128 + tidx), acc_scale)
-            dm_utils.mbar_arrive(mbar + 48 + 8 * slot)          # stats_full[slot]
+            if const_expr(self.pc_inj == 9):
+                # DEBUG PC 9 (G1a): stats_full arrives BEFORE its payload, payload ~20 us later -> must corrupt (rescaling inputs)
+                dm_utils.mbar_arrive(mbar + 48 + 8 * slot)
+                for _d in cutlass.range_constexpr(20):
+                    dm_utils.nanosleep_1us()
+                st_shared_f32(stats + 4 * (slot * 128 + tidx), acc_scale)
+            else:
+                st_shared_f32(stats + 4 * (slot * 128 + tidx), acc_scale)
+                dm_utils.mbar_arrive(mbar + 48 + 8 * slot)          # stats_full[slot]
         m_safe = row_max if row_max != -Float32.inf else Float32(0.0)
         dm_w = [None] * 4
         dm_sfa = [None] * 4
@@ -1180,6 +1187,12 @@ class DMFwdHd256MxSm100:
             dm_utils.mbar_wait_parity(mbar + 32, (j - 1) & 1)                       # O_full(PV(j-1))
             dm_utils.tc_fence_after()
             self.tr(j, 25, None, tidx == 0)
+            if const_expr(self.pc_inj == 10):
+                # DEBUG PC 10: O_ready(j) arrives BEFORE the O rescale -> PV(j) may accumulate into unscaled O -> must corrupt
+                dm_utils.tc_fence_before()
+                dm_utils.mbar_arrive(mbar + 40)
+                for _d in cutlass.range_constexpr(20):          # widen the window: the rescale lands ~20 us after O_ready
+                    dm_utils.nanosleep_1us()
             if cute.arch.vote_ballot_sync(acc_scale < Float32(1.0)) != 0:      # hd128 predicate
                 for c in cutlass.range_constexpr(8):
                     o = list(tmem_ld32(obase + 32 * c))
@@ -1188,8 +1201,9 @@ class DMFwdHd256MxSm100:
                         o[k], o[k + 1] = cute.arch.mul_packed_f32x2((o[k], o[k + 1]), (acc_scale, acc_scale))
                     tmem_st32(obase + 32 * c, o)
                 tmem_wait_st()
-            dm_utils.tc_fence_before()
-            dm_utils.mbar_arrive(mbar + 40)                                          # O_ready(j)
+            if const_expr(self.pc_inj != 10):
+                dm_utils.tc_fence_before()
+                dm_utils.mbar_arrive(mbar + 40)                                      # O_ready(j)
             self.tr(j, 26, None, tidx == 0)
         dm_utils.mbar_wait_parity(mbar + 64, Int32(0))
         scale = ld_shared_f32(stats + 4 * (2 * 128 + tidx))

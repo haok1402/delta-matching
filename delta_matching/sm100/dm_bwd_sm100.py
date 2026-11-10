@@ -720,7 +720,9 @@ class DMBackwardSm100:
         # ordinv planted controls (DEBUG ONLY): ordpc1 / ordpc3 -> the MMA warp overwrites SFA_dv (S region col 32) / SFA_dk
         # (dP region col dS+32) of its lanes with tcgen05.st (+ wait::st) right before S^T(t+1) / dP^T(t+1), i.e. where the
         # next MMA's overwrite lands; caught unless ordw orders it after dV(t) / dK(t) completed.
-        self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else 0)
+        self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else (2 if "ordpc2" in self.dm_opts else 0))
+        # ordpc2: SFA_dv poison right after dV(t) issue (after dV(t)'s completion wait with ordw): B1's window is closed in
+        # practice by the dQ-empty wait before S^T(t+1) (ordpc1 never fires), so ordpc2 shows the harness sees a dV SF overwrite
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
         # DM dsq (track L, kda/docs/bwdalt-design.md): the dS tile amax / pow2 scale / e4m3 quantization / dS code+SF stores /
         # dQ SF word + peer dS exchange move from the 8 compute warps to the 4 reduce (dQ drain) warps. Reduce warp q owns
@@ -4002,6 +4004,12 @@ class DMBackwardSm100:
                             if const_expr(self.dm_ordw_v):
                                 self._dm_ord_commit(0, cta_group, cta_rank_in_cluster)
                                 dm_dvn += 1
+                            if const_expr(self.dm_ordpc == 2):
+                                # DEBUG planted control (hd256 pc1/pc2 analogue): SFA_dv poison right after dV(t) issue; with
+                                # ordw it is issued after dV(t)'s completion wait (the ordw protocol), without it races dV(t)
+                                if const_expr(self.dm_ordw_v):
+                                    self._dm_ord_wait(0, dm_dvn)
+                                self._dm_ord_plant(tStS, self.dm_sfa_dv_col)
                         else:
                             if dm_dv_first <= 0:
                                 mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False, dz=dmz)

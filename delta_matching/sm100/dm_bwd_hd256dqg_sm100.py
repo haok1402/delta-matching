@@ -28,7 +28,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.cute.nvgpu import cpasync, tcgen05
 
 from delta_matching.sm100 import dm_utils
-from delta_matching.sm100.dm_bwd_hd256_sm100 import tmem_ld32, bf16x2, st_global_v4, mul_f32, _gaddr, _asm
+from delta_matching.sm100.dm_common_hd256 import tmem_ld32, bf16x2, st_global_v4, mul_f32, _gaddr, _asm
 from delta_matching.sm100.dm_bwd_hd256mx_sm100 import spin, sb_of, pack4, tc_fence_before, tc_fence_after
 
 F8 = cutlass.Float8E4M3FN
@@ -60,7 +60,7 @@ class DmHd256Dqg:
     # positive controls ("<k>" UNSAFE order + delay; "<k>_safe" shipped order + the same delay, must be bitwise the default):
     #   ab : A/B stage released right after the full wait (before the MMAs) + delay before the MMAs
     #   sf : SFA published (arrive) before it is written + delay before the st
-    #   sw : SF warps skip the SFA-stage WAR wait; the MMA warp delays every MMA (so MMA(t - S) is still pending)
+    #   sw : SF warps skip the SFA-stage WAR wait at the first reuse (t == S); the MMA warp delays MMA(0)
     #   fin: epilogue reads acc before the fin wait; the last MMA tile is delayed
     KNOBS = ("ab", "sf", "sw", "fin")
     DLY = 1 << 15
@@ -194,7 +194,8 @@ class DmHd256Dqg:
                         f.release()
                     spin(self.DLY)
                 if const_expr(self.kn == "sw"):
-                    spin(self.DLY)
+                    if kt == 0:
+                        spin(self.DLY)     # MMA(0) still pending while the SF warps reach kt == S
                 if const_expr(self.kn == "fin"):
                     if kt == total - 1:
                         spin(self.DLY)
@@ -231,7 +232,11 @@ class DmHd256Dqg:
                             dm_utils.add_sb_clamp(byte_of(w, 2), sb_of(kv[2])),
                             dm_utils.add_sb_clamp(byte_of(w, 3), sb_of(kv[3])))
                 if kt >= S:
-                    if const_expr(not (self.kn == "sw" and self.unsafe)):
+                    if const_expr(self.kn == "sw" and self.unsafe):
+                        if kt > S:     # UNSAFE: the first reuse (kt == S) skips the WAR wait (bounded lead: no phase aliasing)
+                            dm_utils.mbar_wait_parity(abe_addr + 8 * s, ((kt // S) - 1) & 1)
+                            tc_fence_after()
+                    else:
                         dm_utils.mbar_wait_parity(abe_addr + 8 * s, ((kt // S) - 1) & 1)   # MMA(kt - S) complete
                         tc_fence_after()
                 if const_expr(self.kn == "sf"):

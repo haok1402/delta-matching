@@ -65,7 +65,7 @@ class DmHd256Mx2:
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
                  q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False,
-                 yr: bool = False, pers: int = 0, bes: bool = False, omsk: bool = False):
+                 yr: bool = False, pers: int = 0, bes: bool = False, omsk: bool = False, mr: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -116,6 +116,9 @@ class DmHd256Mx2:
         #     the same scores go to the same P helper (bitwise).
         self.bes = bool(bes) and bool(self.pers)
         self.omsk = bool(omsk) and self.dqopt
+        # mr (dq causal): mask compare strength-reduced: c0 > rtok  <=>  (32 jj + i + q2) > rtok - ctok0 - col0 (one per-tile limit, an
+        #     immediate per element; same integer predicate, no branch) -> drops the per-element VIADD of the key index
+        self.mr = bool(mr) and self.dqopt and not self.omsk
         assert not (self.bes and knob.replace("_safe", "") == "xw"), knob
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
@@ -852,6 +855,9 @@ class DmHd256Mx2:
                         else:
                             vals = self._dq_p64(sv, cs, l2r, rtok, ctok0, col0, False)
                     else:
+                        mlim = Int32(0)
+                        if const_expr(self.mr and self.causal):
+                            mlim = rtok - ctok0 - col0                          # mr: key offset in this half > mlim <=> masked
                         vals = [[Float32(0.0)] * 32, [Float32(0.0)] * 32]       # P (then dS) of chunk jj
                         for jj in cutlass.range_constexpr(2):
                             cb = col0 + 32 * jj                                  # first score column of this chunk
@@ -867,6 +873,9 @@ class DmHd256Mx2:
                                         if const_expr(self.rows_are_keys):
                                             s0 = -Float32.inf if rtok > c0 else s0
                                             s1 = -Float32.inf if rtok > c0 + 1 else s1
+                                        elif const_expr(self.mr):
+                                            s0 = -Float32.inf if Int32(32 * jj + i + q2) > mlim else s0
+                                            s1 = -Float32.inf if Int32(32 * jj + i + q2 + 1) > mlim else s1
                                         else:
                                             s0 = -Float32.inf if c0 > rtok else s0
                                             s1 = -Float32.inf if c0 + 1 > rtok else s1

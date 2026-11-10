@@ -37,7 +37,12 @@ IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(d
               # fork hd256-dqb (codex/hd256-dqb-01-pers.md): "30" = 13 + persistent static snake-LPT (one CTA per SM: pers=-1 -> the
               # device SM count, env FLASH_ATTENTION_NUM_SMS / DM_NSM first); "31" = the same kernel with 7 CTAs (test-only stress
               # build: every CTA runs many items, so the item hand-offs are exercised at small shapes)
-              "30": dict(dqopt=True, lpt="g", yr=True, pers=-1), "31": dict(dqopt=True, lpt="g", yr=True, pers=7)}
+              "30": dict(dqopt=True, lpt="g", yr=True, pers=-1), "31": dict(dqopt=True, lpt="g", yr=True, pers=7),
+              # codex/hd256-dqb-02-review-next.md: "32" = 30 + boundary early S (bes), "33" = 30 + off-diagonal mask skip (omsk),
+              # "34" = 30 + bes + omsk; "35" = 34 with 7 CTAs (test stress)
+              "32": dict(dqopt=True, lpt="g", yr=True, pers=-1, bes=True), "33": dict(dqopt=True, lpt="g", yr=True, pers=-1, omsk=True),
+              "34": dict(dqopt=True, lpt="g", yr=True, pers=-1, bes=True, omsk=True),
+              "35": dict(dqopt=True, lpt="g", yr=True, pers=7, bes=True, omsk=True)}
 IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "13"}  # Q12 + causal global LPT + Ya reuse (HD256-DQ-YR) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}

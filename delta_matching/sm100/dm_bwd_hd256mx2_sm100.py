@@ -65,7 +65,7 @@ class DmHd256Mx2:
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
                  q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False,
-                 yr: bool = False, pers: int = 0):
+                 yr: bool = False, pers: int = 0, bes: bool = False, omsk: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -110,6 +110,13 @@ class DmHd256Mx2:
         #     the next item's X during Q(last) / out(last) / epilogue; the first out of an item (zero init) waits fin-empty (the
         #     previous item's epilogue read the accumulator).  Per-tile body unchanged: bitwise.
         self.pers = int(pers) if (self.yr and mode == "dq") else 0
+        # bes (codex/hd256-dqb-02-review-next.md B): pers + boundary early S: in the drain step of item k the MMA warp issues S(0, k+1)
+        #     (next X / Ya(0) / score region) BEFORE out(last, k); item k+1 then skips its X wait and S(0).  Same MMAs, same values.
+        # omsk (C): dq causal: the per-element causal mask only on the diagonal tile (ct == rt); ct < rt has no masked element,
+        #     the same scores go to the same P helper (bitwise).
+        self.bes = bool(bes) and bool(self.pers)
+        self.omsk = bool(omsk) and self.dqopt
+        assert not (self.bes and knob.replace("_safe", "") == "xw"), knob
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
@@ -135,6 +142,25 @@ class DmHd256Mx2:
         rt = n_t - 1 - q_
         c_hi = rt + 1 if self.causal else n_t
         return rt, r_ % H, r_ // H, c_hi, c_hi, c_hi
+
+    @cute.jit
+    def _dq_p64(self, sv, cs, l2r, rtok, ctok0, col0, masked: cutlass.Constexpr):
+        """omsk (dq): P of this thread's 64 scores, exactly the generic block's ops; masked=False only for ct < rt (no masked key)."""
+        vals = [[Float32(0.0)] * 32, [Float32(0.0)] * 32]
+        for jj in cutlass.range_constexpr(2):
+            cb = col0 + 32 * jj
+            for i in cutlass.range_constexpr(0, 32, 4):
+                for q2 in cutlass.range_constexpr(0, 4, 2):
+                    s0 = sv[jj][i + q2]
+                    s1 = sv[jj][i + q2 + 1]
+                    if const_expr(masked):
+                        c0 = ctok0 + cb + i + q2
+                        s0 = -Float32.inf if c0 > rtok else s0
+                        s1 = -Float32.inf if c0 + 1 > rtok else s1
+                    p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[jj], l2r)
+                    vals[jj][i + q2] = p0
+                    vals[jj][i + q2 + 1] = p1
+        return vals
 
     @cute.jit
     def __call__(self, mXa: cute.Tensor, mXb: cute.Tensor, mYa: cute.Tensor, mYb: cute.Tensor, mT: cute.Tensor,
@@ -371,12 +397,21 @@ class DmHd256Mx2:
             if const_expr(self.yr):
                 ya_o = ya_c.clone()                            # yr: second cursor over the Ya stages, released by out(t-1)
             U = Int32(0)
+            have_s0 = Int32(0)
             for it in cutlass.range(nit, unroll=1):
                 if const_expr(self.pers):
                     rt, hx, b, c_hi, ncs, total = self._pitem(it, cta, G, nbz, n_t, H)
-                xf = x_c.wait_and_advance()
+                if const_expr(self.bes):
+                    if have_s0 == 0:
+                        x_c.wait()                             # bes: X(k) not yet waited (first item)
+                    xf = x_c.current_handle()
+                else:
+                    xf = x_c.wait_and_advance()
                 for t in cutlass.range(total + 1, unroll=1):
-                    if t < total:
+                    s_go = t < total
+                    if const_expr(self.bes):
+                        s_go = (t < total) & ((t > 0) | (have_s0 == 0))      # bes: S(0) issued in the previous item's drain
+                    if s_go:
                         yf = ya_c.wait_and_advance()
                         se = sc_p.acquire_and_advance()            # score region free (compute read dP(t-1) / S(t-1))
                         if const_expr(self.ordf):
@@ -397,6 +432,20 @@ class DmHd256Mx2:
                         se.commit()
                         if const_expr(not self.yr or (self.kn == "yw" and self.unsafe)):
                             yf.release()                           # yr: released after out(t) instead (control yw unsafe: here)
+                    if const_expr(self.bes):
+                        if t == total:
+                            if it + 1 < nit:
+                                # bes: S(0, k+1) before out(last, k): X(k+1) full (no advance), Ya(0, k+1), score region free
+                                x_c.wait()
+                                yn = ya_c.wait_and_advance()
+                                sn = sc_p.acquire_and_advance()
+                                if const_expr(self.ordf):
+                                    tc_fence_after()           # BW2
+                                mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                                for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
+                                    cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, yn.index)], accS)
+                                    mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                                sn.commit()                    # Ya(0, k+1) released by out(0, k+1) via ya_o
                     if const_expr(self.sp):
                         # Q4 split: out(t-1) k 0-1 -> dP(t) (commit) -> out(t-1) k 2-3; same k order, zero init on k 0 of tile 0
                         if t > 0:
@@ -553,6 +602,8 @@ class DmHd256Mx2:
                                     else:
                                         if t + 1 == total:
                                             xf.release()
+                                            if const_expr(self.bes):
+                                                x_c.advance()      # bes: the cursor now names X(k+1)
                     if const_expr(self.q3):     # q3: out(t-1) after dP(t)
                         if t > 0:
                             # out(t-1): codes stage / SF set (t-1) & 1
@@ -576,6 +627,10 @@ class DmHd256Mx2:
                             cf.release()
                 fe = fin_p.acquire_and_advance()
                 fe.commit()
+                if const_expr(self.bes):
+                    have_s0 = Int32(0)
+                    if it + 1 < nit:
+                        have_s0 = Int32(1)
                 if const_expr(self.pers):
                     U = U + total
             sc_p.tail()
@@ -790,30 +845,37 @@ class DmHd256Mx2:
                     if const_expr(self.kn == "ld"):
                         if warp == 3:
                             spin(self.DLY)
-                    vals = [[Float32(0.0)] * 32, [Float32(0.0)] * 32]       # P (then dS) of chunk jj
-                    for jj in cutlass.range_constexpr(2):
-                        cb = col0 + 32 * jj                                  # first score column of this chunk
-                        for i in cutlass.range_constexpr(0, 32, 4):
-                            l2v = [l2r] * 4
-                            if const_expr(self.rows_are_keys):
-                                l2v = ld_shared_v4f(ldb + (cb + i) * 4)
-                            for q2 in cutlass.range_constexpr(0, 4, 2):
-                                s0 = sv[jj][i + q2]
-                                s1 = sv[jj][i + q2 + 1]
-                                if const_expr(self.causal):
-                                    c0 = ctok0 + cb + i + q2
-                                    if const_expr(self.rows_are_keys):
-                                        s0 = -Float32.inf if rtok > c0 else s0
-                                        s1 = -Float32.inf if rtok > c0 + 1 else s1
-                                    else:
-                                        s0 = -Float32.inf if c0 > rtok else s0
-                                        s1 = -Float32.inf if c0 + 1 > rtok else s1
+                    if const_expr(self.omsk and self.causal):
+                        vals = [[Float32(0.0)] * 32, [Float32(0.0)] * 32]
+                        if ct == rt:
+                            vals = self._dq_p64(sv, cs, l2r, rtok, ctok0, col0, True)
+                        else:
+                            vals = self._dq_p64(sv, cs, l2r, rtok, ctok0, col0, False)
+                    else:
+                        vals = [[Float32(0.0)] * 32, [Float32(0.0)] * 32]       # P (then dS) of chunk jj
+                        for jj in cutlass.range_constexpr(2):
+                            cb = col0 + 32 * jj                                  # first score column of this chunk
+                            for i in cutlass.range_constexpr(0, 32, 4):
+                                l2v = [l2r] * 4
                                 if const_expr(self.rows_are_keys):
-                                    p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs[jj], l2v[q2], l2v[q2 + 1])
-                                else:
-                                    p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[jj], l2r)
-                                vals[jj][i + q2] = p0
-                                vals[jj][i + q2 + 1] = p1
+                                    l2v = ld_shared_v4f(ldb + (cb + i) * 4)
+                                for q2 in cutlass.range_constexpr(0, 4, 2):
+                                    s0 = sv[jj][i + q2]
+                                    s1 = sv[jj][i + q2 + 1]
+                                    if const_expr(self.causal):
+                                        c0 = ctok0 + cb + i + q2
+                                        if const_expr(self.rows_are_keys):
+                                            s0 = -Float32.inf if rtok > c0 else s0
+                                            s1 = -Float32.inf if rtok > c0 + 1 else s1
+                                        else:
+                                            s0 = -Float32.inf if c0 > rtok else s0
+                                            s1 = -Float32.inf if c0 + 1 > rtok else s1
+                                    if const_expr(self.rows_are_keys):
+                                        p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs[jj], l2v[q2], l2v[q2 + 1])
+                                    else:
+                                        p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[jj], l2r)
+                                    vals[jj][i + q2] = p0
+                                    vals[jj][i + q2 + 1] = p1
                     if const_expr((self.dbg & 8) and self.mode != "dk"):
                         for jj in cutlass.range_constexpr(2):
                             cb = col0 + 32 * jj

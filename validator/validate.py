@@ -103,6 +103,10 @@ SPREAD_BLK = 1e-3   # accuracy-audit 19:05: under the max(block, head-RMS) norma
 SPREAD_ELEM = 1.6e-2          # per element, relative to its row's max |x|: 2 bf16 ulp (1 ulp flip can be 2^-7 = 7.8e-3)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
+# hd256 (lead ruling 2026-11-10, no accuracy trade-off): the [64,32] contract (sm90-d256) is the floor. A finer / different scheme is
+# added here only after it is measured at least as accurate as sm90-d256 on every metric (sm100-d256 = [64,32] inputs + sm100-mx P/dS
+# is NOT: O 5-6% worse on randn / peaked / bigmag, from the forward P quantization).
+ACCEPTED_NUMERICS_HD256 = ("sm90-d256",)
 
 
 def rel(a, b):
@@ -793,9 +797,10 @@ def main():
     preset = a.preset or meta["meta"].get("NUMERICS") or "sm90"
     supports = meta["meta"].get("SUPPORTS") or {}
     CAND_DETERMINISTIC[0] = meta["meta"].get("DETERMINISTIC") is not False
-    if preset not in ACCEPTED_NUMERICS and not os.environ.get("DMVAL_SELFTEST") and not FWD_ONLY:
-        print(f"FAIL: NUMERICS={preset!r} is not an accepted spec {ACCEPTED_NUMERICS}: only numerics at least as accurate "
-              f"as sm100-mx are promotable (user: operations that trade away accuracy are banned)"); sys.exit(1)
+    _acc = ACCEPTED_NUMERICS if D == 128 else ACCEPTED_NUMERICS_HD256
+    if preset not in _acc and not os.environ.get("DMVAL_SELFTEST") and not FWD_ONLY:
+        print(f"FAIL: NUMERICS={preset!r} is not an accepted spec {_acc}: only numerics at least as accurate "
+              f"as the hd{D} spec are promotable (user: operations that trade away accuracy are banned)"); sys.exit(1)
     if preset not in R.PRESETS:
         print(f"FAIL: NUMERICS={preset!r} is not a preset of reference.py ({sorted(R.PRESETS)})"); sys.exit(1)
     cases = build_cases(a.tier, supports, seed)

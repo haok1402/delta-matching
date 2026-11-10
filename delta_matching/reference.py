@@ -585,6 +585,12 @@ SITE_FNS["sm90_ds"] = sm90_ds
 
 # kda-sm100's final sm100-mx rules (inbox 2026-11-08 17:40): kda-v1 with dS scaled per (128-query tile x 32 keys)
 make_kda_preset("sm100-mx", ds_block=(128, 32), delta_norm=True)
+# hd256 (lead ruling 2026-11-10: no accuracy trade-off -> the [64,32] contract is the floor): sm100-mx's P / dS sites with the [64,32]
+# fp32 input scales (Q / dO 64 rows, K / V 32 keys per scale, s = amax / 448), i.e. the likely kda-hd256 design. Accepted at hd256 only
+# where measured at least as accurate as sm90-d256 on every metric.
+_d256 = make_kda_preset("sm100-d256", ds_block=(128, 32), delta_norm=True, register=False)
+_register(replace(_d256, q="blockrows:64", k="blockrows:32", v="blockrows:32", do="blockrows:64",
+                  notes="hd256: [64,32] fp32 input scales + sm100-mx P (row x 32 keys exp) / P^T / dS 128x32 / delta_norm"))
 make_kda_preset("sm100-mx-nonorm", ds_block=(128, 32), delta_norm=False)
 make_kda_preset("sm100-mx-lq", ds_block=(128, 32), delta_norm=True, l_from_codes=True)
 # kda-sm100 19:00: forward with ~exact P (fp8 code + 2 bf16 residuals ~ fp32), matched delta = dequant(dO8) . O_fp32

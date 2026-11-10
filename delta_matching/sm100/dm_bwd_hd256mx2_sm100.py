@@ -57,7 +57,7 @@ class DmHd256Mx2:
     DLY = 1 << 15
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
-                 q3: bool = False, lpt: str = ""):
+                 q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -75,6 +75,11 @@ class DmHd256Mx2:
         #     reversed rt.  Each CTA keeps its ascending key traversal.
         self.q3 = bool(q3) and self.dqopt
         self.lpt = lpt if (self.dqopt and causal) else ""
+        # xs (codex/hd256-dqopt-04-xchg.md X3): per-half max exchange read as ONE lane-distributed LDS.32 (lane l: slot 8 hf + (l & 7))
+        #     + xor-1 / xor-2 shuffles (the same max(max(m0, m1), max(m2, m3)) tree) + 2 broadcasts, instead of 2 x LDS.128.
+        # sp (Q4 split out): out(t-1) k-steps 0-1 -> dP(t) (committed) -> out(t-1) k-steps 2-3 (non-q3 order only).
+        self.xs = bool(xs) and self.dqopt
+        self.sp = bool(sp) and self.dqopt and not self.q3
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
@@ -304,29 +309,69 @@ class DmHd256Mx2:
                         mma_s.set(tcgen05.Field.ACCUMULATE, True)
                     se.commit()
                     yf.release()
-                if const_expr(not self.q3):
+                if const_expr(self.sp):
+                    # Q4 split: out(t-1) k 0-1 -> dP(t) (commit) -> out(t-1) k 2-3; same k order, zero init on k 0 of tile 0
                     if t > 0:
-                        # out(t-1): codes stage / SF set (t-1) & 1
-                        if const_expr(self.kn in ("cd", "fin")):
-                            spin(self.DLY)
-                        tp = t - 1
-                        s = tp & 1
-                        if const_expr(self.kn == "cd" and self.unsafe):
-                            s = tp * 0
-                        tf = t_c.wait_and_advance()
-                        cf = cd_c.wait_and_advance()
-                        tc_fence_after()
-                        dm_utils.gemm_ptx_bs(
-                            mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                            sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                            tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                            ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
-                            tuple((0, 0) for k in range(4)),
-                            zero_init=cutlass.Boolean(tp == 0))
-                        tf.release()
-                        cf.release()
-                if const_expr(self.has_dp):
-                    if t < total:
+                        if t < total:
+                            # out(t-1): codes stage / SF set (t-1) & 1
+                            if const_expr(self.kn in ("cd", "fin")):
+                                spin(self.DLY)
+                            tp = t - 1
+                            s = tp & 1
+                            if const_expr(self.kn == "cd" and self.unsafe):
+                                s = tp * 0
+                            tf = t_c.wait_and_advance()
+                            cf = cd_c.wait_and_advance()
+                            tc_fence_after()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=cutlass.Boolean(tp == 0), k_range=(0, 1))
+                            yg = yb_c.wait_and_advance()
+                            de = sc_p.acquire_and_advance()        # compute read S(t)
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW2
+                            if const_expr(self.kn == "s3"):
+                                spin(self.DLY)                     # control s3: dP(t) producer late
+                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                            for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                                cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                            de.commit()
+                            yg.release()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=False, k_range=(2, 3))
+                            tf.release()
+                            cf.release()
+                        else:
+                            # out(t-1): codes stage / SF set (t-1) & 1
+                            if const_expr(self.kn in ("cd", "fin")):
+                                spin(self.DLY)
+                            tp = t - 1
+                            s = tp & 1
+                            if const_expr(self.kn == "cd" and self.unsafe):
+                                s = tp * 0
+                            tf = t_c.wait_and_advance()
+                            cf = cd_c.wait_and_advance()
+                            tc_fence_after()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=cutlass.Boolean(tp == 0))
+                            tf.release()
+                            cf.release()
+                    else:
                         yg = yb_c.wait_and_advance()
                         de = sc_p.acquire_and_advance()        # compute read S(t)
                         if const_expr(self.ordf):
@@ -339,6 +384,42 @@ class DmHd256Mx2:
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
                         de.commit()
                         yg.release()
+                else:
+                    if const_expr(not self.q3):
+                        if t > 0:
+                            # out(t-1): codes stage / SF set (t-1) & 1
+                            if const_expr(self.kn in ("cd", "fin")):
+                                spin(self.DLY)
+                            tp = t - 1
+                            s = tp & 1
+                            if const_expr(self.kn == "cd" and self.unsafe):
+                                s = tp * 0
+                            tf = t_c.wait_and_advance()
+                            cf = cd_c.wait_and_advance()
+                            tc_fence_after()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=cutlass.Boolean(tp == 0))
+                            tf.release()
+                            cf.release()
+                    if const_expr(self.has_dp):
+                        if t < total:
+                            yg = yb_c.wait_and_advance()
+                            de = sc_p.acquire_and_advance()        # compute read S(t)
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW2
+                            if const_expr(self.kn == "s3"):
+                                spin(self.DLY)                     # control s3: dP(t) producer late
+                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                            for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                                cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                            de.commit()
+                            yg.release()
                 if const_expr(self.q3):     # q3: out(t-1) after dP(t)
                     if t > 0:
                         # out(t-1): codes stage / SF set (t-1) & 1
@@ -721,6 +802,13 @@ class DmHd256Mx2:
                         sb = dm_utils.pow2_sb(dm_utils.redux_max_abs_f32(cute.arch.fmax(cute.arch.fmax(am2[0], am2[1]), mo)))
                         sbs = [sb, sb]
                         sball = [sb] * 4
+                    elif const_expr(self.dqopt and self.xs):
+                        sball = [Int32(0)] * 4
+                        xv = ld_shared_f32(xb + (8 * hf + (lane & 7)) * 4)       # lanes 4c..4c+3: chunk 2 hf + c, quadrants 0..3
+                        xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=1))   # lane 4c: max(m0, m1); 4c+2: max(m2, m3)
+                        xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=2))   # lane 4c: max(max(m0, m1), max(m2, m3))
+                        sbs[0] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=0))
+                        sbs[1] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=4))
                     elif const_expr(self.dqopt):
                         sball = [Int32(0)] * 4
                         for jj in cutlass.range_constexpr(2):

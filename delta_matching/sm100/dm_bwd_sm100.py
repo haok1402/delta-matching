@@ -625,6 +625,9 @@ class DMBackwardSm100:
         # variant knobs for same-process A/B (bwd.py keys the compile cache on DM_BWD_OPTS)
         self.dm_opts = tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
+        _hog = next((x[4:] for x in self.dm_abl if x.startswith("hog=")), "0").split(":")
+        self.dm_hog_kib = int(_hog[0])
+        self.dm_hog_sleep = int(_hog[1]) if len(_hog) > 1 else 2
         # DM dsq (track L, kda/docs/bwdalt-design.md): the dS tile amax / pow2 scale / e4m3 quantization / dS code+SF stores /
         # dQ SF word + peer dS exchange move from the 8 compute warps to the 4 reduce (dQ drain) warps. Reduce warp q owns
         # TMEM lanes 32q..32q+31 = 32 keys = exactly one dS scale block (32 keys x 128 queries): no cross-WG amax exchange.
@@ -2142,6 +2145,11 @@ class DMBackwardSm100:
             self._dm_setmaxreg_dec(self.num_regs_empty)
             if const_expr(self.dm_pdyn):
                 self._dm_claim_loop(tile_sched_params, dm_sbase, aux_data.tensors[-1].iterator.toint())
+            if const_expr(self.dm_hog_kib > 0):
+                # TIMING-ONLY (abl:hog=<KiB>[:<sleep_us>]): background SMEM read traffic from the otherwise idle empty warp,
+                # <KiB> per m-block per CTA (one 128 B wavefront per ld.shared.b32 warp-instr over sK), then ~sleep_us of
+                # nanosleep, so it is spread over the tile period. Off the critical path: tests whether SMEM bandwidth binds.
+                self._dm_hog(storage.sK.data_ptr().toint(), cute.arch.lane_idx(), TileSchedulerCls, SeqlenInfoCls, block_info)
 
         #  RELAY
         # (14)
@@ -4144,6 +4152,27 @@ class DMBackwardSm100:
     def kv_head_of(self, head_idx):
         """KV head of a scheduler head (NOTE [SM100 backward coordinate spaces])."""
         return bwd_kv_head(head_idx, qhead_per_kvhead=self.qhead_per_kvhead, pack_gqa=self.pack_gqa)
+
+    @cute.jit
+    def _dm_hog(self, sbase: Int32, lane: Int32, TileSchedulerCls, SeqlenInfoCls, block_info):
+        cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
+        tile_scheduler = TileSchedulerCls()
+        work_tile = tile_scheduler.initial_work_tile_info()
+        acc = Int32(0)
+        n_ld = self.dm_hog_kib * 1024 // 128
+        while work_tile.is_valid_tile:
+            (work_n, kv_block, head_idx, kv_head, batch_idx, seqlen, m_block_min, m_block_max, process_tile) = (
+                self._work_tile(work_tile, cta_rank_in_cluster, SeqlenInfoCls, block_info))
+            if process_tile:
+                for _m in cutlass.range(m_block_max - m_block_min, unroll=1):
+                    for i in cutlass.range(n_ld, unroll=8):
+                        acc = acc ^ dm_utils.ld_shared_b32(sbase + ((i * 128 + lane * 4) & 16383))
+                    for _s in cutlass.range_constexpr(self.dm_hog_sleep):
+                        dm_utils.nanosleep_1us()
+            tile_scheduler.advance_to_next_work()
+            work_tile = tile_scheduler.get_current_work()
+        if acc == Int32(0x7EADBEEF):
+            dm_utils.st_shared_b32(sbase, acc)
 
     @cute.jit
     def _work_tile(self, work_tile, cta_rank, SeqlenInfoCls, block_info):

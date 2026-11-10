@@ -180,7 +180,11 @@ class DMFwdHd256MxSm100:
     Out: O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
-                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True):
+                 sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False):
+        # ord_td (fork hd256-ordinv, site FW15 of kda/hd256/ordinv-hd256.md; opt-in DM_HD256_ORDT=1): tcgen05 fence pair around
+        # the TMEM teardown barrier (users: fence::before_thread_sync before their arrive; allocator: before + after around its
+        # arrive_and_wait, then dealloc).  False = shipped code (PTX unchanged).
+        self.ord_td = ord_td
         # C6 (two_wg, default; Codex hd256-fwd-03, ncu run hd256-fwd-r3): TWO softmax warpgroups by tile parity - WG0 (warps 0-3)
         # owns tiles j = 0, 2, ... (S slot 0), WG1 (warps 4-7) tiles 1, 3, ... (slot 1). Per tile the m-independent prefix (S load,
         # block maxima, kb, bias, FFMA2, ex2, e4m3 codes -> sP, block sums) runs without the running state; the ordered tail
@@ -399,7 +403,11 @@ class DMFwdHd256MxSm100:
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.mma(tiled_mma_qk, tiled_mma_pv, sQ, sK, sV, sP, acc_qk, acc_pv, pipeline_q, pipeline_kv, mbar, cnt)
             tmem.relinquish_alloc_permit()
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_before()
             tmem_alloc_barrier.arrive_and_wait_unaligned()
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_after()
             tmem.free(tmem_ptr)
 
         if warp_idx <= self.softmax_warp_ids[-1]:
@@ -411,6 +419,8 @@ class DMFwdHd256MxSm100:
             else:
                 self.softmax(acc_qk, mbar, stats, sp_base, mLSE, mQS, mKVW, m_block, head_idx, kv_head_idx,
                              batch_idx, n_block_max, cnt)
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_before()
             tmem_alloc_barrier.arrive_unaligned()
 
         if warp_idx >= self.correction_warp_ids[0] and warp_idx <= self.correction_warp_ids[-1]:
@@ -420,6 +430,8 @@ class DMFwdHd256MxSm100:
                 cute.arch.setmaxregister_decrease(self.num_regs_correction)
             tmem_alloc_barrier.arrive_and_wait_unaligned()
             self.correction(mbar, stats, mO, m_block, head_idx, batch_idx, cnt)
+            if const_expr(self.ord_td):
+                dm_utils.tc_fence_before()
             tmem_alloc_barrier.arrive_unaligned()
         return
 

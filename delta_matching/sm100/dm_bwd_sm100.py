@@ -5221,7 +5221,8 @@ class DMBackwardSm100:
                           # expoff: this warp's 32 keys x this stage's 32 queries = one 32x32 block (the b6 indices); poly iff
                           # (qb + kb) % m < r (warp-uniform) - the same rule, helper and op sequence as pass 0 -> bitwise P
                           if (dm_common.expoff_uses_poly(
-                                  m_block * (self.tile_m // 32) + dm_qoff[stage], dm_kv_blk, self.dm_eo[1], self.dm_eo[2])):
+                                  0 if const_expr(dm_common.expoff_rule() == "k") else m_block * (self.tile_m // 32) + dm_qoff[stage],
+                                  dm_kv_blk, self.dm_eo[1], self.dm_eo[2])):
                               for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
                                   tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_common.expoff_ex2_pair(
                                       tSrS_cur[2 * v], tSrS_cur[2 * v + 1], self.dm_eo[0])

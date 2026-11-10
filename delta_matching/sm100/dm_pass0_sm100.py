@@ -302,6 +302,8 @@ class DMPass0Sm100:
         self.dm_eo = dm_common.expoff_pb()
         if self.dm_eo is not None:
             assert "tl" in _fl0 and self.m_block_size == 128, "expoff: pass 0 +tl path (m_block_size 128) only"
+        self.dm_eo_k = self.dm_eo is not None and dm_common.expoff_rule() == "k"
+        assert not self.dm_eo_k or self.dm_eo[2] in (2, 4), "expoff rule k: m in {2, 4} (kb % m = j % m, compile-time)"
         if self.dm_tl:
             assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
             assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
@@ -2738,7 +2740,17 @@ class DMPass0Sm100:
                                 for i in cutlass.range_constexpr(32 * h, 32 * h + 32):
                                     r[i] = -Float32.inf if kbase + 2 * i + par > row else r[i]
                         for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
-                            if const_expr(self.dm_eo is not None):
+                            if const_expr(self.dm_eo_k):
+                                # expoff rule k: kb = n_block*4 + j, so kb % m == j % m (m | 4): static per chunk, fused per pair
+                                for v in cutlass.range_constexpr(0, 16, 2):
+                                    i0 = 16 * j + v
+                                    r[i0], r[i0 + 1] = cute.arch.fma_packed_f32x2((r[i0], r[i0 + 1]), (cs[j], cs[j]), (-l2, -l2))
+                                    if const_expr(j % self.dm_eo[2] < self.dm_eo[1]):
+                                        r[i0], r[i0 + 1] = dm_common.expoff_ex2_pair(r[i0], r[i0 + 1], self.dm_eo[0])
+                                    else:
+                                        r[i0] = cute.math.exp2(r[i0], fastmath=True)
+                                        r[i0 + 1] = cute.math.exp2(r[i0 + 1], fastmath=True)
+                            elif const_expr(self.dm_eo is not None):
                                 # expoff: same FFMA as dm_bwd_p_pair, then this warp's 32x32 block (qb = row // 32 is
                                 # warp-uniform: rows quad*32 + 16*rh + 0..15; kb = n_block*4 + j) picks poly or MUFU
                                 for v in cutlass.range_constexpr(0, 16, 2):

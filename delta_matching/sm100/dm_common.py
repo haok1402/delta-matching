@@ -164,3 +164,10 @@ def expoff_uses_poly(qb, kb, r: int, m: int):
     if os.environ.get("DM_EXPOFF_DIAG", "") == "nobr":   # diagnostic: no branch, every block MUFU (restructure cost only)
         return False
     return cute.arch.make_warp_uniform((qb + kb) % m) < r   # warp-uniform in both kernels -> uniform branch
+
+
+def expoff_rule() -> str:
+    """DM_EXPOFF_RULE: 'qk' (default) = (qb + kb) % m < r; 'k' = kb % m < r (key block only; m in {2, 4}: compile-time per
+    32-key chunk in pass 0, per-warp in the backward). Same rule in both kernels."""
+    import os
+    return os.environ.get("DM_EXPOFF_RULE", "qk") or "qk"

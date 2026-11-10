@@ -3774,7 +3774,8 @@ class DMBackwardSm100:
                             dm_acc0 = dm_acc0 + (dm_utils.clock64() - dm_t0)
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
-                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                        if const_expr("nodqs" not in self.dm_abl):
+                            pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                         if const_expr(dm_trace is not None):
                             dm_acc1 = dm_acc1 + (dm_utils.clock64() - dm_t0)
                         mma_qk_fn(B_idx=consumer_state_Q.index)
@@ -3821,6 +3822,8 @@ class DMBackwardSm100:
                         cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
                         if const_expr(dm_trace is not None):
                             dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
+                        if const_expr("nodqs" in self.dm_abl):  # ABL nodqs (timing only, WRONG)
+                            pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                         mma_dsk_fn()
                         pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
                         pipeline_dS.consumer_release(consumer_state_dS)
@@ -3832,7 +3835,8 @@ class DMBackwardSm100:
                         producer_phase_acc ^= 1
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
-                        pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)  # S -> P
+                        if const_expr("nopw" not in self.dm_abl):  # ABL nopw (timing only, WRONG)
+                            pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)  # S -> P
                         if const_expr(dm_trace is not None):
                             dm_acc7 = dm_acc7 + (dm_utils.clock64() - dm_t0)
                         mma_pdo_fn(B_idx=consumer_state_dO.index, zero_init=False)

@@ -7,6 +7,8 @@ bf16 epilogue.  Only the schedule / ownership changes:
 
   TMEM: cols 0-127 ONE score region, used S(t) then dP(t) (dk / dq) or S(t) only (dv); cols 128+16s .. +11 SF set s
         (SFA 4 cols, SFB 8 cols of constant 0x7F written once), s = t & 1; cols 256-511 out accumulator.
+        dqopt (impl 3, the dq default): SF set s uses all 16 columns: SFA block +0..3 (half 0, k-steps 0, 1), +4..7 (half 1,
+        k-steps 2, 3), SFB +8..15.
   Warps: 0-7 compute (warp w: TMEM lane quadrant w % 4, row r = 32 (w % 4) + lane, score columns 64 (w // 4) .. +63 =
          quantization chunks j = 2 (w // 4) + {0, 1}); 8 MMA; 9 TMA.  Each thread holds its 64 P / dS in registers (no stash).
   MMA order per tile: S(t) -> out(t-1) -> dP(t) (dk / dq), S(t) -> out(t-1) (dv).  No od barrier: SFs never alias scores.
@@ -46,6 +48,12 @@ class DmHd256Mx2:
     TM, TN, D = 128, 128, 256
     COL_SF, SF_STRIDE, COL_OUT = 128, 16, 256
     KNOBS = ("sc", "cd", "ld", "xc", "fin")
+    # dq / dqopt positive controls (fork hd256-dqopt, codex/hd256-dqopt-01-controls.md; harness kda/tests/hd256/t_dqctl.py), kept
+    # out of KNOBS (t_bwdmx knobs_main loops KNOBS over all modes).  Unsafe = the edge's order broken + delay; "_safe" = shipped
+    # order + the same delay.  xh0/xh1 per-half max exchange (bar 5 / 6); xi identity exchange (bar 2, dbg 1); s1 / s3 S / dP MMA ->
+    # tcgen05.ld (RAW); s4 ld dP(t) -> S(t+1) (WAR); sf0/sf1 SFA st -> out (per half / SFA block); cw0/cw1 codes st.shared -> out
+    # (per half); sfb0/sfb1 one-time SFB write -> first out of SF set 0 / 1.
+    DQCTL = ("xh0", "xh1", "xi", "s1", "s3", "s4", "sf0", "sf1", "cw0", "cw1", "sfb0", "sfb1")
     DLY = 1 << 15
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False):
@@ -63,7 +71,8 @@ class DmHd256Mx2:
         assert not (dbg & 4)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")
-        assert self.kn in ("",) + self.KNOBS, knob
+        assert self.kn in ("",) + self.KNOBS + self.DQCTL, knob
+        assert self.kn not in self.DQCTL or self.dqopt, knob
         self.mode = mode
         self.causal = bool(causal)
         self.dbg = int(dbg)
@@ -261,6 +270,8 @@ class DmHd256Mx2:
                     se = sc_p.acquire_and_advance()            # score region free (compute read dP(t-1) / S(t-1))
                     if const_expr(self.ordf):
                         tc_fence_after()                       # BW2
+                    if const_expr(self.kn == "s1"):
+                        spin(self.DLY)                         # control s1: S(t) producer late
                     mma_s.set(tcgen05.Field.ACCUMULATE, False)
                     for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
                         cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
@@ -293,6 +304,8 @@ class DmHd256Mx2:
                         de = sc_p.acquire_and_advance()        # compute read S(t)
                         if const_expr(self.ordf):
                             tc_fence_after()                   # BW2
+                        if const_expr(self.kn == "s3"):
+                            spin(self.DLY)                     # control s3: dP(t) producer late
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
                             cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
@@ -342,8 +355,16 @@ class DmHd256Mx2:
             if hf == 0:
                 one = Int32(0x7F7F7F7F)
                 for s in cutlass.range_constexpr(2):
-                    dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF, one, one, one, one)
-                    dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF + 4, one, one, one, one)
+                    if const_expr(self.kn == "sfb%d" % s):
+                        # control sfb<s>: POISON 0x80 (2.0) first, completed; the real 0x7F follows here (safe) or only after
+                        # set s's first publication (unsafe, below)
+                        pz = Int32(0x80808080 - (1 << 32))
+                        dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF, pz, pz, pz, pz)
+                        dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF + 4, pz, pz, pz, pz)
+                        cute.arch.fence_view_async_tmem_store()
+                    if const_expr(not (self.kn == "sfb%d" % s and self.unsafe)):
+                        dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF, one, one, one, one)
+                        dm_utils.tmem_st_x4(tb + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF + 4, one, one, one, one)
             # keys-on-rows: stage l2 / delta of tile 0 (threads 0-127 l2, 128-255 delta)
             if const_expr(self.rows_are_keys):
                 h0 = hx * rep
@@ -416,15 +437,23 @@ class DmHd256Mx2:
                     ldn = sLD_addr
                 xb = xch_addr + par * 1024
                 # ---- S(t) -> registers, release the score region ----
-                sf = sc_c.wait_and_advance()
-                if const_expr(self.ordf):
-                    tc_fence_after()                           # BW1
-                if const_expr(self.kn == "sc"):
-                    if const_expr(self.unsafe):
-                        sf.release()
-                    spin(self.DLY)
-                sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
-                cute.arch.fence_view_async_tmem_load()
+                if const_expr(self.kn == "s1" and self.unsafe):
+                    # control s1 (unsafe): read the score region BEFORE S(t)'s full wait
+                    sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                    cute.arch.fence_view_async_tmem_load()
+                    sf = sc_c.wait_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_after()
+                else:
+                    sf = sc_c.wait_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_after()                       # BW1
+                    if const_expr(self.kn == "sc"):
+                        if const_expr(self.unsafe):
+                            sf.release()
+                        spin(self.DLY)
+                    sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                    cute.arch.fence_view_async_tmem_load()
                 if const_expr(not (self.kn == "sc" and self.unsafe)):
                     if const_expr(self.ordf):
                         tc_fence_before()                      # BW2
@@ -489,14 +518,36 @@ class DmHd256Mx2:
                 ce = None
                 if const_expr(self.has_dp):
                     # ---- dP(t) -> registers, release; dS = P * fma(dP, a, -delta) ----
-                    df = sc_c.wait_and_advance()
-                    if const_expr(self.ordf):
-                        tc_fence_after()                       # BW1
-                    dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
-                    cute.arch.fence_view_async_tmem_load()
-                    if const_expr(self.ordf):
-                        tc_fence_before()                      # BW2
-                    df.release()
+                    if const_expr(self.kn == "s3" and self.unsafe):
+                        # control s3 (unsafe): read dP BEFORE dP(t)'s full wait
+                        dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                        cute.arch.fence_view_async_tmem_load()
+                        df = sc_c.wait_and_advance()
+                        if const_expr(self.ordf):
+                            tc_fence_after()
+                        if const_expr(self.ordf):
+                            tc_fence_before()
+                        df.release()
+                    elif const_expr(self.kn == "s4" and self.unsafe):
+                        # control s4 (unsafe): release the score region BEFORE reading dP(t), then delay the read
+                        df = sc_c.wait_and_advance()
+                        if const_expr(self.ordf):
+                            tc_fence_after()
+                        df.release()
+                        spin(self.DLY)
+                        dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                        cute.arch.fence_view_async_tmem_load()
+                    else:
+                        df = sc_c.wait_and_advance()
+                        if const_expr(self.ordf):
+                            tc_fence_after()                   # BW1
+                        if const_expr(self.kn == "s4"):
+                            spin(self.DLY)
+                        dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                        cute.arch.fence_view_async_tmem_load()
+                        if const_expr(self.ordf):
+                            tc_fence_before()                  # BW2
+                        df.release()
                     am2 = [Float32(0.0)] * 2
                     idc = [[Float32(0.0)] * 3, [Float32(0.0)] * 3]
                     for jj in cutlass.range_constexpr(2):
@@ -551,12 +602,17 @@ class DmHd256Mx2:
                         # row max over this half -> slot [hf][r]; partner half's max after the barrier
                         st_shared_f32(xb + (hf * 128 + r) * 4, cute.arch.fmax(am2[0], am2[1]))
                     else:
+                        if const_expr(self.kn in ("xh0", "xh1")):
+                            if warp == 4 * int(self.kn[2]):
+                                spin(self.DLY)                 # control xh<h>: warp 0 / 4 late BEFORE its slot stores
                         for jj in cutlass.range_constexpr(2):
                             a_ = dm_utils.redux_max_abs_f32(am2[jj])
                             if lane == 0:
                                 st_shared_f32(xb + ((2 * hf + jj) * 4 + qd) * 4, a_)
                     if const_expr((self.dbg & 1) and self.mode == "dq"):
                         if hf == 1:
+                            if const_expr(self.kn == "xi"):
+                                spin(self.DLY)                 # control xi: upper half late before its identity stores
                             for jj in cutlass.range_constexpr(2):
                                 for u in cutlass.range_constexpr(3):
                                     st_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj + u) * 4, idc[jj][u])
@@ -567,10 +623,12 @@ class DmHd256Mx2:
                         if const_expr(self.dqopt):
                             # Q2: chunks 2 hf, 2 hf + 1 are reduced over the 4 lane quadrants of THIS half only
                             if hf == 0:
-                                cute.arch.barrier(barrier_id=5, number_of_threads=128)
+                                if const_expr(not (self.kn == "xh0" and self.unsafe)):
+                                    cute.arch.barrier(barrier_id=5, number_of_threads=128)
                             else:
-                                cute.arch.barrier(barrier_id=6, number_of_threads=128)
-                            if const_expr(self.dbg & 1):
+                                if const_expr(not (self.kn == "xh1" and self.unsafe)):
+                                    cute.arch.barrier(barrier_id=6, number_of_threads=128)
+                            if const_expr((self.dbg & 1) and not (self.kn == "xi" and self.unsafe)):
                                 cute.arch.barrier(barrier_id=2, number_of_threads=256)    # identity exchange (dbg only)
                         else:
                             cute.arch.barrier(barrier_id=2, number_of_threads=256)
@@ -637,6 +695,7 @@ class DmHd256Mx2:
                             tc_fence_after()                   # BW3
                 # ---- codes -> smem stage stg (own two chunks) ----
                 cbase = crow + stg * self.bytes_c
+                pend = []                    # control cw<h>: code stores deferred (emitted below), else stored here
                 for jj in cutlass.range_constexpr(2):
                     j2 = 2 * hf + jj
                     hsl = [Int32(0)] * 32
@@ -649,7 +708,10 @@ class DmHd256Mx2:
                             y0, y1 = cute.arch.mul_packed_f32x2((vals[jj][i0], vals[jj][i0 + 1]), (inv, inv))
                             y2, y3 = cute.arch.mul_packed_f32x2((vals[jj][i0 + 2], vals[jj][i0 + 3]), (inv, inv))
                             w[u] = e4m3x4(y0, y1, y2, y3)
-                        st_shared_v4(cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                        if const_expr(self.kn in ("cw0", "cw1")):
+                            pend.append((cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3]))
+                        else:
+                            st_shared_v4(cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
                         if const_expr((self.dbg & 8) and self.has_dp):
                             for u in cutlass.range_constexpr(4):
                                 for q in cutlass.range_constexpr(4):
@@ -693,22 +755,69 @@ class DmHd256Mx2:
                             for q in cutlass.range_constexpr(4):
                                 st_global_u8(cp, x4[u] >> (8 * q))
                                 cp = cp + stc
+                sfw = Int32(0)
                 if const_expr(self.dqopt):
                     v0_ = dm_utils.add_sb_clamp(sbs[0], osbo[0])
                     v1_ = dm_utils.add_sb_clamp(sbs[1], osbo[1])
                     z_ = Int32(0)
                     sfw = sel_eq_i32(hf, Int32(0), pack4(v0_, v1_, z_, z_), pack4(z_, z_, v0_, v1_))
-                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
-                elif hf == 0:
-                    sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),
-                                dm_utils.add_sb_clamp(sball[2], osb[2]), dm_utils.add_sb_clamp(sball[3], osb[3]))
-                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + qd, sfa)
-                cute.arch.fence_view_async_tmem_store()
-                cute.arch.fence_view_async_shared()
-                tc_fence_before()
-                if const_expr(self.kn == "cd" and self.unsafe):
-                    ce = cd_p.acquire_and_advance()
-                ce.commit()
+                if const_expr(self.kn in ("cw0", "cw1", "sf0", "sf1")):
+                    # controls (dqopt only): half h = knob digit publishes early (unsafe) / late but in order (safe)
+                    hk_ = int(self.kn[2])
+                    late_cw = self.kn[:2] == "cw"
+                    if const_expr(not self.unsafe):
+                        if hf == hk_:
+                            spin(self.DLY)
+                    if const_expr(late_cw):
+                        if const_expr(self.unsafe):
+                            if hf != hk_:
+                                for pa_ in pend:
+                                    st_shared_v4(*pa_)
+                        else:
+                            for pa_ in pend:
+                                st_shared_v4(*pa_)
+                    if const_expr(self.unsafe and not late_cw):
+                        if hf != hk_:
+                            dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                    else:
+                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                    cute.arch.fence_view_async_tmem_store()
+                    cute.arch.fence_view_async_shared()
+                    tc_fence_before()
+                    ce.commit()
+                    if const_expr(self.unsafe):
+                        if hf == hk_:
+                            spin(self.DLY)
+                            if const_expr(late_cw):
+                                for pa_ in pend:
+                                    st_shared_v4(*pa_)
+                            else:
+                                dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                                cute.arch.fence_view_async_tmem_store()
+                else:
+                    if const_expr(self.dqopt):
+                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                    elif hf == 0:
+                        sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),
+                                    dm_utils.add_sb_clamp(sball[2], osb[2]), dm_utils.add_sb_clamp(sball[3], osb[3]))
+                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + qd, sfa)
+                    cute.arch.fence_view_async_tmem_store()
+                    cute.arch.fence_view_async_shared()
+                    tc_fence_before()
+                    if const_expr(self.kn == "cd" and self.unsafe):
+                        ce = cd_p.acquire_and_advance()
+                    ce.commit()
+                if const_expr(self.kn in ("sfb0", "sfb1")):
+                    # control sfb<s>: after SF set s's FIRST publication (t == s): delay; unsafe writes the real SFB only now
+                    if t == int(self.kn[3]):
+                        if hf == 0:
+                            spin(self.DLY)
+                            if const_expr(self.unsafe):
+                                one_ = Int32(0x7F7F7F7F)
+                                sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
+                                dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
+                                dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
+                                cute.arch.fence_view_async_tmem_store()
             if const_expr((self.dbg & 1) and self.mode == "dq"):
                 if hf == 0:
                     ia = _gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 32

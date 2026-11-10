@@ -23,7 +23,7 @@ from .fastpath import env as _env
 D = 256
 NUMERICS = "sm100-mx-d256"
 DETERMINISTIC = True
-IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "3"}   # O1 (DmHd256Mx2) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
+IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "3"}   # O3-Q12 (DmHd256Mx2 dqopt) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}
 PROF = []
@@ -79,7 +79,7 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
                    knob="", impl=None):
     """impl per mode: "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values).
     impl "1" / "2" = all modes; a dict mode -> impl; None = env DM_H256_MX_IMPL (all modes; renamed from DM_H256_BWD_IMPL in bundle 3, which now names the api-level mx|kv2 switch) if set, else IMPL_DEFAULT
-    (dq "2", dv / dk "1")."""
+    (dq "3" = DmHd256Mx2 + dqopt, dv / dk "1"; the api's default dK/dV is KV2)."""
     if impl is None:
         impl = _env("DM_H256_MX_IMPL", "")
         impl = (IMPL_DEFAULT if not knob else "1") if impl == "" else impl   # knobs are per class: one impl for all modes

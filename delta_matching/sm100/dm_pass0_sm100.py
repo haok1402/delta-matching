@@ -308,7 +308,13 @@ class DMPass0Sm100:
         # stage = (warp >> 2) & 1, rh = warp >> 3 (same warp -> (stage, rh) map as the default). Only TMEM/barrier/row
         # addressing becomes register-held; every value and per-element op/order is unchanged: delta bitwise.
         self.dm_u1 = "u1" in _fl0
-        assert not self.dm_u1 or self.dm_tl, "+u1 needs +tl"
+        # +u2: two code copies (stage stays a trace-time constant -> immediate barrier / TMEM-column addresses; only the
+        # row half rh = warp >> 3 is runtime): stage-0 warps (0-3, 8-11) and stage-1 warps (4-7, 12-15) each share a copy
+        self.dm_u2 = "u2" in _fl0
+        assert not (self.dm_u1 and self.dm_u2)
+        if self.dm_u2:
+            self.dm_u1 = True
+        assert not self.dm_u1 or self.dm_tl, "+u1/+u2 need +tl"
         if self.dm_tl:
             assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
             assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
@@ -1479,8 +1485,16 @@ class DMPass0Sm100:
                 tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
                 u1_stage = (warp_idx >> 2) & 1   # warps 0-3 / 8-11 -> stage 0, 4-7 / 12-15 -> stage 1
                 u1_rh = warp_idx >> 3            # softmax ids 0-7 -> rows 0-15, correction ids 8-15 -> rows 16-31
-                self.tl_loop(u1_stage, u1_rh, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
-                             num_splits, SeqlenInfoCls, tile_scheduler)
+                if const_expr(self.dm_u2):
+                    if u1_stage == 0:
+                        self.tl_loop(0, u1_rh, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
+                                     num_splits, SeqlenInfoCls, tile_scheduler)
+                    else:
+                        self.tl_loop(1, u1_rh, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
+                                     num_splits, SeqlenInfoCls, tile_scheduler)
+                else:
+                    self.tl_loop(u1_stage, u1_rh, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data,
+                                 block_info, num_splits, SeqlenInfoCls, tile_scheduler)
                 tmem_alloc_barrier.arrive_unaligned()
 
         # ///////////////////////////////////////////////////////////////////////////////

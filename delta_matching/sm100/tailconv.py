@@ -72,7 +72,7 @@ def _patch(src: str) -> str:
             raise RuntimeError(f"tailconv patch anchor not unique/found ({src.count(a)}): {a[:80]!r}")
         src = src.replace(a, b)
     # deferred griddepcontrol.wait at the very end of the kernel (the module ends with the kernel body)
-    src = src.rstrip("\n") + ("\n        if const_expr(os.environ.get('DM_TCONV_GDCWAIT', '1') == '1'):\n"
+    src = src.rstrip("\n") + ("\n        if const_expr(self.dm_gdcwait):\n"
                                "            cute.arch.griddepcontrol_wait()\n")
     return src
 
@@ -92,6 +92,7 @@ class DMTailConv(_Base):
     def __init__(self, *a, dm_kind="q", dm_causal=True, dm_ctn=256, dm_G=1, dm_ctl="", **k):
         super().__init__(*a, **k)
         self.dm_kind, self.dm_causal, self.dm_ctn, self.dm_G, self.dm_ctl = dm_kind, dm_causal, dm_ctn, dm_G, dm_ctl
+        self.dm_gdcwait = os.environ.get("DM_TCONV_GDCWAIT", "1") == "1"
 
     @cute.jit
     def _dm_pick(self, mDmSem, mDmQ, sbuf, tidx):

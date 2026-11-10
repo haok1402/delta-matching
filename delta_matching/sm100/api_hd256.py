@@ -15,19 +15,21 @@ from .quant import quant_do_delta
 from .pass0_hd256 import dm_delta_hd256
 from .bwd_hd256mx import dm_bwd_hd256mx
 from .bwd_hd256kv2 import dm_bwd_hd256kv2, kv2_launch
+from .bwd_hd256dqr import dm_bwd_hd256dqr
 from .fastpath import env as _env
 
-BWD_IMPL_DEFAULT = "kv2"    # host impl switch (DM_H256_BWD_IMPL): "mx" = DmHd256Mx dv+dk+dq, "kv2" = DmHd256Mx dq + DmHd256Kv2
+BWD_IMPL_DEFAULT = "kv2"    # host impl switch (DM_H256_BWD_IMPL): "mx" = DmHd256Mx dv+dk+dq, "kv2" = DmHd256Mx dq + DmHd256Kv2,
+#                             "dqr" = KV2 (+ dS workspace) then the DmHd256Dqg dQ GEMM (fork hd256-dqr, opt-in)
 
 
 def _bwd_impl():
     v = _env("DM_H256_BWD_IMPL", BWD_IMPL_DEFAULT)
-    assert v in ("mx", "kv2"), v
+    assert v in ("mx", "kv2", "dqr"), v
     return v
 
 
 def _bwd(*a, **k):
-    return (dm_bwd_hd256kv2 if _bwd_impl() == "kv2" else dm_bwd_hd256mx)(*a, **k)
+    return {"kv2": dm_bwd_hd256kv2, "mx": dm_bwd_hd256mx, "dqr": dm_bwd_hd256dqr}[_bwd_impl()](*a, **k)
 
 D = 256
 

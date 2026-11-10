@@ -739,6 +739,8 @@ class DMBackwardSm100:
         # The dS relay (X10) and the dealloc handshake (X11) keep the pwq form. xrp:<k> = DEBUG planted control: relay lane k forwards
         # BEFORE its local phase completes (arrive, then wait) -> the leader may consume CTA 1's data one phase early.
         self.dm_xs_relay = self.dm_xscope and "rly" in _xm
+        if self.dm_xscope and "fa" in _xm:   # xs:fawq: fence.acq_rel.cluster + .cta remote arrive per arriving thread (ruling's fence form)
+            self.dm_xs_arrive = 3
         if self.dm_xs_relay:
             self.dm_xs_arrive, self.dm_xs_wait = 2, 2
         self.dm_xrp = int(next((x[4:] for x in self.dm_opts if x.startswith("xrp:")), "-1"))

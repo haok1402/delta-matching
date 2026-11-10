@@ -1060,6 +1060,9 @@ def _xs_install():
     f = _A.mbarrier_arrive
     if not getattr(f, "_dm_xs", False):
         def mbarrier_arrive(mbar_ptr, peer_cta_rank_in_cluster=None, *a, **kw):
+            if XS[0] == 3 and peer_cta_rank_in_cluster is not None and kw.get("scope") is None:
+                fence_acq_rel_cluster()   # per arriving (elected) thread: fence.acq_rel.cluster, then the .cta arrive
+                return f(mbar_ptr, peer_cta_rank_in_cluster, *a, **kw)
             if (XS[0] == 4 and peer_cta_rank_in_cluster is not None and kw.get("scope") is None and not a
                     and kw.get("arrive_count", 1) == 1 and not kw.get("relaxed", False)):
                 return mbar_arrive_relay_local(Int32(mbar_ptr.toint()), Int32(peer_cta_rank_in_cluster),

@@ -83,9 +83,8 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     dev = q8.device
     causal = bool(causal)
     f8 = torch.float8_e4m3fn
-    qt, dot, kt = tw if tw is not None else twins(q8, do8, k8)
     p = lambda x: x.view(f8).permute(1, 3, 2, 0)        # (B, N, h, D) -> (N, D, h, B)  # noqa: E731
-    tt = lambda x: x.view(f8).permute(1, 2, 0)          # (L, 256, N) -> (256, N, L)  # noqa: E731
+    tt = lambda x: x.view(f8).permute(3, 1, 2, 0)       # (B, N, h, 256) -> (256, N, h, B): MN-major B of the out MMAs  # noqa: E731
     dq = torch.empty(B, N, H, D, device=dev, dtype=torch.bfloat16)
     dk = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
     dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
@@ -97,16 +96,16 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     n_t = N // 128
     for mode in modes:
         if mode == "dv":
-            X, Xb, Y, Yb, Tw, out = k8, k8, q8, q8, dot, dv
+            X, Xb, Y, Yb, Tw, out = k8, k8, q8, q8, do8, dv
         elif mode == "dk":
-            X, Xb, Y, Yb, Tw, out = k8, v8, q8, do8, qt, dk
+            X, Xb, Y, Yb, Tw, out = k8, v8, q8, do8, q8, dk
         else:
-            X, Xb, Y, Yb, Tw, out = q8, do8, k8, v8, kt, dq
+            X, Xb, Y, Yb, Tw, out = q8, do8, k8, v8, k8, dq
         dump = torch.zeros(L, N, N, 4, device=dev) if big else torch.zeros(1, 1, 1, 4, device=dev)
         codes = torch.zeros(L, N, N, device=dev, dtype=torch.uint8) if big else torch.zeros(1, 1, 16, device=dev, dtype=torch.uint8)
         sb = torch.zeros(L, N, N // 32, device=dev, dtype=torch.int32) if big else torch.zeros(1, 1, 4, device=dev, dtype=torch.int32)
         ten = [p(X), p(Xb), p(Y), p(Yb), tt(Tw), qs, ks, vs, dos, lse, delta, out, ident, dump, codes, sb]
-        lds = [1, 1, 1, 1, 1] + lds_tail
+        lds = [1, 1, 1, 1, 0] + lds_tail
         kd = dbg & 3 if mode == "dq" else dbg & 2
         key = (mode, causal, kd) if not knob else (mode, causal, kd, knob)
         _run(key, lambda: DmHd256Mx(mode, causal, kd, knob), ten, lds, [n_t, H, Hk])
@@ -127,11 +126,10 @@ def delta_test(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal):
     p = lambda x: x.view(f8).permute(1, 3, 2, 0)  # noqa: E731
     nd = torch.zeros(B * H, N, 2, device=dev, dtype=torch.float64)
     z = torch.zeros(1, 1, 1, 4, device=dev)
-    kt = torch.zeros(B * Hk, D, 128, device=dev, dtype=torch.uint8).view(f8)
-    ten = [p(q8), p(do8), p(k8), p(v8), kt.permute(1, 2, 0), qs, ks, vs, dos, lse, lse,
+    ten = [p(q8), p(do8), p(k8), p(v8), k8.view(f8).permute(3, 1, 2, 0), qs, ks, vs, dos, lse, lse,
            torch.zeros(1, 1, 1, D, device=dev, dtype=torch.bfloat16), nd,
            z, torch.zeros(1, 1, 16, device=dev, dtype=torch.uint8), torch.zeros(1, 1, 4, device=dev, dtype=torch.int32)]
-    lds = [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2]
+    lds = [1, 1, 1, 1, 0, 2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2]
     _run(("delta", bool(causal)), lambda: DmHd256Mx("dq", bool(causal), 4), ten, lds, [N // 128, H, Hk])
     num, den = nd[..., 0], nd[..., 1]
     return torch.where(den > 0, num / den, torch.zeros_like(num)).float().view(B, H, N), nd

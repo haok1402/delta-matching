@@ -158,7 +158,8 @@ class DmHd256Mx:
         a_l = sm100_utils.make_smem_layout_a(mma_s, s_tiler, F8, 1)
         b_l = sm100_utils.make_smem_layout_b(mma_s, s_tiler, F8, 1)
         o_tiler = (self.TM, D, self.TN)
-        mma_o = sm100_utils.make_trivial_tiled_mma(F8, F8, tcgen05.OperandMajorMode.K, tcgen05.OperandMajorMode.K,
+        # out MMAs: B = dO / Q / K read MN-major (d contiguous) straight from the natural (B, N, heads, 256) layout (F1)
+        mma_o = sm100_utils.make_trivial_tiled_mma(F8, F8, tcgen05.OperandMajorMode.K, tcgen05.OperandMajorMode.MN,
                                                    Float32, tcgen05.CtaGroup.ONE, o_tiler[:2])
         c_l = sm100_utils.make_smem_layout_a(mma_o, o_tiler, F8, 1)
         t_l = sm100_utils.make_smem_layout_b(mma_o, o_tiler, F8, 1)
@@ -310,7 +311,7 @@ class DmHd256Mx:
                 nyh = H
                 if const_expr(not self.rows_are_keys):
                     nyh = Hk
-                gT = cute.local_tile(mT[None, None, b * nyh + hy], (D, self.TN), (0, None))
+                gT = cute.local_tile(mT[None, None, hy, b], (D, self.TN), (0, None))
                 tTs, tTg = cpasync.tma_partition(tma_T, 0, cute.make_layout(1), cute.group_modes(sT, 0, 3),
                                                  cute.group_modes(thr_o.partition_B(gT), 0, 3))
                 for ci in cutlass.range(ncs, unroll=1):

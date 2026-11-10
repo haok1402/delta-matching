@@ -302,6 +302,13 @@ class DMPass0Sm100:
         # of this stage waits on dP(n)). Same TMEM loads, same values, same per-element ops and order: delta bitwise.
         self.dm_es = "es" in _fl0
         assert not self.dm_es or self.dm_tl, "+es needs +tl"
+        # +u1 (kda-sm100-gap8k): ONE code copy of the two-lane loop. Default: tl_loop(stage, rh) is traced 4x (Python-int
+        # stage/rh, two call sites) and every SMSP runs all 4 copies (~45 KB of hot SASS; ncu: no_instruction 0.87-0.91
+        # warps/issue = icache misses). +u1: all 16 compute warps take one call site with warp-uniform runtime
+        # stage = (warp >> 2) & 1, rh = warp >> 3 (same warp -> (stage, rh) map as the default). Only TMEM/barrier/row
+        # addressing becomes register-held; every value and per-element op/order is unchanged: delta bitwise.
+        self.dm_u1 = "u1" in _fl0
+        assert not self.dm_u1 or self.dm_tl, "+u1 needs +tl"
         if self.dm_tl:
             assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
             assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
@@ -1462,9 +1469,24 @@ class DMPass0Sm100:
                 )
 
         # ///////////////////////////////////////////////////////////////////////////////
+        #  +u1: all 16 two-lane compute warps (softmax 0-7 + correction ids 8-15) share one tl_loop call site
+        # ///////////////////////////////////////////////////////////////////////////////
+        if const_expr(self.dm_u1):
+            if warp_idx <= self.correction_warp_ids[-1]:
+                cute.arch.setmaxregister_increase(self.num_regs_softmax)   # == num_regs_correction (tl asserts)
+                # sync with mma warp before retrieving tmem ptr
+                tmem_alloc_barrier.arrive_and_wait_unaligned()
+                tmem_ptr = tmem.retrieve_ptr(self.qk_acc_dtype)
+                u1_stage = (warp_idx >> 2) & 1   # warps 0-3 / 8-11 -> stage 0, 4-7 / 12-15 -> stage 1
+                u1_rh = warp_idx >> 3            # softmax ids 0-7 -> rows 0-15, correction ids 8-15 -> rows 16-31
+                self.tl_loop(u1_stage, u1_rh, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_o_acc, aux_data, block_info,
+                             num_splits, SeqlenInfoCls, tile_scheduler)
+                tmem_alloc_barrier.arrive_unaligned()
+
+        # ///////////////////////////////////////////////////////////////////////////////
         #  Softmax
         # ///////////////////////////////////////////////////////////////////////////////
-        if (
+        if const_expr(not self.dm_u1) and (
             (const_expr(self.q_stage == 2) and warp_idx <= self.softmax1_warp_ids[-1]) or
             (const_expr(self.q_stage == 1) and warp_idx <= self.softmax0_warp_ids[-1])
         ):
@@ -1524,7 +1546,7 @@ class DMPass0Sm100:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Correction
         # ///////////////////////////////////////////////////////////////////////////////
-        if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+        if const_expr(not self.dm_u1) and warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
             # setmaxnreg.dec cannot exceed the launch register count.
             if const_expr(self.dm_tl):
                 cute.arch.setmaxregister_increase(self.num_regs_correction)   # 640-thread launch: 96 regs
@@ -2656,7 +2678,7 @@ class DMPass0Sm100:
             work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
-    def tl_loop(self, stage: int, rh: int, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_dp, aux_data, block_info,
+    def tl_loop(self, stage, rh, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_dp, aux_data, block_info,
                 num_splits, SeqlenInfoCls, tile_scheduler):
         """P0 +tl (track AG): two lanes per query row, 4 compute warps / SMSP (stage, row half rh).
         tcgen05.ld.16x64b: thread t of the warp holds TMEM lane quad*32 + 16*rh + t//4 + 8*(t&1) and the columns of

@@ -641,8 +641,8 @@ class DmHd256Kv2:
             crow_off = (r // 8) * 1024 + (r % 8) * 128
             rsw = r % 8
             if const_expr(self.dqc):
-                if const_expr(self.kn == "cr"):
-                    spin(self.DLY)
+                if const_expr(self.kn == "cr" and not self.unsafe):
+                    spin(self.DLY)               # safe: the same delay, before the restore (and so before the t = 0 publication)
                 if const_expr(not (self.kn == "cr" and self.unsafe)):
                     self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
             for t in cutlass.range(total, unroll=1):
@@ -881,7 +881,8 @@ class DmHd256Kv2:
                 if const_expr(not (self.kn == "cd" and self.unsafe)):
                     self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)    # release.cluster on the leader's barrier
                 if const_expr(self.dqc and self.kn == "cr" and self.unsafe):
-                    if t == 0:       # UNSAFE cr: carry restored after the t = 0 publication (the first dV / dK MMA may run first)
+                    if t == 0:       # UNSAFE cr: carry restored after the t = 0 publication + a delay (the first dV / dK MMA runs first)
+                        spin(self.DLY)
                         self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
             if const_expr(not (self.kn == "fin" and self.unsafe)):

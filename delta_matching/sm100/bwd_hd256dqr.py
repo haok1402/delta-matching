@@ -163,6 +163,9 @@ def batch_chunks(B, H, N, causal):
     return _balanced(B, int(_cfg()[0] * (1 << 30) // _ws_bytes(1, H, N, causal)))
 
 
+_CHUNK_HOOK = None      # tests only (positive controls csk): called with the chunk index before each chunk is enqueued
+
+
 def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqg_knob="", ch=None):
     """(dq, dk, dv) [+ dbg dict as dm_bwd_hd256kv2].  dbg != 0 or no chunk plan within the cap -> the kv2 (bundle-6/7/8) path.
     Chunks (plan()) in order: KV2(+dS workspace) then Dqg per chunk, one reused workspace (stream order = the W hand-off between
@@ -190,16 +193,19 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
         rows = []
         for c in carried:
             rows.append([c["q0"], nt, int(c["h0"] > 0), int(not (c["h1"] == r and c["q1"] == nt)), 0, 0, 0, 0])
-        descs = torch.tensor(rows, dtype=torch.int32).pin_memory().to(dev, non_blocking=True)
+        descs = torch.tensor(rows, dtype=torch.int32).to(dev)     # pageable source: the copy is complete on return, stream ordered
         gmax = max(c["g1"] - c["g0"] for c in carried)
         carry = (torch.empty(1, N, gmax, D, device=dev, dtype=torch.float32), torch.empty(1, N, gmax, D, device=dev, dtype=torch.float32))
-    ci = 0
+    ci = ci_all = 0
     for c in ch:
         b0, b1, g0, g1, h0, h1, q0, q1 = (c[k_] for k_ in ("b0", "b1", "g0", "g1", "h0", "h1", "q0", "q1"))
         nb, ng, nh = b1 - b0, g1 - g0, h1 - h0
         T = nb * ng * nh * _tiles(nt, q0, q1, causal)
         ws = (W[:T], Wsb[:T])
-        if ng == Hk and nh == r:     # batch chunk: contiguous batch slices, no copies
+        if _CHUNK_HOOK is not None:
+            _CHUNK_HOOK(ci_all)
+        ci_all += 1
+        if ng == Hk and nh == r and q0 == 0 and q1 == nt:     # batch chunk: contiguous batch slices, no copies
             sl = lambda x: x[b0:b1]  # noqa: E731
             _kv.kv2_launch(*[sl(x) for x in (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)], causal, knob=knob, opts=base, dqw=ws,
                            out=(sl(dk), sl(dv)))
@@ -207,7 +213,7 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
             continue
         # head-split chunk: contiguous copies of its heads, group-major (g, hi) -> kernel head h = g_local * nh + hi_local
         hql = [g * r + h for g in range(g0, g1) for h in range(h0, h1)]
-        hq = torch.tensor(hql, dtype=torch.int64).pin_memory().to(dev, non_blocking=True)
+        hq = (torch.arange(g0, g1, device=dev)[:, None] * r + torch.arange(h0, h1, device=dev)[None, :]).reshape(-1)  # no H2D copy
         tq = lambda x: x[b0:b1].index_select(2, hq)  # noqa: E731     (B, N, h, D)
         sq = lambda x: x[b0:b1].index_select(1, hq)  # noqa: E731     (B, h, ...)
         k8c, ksc = k8[b0:b1, :, g0:g1].contiguous(), ks[b0:b1, g0:g1].contiguous()

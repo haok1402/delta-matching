@@ -1544,6 +1544,24 @@ class DMBackwardSm100:
                 ]
 
         self.shared_storage = SharedStorage
+        if os.environ.get("DM_SMEM_DUMP", "0") == "1":   # BD debug: SharedStorage size/fields
+            try:
+                print("DM_SMEM_DUMP total_bytes", SharedStorage.size_in_bytes(), flush=True)
+            except Exception as e:
+                print("DM_SMEM_DUMP size err", repr(e), flush=True)
+            print("DM_SMEM_DUMP dir", [a for a in dir(SharedStorage) if not a.startswith("__")][:80], flush=True)
+            try:
+                _off = SharedStorage._offsets
+                _ann = SharedStorage._annotations
+                print("DM_SMEM_DUMP offsets", repr(_off)[:4000], flush=True)
+                print("DM_SMEM_DUMP anns", repr(list(_ann.keys()) if hasattr(_ann, "keys") else _ann)[:2000], flush=True)
+            except Exception as e:
+                print("DM_SMEM_DUMP off err", repr(e), flush=True)
+            for _a in ("_fields", "_members", "__struct_fields__", "_layout"):
+                if hasattr(SharedStorage, _a):
+                    print("DM_SMEM_DUMP attr", _a, repr(getattr(SharedStorage, _a))[:3000], flush=True)
+            for _k in getattr(SharedStorage, "__annotations__", {}):
+                print("DM_SMEM_DUMP field", _k, repr(SharedStorage.__annotations__[_k])[:200], flush=True)
 
         LOG2_E = math.log2(math.e)
         if const_expr(self.score_mod is None):

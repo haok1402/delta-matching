@@ -355,11 +355,16 @@ class DmHd256Mx:
                     for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
                         cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
                         mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                    if const_expr(self.has_dp and self.delta_only):
+                    if const_expr(self.has_dp and (self.delta_only or (self.kn == "od" and self.unsafe))):
+                        # (od UNSAFE: dP(t+1) issued before out(t) -> clobbers out(t)'s SF words)
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
                             cute.gemm(mma_s, accP, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accP)
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                    if const_expr(not self.has_dp):
+                        # dv: S(t+1) is all the compute warps need; out(t)'s codes / SFs are guarded by cd
+                        yn.release()
+                        an.commit()
                     if const_expr(not self.delta_only):
                         if const_expr(self.kn in ("cd", "fin", "od")):
                             spin(self.DLY)
@@ -379,19 +384,19 @@ class DmHd256Mx:
                         if const_expr(not (self.kn == "tw" and self.unsafe)):
                             tf.release()
                         cf.release()
-                    if const_expr(self.has_dp and not self.delta_only):
+                    if const_expr(self.has_dp and not self.delta_only and not (self.kn == "od" and self.unsafe)):
                         # dP(t+1) overwrites the SF words of out(t): wait until out(t) has completed
                         with cute.arch.elect_one():
                             tcgen05.commit(od_bar)
-                        if const_expr(not (self.kn == "od" and self.unsafe)):
-                            cute.arch.mbarrier_wait(od_bar, t & 1)
+                        cute.arch.mbarrier_wait(od_bar, t & 1)
                         tc_fence_after()
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
                             cute.gemm(mma_s, accP, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accP)
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                    yn.release()
-                    an.commit()
+                    if const_expr(self.has_dp):
+                        yn.release()
+                        an.commit()
                 else:
                     if const_expr(not self.delta_only):
                         if const_expr(self.kn in ("cd", "fin", "od")):
@@ -644,16 +649,15 @@ class DmHd256Mx:
                         sbs = [sb] * 4
                     elif const_expr(self.mode == "dq"):
                         slot = amax_addr + par * 64
-                        if const_expr(self.kn == "am" and self.unsafe):
-                            slot = amax_addr
                         for j in cutlass.range_constexpr(4):
                             am = dm_utils.redux_max_abs_f32(amq[j])
+                            if const_expr(self.kn == "am" and j == 0):
+                                if warp == 0:
+                                    spin(self.DLY)
                             if lane == 0:
                                 st_shared_f32(slot + (j * 4 + warp) * 4, am)
-                        cute.arch.barrier(barrier_id=2, number_of_threads=128)
-                        if const_expr(self.kn == "am"):
-                            if warp == 3:
-                                spin(self.DLY)
+                        if const_expr(not (self.kn == "am" and self.unsafe)):    # am UNSAFE: no barrier
+                            cute.arch.barrier(barrier_id=2, number_of_threads=128)
                         for j in cutlass.range_constexpr(4):
                             m4 = ld_shared_v4f(slot + j * 16)
                             am = max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3]))

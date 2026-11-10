@@ -61,7 +61,7 @@ class DmHd256Mx2:
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
                  q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False,
-                 yr: bool = False, pe: int = 0):
+                 yr: bool = False, pe: int = 0, tc: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -107,6 +107,14 @@ class DmHd256Mx2:
         #     pe = 2 (impl 16): no early probe (impl 15's probe result conversion was scheduled before the exps and blocked on dP:
         #     0.87x); the blocking wait (token = dep == 0 -> always waits) is entered only after every P is final.
         self.pe = int(pe) if (self.dqopt and not self.x2) else 0
+        # tc (fork hd256-dq4, codex/hd256-dq4-02-tc.md), dq + dqopt + yr: the dS codes go to TMEM (stage s at cols COL_C + 32 s,
+        #     4 codes per 32-bit column, key k of the tile -> column k // 4, byte k % 4: the same e4m3x4 words as the smem rows) and
+        #     the out MMA reads A from TMEM (TS, same kind::mxf8f6f4, same SFA / SFB, same k order) -> no codes st.shared, less smem
+        #     traffic while S(t+1) runs.  Hand-off unchanged in kind: tcgen05.st -> wait::st -> fence::before -> cd arrive -> MMA
+        #     wait + fence::after (as the SFA words); WAR: the cd producer acquire (released by out(t-2)'s commit) before the store.
+        #     dbg & 2 also writes the smem copy (dump only).
+        self.tc = bool(tc) and self.yr
+        self.COL_C = 160
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
@@ -174,6 +182,15 @@ class DmHd256Mx2:
         self.kernel(mma_s, mma_o, tma_Xa, tXa, tma_Xb, tXb, tma_Ya, tYa, tma_Yb, tYb, tma_T, tT, a_l, b_l, c_l, t_l,
                     mQs, mKs, mVs, mdOs, mLse, mDelta, mOut, mIdent, mDump, mCodes, mSB, mHash, n_t, H, Hk).launch(
             grid=[n_t, nh, cute.size(mXa, mode=[3])], block=[self.threads, 1, 1], smem=SS.size_in_bytes(), stream=stream)
+
+    def _cst(self, pa_):
+        """Store one 16-byte group of e4m3 codes: smem row (impls without tc) or the TMEM codes columns (tc; + smem for dbg & 2)."""
+        if const_expr(self.tc):
+            dm_utils.tmem_st_x4(pa_[1], pa_[2], pa_[3], pa_[4], pa_[5])
+            if const_expr(self.dbg & 2):
+                st_shared_v4(pa_[0], pa_[2], pa_[3], pa_[4], pa_[5])
+        else:
+            st_shared_v4(pa_[0], pa_[1], pa_[2], pa_[3], pa_[4])
 
     @cute.kernel
     def kernel(self, mma_s: cute.TiledMma, mma_o: cute.TiledMma, tma_Xa: cute.CopyAtom, mXa: cute.Tensor,
@@ -444,13 +461,22 @@ class DmHd256Mx2:
                             yo = ya_o.current_handle()
                             cf = cd_c.wait_and_advance()
                             tc_fence_after()
-                            dm_utils.gemm_ptx_bs(
-                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                                sC[(None, None, None, s)], sT[(None, None, None, yo.index)],
-                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                                ((0, 0), (0, 1), (4, 2), (4, 3)),
-                                tuple((0, 0) for k in range(4)),
-                                zero_init=cutlass.Boolean(tp == 0))
+                            if const_expr(self.tc):
+                                dm_utils.gemm_ptx_bs(       # TS: A = codes stage s in TMEM, k-step k at column + 8 k
+                                    mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                    None, sT[(None, None, None, yo.index)],
+                                    tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                    ((0, 0), (0, 1), (4, 2), (4, 3)),
+                                    tuple((0, 0) for k in range(4)),
+                                    zero_init=cutlass.Boolean(tp == 0), tA_addr=tmem_base + self.COL_C + 32 * s, offs_a=(0, 8, 16, 24))
+                            else:
+                                dm_utils.gemm_ptx_bs(
+                                    mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                    sC[(None, None, None, s)], sT[(None, None, None, yo.index)],
+                                    tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                    ((0, 0), (0, 1), (4, 2), (4, 3)),
+                                    tuple((0, 0) for k in range(4)),
+                                    zero_init=cutlass.Boolean(tp == 0))
                             if const_expr(not (self.kn == "yw" and self.unsafe)):
                                 yo.release()                       # Ya stage free once out(t-1) (and S(t-1) before it) completed
                             ya_o.advance()
@@ -970,6 +996,7 @@ class DmHd256Mx2:
                     dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfe)
                 # ---- codes -> smem stage stg (own two chunks) ----
                 cbase = crow + stg * self.bytes_c
+                tcb = tb + self.COL_C + 32 * stg          # tc: this row's codes columns of stage stg
                 pend = []                    # control cw<h>: code stores deferred (emitted below), else stored here
                 for jj in cutlass.range_constexpr(2):
                     j2 = 2 * hf + jj
@@ -983,10 +1010,14 @@ class DmHd256Mx2:
                             y0, y1 = cute.arch.mul_packed_f32x2((vals[jj][i0], vals[jj][i0 + 1]), (inv, inv))
                             y2, y3 = cute.arch.mul_packed_f32x2((vals[jj][i0 + 2], vals[jj][i0 + 3]), (inv, inv))
                             w[u] = e4m3x4(y0, y1, y2, y3)
-                        if const_expr(self.kn in ("cw0", "cw1")):
-                            pend.append((cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3]))
+                        if const_expr(self.tc):
+                            pa_t = (cbase + (((2 * j2 + hv) ^ rsw) * 16), tcb + 8 * j2 + 4 * hv, w[0], w[1], w[2], w[3])
                         else:
-                            st_shared_v4(cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                            pa_t = (cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                        if const_expr(self.kn in ("cw0", "cw1")):
+                            pend.append(pa_t)
+                        else:
+                            self._cst(pa_t)
                         if const_expr((self.dbg & 8) and self.has_dp):
                             for u in cutlass.range_constexpr(4):
                                 for q in cutlass.range_constexpr(4):
@@ -1051,10 +1082,10 @@ class DmHd256Mx2:
                         if const_expr(self.unsafe):
                             if hf != hk_:
                                 for pa_ in pend:
-                                    st_shared_v4(*pa_)
+                                    self._cst(pa_)
                         else:
                             for pa_ in pend:
-                                st_shared_v4(*pa_)
+                                self._cst(pa_)
                     if const_expr(self.unsafe and not late_cw):
                         if hf != hk_:
                             dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
@@ -1073,7 +1104,7 @@ class DmHd256Mx2:
                                 spin(self.DLY)
                                 if const_expr(late_cw):
                                     for pa_ in pend:
-                                        st_shared_v4(*pa_)
+                                        self._cst(pa_)
                                 else:
                                     dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
                                     cute.arch.fence_view_async_tmem_store()

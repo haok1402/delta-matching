@@ -210,7 +210,7 @@ def redux_max_abs_f32(x: Float32, *, loc=None, ip=None) -> Float32:
 
 def gemm_ptx_bs(
     op, acc_tmem_addr, tCrA, tCrB, sA, sB, sfa_base, sfb_base, sfa_map, sfb_map,
-    zero_init=False, tA_addr=None, cta_group: int = 1, k_range=None,
+    zero_init=False, tA_addr=None, cta_group: int = 1, k_range=None, offs_a=None,
 ):
     """Block-scaled (kind::mxf8f6f4, UE8M0) MMA over all k-steps of tCrA/tCrB, SS (sA given) or TS (A in TMEM at tA_addr).
     sfa_map / sfb_map: per k-step (column offset added to sfa_base / sfb_base, sf byte id 0..3) python tuples.
@@ -233,8 +233,11 @@ def gemm_ptx_bs(
     offset_b = [cute.crd2idx((0, 0, k), tCrB.layout) for k in range(nk)]
     start_b = Int32(b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
     if is_ts:
-        tCrA_layout = cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
-        offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)]
+        if offs_a is None:
+            tCrA_layout = cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
+            offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(nk)]
+        else:          # hd256-dq4 tc: explicit TMEM column offset per k-step
+            offset_a = list(offs_a)
         a_arg = Int32(cute.arch.make_warp_uniform(tA_addr))
         a_hi = None
     else:

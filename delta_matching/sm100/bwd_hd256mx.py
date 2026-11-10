@@ -35,7 +35,8 @@ IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(d
               "11": dict(dqopt=True, lpt="g", esf=True), "12": dict(dqopt=True, lpt="g", x2=True, esf=True),
               "13": dict(dqopt=True, lpt="g", yr=True), "14": dict(dqopt=True, lpt="g", yr=True, esf=True),
               "15": dict(dqopt=True, lpt="g", yr=True, pe=1),
-              "16": dict(dqopt=True, lpt="g", yr=True, pe=2)}
+              "16": dict(dqopt=True, lpt="g", yr=True, pe=2),
+              "17": dict(dqopt=True, lpt="g", yr=True, tc=True)}
 IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "13"}  # Q12 + causal global LPT + Ya reuse (HD256-DQ-YR) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}

@@ -10,7 +10,7 @@ Bitwise the dq kernel (DmHd256Mx2 impl 13) by construction:
 
 Grid: one CTA per (q tile, q head, batch), causal global LPT (longest first).  192 threads:
   warps 0-3: SF writers (SFA word per tile, SFB once) + epilogue (row = 32 w + lane); warp 4: MMA (one elected thread); warp 5: TMA.
-smem: S stages x [A 16 KB | B 32 KB].  TMEM (512 cols): acc 0-255, SFA stage s at 256 + 4 s, SFB at 256 + 4 S.
+smem: S stages x [A 16 KB | B 32 KB].  TMEM (512 cols): acc 0-255, SFA stage s at 256 + 4 s (+ lane quadrant), SFB 8 cols at 256 + 4 S.
 Hand-offs (dqr-draft.md section 3; each with a positive-control knob):
   ab  TMA A/B -> MMA                       PipelineTmaUmma (tx), released by tcgen05.commit after the stage's 4 MMAs
   sf  SF warps tcgen05.st (SFA, + SFB at t == 0) -> MMA     mbarrier sff[s] (4 warp arrivals, release.cta), MMA acquire + fence::after
@@ -214,7 +214,8 @@ class DmHd256Dqg:
             tb = tmem_base + Int32((warp * 32) << 16)
             # SFB = 1.0 (0x7F), once; published by the first sff arrive below (same threads, program order + fences)
             onew = Int32(0x7F7F7F7F)
-            dm_utils.tmem_st_x4(tb + self.COL_SFB, onew, onew, onew, onew)
+            dm_utils.tmem_st_x4(tb + self.COL_SFB, onew, onew, onew, onew)       # N = 256: 8 SFB columns (as Mx2)
+            dm_utils.tmem_st_x4(tb + self.COL_SFB + 4, onew, onew, onew, onew)
             wsb_base = _gaddr(mWsb)
             wnext = ld_global_u32(wsb_base + tbase * 4)
             for kt in cutlass.range(total, unroll=1):
@@ -237,7 +238,7 @@ class DmHd256Dqg:
                     if const_expr(self.unsafe):
                         warp_arrive(SFF + 8 * s)       # UNSAFE: published before the SFA word is written
                     spin(self.DLY)
-                dm_utils.tmem_st_x1(tb + self.COL_SF + 4 * s, sfa)
+                dm_utils.tmem_st_x1(tb + self.COL_SF + 4 * s + warp, sfa)       # SFA of rows 32 w.. at column + w (as Mx2)
                 cute.arch.fence_view_async_tmem_store()
                 tc_fence_before()
                 if const_expr(not (self.kn == "sf" and self.unsafe)):

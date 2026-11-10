@@ -27,11 +27,12 @@ _CACHE = None
 def _cache():
     global _CACHE
     if _CACHE is None:
-        h = hashlib.sha256(cache_utils._compute_source_fingerprint().encode())
-        for f in ("dm_fwd_hd256_sm100.py", "dm_fwd_hd256_mx_sm100.py", "fwd_hd256.py", "dm_utils.py"):
-            h.update((_HERE / f).read_bytes())
+        # kda-hd256 bundle 3 (cache-key audit): the same fingerprint as every other DM kernel = FA4 source fingerprint +
+        # ALL delta_matching/sm100/*.py bytes + fwd.compile_env() (DSL lineinfo/opt/debug, SM count, fence settings, ...).
+        # (Was: only 4 files and no compile settings -> a change in dm_common*.py / quant*.py or the DSL settings kept the key.)
+        from .fwd import _fingerprint
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
-            _CACHE = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / h.hexdigest()[:24] / "fwd_hd256")
+            _CACHE = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / "fwd_hd256")
         else:
             _CACHE = cache_utils.JITCache()
     return _CACHE

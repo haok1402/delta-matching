@@ -27,9 +27,43 @@ _LOCK = threading.Lock()
 FORCE = dict(use_2cta_instrs=False, pack_gqa=False, use_s_ping_pong=False, num_splits=1, ex2_emu_freq=0)
 
 
+_STATIC_ENV = []
+
+
+def compile_env():
+    """kda-sm100-cachekey: every compile-time input of the DM kernels that FA4's compile key (dtype / head dims / causal /
+    GQA ratio / config incl. registers / deterministic / arch / ...) and the opts string do NOT carry, rendered as one
+    string that is hashed into the persistent cache directory (_fingerprint) and into the in-process cache memos:
+      DM_ABL (bwd ablation knobs, read in DMBackwardSm100.__init__), DM_TCF_SKIP (read while tracing), the dm_utils fence
+      emission settings in effect (DM_TCF_IMPL / DM_TCF_MASK, read at dm_utils import), the pass-0 register splits in effect
+      (DM_P0_C3REGS / DM_P0_TLREGS, read at pass0 import; also in the config), the SM count the static persistent grids
+      are traced with (FLASH_ATTENTION_NUM_SMS or the device), and the CuTe DSL compile settings (CUTE_DSL_LINEINFO,
+      _COMPILER_OPT, _DEBUG, ... = the DSL's own cache_key_str() minus arch, which FA4's key has, and the runtime lib path).
+    Opts strings (DM_FWD_OPTS, effective DM_BWD_OPTS incl. b6=, DM_P0_EXP variant) are hashed by the callers."""
+    from . import dm_utils, pass0 as _p0
+    if not _STATIC_ENV:
+        try:
+            from cutlass.cutlass_dsl import CuTeDSL
+            dsl = ";".join(x for x in CuTeDSL._get_dsl().envar.cache_key_str().split(";")
+                           if x and not x.startswith(("arch=", "shared_libs=")))
+        except Exception as e:  # noqa: BLE001
+            dsl = f"unknown:{type(e).__name__}"
+        nsm = os.environ.get("FLASH_ATTENTION_NUM_SMS")
+        if not nsm:
+            try:
+                import cutlass.utils
+                nsm = str(cutlass.utils.HardwareInfo().get_device_multiprocessor_count())
+            except Exception:  # noqa: BLE001
+                nsm = "?"
+        _STATIC_ENV.append(f"dsl={dsl}|nsm={nsm}|tcf_impl={dm_utils._TCF_IMPL}|tcf_mask={dm_utils._TCF_MASK}|"
+                           f"p0regs={sorted(_p0.REGS_C3.items())}{sorted(_p0.REGS_TL.items())}")
+    return f"{_STATIC_ENV[0]}|abl={_env('DM_ABL', '')}|tcf_skip={_env('DM_TCF_SKIP', '')}"
+
+
 def _fingerprint(opts=""):
     h = hashlib.sha256(cache_utils._compute_source_fingerprint().encode())
     h.update(opts.encode())   # kernel variant knobs (DM_FWD_OPTS, read in DMForwardSm100.__init__)
+    h.update(compile_env().encode())   # kda-sm100-cachekey: compile-time inputs outside FA4's key and the opts
     for f in sorted(_HERE.glob("*.py")):
         h.update(f.name.encode())
         h.update(f.read_bytes())
@@ -42,12 +76,13 @@ _CACHES = {}
 def _cache():
     """One compile cache per DM_FWD_OPTS string (so several variants can run in one process)."""
     opts = _env("DM_FWD_OPTS", "")
-    if opts not in _CACHES:
+    mk = (opts, compile_env())   # kda-sm100-cachekey: memo keyed on every compile-time input, not only the opts
+    if mk not in _CACHES:
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
-            _CACHES[opts] = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint(opts) / "fwd")
+            _CACHES[mk] = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint(opts) / "fwd")
         else:
-            _CACHES[opts] = cache_utils.JITCache()
-    return _CACHES[opts]
+            _CACHES[mk] = cache_utils.JITCache()
+    return _CACHES[mk]
 
 
 _SEL_MEMO = {}   # host-overhead cut: memoized config selection (pure function of FA4's inputs + our overrides)
@@ -117,7 +152,7 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
         qsc, ksc, vsc = qs.contiguous(), ks.contiguous(), vs.contiguous()
     fopts = _env("DM_FWD_OPTS", "")
     return fastpath.call("fwd", dict(q8=q8, k8=k8, v8=v8, qsc=qsc, ksc=ksc, vsc=vsc),
-                         (bool(causal), fopts, repr(sorted(over.items()))),
+                         (bool(causal), fopts, repr(sorted(over.items())), compile_env()),
                          lambda: _dm_fwd_slow(q8, k8, v8, qsc, ksc, vsc, causal, over))
 
 

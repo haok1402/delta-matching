@@ -106,7 +106,13 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw")
+    # dqw (fork hd256-dqr): also store the dS codes + raw dS block exponents to a dQ workspace for the dQ GEMM kernel DmHd256Dqg
+    # (dm_bwd_hd256dqg_sm100.py). The workspace tensors are passed in the mCodesS / mSBS slots (dbg 2 must be off):
+    #   mCodesS = W  uint8 (T, 128, 128): tile T = (l, q tile ct, key tile kt) [key in tile][query in tile] (plain row-major,
+    #             causal packing T = l * n_t (n_t + 1) / 2 + ct (ct + 1) / 2 + kt, else l * n_t^2 + ct * n_t + kt);
+    #   mSBS   = Wsb uint8 (T, 1, 4): raw pow2_sb of the 4 32-key blocks of the tile (shared by all 128 queries).
+    # Plain st.global only; the consumer is a later kernel in stream order (no in-kernel hand-off).
     RELAY_WARP = 11   # relcl/acqcl: DEBUG: only release / only acquire at cluster   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
@@ -129,6 +135,7 @@ class DmHd256Kv2:
     def __init__(self, causal: bool, dbg: int = 0, knob: str = "", opts=None):
         self.opts = tuple(sorted((self.DEFAULT_OPTS if opts is None else opts).replace(",", " ").split()))
         assert all(o in self.OPTS for o in self.opts), self.opts
+        assert not ("dqw" in self.opts and (int(dbg) & 2)), "dqw reuses the dbg-2 codes slots"
         self.nqs = 2 if "qb2" in self.opts else 1
         self.causal = bool(causal)
         self.dbg = int(dbg)
@@ -488,6 +495,12 @@ class DmHd256Kv2:
                 ctok0 = ct * 128
                 q0 = ctok0 + 32 * jb                      # first query of this thread's block
                 ldb = sLD_addr + par * 1024
+                wtile = Int64(0)
+                if const_expr("dqw" in self.opts):
+                    if const_expr(self.causal):
+                        wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
+                    else:
+                        wtile = (Int64(l) * n_t + ct) * n_t + kt
                 mf = None
                 qsj = Float32(0.0)
                 dosj = Float32(0.0)
@@ -634,6 +647,9 @@ class DmHd256Kv2:
                         if const_expr(hv == 0):
                             w[0] = w[0] ^ sel_eq_i32(t + key + hx + b, Int32(0), Int32(1), Int32(0))
                     st_shared_v4(srow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                    if const_expr("dqw" in self.opts):
+                        st_global_v4(_gaddr(mCodesS) + wtile * 16384 + (64 * crank + r) * 128 + 32 * jb + 16 * hv,
+                                     w[0], w[1], w[2], w[3])
                     if const_expr(self.dbg & 8):
                         for u in cutlass.range_constexpr(4):
                             for q in cutlass.range_constexpr(4):
@@ -649,6 +665,10 @@ class DmHd256Kv2:
                                 cp_ = cp_ + Int64(N)
                 if const_expr(self.dbg & 2):
                     mSBS[l, key, ct * 4 + jb] = dsb
+                if const_expr("dqw" in self.opts):
+                    if warp < 2:
+                        if lane == 0:
+                            st_global_u8(_gaddr(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
                 if const_expr(self.dbg & 8):
                     a0_ = _gaddr(mHash) + (Int64(l) * N + q0) * 32
                     lk_cols_u32(hsl, lane, a0_ + 8)

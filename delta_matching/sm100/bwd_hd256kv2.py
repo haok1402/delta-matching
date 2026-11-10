@@ -26,7 +26,18 @@ def _ph(dev):
     return _PH[k]
 
 
-def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None):
+def dqw_tiles(B, H, n_t, causal):
+    """number of (l, q tile, key tile) tiles of the dQ workspace (fork hd256-dqr; layout in DmHd256Kv2 opt dqw)."""
+    return B * H * (n_t * (n_t + 1) // 2 if causal else n_t * n_t)
+
+
+def dqw_alloc(B, H, N, causal, dev):
+    T = dqw_tiles(B, H, N // 128, bool(causal))
+    return (torch.empty(T, 128, 128, device=dev, dtype=torch.uint8), torch.empty(T, 1, 4, device=dev, dtype=torch.uint8))
+
+
+def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqw=None):
+    """dqw = (W, Wsb) from dqw_alloc: KV2 also stores the dS codes / raw block exponents for the dQ GEMM (opts must contain dqw)."""
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -50,10 +61,15 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     else:   # production: the dbg tensors are never touched (compiled out) -> shared placeholders, no per-call zeroing
         ph = _ph(dev)
         dump, cp_, cs_, sbp, sbs, hh = ph["dump"], ph["c"], ph["c"], ph["sb"], ph["sb"], ph["h"]
+    ot = DmHd256Kv2.DEFAULT_OPTS if opts is None else opts
+    assert (dqw is not None) == ("dqw" in ot.split()), (ot, dqw is None)
+    if dqw is not None:
+        assert not big
+        cs_, sbs = dqw
+        assert cs_.shape == (dqw_tiles(B, H, N // 128, causal), 128, 128) and sbs.shape == (cs_.shape[0], 1, 4)
     ten = [p(k8), p(v8), p(q8), p(do8), tt(q8), tt(do8), qs, ks, vs, dos, lse, delta, dk, dv, dump, cp_, cs_, sbp, sbs, hh]
     lds = [1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2]
     kd = dbg & 10
-    ot = DmHd256Kv2.DEFAULT_OPTS if opts is None else opts
     key = ("kv2", causal, kd, knob, ot)
     _mx._run(key, lambda: DmHd256Kv2(causal, kd, knob, ot), ten, lds, [N // 128, H, Hk])
     extra = dict(dump=dump, codesP=cp_, codesS=cs_, sbP=sbp, sbS=sbs, hash=hh)

@@ -125,11 +125,11 @@ def test_accuracy_vs_exact_and_spec_emulation(B, N, H, Hk, causal, mode, family)
     inside the fp8 floor's absolute bounds; LSE equals the emulation's to fp32 round-off (summation order only)."""
     from delta_matching import reference as R
     from delta_matching.sm100.attention import dm_attn_debug
-    from delta_matching.sm100.quant import quant_qkv2
+    from delta_matching.sm100.fp8_quant_sm100 import fp8_quant_qkv
     q, k, v, do = _inputs(B, N, H, Hk, family, seed=N + H + Hk)
     out = _run(q, k, v, do, causal, mode)
     assert all(torch.isfinite(t.float()).all() for t in out)
-    mean = quant_qkv2(q, k, v, D ** -0.5)[7]
+    mean = fp8_quant_qkv(q, k, v, D ** -0.5)[7]
     em = R.dm_reference(q, k, v, do, causal, mode, "sm100-mx-d256", q_block=512, k_mean=mean,
                         o_for_stale=out[0] if mode == "stale" else None)
     ex = R.attention_fp32(q, k, v, do, causal, dtype=torch.float64)

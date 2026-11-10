@@ -7,10 +7,10 @@ import os
 import torch
 
 from delta_matching.sm100.bwd import dm_bwd_main, dm_bwd_prestage
+from delta_matching.sm100.fp8_quant_sm100 import fp8_quant_dout, fp8_quant_qkv
 from delta_matching.sm100.fwd import dm_fwd
 from delta_matching.sm100.launch_cache_sm100 import env
 from delta_matching.sm100.pass0 import dm_delta
-from delta_matching.sm100.quant import quant_do_delta, quant_qkv2
 
 __all__ = ["AttentionHd128", "attention_hd128", "attention_debug_hd128"]
 
@@ -29,7 +29,7 @@ def deterministic_default():
 class AttentionHd128(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, causal, mode, deterministic):
-        q8, qs, k8, ks, v8, vs, kv_words, _ = quant_qkv2(q, k, v, SOFTMAX_SCALE)
+        q8, qs, k8, ks, v8, vs, kv_words, _ = fp8_quant_qkv(q, k, v, SOFTMAX_SCALE)
         o, lse = dm_fwd(q8, qs, k8, kv_words, v8, None, causal)
         ctx.save_for_backward(q8, qs, k8, ks, v8, vs, o, lse)
         ctx.causal, ctx.mode, ctx.deterministic = causal, mode, deterministic
@@ -42,7 +42,7 @@ class AttentionHd128(torch.autograd.Function):
         do = do.contiguous()
         # scratch allocation, zeroing and lse * log2(e) run on a side stream, overlapping pass 0
         dm_bwd_prestage(q8, k8, lse, ctx.causal, deterministic=ctx.deterministic)
-        do8, dos, delta = quant_do_delta(do, o if ctx.mode == "stale" else None)
+        do8, dos, delta = fp8_quant_dout(do, o if ctx.mode == "stale" else None)
         if ctx.mode == "matched":
             delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, ctx.causal)
         dq, dk, dv = dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, ctx.causal, SOFTMAX_SCALE, deterministic=ctx.deterministic)
@@ -66,9 +66,9 @@ def attention_debug_hd128(q, k, v, do, causal=True, mode="matched", identity=Fal
     dm_attn_debug at head_dim 128.
     """
     q, k, v = (x if x.stride(-1) == 1 else x.contiguous() for x in (q, k, v))
-    q8, qs, k8, ks, v8, vs, kv_words, _ = quant_qkv2(q, k, v, SOFTMAX_SCALE)
+    q8, qs, k8, ks, v8, vs, kv_words, _ = fp8_quant_qkv(q, k, v, SOFTMAX_SCALE)
     o, lse = dm_fwd(q8, qs, k8, kv_words, v8, None, causal)
-    do8, dos, delta = quant_do_delta(do.contiguous(), o if mode == "stale" else None)
+    do8, dos, delta = fp8_quant_dout(do.contiguous(), o if mode == "stale" else None)
     if mode == "matched":
         delta = dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
     out = {"delta": delta.float().contiguous(), "lse": lse.float().contiguous()}

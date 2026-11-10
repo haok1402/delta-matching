@@ -20,7 +20,7 @@ import torch
 
 ENABLED = os.environ.get("DM_FASTPATH", "1") != "0"
 _TLS = threading.local()
-EPOCH = [0]     # bumped by every compile-cache miss / insert, every cute.compile and every Triton specialization miss
+EPOCH = [0]     # bumped by every compile-cache miss / insert and every cute.compile (incl. the CuTe producers, quant.py)
 
 try:                        # os.environ.get without the Mapping machinery (same lookup + decode; ~10x cheaper)
     _ED, _ENC, _DEC = os.environ._data, os.environ.encodekey, os.environ.decodevalue
@@ -38,44 +38,6 @@ def env(k, d=None):
         kb = _EK[k] = _ENC(k)
     v = _ED.get(kb)
     return d if v is None else _DEC(v)
-
-
-class TLaunch:
-    """Cached direct launch of a Triton JITFunction: kernel(grid, *args, **kw) == jitfn[grid](*args, **kw).
-    The first call per key goes through JITFunction.run (binding, specialization, compile-cache lookup) and returns the
-    CompiledKernel; later calls with the same key (grid, every non-tensor arg by value, every tensor's dtype + 16-byte
-    alignment of its pointer = all that Triton specializes on, kwargs, device) call the kernel's launcher directly with
-    the same bound-argument order, swapping in the new tensors.  Same compiled kernel, same arguments -> same launch."""
-
-    def __init__(self, jf):
-        self.jf = jf
-        self.c = {}
-
-    def __call__(self, grid, *args, **kw):
-        if not ENABLED:
-            return self.jf[grid](*args, **kw)
-        dev = torch.cuda.current_device()
-        k = (grid, dev, tuple(kw.values()), tuple(kw), tuple((a.dtype, a.data_ptr() % 16) if isinstance(a, torch.Tensor)
-                                                          else (type(a), a) for a in args))
-        e = self.c.get(k)
-        if e is None:
-            from triton import knobs
-            EPOCH[0] += 1
-            kernel = self.jf.run(*args, grid=grid, warmup=False, **kw)
-            bound = list(self.jf.device_caches[dev][4](*args, **kw)[0].values())
-            ok = (kernel is not None and len(bound) >= len(args) and all(b is a for a, b in zip(args, bound))
-                  and not self.jf.pre_run_hooks)
-            g = tuple(grid) + (1,) * (3 - len(grid))
-            self.c[k] = (kernel.run, kernel.function, kernel.packed_metadata, kernel, tuple(bound[len(args):]), g,
-                         knobs.runtime) if ok else False
-            return
-        if e is False:
-            return self.jf[grid](*args, **kw)
-        run, fn, pm, kernel, tail, g, rt = e
-        if getattr(rt.launch_enter_hook, "calls", 1) or getattr(rt.launch_exit_hook, "calls", 1):
-            return self.jf[grid](*args, **kw)     # launch hooks installed (profilers): Triton's own path
-        stream = torch._C._cuda_getCurrentRawStream(dev)
-        run(g[0], g[1], g[2], stream, fn, pm, None, None, None, *args, *tail)
 
 
 class RecCache:

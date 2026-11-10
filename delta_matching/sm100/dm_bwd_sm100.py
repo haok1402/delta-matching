@@ -725,6 +725,11 @@ class DMBackwardSm100:
         # warps, the dS relay's leader arrive) -> mbarrier.arrive.release.cluster; every mbarrier wait of the leader's MMA warp
         # (the only consumer of barriers with remote producers that are not TMA complete_tx / tcgen05.commit) -> + fence.acq_rel.cluster.
         self.dm_xscope = self.use_2cta_instrs and "noxscope" not in self.dm_opts
+        # cost bisect (DEBUG): xs:a = remote arrives only, xs:wf = MMA-warp wait fences only, xs:wq = waits as
+        # try_wait.acquire.cluster only, xs:awq = arrives + acquire.cluster waits (default = arrives + fences)
+        _xm = next((x[3:] for x in self.dm_opts if x.startswith("xs:")), "awf")
+        self.dm_xs_arrive = self.dm_xscope and "a" in _xm
+        self.dm_xs_wait = (0 if not self.dm_xscope else 2 if "wq" in _xm else 1 if "wf" in _xm else 0)
         self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else (2 if "ordpc2" in self.dm_opts else 0))
         # ordpc2: SFA_dv poison right after dV(t) issue (after dV(t)'s completion wait with ordw): B1's window is closed in
         # practice by the dQ-empty wait before S^T(t+1) (ordpc1 never fires), so ordpc2 shows the harness sees a dV SF overwrite
@@ -1845,7 +1850,7 @@ class DMBackwardSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
     ):
         dm_utils.tcf_begin(0 if "notcf" in self.dm_opts else 2 if "tcfb" in self.dm_opts else 1)
-        dm_utils.XS[0] = int(self.dm_xscope)   # ordinv Part III: remote mbarrier arrives at cluster scope   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
+        dm_utils.XS[0] = int(self.dm_xs_arrive)   # ordinv Part III: remote mbarrier arrives at cluster scope   # kda-sm100-fwdfence: tcgen05 thread-sync fences (dm_utils.TCF)
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         bidx, _, _ = cute.arch.block_idx()
         if const_expr("tl2" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
@@ -2389,7 +2394,7 @@ class DMBackwardSm100:
             # Dealloc the tensor memory buffer
             tmem.relinquish_alloc_permit()
             tmem_alloc_barrier.arrive_and_wait()
-            dm_utils.XS[1] = int(self.dm_xscope)   # ordinv Part III: the 2-CTA dealloc handshake (peer arrive -> wait) too
+            dm_utils.XS[1] = int(self.dm_xs_wait)   # ordinv Part III: the 2-CTA dealloc handshake (peer arrive -> wait) too
             tmem.free(tmem_ptr)
             dm_utils.XS[1] = 0
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
@@ -3581,7 +3586,7 @@ class DMBackwardSm100:
         # kernel (before warp specialization) is a lot slower tha putting them here.
         # Partition smem / tmem tensors
         # S = K @ Q.T
-        dm_utils.XS[1] = int(self.dm_xscope)   # ordinv Part III: fence.acq_rel.cluster after every MMA-warp mbarrier wait
+        dm_utils.XS[1] = int(self.dm_xs_wait)   # ordinv Part III: cluster-scope acquire for every MMA-warp mbarrier wait
         tSrK = tiled_mma_S.make_fragment_A(sK)
         tSrQ = tiled_mma_S.make_fragment_B(sQ)
         # dP = V @ dOt.T

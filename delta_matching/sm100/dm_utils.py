@@ -1033,8 +1033,13 @@ def _xs_install():
         if g is None or getattr(g, "_dm_xs", False):
             continue
 
-        def mk(g):
+        def mk(g, n=n):
             def w(*a, **kw):
+                if XS[1] == 2 and n == "mbarrier_wait":
+                    # acquire at cluster scope on the wait itself (mbarrier.try_wait.parity.acquire.cluster loop)
+                    ptr = a[0] if a else kw["mbar_ptr"]
+                    ph = a[1] if len(a) > 1 else kw["phase"]
+                    return mbar_wait_parity_cluster(Int32(ptr.toint()), Int32(ph))
                 r = g(*a, **kw)
                 if XS[1]:
                     fence_acq_rel_cluster()

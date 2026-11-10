@@ -133,7 +133,12 @@ class DmHd256Kv2:
     #   q: Q/dO smem released before the S/dP MMAs; d: Qd/dOd released before dV/dK; s: S/dP TMEM released before the
     #   compute loads; cd: codes/SFA published before they are written; ex: exchange barrier dropped; ld: l2/delta single
     #   buffer; fin: epilogue reads dK/dV before the final commit.
+    # pds (hd256-b9d, identity-hook liveness, DEBUG ONLY): + PDS_EPS on the pre-quant fp32 dS of ONE element of the launch (row
+    # l = 0, query PDS_Q, key PDS_K) BEFORE the dbg-16 rowsum and the quantization; "pds_safe" plants nothing.  Compiled out unless
+    # knob == "pds" (const_expr): the default / dbg builds are untouched.  Kept out of KNOBS (not a hand-off control).
     KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta")
+    IDKN = ("pds",)
+    PDS_Q, PDS_K, PDS_EPS = 5000, 1234, 2.0 ** -20
     DLY = 1 << 15
 
     # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e); meta: warp 10 stages l2/delta/qs/dos per
@@ -191,7 +196,7 @@ class DmHd256Kv2:
         self.dbg = int(dbg)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")
-        assert self.kn in ("",) + self.KNOBS + self.DQTCTL, knob
+        assert self.kn in ("",) + self.KNOBS + self.DQTCTL + self.IDKN, knob
         assert not ("dqt" in self.opts and "dqw" in self.opts)
         assert "dqt" not in self.opts or "rly" in self.opts
         self.wsp = "dqw" in self.opts or "dqt" in self.opts
@@ -743,6 +748,10 @@ class DmHd256Kv2:
                         x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
                         dsv[i + q2] = x0
                         dsv[i + q2 + 1] = x1
+                if const_expr(self.kn == "pds" and self.unsafe):
+                    hit = (sel_eq_i32(l, Int32(0), Int32(1), Int32(0)) * sel_eq_i32(key, Int32(self.PDS_K), Int32(1), Int32(0))
+                           * sel_eq_i32(q0, Int32(self.PDS_Q - self.PDS_Q % 32), Int32(1), Int32(0)))
+                    dsv[self.PDS_Q % 32] = dsv[self.PDS_Q % 32] + Float32(hit) * Float32(self.PDS_EPS)
                 if const_expr(self.dbg & 2):
                     pa = _gaddr(mDump) + ((Int64(l) * N + q0) * N + key) * 16
                     for i in cutlass.range_constexpr(32):

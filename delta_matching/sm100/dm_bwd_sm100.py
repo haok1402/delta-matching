@@ -733,6 +733,15 @@ class DMBackwardSm100:
         _xm = next((x[3:] for x in self.dm_opts if x.startswith("xs:")), "pwq")
         self.dm_xs_arrive = (2 if "p" in _xm else 1) if (self.dm_xscope and ("a" in _xm or "p" in _xm)) else 0   # xs:p.. = peer-only cluster scope
         self.dm_xs_wait = (0 if not self.dm_xscope else 2 if "wq" in _xm else 1 if "wf" in _xm else 0)
+        # xs:rly (hd256 KV2 pattern): CTA 1's compute / dsqw / reduce warps arrive .release.cta (count 2) on their OWN CTA's copy of the
+        # pipeline barrier (unused otherwise: only the leader's copy is waited on); one relay lane per site in CTA 1's idle MMA warp waits
+        # it (.acquire.cta) and forwards ONE .release.cluster arrive (count = CTA-1 arrivals) to the leader, which waits .acquire.cluster.
+        # The dS relay (X10) and the dealloc handshake (X11) keep the pwq form. xrp:<k> = DEBUG planted control: relay lane k forwards
+        # BEFORE its local phase completes (arrive, then wait) -> the leader may consume CTA 1's data one phase early.
+        self.dm_xs_relay = self.dm_xscope and "rly" in _xm
+        if self.dm_xs_relay:
+            self.dm_xs_arrive, self.dm_xs_wait = 2, 2
+        self.dm_xrp = int(next((x[4:] for x in self.dm_opts if x.startswith("xrp:")), "-1"))
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)
         self.dm_xs_roles = next((x[4:] for x in self.dm_opts if x.startswith("xsr:")), "rmcdq")
         self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else (2 if "ordpc2" in self.dm_opts else 0))
@@ -2352,6 +2361,10 @@ class DMBackwardSm100:
             tmem.allocate(self.tmem_alloc_cols)
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
+            if const_expr(self.dm_xs_relay):
+                if not is_leader_cta:
+                    self.ord_relay(pipeline_S_P, pipeline_dP, pipeline_dS, pipeline_dQ, pipeline_dKV, block_info, SeqlenInfoCls,
+                                   TileSchedulerCls)
 
             self.mma(
                 tiled_mma_S,
@@ -2414,7 +2427,7 @@ class DMBackwardSm100:
             self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            dm_utils.XS[0] = (self.dm_xs_arrive if "c" in self.dm_xs_roles else 0)
+            dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "c" in self.dm_xs_roles else 0
             self.compute_loop(
                 thr_mma_S,
                 thr_mma_dP,
@@ -2475,7 +2488,7 @@ class DMBackwardSm100:
                     self._dm_setmaxreg_inc(self.num_regs_dsq)
                 tmem.wait_for_alloc()
                 tmem_ptr = tmem.retrieve_ptr(Float32)
-                dm_utils.XS[0] = (self.dm_xs_arrive if "d" in self.dm_xs_roles else 0)
+                dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "d" in self.dm_xs_roles else 0
                 self.dsq_loop(
                     thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
                     sDm, storage.dm_xchg_mbar.data_ptr(), aux_data, block_info, SeqlenInfoCls, TileSchedulerCls,
@@ -2492,7 +2505,7 @@ class DMBackwardSm100:
                 self._dm_setmaxreg_inc(self.num_regs_reduce)
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            dm_utils.XS[0] = (self.dm_xs_arrive if "q" in self.dm_xs_roles else 0)
+            dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "q" in self.dm_xs_roles else 0
             self.dQacc_reduce(
                 mdQaccum,
                 sdQaccum,
@@ -4267,6 +4280,53 @@ class DMBackwardSm100:
         # pipeline_dP.producer_tail(producer_state_dP)
         # pipeline_dKV.producer_tail(producer_state_dKV)
         # pipeline_dQ.producer_tail(producer_state_dQ)
+
+    @cute.jit
+    def ord_relay(self, pipeline_S_P, pipeline_dP, pipeline_dS, pipeline_dQ, pipeline_dKV, block_info, SeqlenInfoCls, TileSchedulerCls):
+        """ordinv Part III relay (xs:rly), CTA 1's MMA warp: lane k serves site k independently (independent thread scheduling):
+        0 S_P empty, 1 dP empty, 2 dS full, 3 dQ empty (M phases per work tile each), 4 dKV empty stages 0 and 1 (1 phase each per tile).
+        Per phase: wait the local copy (.acquire.cta, all CTA-1 arrivals, count 2 each), then ONE .release.cluster arrive on the leader's
+        copy with count = number of CTA-1 arrivals."""
+        cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
+        lane = cute.arch.lane_idx()
+        nc, nr = len(self.compute_warp_ids), len(self.reduce_warp_ids)
+        bars = (pipeline_S_P.sync_object_empty.get_barrier(0), pipeline_dP.sync_object_empty.get_barrier(0),
+                pipeline_dS.sync_object_full.get_barrier(0), pipeline_dQ.sync_object_empty.get_barrier(0))
+        cnts = (nc, nr, nr, nr)
+        ph = cute.make_rmem_tensor((6,), Int32)
+        for k in cutlass.range_constexpr(6):
+            ph[k] = Int32(0)
+        tile_scheduler = TileSchedulerCls()
+        work_tile = tile_scheduler.initial_work_tile_info()
+        while work_tile.is_valid_tile:
+            _, kv_block, head_idx, _, batch_idx, _, m_block_min, m_block_max, process_tile = (
+                self._work_tile(work_tile, cta_rank_in_cluster, SeqlenInfoCls, block_info)
+            )
+            num_iters = (m_block_max - m_block_min) * self.dm_G
+            if process_tile:
+                for k in cutlass.range_constexpr(4):
+                    if lane == k:
+                        a = Int32(bars[k].toint())
+                        for _ in cutlass.range(num_iters, unroll=1):
+                            if const_expr(self.dm_xrp == k):
+                                dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(cnts[k]))   # DEBUG plant: forward first
+                                dm_utils.mbar_wait_parity(a, ph[k] & 1)
+                            else:
+                                dm_utils.mbar_wait_parity(a, ph[k] & 1)
+                                dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(cnts[k]))
+                            ph[k] = ph[k] + 1
+                if lane == 4:
+                    for st in cutlass.range_constexpr(2):
+                        a = Int32(pipeline_dKV.sync_object_empty.get_barrier(st).toint())
+                        if const_expr(self.dm_xrp == 4):
+                            dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(nc))
+                            dm_utils.mbar_wait_parity(a, ph[4 + st] & 1)
+                        else:
+                            dm_utils.mbar_wait_parity(a, ph[4 + st] & 1)
+                            dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(nc))
+                        ph[4 + st] = ph[4 + st] + 1
+            tile_scheduler.advance_to_next_work()
+            work_tile = tile_scheduler.get_current_work()
 
     @cute.jit
     def _dm_ord_commit(self, k: int, cta_group, cta_rank):

@@ -490,15 +490,22 @@ class DMForwardSm100:
             assert 4 * max(_rs - 80, 0) + max(_rc - 80, 0) <= 4 * max(80 - _rs, 0) + max(80 - _rc, 0) + max(80 - _ro, 0), \
                 f"setmaxnreg pool: {self.dm_sl_regs}"
 
-        # ordinv (kda/docs/ordinv-design.md, OPT-IN, default off): ordw=1 makes the PV_s -> QK_s TMEM reuse PTX-ordered.
+        # ordinv (kda/docs/ordinv-design.md; DEFAULT ON since the lead decision 2026-11-10, ordw=0 / ordld=0 = DEBUG ONLY, the
+        # pre-ordinv issue-order build): ordw makes the PV_s -> QK_s TMEM reuse PTX-ordered.
         # PV_s reads its SFA/SFB scale factors (block-scaled tcgen05.mma) from S_s's TMEM columns, and the next QK_s
         # (a different accumulator/shape/kind) overwrites S_s. PTX ISA 9.7.18.6.2 pipelines MMA A/metadata reads ->
         # later MMA D writes, but not scale-factor reads, so issue order alone is not a guarantee. ordw=1: tcgen05.commit
         # after every PV_s -> mbarrier ord[s]; the MMA warp waits it (+ fence::after_thread_sync) before the next QK_s.
         # Same MMAs, same operands: bitwise.
-        self.dm_ordld = self.dm_opts.get("ordld", "0") == "1"   # ordinv: tcgen05.wait::ld before the slice kb arrival
-        self.dm_ordw = (self.dm_opts.get("ordw", "0") == "1" and not self.use_s_ping_pong and not self.dm_sspv
+        self.dm_ordld = self.dm_opts.get("ordld", "1") == "1"   # ordinv: tcgen05.wait::ld before the slice kb arrival
+        self.dm_ordw = (self.dm_opts.get("ordw", "1") == "1" and not self.use_s_ping_pong and not self.dm_sspv
                         and self.cta_group_size == 1)
+        # ordinv planted controls (DEBUG ONLY, compiled out by default): ordpc=1 -> the MMA warp overwrites SFA of S_s (lanes 0-31)
+        # with tcgen05.st right before QK_s(k+1) (where the QK overwrite lands; caught unless ordw orders it after PV_s(k));
+        # ordpc=4 -> slice warps 0-3 re-load S_s cols 16..23 and check them against their first load, poisoning l on a
+        # mismatch; with ordld the re-load completes (wait::ld) before the kb arrival, without it the load is moved to the
+        # latest point PTX permits (after the arrival + 2 us), so a racing correction SF store is seen.
+        self.dm_ordpc = int(self.dm_opts.get("ordpc", "0"))
         self.num_regs_softmax = config.registers.softmax
         self.num_regs_correction = config.registers.correction
         self.num_regs_other = config.registers.other
@@ -2402,6 +2409,14 @@ class DMForwardSm100:
                                 # Phase-safe: PV_s(i-1) is complete (P_full(i) needs S_s(i) loaded, whose commit tracks it).
                                 dm_utils.mbar_wait_parity(self.dm_ord + 8 * stage, dm_pvn & 1)
                                 dm_utils.tc_fence_after()
+                            if const_expr(self.dm_ordpc == 1):
+                                # DEBUG planted control: poison SFA of S_s (lanes of this warp's quadrant) before QK_s(i+1)
+                                dm_pc_a = ((cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32) << 16
+                                dm_pc_a = dm_pc_a + Int32(tStS[(None, None), 0, 0, 0].iterator.toint()) + Int32(
+                                    self.tmem_s_offset[stage] + (self.dm_sl_sfcol if self.dm_slice else self.dm_sf_col))
+                                dm_pc_w = Int32(-2139062144)   # 0x80808080
+                                dm_utils.tmem_st_x4(dm_pc_a, dm_pc_w, dm_pc_w, dm_pc_w, dm_pc_w)
+                                cute.arch.fence_view_async_tmem_store()
                             # gemm_Si[stage](tCrB=tSrK[None, None, None, Ki_index], sB=sK_cur)
                             gemm_Si[stage](
                                 smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
@@ -3053,7 +3068,7 @@ class DMForwardSm100:
                 dm_row = self._q_block(work_m, s, thr_mma_qk.thr_idx) * self.m_block_size + tidx
                 dm_qblk = cutlass.min(dm_row // 32, (seqlen.seqlen_q + 31) // 32 - 1)
                 qsc[s] = Float32(descale_tensors.q_descale[batch_idx, head_idx, dm_qblk]) * Float32(math.log2(math.e))
-            step = partial(self._slice_step, q=q, tidx=tidx, st=st, qsc=qsc, rS=rS, rP=rP, rP8=rP8, tSt_ld=tSt_ld,
+            step = partial(self._slice_step, sbase=Int32(tSAcc.iterator.toint()), q=q, tidx=tidx, st=st, qsc=qsc, rS=rS, rP=rP, rP8=rP8, tSt_ld=tSt_ld,
                            tSt_st=tSt_st, thr_ld=thr_ld, thr_st=thr_st, dm_lean=dm_lean, pipeline_s_p_o=pipeline_s_p_o,
                            descale_tensors=descale_tensors, batch_idx=batch_idx, kv_head_idx=kv_head_idx,
                            work_m=work_m, seqlen=seqlen)
@@ -3074,7 +3089,7 @@ class DMForwardSm100:
 
     @cute.jit
     def _slice_step(
-        self, n_block: Int32, mask_seqlen: cutlass.Constexpr, mask_causal: cutlass.Constexpr, q: Int32, tidx: Int32,
+        self, n_block: Int32, mask_seqlen: cutlass.Constexpr, mask_causal: cutlass.Constexpr, sbase: Int32, q: Int32, tidx: Int32,
         st: cute.Tensor, qsc, rS: cute.Tensor, rP: cute.Tensor, rP8: cute.Tensor, tSt_ld: cute.Tensor,
         tSt_st: cute.Tensor, thr_ld, thr_st, dm_lean: cutlass.Constexpr, pipeline_s_p_o, descale_tensors,
         batch_idx: Int32, kv_head_idx: Int32, work_m: Int32, seqlen,
@@ -3094,6 +3109,8 @@ class DMForwardSm100:
             pipeline_s_p_o.consumer_wait_w_index_phase(s, ph)
             col = Int32(self.tmem_s_offset[s]) + q * 32
             cute.copy(thr_ld, cute.make_tensor(tSt_ld.iterator + col, tSt_ld.layout), rS)
+            if const_expr(self.dm_ordpc == 4):
+                dm_sv = [rS[16 + j] for j in range(8)]   # DEBUG planted control: raw S of cols 16..23 (first load)
             if const_expr(mask_seqlen or mask_causal):
                 # = AttentionMask.apply_mask_sm100 (non-pack-GQA, 1-CTA) restricted to columns [32 q, 32 q + 32)
                 n_blk = cutlass.max(n_block, 0)   # apply_mask_sm100 treats negative n_blocks as block 0 (empty KV range)
@@ -3123,6 +3140,10 @@ class DMForwardSm100:
                 v = utils.fmax(utils.fmax(lm[0], lm[1]), lm[2], lm[3])
             xb = v * c
             dm_utils.st_shared_b32(self.dm_slbuf + 4 * ((s * 4 + q) * self.m_block_size + tidx), dm_utils.bitcast_f32_i32(xb))
+            if const_expr(self.dm_ordpc == 4):
+                dm_pc_a = sbase + ((cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32 << 16) + col + 16
+            if const_expr(self.dm_ordpc == 4 and self.dm_ordld):
+                dm_pv = dm_utils.tmem_ld_32x32b_x8(dm_pc_a)   # re-load of this block's cols 16..23 (q = 0: the SF columns)
             if const_expr(self.dm_ordld):
                 # ordinv: the correction WG's SF tcgen05.st overwrites S_s cols 16..23 that slice WG 0 loaded; PTX
                 # 9.7.18.6.4.4/.5: a cross-thread ld -> st hand-off needs tcgen05.wait::ld before the fence + arrive
@@ -3133,6 +3154,16 @@ class DMForwardSm100:
             cute.arch.sync_warp()
             with cute.arch.elect_one():
                 dm_utils.mbar_arrive(self.dm_slbar + 8 * s)
+            if const_expr(self.dm_ordpc == 4):
+                dm_pois = Float32(0.0)
+                if const_expr(not self.dm_ordld):
+                    dm_utils.nanosleep_1us()
+                    dm_utils.nanosleep_1us()
+                    dm_pv = dm_utils.tmem_ld_32x32b_x8(dm_pc_a)   # the re-load at the latest point PTX permits without wait::ld
+                    cute.arch.fence_view_async_tmem_load()
+                for j in cutlass.range_constexpr(8):
+                    if dm_utils.bitcast_f32_i32(dm_pv[j]) != dm_utils.bitcast_f32_i32(dm_sv[j]):
+                        dm_pois = Float32(float("nan"))
             kb = cute.arch.fmax(dm_utils.floor_f32(xb), Float32(-1e30))
             bias = Float32(7.0) - kb
             for i in cutlass.range_constexpr(0, 32, 2):
@@ -3155,6 +3186,8 @@ class DMForwardSm100:
             for i in cutlass.range_constexpr(2, 32, 2):
                 ps = cute.arch.add_packed_f32x2(ps, (rS[i], rS[i + 1]))
             bsum = ps[0] + ps[1]
+            if const_expr(self.dm_ordpc == 4):
+                bsum = bsum + dm_pois   # DEBUG planted control: a re-load that saw the SF store poisons l (-> O, LSE NaN)
             if nstep > 0:
                 if const_expr(self.dm_opts.get("slnobe", "0") != "1"):   # slnobe=1: DEBUG planted WAR bug (no bsempty wait)
                     dm_utils.mbar_wait_parity(self.dm_slbar + 32 + 8 * s, (nstep - 1) & 1)

@@ -705,17 +705,22 @@ class DMBackwardSm100:
         # MMA warp's smem descriptor starts keeps ptxas from hoisting every per-k-step 64-bit descriptor into the
         # uniform registers (UR exhaustion -> 69 STL/LDL in the 48-register MMA warp in det). Same MMAs: bitwise.
         self.dm_d3nh = "d3nh" in self.dm_opts or (self.deterministic and "nod3nh" not in self.dm_opts)
-        # ordinv (kda/docs/ordinv-design.md, OPT-IN, default off). 2-CTA pipelined schedule: dV(t) reads its SFA/SFB scale
+        # ordinv (kda/docs/ordinv-design.md; DEFAULT ON since the lead decision 2026-11-10; 'noordw' = DEBUG ONLY, the pre-ordinv
+        # issue-order build). 2-CTA pipelined schedule: dV(t) reads its SFA/SFB scale
         # factors from TMEM cols in the S region (P 0..31, SF 32..51) and the next S^T MMA overwrites the S region; dK(t)
         # reads SFA/SFB_dk at dS_offset + 32.. (dP region) and the next dP^T MMA overwrites it. PTX ISA 9.7.18.6.2 pipelines
         # MMA A/metadata reads -> later MMA D writes, not scale-factor reads, so issue order alone is not a guarantee.
         # 'ordw': tcgen05.commit after dV / dK -> mbarrier ord[0] / ord[1]; the MMA warp waits it (+ fence::after) before
-        # the next S^T / dP^T MMA. 'ordw=v' / 'ordw=k': only the dV->S / dK->dP site. Same MMAs: bitwise.
-        _ow = next((x for x in self.dm_opts if x == "ordw" or x.startswith("ordw=")), None)
-        self.dm_ordw_v = _ow is not None and _ow in ("ordw", "ordw=v")
-        self.dm_ordw_k = _ow is not None and _ow in ("ordw", "ordw=k")
-        if self.dm_ordw_v or self.dm_ordw_k:
-            assert self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED and "rdo" not in self.dm_opts, "ordw: 2-CTA pipelined only"
+        # the next S^T / dP^T MMA. Same MMAs: bitwise. (The 1-CTA / serial schedules are not used at hd128: FA4 picks 2-CTA
+        # for every hdim >= 128 problem; they are not covered.)
+        _ow = self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED and "noordw" not in self.dm_opts
+        assert not (_ow and "rdo" in self.dm_opts), "rdo (debug order) is not ordinv-ordered: use it with noordw"
+        self.dm_ordw_v = _ow
+        self.dm_ordw_k = _ow
+        # ordinv planted controls (DEBUG ONLY): ordpc1 / ordpc3 -> the MMA warp overwrites SFA_dv (S region col 32) / SFA_dk
+        # (dP region col dS+32) of its lanes with tcgen05.st (+ wait::st) right before S^T(t+1) / dP^T(t+1), i.e. where the
+        # next MMA's overwrite lands; caught unless ordw orders it after dV(t) / dK(t) completed.
+        self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else 0)
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
         # DM dsq (track L, kda/docs/bwdalt-design.md): the dS tile amax / pow2 scale / e4m3 quantization / dS code+SF stores /
         # dQ SF word + peer dS exchange move from the 8 compute warps to the 4 reduce (dQ drain) warps. Reduce warp q owns
@@ -3903,6 +3908,8 @@ class DMBackwardSm100:
                         if const_expr(self.dm_ordw_v):
                             # ordinv C0: dV(t) read SFA/SFB_dv (S region cols 32..51); S^T(t+1) overwrites the S region
                             self._dm_ord_wait(0, dm_dvn)
+                        if const_expr(self.dm_ordpc == 1):
+                            self._dm_ord_plant(tStS, self.dm_sfa_dv_col)
                         mma_qk_fn(B_idx=consumer_state_Q.index, dz=dmz)
                         pipeline_S_P.sync_object_full.arrive(
                             0, pipeline_S_P.producer_mask, cta_group
@@ -3942,6 +3949,8 @@ class DMBackwardSm100:
                         if const_expr(self.dm_ordw_k):
                             # ordinv C0: dK(t) read SFA/SFB_dk (dP region cols dS+32..); dP^T(t+1) overwrites the dP region
                             self._dm_ord_wait(1, dm_dkn)
+                        if const_expr(self.dm_ordpc == 3):
+                            self._dm_ord_plant(tStS, self.dm_sfa_dk_col)
                         mma_dov_fn(B_idx=consumer_state_dO.index, dz=dmz)
                         pipeline_dP.sync_object_full.arrive(0, pipeline_dP.producer_mask, cta_group)
 
@@ -4236,6 +4245,15 @@ class DMBackwardSm100:
         if n > 0:
             cute.arch.mbarrier_wait(self.dm_ord_ptr + k, phase=(n - 1) & 1)
             dm_utils.tc_fence_after()
+
+    @cute.jit
+    def _dm_ord_plant(self, tStS: cute.Tensor, col: int):
+        """ordinv DEBUG planted control: tcgen05.st 0x80808080 (E8M0 2.0) into 4 SF columns of this warp's lane quadrant."""
+        a = ((cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32) << 16
+        a = a + Int32(tStS.iterator.toint()) - Int32(self.tmem_S_offset) + Int32(col)
+        w = Int32(-2139062144)
+        dm_utils.tmem_st_x4(a, w, w, w, w)
+        cute.arch.fence_view_async_tmem_store()
 
     def _check_dS_exchange_layouts(self):
         """The dS exchange of the M=64 layout copies the peer's Q-column half of this CTA's

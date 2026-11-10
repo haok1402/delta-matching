@@ -1020,6 +1020,18 @@ def tmem_ld_16x64b_x32(addr: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def tmem_ld_32x32b_x8(addr: Int32, *, loc=None, ip=None):
+    """ordinv planted control only: raw tcgen05.ld.32x32b.x8 (thread t = lane base + t, 8 consecutive columns)."""
+    regs = ",".join(f"${i}" for i in range(8))
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 8), [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "tcgen05.ld.sync.aligned.32x32b.x8.b32 {" + regs + "}, [$8];",
+        ",".join(["=f"] * 8) + ",r", has_side_effects=True, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return [Float32(llvm.extractvalue(T.f32(), res, [i], loc=loc, ip=ip)) for i in range(8)]
+
+
+@dsl_user_op
 def tmem_ld_16x64b_x16(addr: Int32, *, loc=None, ip=None):
     regs = ",".join(f"${i}" for i in range(16))
     res = llvm.inline_asm(

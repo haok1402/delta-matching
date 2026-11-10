@@ -140,7 +140,12 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc",
+            "sfnomath", "sfnopc", "sfnoxchg", "sfnodsc", "sfnosfa")
+    # sf* (fork kda-sm100-kv2sf stage-1 bound, TIMING ONLY, wrong dK/dV): remove one link of the compute warps' P^T / dS codes +
+    # SF production chain each.  sfnomath: P = S, dS = dP (no exp / dS math); sfnopc: no P^T block max / codes / smem store
+    # (p_sb = 127); sfnoxchg: no p_sb / |dS|-max exchange (no bar 3, no gather; dS scale from the thread-local max); sfnodsc: no dS
+    # codes (scale still computed); sfnosfa: no SFA words (no smem p_sb reads, no tcgen05.st; TMEM SFA stale).
     # dqc (fork hd256-dqr2, requires dqt): EXACT-CARRY chunk of the (q head, q tile) reduction of every key tile.  The launch covers
     # q heads [0, rep) of its (copied) head tensors x q tiles [Q0, Q1) (Q1 = the n_t argument; causal: key tiles 0..Q1-1 = the grid).
     # Chunk descriptor (int32, in the mSBP slot): [Q0, n_t of the full sequence, cin, cout]; cin = 1: this launch continues the
@@ -725,7 +730,11 @@ class DmHd256Kv2:
                     self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
-                for i in cutlass.range_constexpr(0, 32, 4):
+                if const_expr("sfnomath" in self.opts):
+                    for i in cutlass.range_constexpr(32):
+                        pv[i] = sv[i]
+                        dsv[i] = dpv[i]
+                for i in cutlass.range_constexpr(0, 0 if const_expr("sfnomath" in self.opts) else 32, 4):
                     l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
                     dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
                     for q2 in cutlass.range_constexpr(0, 4, 2):
@@ -753,13 +762,16 @@ class DmHd256Kv2:
                         pa = pa + Int64(N) * 16
                 # ---- P^T codes: pow2 per (key, 32 queries), thread-local ----
                 am = Float32(0.0)
-                for i in cutlass.range_constexpr(32):
-                    am = cute.arch.fmax(am, pv[i])
-                psb = dm_utils.pow2_sb(am)
-                inv = dm_utils.inv_pow2_from_sb(psb)
+                psb = Int32(127)
+                inv = Float32(1.0)
+                if const_expr("sfnopc" not in self.opts):
+                    for i in cutlass.range_constexpr(32):
+                        am = cute.arch.fmax(am, pv[i])
+                    psb = dm_utils.pow2_sb(am)
+                    inv = dm_utils.inv_pow2_from_sb(psb)
                 crow = sCP_addr + stg * cstage_bytes + crow_off
                 hpl = [Int32(0)] * 32
-                for hv in cutlass.range_constexpr(2):
+                for hv in cutlass.range_constexpr(0 if const_expr("sfnopc" in self.opts) else 2):
                     w = [None] * 4
                     for u in cutlass.range_constexpr(4):
                         i0 = 16 * hv + 4 * u
@@ -784,26 +796,32 @@ class DmHd256Kv2:
                 if const_expr(self.kn == "ex"):
                     if warp == 6:
                         spin(self.DLY)
-                if const_expr("xpt" in self.opts):
-                    dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
-                else:
-                    dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
+                if const_expr("sfnoxchg" not in self.opts):
+                    if const_expr("xpt" in self.opts):
+                        dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
+                    else:
+                        dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
                 amd = Float32(0.0)
                 for i in cutlass.range_constexpr(32):
                     amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
-                wm = dm_utils.redux_max_abs_f32(amd)
-                if lane == 0:
+                wm = Float32(0.0)
+                if const_expr("sfnoxchg" not in self.opts):
+                    wm = dm_utils.redux_max_abs_f32(amd)
+                if lane == 0 and const_expr("sfnoxchg" not in self.opts):
                     if const_expr("xsv" in self.opts):
                         st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
                     else:
                         st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
-                cute.arch.fence_view_async_shared()
-                if const_expr(not (self.kn == "ex" and self.unsafe)):
+                if const_expr("sfnoxchg" not in self.opts):
+                    cute.arch.fence_view_async_shared()
+                if const_expr(not (self.kn == "ex" and self.unsafe) and "sfnoxchg" not in self.opts):
                     cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
                 g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
                 xs = sXS_addr + par * 32
                 m4 = Float32(0.0)
-                if const_expr("xsv" in self.opts):
+                if const_expr("sfnoxchg" in self.opts):
+                    m4 = amd
+                elif const_expr("xsv" in self.opts):
                     x4 = ld_shared_v4f(xs + g * 16)
                     m4 = max_f32(max_f32(x4[0], x4[1]), max_f32(x4[2], x4[3]))
                 else:
@@ -814,7 +832,7 @@ class DmHd256Kv2:
                 srow = sCS_addr + stg * cstage_bytes + crow_off
                 hsl = [Int32(0)] * 32
                 hcl = [Int32(0)] * 32
-                for hv in cutlass.range_constexpr(2):
+                for hv in cutlass.range_constexpr(0 if const_expr("sfnodsc" in self.opts) else 2):
                     w = [None] * 4
                     for u in cutlass.range_constexpr(4):
                         i0 = 16 * hv + 4 * u
@@ -858,7 +876,7 @@ class DmHd256Kv2:
                     lk_cols_f64(dsv, lane, a1_)
                     lk_cols_f64(pdl, lane, a1_ + 8)
                 # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
-                if warp < 4:
+                if warp < 4 and const_expr("sfnosfa" not in self.opts):
                     bp = [Int32(0)] * 4
                     bs = [Int32(0)] * 4
                     for j in cutlass.range_constexpr(4):

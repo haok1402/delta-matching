@@ -273,6 +273,10 @@ class DMPass0Sm100:
         self.dm_b6 = next((int(t[3:]) for t in _fl0 if t.startswith("b6_")), 0)   # deg-6 poly exp on (qb+kb)%m==0 blocks
         self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
+        # rw8k dq8 (stage 2b): the compute warps quantize this work tile's dO rows (bf16 aux[6] -> e4m3 codes aux[7],
+        # pow2 scales aux[8]; quant.py arithmetic) at the start of every work tile. The dP MMA still reads the TMA-loaded
+        # do8 (cost check; the codes written here are compared bitwise with quant_do on the host)
+        self.dm_dq8 = "dq8" in _fl0
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
         # +f64: per-tile fp32 partial sums (short chains), accumulated across tiles in fp64; delta = num / den in fp64,
         # rounded once to fp32. P and dP are untouched (bitwise the backward's), only the row-sum round-off shrinks.
@@ -2651,6 +2655,42 @@ class DMPass0Sm100:
             work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
+    def _dq8_quant(self, aux, quad, rh, lane, m_block, head_idx, batch_idx, seqlen):
+        """rw8k dq8: rows m_block*128 + quad*32 + [0, 32) form one 32-token scale block; both row-half warps (rh 0/1) take
+        its amax (lane l: columns 4l..4l+3 of all 32 rows, then a warp max), each writes the codes of its 16 rows, rh 0
+        writes the scale. Same arithmetic as quant.py _quant_do_delta_kernel (prescale 1, no mean)."""
+        H = cute.size(aux[6], mode=[2])
+        N = seqlen.seqlen_q
+        r0 = m_block * self.m_block_size + quad * 32
+        src = aux[6].iterator.toint()
+        dst = aux[7].iterator.toint()
+        rs = Int64(H) * Int64(256)   # bytes per token row of bf16 dO (H heads x 128 x 2)
+        base = src + (Int64(batch_idx) * Int64(N) + Int64(r0)) * rs + Int64(head_idx) * Int64(256) + Int64(8 * lane)
+        am = Float32(0.0)
+        for hh in cutlass.range_constexpr(2):
+            ws = [dm_utils.ld_global_b64(base + Int64(16 * hh + j) * rs) for j in range(16)]
+            for j in cutlass.range_constexpr(16):
+                am = cute.arch.fmax(am, dm_utils.bf16x4_absmax(ws[j]))
+        for off in cutlass.range_constexpr(5):
+            am = cute.arch.fmax(am, cute.arch.shuffle_sync_bfly(am, offset=1 << off))
+        ab = dm_utils.bitcast_f32_i32(am)
+        eb = ((ab >> 23) & 0xFF) - 8
+        if (ab & 0x7FFFFF) > 0x600000:
+            eb = eb + 1
+        eb = cutlass.min(cutlass.max(eb, Int32(1)), Int32(254))
+        if am == Float32(0.0):
+            eb = Int32(127)
+        inv = dm_utils.bitcast_i32_f32((Int32(254) - eb) << 23)
+        rsq = Int64(H) * Int64(128)
+        obase = dst + (Int64(batch_idx) * Int64(N) + Int64(r0 + 16 * rh)) * rsq + Int64(head_idx) * Int64(128) + Int64(4 * lane)
+        ws2 = [dm_utils.ld_global_b64(base + Int64(16 * rh + j) * rs) for j in range(16)]
+        for j in cutlass.range_constexpr(16):
+            dm_utils.st_global_b32(obase + Int64(j) * rsq, dm_utils.bf16x4_quant_e4m3(ws2[j], inv))
+        if rh == 0:
+            if lane == 0:
+                aux[8][batch_idx, head_idx, r0 // 32] = dm_utils.bitcast_i32_f32(eb << 23)
+
+    @cute.jit
     def tl_loop(self, stage: int, rh: int, thr_mma_qk, tStS, mLSE, pipeline_s_p_o, pipeline_dp, aux_data, block_info,
                 num_splits, SeqlenInfoCls, tile_scheduler):
         """P0 +tl (track AG): two lanes per query row, 4 compute warps / SMSP (stage, row half rh).
@@ -2679,6 +2719,8 @@ class DMPass0Sm100:
             )
             has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
             m_block = self._q_block(work_m, stage)
+            if const_expr(self.dm_dq8):
+                self._dq8_quant(aux, quad, rh, lane, m_block, head_idx, batch_idx, seqlen)
             row = m_block * self.m_block_size + row_in
             rowc = cutlass.min(row, seqlen.seqlen_q - 1)
             qsv = Float32(aux[0][batch_idx, head_idx, rowc // 32])

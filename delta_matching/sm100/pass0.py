@@ -64,7 +64,9 @@ def _aux(t: torch.Tensor, leading_dim: int):
 
 
 def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_override: dict | None = None,
-             exp_variant: str | None = None):
+             exp_variant: str | None = None, dq8_io=None):
+    """dq8_io (rw8k 2b, with exp_variant '+dq8'): (dO bf16 (B,N,H,D), do8 out (B,N,H,D) e4m3, dos out (B,H,N/32) fp32):
+    pass 0 quantizes dO itself (quant.py arithmetic) into the two outputs."""
     if exp_variant is None:
         exp_variant = _env("DM_P0_EXP", "p3_16_0+ma+h2+pf+sq+ts+tl")   # P0-v10 (track AG): +tl two lanes per row, 4 compute warps/SMSP, bitwise (pass 0 -8..-12%). P0-v9 (small): +ts double-float TwoSum cross-tile sums replace the per-tile fp64 flush (identity equal to +f64 on 49 cases, pass 0 +2-3%). P0-v8 (p0floor): +pf scale prefetch, +sq per-stage specialized code (both bitwise). P0-v7b: fp64 flush of the fp32 partials EVERY tile (most accurate of the measured variants; f64k4 = every 4 tiles), delta in fp64. P0-v6 (fix0): ALL exps via dm_bwd_p_pair (MUFU), bitwise the backward's P -> rowsum(dS)=0 at fp32 round-off; keeps h2 halves + 4 accumulators; /sum P kept
     if dm_common.b6_m() > 0 and "+b6_" not in exp_variant:
@@ -74,6 +76,10 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
         over.update(config_override)
     aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
            _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2)]
+    if "dq8" in exp_variant.split("+")[1:]:
+        dob, d8o, dso = dq8_io
+        assert dob.is_contiguous() and d8o.is_contiguous() and dso.is_contiguous()
+        aux += [_aux(dob.view(torch.int64), 3), _aux(d8o.view(torch.uint8).view(torch.int32), 3), _aux(dso, 2)]
     if "tr" in exp_variant.split("+")[1:]:
         global TRACE
         TRACE = torch.zeros(64, dtype=torch.int64, device=lse.device)
@@ -84,7 +90,7 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
         aux.append(_aux(DPDUMP, 3))
     if any(f in exp_variant.split("+")[1:] for f in ("tr", "pd")):
         return _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant)[1]
-    names = ["qs", "ks", "vs", "dos", "do8", "lse"]
+    names = ["qs", "ks", "vs", "dos", "do8", "lse"] + (["dob", "do8o", "doso"] if len(aux) == 9 else [])
     inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
     # the O output of pass 0 is an unused scratch buffer: returned to the fast path (as an output) and dropped here
     return fastpath.call("pass0", inp, (bool(causal), exp_variant, repr(sorted(over.items())), compile_env()),

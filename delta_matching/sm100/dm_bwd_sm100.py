@@ -727,7 +727,10 @@ class DMBackwardSm100:
         self.dm_xscope = self.use_2cta_instrs and "noxscope" not in self.dm_opts
         # cost bisect (DEBUG): xs:a = remote arrives only, xs:wf = MMA-warp wait fences only, xs:wq = waits as
         # try_wait.acquire.cluster only, xs:awq = arrives + acquire.cluster waits (default = arrives + fences)
-        _xm = next((x[3:] for x in self.dm_opts if x.startswith("xs:")), "awf")
+        # DEFAULT = "pwq" (measured cheapest formal variant, kda/runs/ordinv/x3p/bisect): remote arrives to the OTHER CTA's barrier at
+        # .release.cluster (own-CTA targets keep .release.cta: same-CTA producer/consumer), MMA-warp waits as try_wait.acquire.cluster.
+        # (awf = all remote arrives cluster + fence.acq_rel.cluster after waits: 2.3x bwd; release.cluster lowers to MEMBAR.ALL.GPU)
+        _xm = next((x[3:] for x in self.dm_opts if x.startswith("xs:")), "pwq")
         self.dm_xs_arrive = (2 if "p" in _xm else 1) if (self.dm_xscope and ("a" in _xm or "p" in _xm)) else 0   # xs:p.. = peer-only cluster scope
         self.dm_xs_wait = (0 if not self.dm_xscope else 2 if "wq" in _xm else 1 if "wf" in _xm else 0)
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)

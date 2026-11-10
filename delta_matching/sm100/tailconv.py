@@ -51,8 +51,8 @@ def _patch(src: str) -> str:
         ("        m_block, head_idx, batch_idx, _ = work_tile.tile_idx\n",
          "        m_block, head_idx, batch_idx, _ = work_tile.tile_idx\n"
          "        cute.arch.griddepcontrol_launch_dependents()   # rw8k: the next kernel may launch now\n"
-         "        if const_expr(mDmQ is not None):\n"
-         "            m_block, head_idx, batch_idx = self._dm_pick(mDmSem, mDmQ)\n"
+         "        if const_expr(mDmQ is not None and self.dm_ctl != 'early'):\n"
+         "            m_block, head_idx, batch_idx = self._dm_pick(mDmSem, mDmQ, sdQaccum_flat, tidx)\n"
          "        if work_tile.is_valid_tile:\n"
          "            self._dm_ready(mDmSem, m_block, head_idx, batch_idx, tidx, mdQ.shape[1])\n"),
     ]
@@ -82,15 +82,23 @@ class DMTailConv(_Base):
         self.dm_kind, self.dm_causal, self.dm_ctn, self.dm_G, self.dm_ctl = dm_kind, dm_causal, dm_ctn, dm_G, dm_ctl
 
     @cute.jit
-    def _dm_pick(self, mDmSem, mDmQ):
+    def _dm_pick(self, mDmSem, mDmQ, sbuf, tidx):
         """Readiness queue: the CTA with linear block id i converts the i-th tile that became final (bwd main appends tile
-        ids in completion order), so CTAs dispatched in launch order never wait behind a late tile. Every thread polls the
-        entry itself (ld.acquire.gpu, bounded -> trap); the det counters are re-checked in _dm_ready."""
+        ids in completion order), so CTAs dispatched in launch order never wait behind a late tile. Thread 0 polls the
+        entry (ld.acquire.gpu, bounded -> trap) and broadcasts it through smem; the det counters are re-checked in
+        _dm_ready (the queue is only a scheduling hint)."""
         bx, by, bz = cute.arch.block_idx()
-        gx, gy, _ = cute.arch.grid_dim()
+        gx, gy, gz = cute.arch.grid_dim()
         pos = bx + gx * (by + gy * bz)
-        v = dm_utils.poll_acquire_nz_or_trap(mDmQ.iterator.toint() + Int64(4) * Int64(1 + pos), Int32(1 << 26))
-        t = v - 1
+        if const_expr(self.dm_ctl == "qdrop"):
+            pos = pos + gx * gy * gz       # CONTROL: an entry that is never written (must trap)
+        saddr = sbuf.iterator.toint()
+        if tidx == 0:
+            v0 = dm_utils.poll_acquire_nz_or_trap(mDmQ.iterator.toint() + Int64(4) * Int64(1 + pos), Int32(1 << 24))
+            dm_utils.st_shared_b32(saddr, v0)
+        cute.arch.barrier()
+        t = dm_utils.ld_shared_b32(saddr) - 1
+        cute.arch.barrier()
         mt = cute.size(mDmSem, mode=[2])
         nh = cute.size(mDmSem, mode=[1])
         return t % mt, (t // mt) % nh, t // (mt * nh)
@@ -106,7 +114,8 @@ class DMTailConv(_Base):
             else:
                 fin = Int32(self.dm_G)
             if const_expr(self.dm_ctl == "early"):
-                fin = fin - 1          # CONTROL: reads before the last writer released (must be caught by the bit check)
+                fin = Int32(0)         # CONTROL: no readiness at all (block-id tile, no queue, no counter wait): reads
+                                       # tiles before their last writer released -> must be caught by the bit check
             if const_expr(self.dm_ctl == "drop"):
                 fin = fin + 1          # CONTROL: the flag never arrives (must trap, not hang)
             if tidx == 0:
@@ -115,7 +124,7 @@ class DMTailConv(_Base):
                 ns = cute.size(mDmSem, mode=[3])
                 base = mDmSem.iterator.toint() + Int64(4) * Int64(((batch_idx * nh + head_idx) * nt + m_block) * ns)
                 for r in cutlass.range_constexpr(cute.size(mDmSem, mode=[3])):
-                    dm_utils.poll_acquire_ge_or_trap(base + Int64(4 * r), fin, Int32(1 << 26))
+                    dm_utils.poll_acquire_ge_or_trap(base + Int64(4 * r), fin, Int32(1 << 24))
             cute.arch.barrier()
             dm_utils.fence_proxy_async_global()
 

@@ -525,9 +525,9 @@ def poll_acquire_ge_or_trap(addr: cutlass.Int64, target: Int32, limit: Int32, *,
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(target).ir_value(loc=loc, ip=ip),
                            Int32(limit).ir_value(loc=loc, ip=ip)],
                     "{\n\t.reg .pred p;\n\t.reg .b32 v, it;\n\tmov.b32 it, 0;\n"
-                    "DM_POLL:\n\tld.acquire.gpu.global.b32 v, [$0];\n\tsetp.ge.s32 p, v, $1;\n\t@p bra DM_DONE;\n\t"
-                    "add.s32 it, it, 1;\n\tsetp.gt.s32 p, it, $2;\n\t@p trap;\n\tnanosleep.u32 32;\n\tbra DM_POLL;\n"
-                    "DM_DONE:\n\t}",
+                    "DM_TCPG:\n\tld.acquire.gpu.global.b32 v, [$0];\n\tsetp.ge.s32 p, v, $1;\n\t@p bra DM_TCPGD;\n\t"
+                    "add.s32 it, it, 1;\n\tsetp.gt.s32 p, it, $2;\n\t@p trap;\n\tnanosleep.u32 256;\n\tbra DM_TCPG;\n"
+                    "DM_TCPGD:\n\t}",
                     "l,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
@@ -565,7 +565,7 @@ def poll_acquire_nz_or_trap(addr: cutlass.Int64, limit: Int32, *, loc=None, ip=N
         T.i32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(limit).ir_value(loc=loc, ip=ip)],
         "{\n\t.reg .pred p;\n\t.reg .b32 it;\n\tmov.b32 it, 0;\n"
         "DM_PNZ:\n\tld.acquire.gpu.global.b32 $0, [$1];\n\tsetp.ne.s32 p, $0, 0;\n\t@p bra DM_PNZD;\n\t"
-        "add.s32 it, it, 1;\n\tsetp.gt.s32 p, it, $2;\n\t@p trap;\n\tnanosleep.u32 32;\n\tbra DM_PNZ;\n"
+        "add.s32 it, it, 1;\n\tsetp.gt.s32 p, it, $2;\n\t@p trap;\n\tnanosleep.u32 256;\n\tbra DM_PNZ;\n"
         "DM_PNZD:\n\t}",
         "=r,l,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
 

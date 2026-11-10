@@ -17,7 +17,7 @@ from .bwd_hd256mx import dm_bwd_hd256mx
 from .bwd_hd256kv2 import dm_bwd_hd256kv2, kv2_launch
 from .fastpath import env as _env
 
-BWD_IMPL_DEFAULT = "mx"     # host impl switch (DM_H256_BWD_IMPL): "mx" = DmHd256Mx dv+dk+dq, "kv2" = DmHd256Mx dq + DmHd256Kv2
+BWD_IMPL_DEFAULT = "kv2"    # host impl switch (DM_H256_BWD_IMPL): "mx" = DmHd256Mx dv+dk+dq, "kv2" = DmHd256Mx dq + DmHd256Kv2
 
 
 def _bwd_impl():

@@ -78,10 +78,10 @@ def twins(q8, do8, k8):
 def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, modes=("dv", "dk", "dq"), tw=None,
                    knob="", impl=None):
     """impl per mode: "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values).
-    impl "1" / "2" = all modes; a dict mode -> impl; None = env DM_H256_BWD_IMPL (all modes) if set, else IMPL_DEFAULT
+    impl "1" / "2" = all modes; a dict mode -> impl; None = env DM_H256_MX_IMPL (all modes; renamed from DM_H256_BWD_IMPL in bundle 3, which now names the api-level mx|kv2 switch) if set, else IMPL_DEFAULT
     (dq "2", dv / dk "1")."""
     if impl is None:
-        impl = _env("DM_H256_BWD_IMPL", "")
+        impl = _env("DM_H256_MX_IMPL", "")
         impl = (IMPL_DEFAULT if not knob else "1") if impl == "" else impl   # knobs are per class: one impl for all modes
     impls = dict(impl) if isinstance(impl, dict) else {m: str(impl) for m in ("dv", "dk", "dq")}
     assert all(v in ("1", "2") for v in impls.values()), impls

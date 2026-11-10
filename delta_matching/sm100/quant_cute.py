@@ -14,7 +14,9 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass._mlir.dialects import llvm
 import cuda.bindings.driver as cuda
 
-NT = 64            # threads per CTA (= Triton num_warps 2) for every kernel except KMeanPartial (128 = num_warps 4)
+NT = 64            # threads per CTA of ProdA (= Triton num_warps 2: its K-mean tree is defined on 2 warps)
+NT4 = 128          # Tile / ProdB: 4 warps on the same 32-row tile (half the rows per thread -> half the live registers;
+                   # codes / scales / bytes are order-free, each row's delta tree stays within one warp's lanes)
 TR = 32            # rows per quant tile (one E8M0 block)
 
 
@@ -55,13 +57,27 @@ def ld_bf16f(addr: Int64, *, loc=None, ip=None) -> Float32:
                         "{\n\t.reg .b16 h;\n\tld.global.b16 h, [$1];\n\tcvt.f32.bf16 $0, h;\n\t}", "=f,l", loc=loc, ip=ip))
 
 
-@dsl_user_op
-def bf2(w: Int32, *, loc=None, ip=None):
-    """b32 holding 2 bf16 (lo = lower address) -> (f32 lo, f32 hi) via cvt.f32.bf16 (as Triton)."""
-    st = _asm(llvm.StructType.get_literal([T.f32()] * 2), [_v(w, Int32, loc, ip)],
-              "{\n\t.reg .b16 l, h;\n\tmov.b32 {l, h}, $2;\n\tcvt.f32.bf16 $0, l;\n\tcvt.f32.bf16 $1, h;\n\t}",
-              "=f,=f,r", loc=loc, ip=ip)
-    return [Float32(llvm.extractvalue(T.f32(), st, [i], loc=loc, ip=ip)) for i in range(2)]
+def _bf2_op(tag):
+    @dsl_user_op
+    def f(w: Int32, *, loc=None, ip=None):
+        st = _asm(llvm.StructType.get_literal([T.f32()] * 2), [_v(w, Int32, loc, ip)],
+                  "{\n\t.reg .b16 l, h;\n\tmov.b32 {l, h}, $2;\n\tcvt.f32.bf16 $0, l;\n\tcvt.f32.bf16 $1, h;\n\t}"
+                  + (f" // {tag}" if tag else ""), "=f,=f,r", loc=loc, ip=ip)
+        return [Float32(llvm.extractvalue(T.f32(), st, [i], loc=loc, ip=ip)) for i in range(2)]
+    return f
+
+
+_BF2 = {}
+
+
+def bf2(w, tag=""):
+    """b32 holding 2 bf16 (lo = lower address) -> (f32 lo, f32 hi) via cvt.f32.bf16 (as Triton).  `tag` makes the asm text
+    unique per conversion pass so LLVM cannot CSE a re-conversion with an earlier one (that would keep every converted row
+    live and cost occupancy); the PTX instructions are identical."""
+    f = _BF2.get(tag)
+    if f is None:
+        f = _BF2[tag] = _bf2_op(tag)
+    return f(w)
 
 
 def _f2(op, cons="=f,f,f"):
@@ -77,6 +93,39 @@ fsub = _f2("sub.rn.f32")
 fmul = _f2("mul.rn.f32")
 fmax = _f2("max.f32")
 fdivfull = _f2("div.full.f32")
+
+
+# packed f32x2 (sm_100 FADD2 / FMUL2 / FFMA2): each lane is rounded exactly as the scalar .rn op (same values, half the
+# instructions; Triton's reductions are packed the same way)
+def _pk2(op, nin):
+    @dsl_user_op
+    def f(*args, loc=None, ip=None):
+        ins = []
+        for a in args:
+            ins += [_v(a[0], Float32, loc, ip), _v(a[1], Float32, loc, ip)]
+        regs = ", ".join(f"x{i}" for i in range(nin))
+        body = "{\n\t.reg .b64 " + regs + ", z;\n\t"
+        for i in range(nin):
+            body += f"mov.b64 x{i}, {{${2 + 2 * i}, ${3 + 2 * i}}};\n\t"
+        body += f"{op} z, " + regs + ";\n\tmov.b64 {$0, $1}, z;\n\t}"
+        st = _asm(llvm.StructType.get_literal([T.f32()] * 2), ins, body, "=f,=f," + ",".join(["f"] * (2 * nin)),
+                  loc=loc, ip=ip)
+        return (Float32(llvm.extractvalue(T.f32(), st, [0], loc=loc, ip=ip)),
+                Float32(llvm.extractvalue(T.f32(), st, [1], loc=loc, ip=ip)))
+    return f
+
+
+add2 = _pk2("add.rn.f32x2", 2)
+sub2 = _pk2("sub.rn.f32x2", 2)
+mul2 = _pk2("mul.rn.f32x2", 2)
+fma2 = _pk2("fma.rn.f32x2", 3)
+
+
+def tree2(v):
+    """tree() on (lo, hi) pairs, packed."""
+    while len(v) > 1:
+        v = [add2(v[2 * i], v[2 * i + 1]) for i in range(len(v) // 2)]
+    return v[0]
 
 
 @dsl_user_op
@@ -124,17 +173,6 @@ def e4m3x4(a: Float32, b: Float32, c: Float32, d: Float32, *, loc=None, ip=None)
     return Int32(_asm(T.i32(), [_v(x, Float32, loc, ip) for x in (a, b, c, d)],
                       "{\n\t.reg .b16 l, h;\n\tcvt.rn.satfinite.e4m3x2.f32 l, $2, $1;\n\t"
                       "cvt.rn.satfinite.e4m3x2.f32 h, $4, $3;\n\tmov.b32 $0, {l, h};\n\t}", "=r,f,f,f,f", loc=loc, ip=ip))
-
-
-@dsl_user_op
-def e4m3x4_deq(w: Int32, *, loc=None, ip=None):
-    """4 e4m3 bytes -> 4 f32 through f16 (cvt.rn.f16x2.e4m3x2, cvt.f32.f16; as Triton's y.to(float32))."""
-    st = _asm(llvm.StructType.get_literal([T.f32()] * 4), [_v(w, Int32, loc, ip)],
-              "{\n\t.reg .b16 l, h, a, b, c, d;\n\t.reg .b32 x, y;\n\tmov.b32 {l, h}, $4;\n\t"
-              "cvt.rn.f16x2.e4m3x2 x, l;\n\tcvt.rn.f16x2.e4m3x2 y, h;\n\tmov.b32 {a, b}, x;\n\tmov.b32 {c, d}, y;\n\t"
-              "cvt.f32.f16 $0, a;\n\tcvt.f32.f16 $1, b;\n\tcvt.f32.f16 $2, c;\n\tcvt.f32.f16 $3, d;\n\t}",
-              "=f,=f,=f,=f,r", loc=loc, ip=ip)
-    return [Float32(llvm.extractvalue(T.f32(), st, [i], loc=loc, ip=ip)) for i in range(4)]
 
 
 @dsl_user_op
@@ -189,6 +227,12 @@ def bar_sync(*, loc=None, ip=None):
 
 
 @dsl_user_op
+def bar_named(bid: Int32, n: int, *, loc=None, ip=None):
+    """bar.sync bid, n (a warp pair's private barrier)."""
+    _asm(None, [_v(bid, Int32, loc, ip)], f"bar.sync $0, {n};", "r", side=True, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def smem_base(nbytes: int, *, loc=None, ip=None) -> Int32:
     """32-bit shared address of a static smem buffer (CTA-private)."""
     from cutlass.utils import SmemAllocator
@@ -235,23 +279,24 @@ def load_row8(addr, vec):
 
 
 def row_delta(x, o):
-    """Triton's in-thread tree of sum_j x_j * o_j over 16 columns (cutequant-design R3)."""
-    p = {j: fmul(x[j], o[j]) for j in (2, 3, 6, 7, 10, 11, 14, 15)}
-    ae = [ffma(x[4 * k], o[4 * k], p[4 * k + 2]) for k in range(4)]
-    ao = [ffma(x[4 * k + 1], o[4 * k + 1], p[4 * k + 3]) for k in range(4)]
-    e = fadd(fadd(ae[0], ae[1]), fadd(ae[2], ae[3]))
-    od = fadd(fadd(ao[0], ao[1]), fadd(ao[2], ao[3]))
-    return fadd(e, od)
+    """Triton's in-thread tree of sum_j x_j * o_j over 16 columns (cutequant-design R3), packed over column pairs exactly as
+    its PTX: lane lo = even columns, hi = odd: a_k = fma2(x(4k,4k+1), o(4k,4k+1), x(4k+2,4k+3)*o(4k+2,4k+3)),
+    (a0 + a1) + (a2 + a3), then lo + hi."""
+    X = [(x[2 * i], x[2 * i + 1]) for i in range(8)]
+    O = [(o[2 * i], o[2 * i + 1]) for i in range(8)]
+    a = [fma2(X[2 * k], O[2 * k], mul2(X[2 * k + 1], O[2 * k + 1])) for k in range(4)]
+    e = add2(add2(a[0], a[1]), add2(a[2], a[3]))
+    return fadd(e[0], e[1])
 
 
 class TileGeo:
     """32-row x D quant tile on 64 threads, Triton layout spt[1,16] tpw[32/(D/16), D/16] wpc[2,1]."""
 
-    def __init__(self, D, tid):
-        self.D = D
+    def __init__(self, D, tid, nw=2):
+        self.D, self.nw = D, nw
         self.tpw1 = D // 16
         self.tpw0 = 32 // self.tpw1
-        self.rpt = self.tpw0 * 2
+        self.rpt = self.tpw0 * nw
         self.reps = TR // self.rpt
         self.w = tid // 32
         self.lane = tid % 32
@@ -263,44 +308,80 @@ class TileGeo:
         return self.w * self.tpw0 + self.l0 + rep * self.rpt
 
 
-def quant_tile(g: TileGeo, xs, red, n_tok, h_out, nh_out, bh, row0, mY, mS, mWB, w_off, b):
-    """xs[rep] = 16 f32 (already centred / prescaled). Stores codes, the scale and (w_off not None) the UE8M0 byte.
-    Returns (scale, codes words per rep). red: smem address of 2 floats (cross-warp amax)."""
-    m = fabs(xs[0][0])
-    for r in xs:
-        for v in r:
-            m = fmax(m, fabs(v))
+def maxtree(a):
+    while len(a) > 1:                     # max is exact and order-free (maxNum): a tree only for ILP
+        a = [fmax(a[2 * i], a[2 * i + 1]) for i in range(len(a) // 2)]
+    return a[0]
+
+
+def quant_tile(g: TileGeo, row, red, n_tok, h_out, nh_out, bh, row0, mY, mS, mWB, w_off, b, bar=None):
+    """row(rep) -> 16 f32 (centred / prescaled) of this thread's row `rep`; called twice per row (amax pass, code pass)
+    so only the packed raw loads stay live (register pressure = occupancy; the recomputation is the same ops, same
+    values).  Stores codes, the scale and (w_off not None) the UE8M0 byte; returns the scale.
+    red: smem address of 2 floats (cross-warp amax)."""
+    m = maxtree([maxtree([fabs(v) for v in row(rep, "a")]) for rep in range(g.reps)])
     for off in (16, 8, 4, 2, 1):
         m = fmax(m, shfl_bfly(m, off))
     sts_f32_if(red + g.w * 4, m, Int32(g.lane == 0))
-    bar_sync()
-    m = fmax(lds_f32(red), lds_f32(red + 4))
+    (bar_sync if bar is None else bar)()
+    m = maxtree([lds_f32(red + 4 * i) for i in range(g.nw)])
     eb = e8m0(m)
     scale = shl23f(eb)
     inv = shl23f(Int32(254) - eb)
     blk = row0 // TR
-    words = []
+    y0 = mY + ((Int64(b) * Int64(n_tok) + Int64(row0 + g.row(0))) * Int64(nh_out) + Int64(h_out)) * Int64(g.D) + Int64(g.c0)
+    ystep = Int64(nh_out) * (g.rpt * g.D)
     for rep in range(g.reps):
-        y = [fmul(v, inv) for v in xs[rep]]
+        r = row(rep, "c")
+        y = []
+        for i in range(8):
+            y += list(mul2((r[2 * i], r[2 * i + 1]), (inv, inv)))
         wds = [e4m3x4(y[4 * k], y[4 * k + 1], y[4 * k + 2], y[4 * k + 3]) for k in range(4)]
-        words.append(wds)
-        tok = Int64(row0 + g.row(rep))
-        addr = mY + ((Int64(b) * Int64(n_tok) + tok) * Int64(nh_out) + Int64(h_out)) * Int64(g.D) + Int64(g.c0)
-        st_v4(addr, *wds)
+        st_v4(y0, *wds)
+        y0 = y0 + ystep
     first = Int32(g.w == 0) * Int32(g.lane == 0)
     st_f32_if(mS + (Int64(bh) * Int64(n_tok // TR) + Int64(blk)) * 4, scale, first)
     if w_off is not None:
         baddr = mWB + (Int64(bh) * Int64(n_tok // 64) + Int64(2 * (blk // 4) + w_off)) * 4 + Int64(blk % 4)
         st_u8_if(baddr, eb, first)
-    return scale, words
+    return scale
 
 
-def load_tile(g: TileGeo, mX, b, h, row0, sb, sn, sh, vec, f32=False):
-    xs = []
-    for rep in range(g.reps):
-        off = Int64(b) * Int64(sb) + Int64(h) * Int64(sh) + Int64(row0 + g.row(rep)) * Int64(sn) + Int64(g.c0)
-        xs.append(load_row16_f32(mX + off * 4, vec) if f32 else load_row16(mX + off * 2, vec))
-    return xs
+def load_tile_raw(g: TileGeo, mX, b, h, row0, sb, sn, sh, vec, f32=False):
+    """Issue every load of the thread's rows (all in flight before any use). Returns per rep: 8 b32 words (bf16 pairs,
+    16 B-vector path) or 16 f32 (scalar / fp32 path)."""
+    es = 4 if f32 else 2
+    a0 = mX + (Int64(b) * Int64(sb) + Int64(h) * Int64(sh) + Int64(row0 + g.row(0)) * Int64(sn) + Int64(g.c0)) * es
+    step = Int64(sn) * (g.rpt * es)            # rows of rep r = row(0) + r * rpt: strength-reduced addresses
+    addrs = [a0]
+    for rep in range(1, g.reps):
+        addrs.append(addrs[-1] + step)
+    if f32 or not vec:
+        return [load_row16_f32(a, vec) if f32 else load_row16(a, vec) for a in addrs]
+    return [ld_v4(a) + ld_v4(a + Int64(16)) for a in addrs]
+
+
+def conv_row(r, packed, tag=""):
+    """Raw row -> 16 f32 (cvt.f32.bf16 of each half; exact)."""
+    if not packed:
+        return r
+    out = []
+    for x in r:
+        out += bf2(x, tag)
+    return out
+
+
+def row_fn(raw, packed, mu=None, pre=None, recon=True):
+    """rep -> 16 f32 = ((x - mu) * pre) with the same ops as Triton (sub.rn, mul.rn).  recon=False: every pass uses the
+    same asm text, so LLVM CSEs the conversions (converted rows stay live: fewer instructions, more registers)."""
+    def f(rep, tag=""):
+        x = conv_row(raw[rep], packed, tag if recon else "")
+        if mu is not None:
+            x = [v for i in range(8) for v in sub2((x[2 * i], x[2 * i + 1]), (mu[2 * i], mu[2 * i + 1]))]
+        if pre is not None:
+            x = [v for i in range(8) for v in mul2((x[2 * i], x[2 * i + 1]), (pre, pre))]
+        return x
+    return f
 
 
 class ChunkGeo:
@@ -325,26 +406,46 @@ class ChunkGeo:
         return rep * self.G + self.g if self.aligned else self.g * self.reps + rep
 
 
-def chunk_colsum(cg: ChunkGeo, mK, b, h, row0, sb, sn, sh, vec, red, warp_order):
+def chunk_colsum(cg: ChunkGeo, mK, b, h, row0, sb, sn, sh, vec, red, warp_order, bar=None):
     """Column sums of one chunk in Triton's tree; returns 8 f32 (valid in warp 0, lanes with l0 == 0).
     red: smem address of nw * D floats."""
-    base = Int64(b) * Int64(sb) + Int64(h) * Int64(sh) + Int64(cg.c0)
-    vals = [load_row8(mK + (base + Int64(row0 + cg.row(rep)) * Int64(sn)) * 2, vec) for rep in range(cg.reps)]
-    s = [tree([vals[rep][j] for rep in range(cg.reps)]) for j in range(8)]
+    a0 = mK + (Int64(b) * Int64(sb) + Int64(h) * Int64(sh) + Int64(cg.c0) + Int64(row0 + cg.row(0)) * Int64(sn)) * 2
+    step = Int64(sn) * (2 * (cg.G if cg.aligned else 1))      # row(rep + 1) - row(rep)
+    addrs = [a0]
+    for rep in range(1, cg.reps):
+        addrs.append(addrs[-1] + step)
+    if vec:
+        # groups of <= 16 reps (16 B loads in flight together); a balanced tree over 2^k leaves = the tree of its two
+        # halves' trees, so per-group trees combined by tree() give exactly T_reps
+        gs = min(cg.reps, 16)
+        parts = []
+        for g0 in range(0, cg.reps, gs):
+            raw = [ld_v4(a) for a in addrs[g0:g0 + gs]]
+            sg = []
+            for wj in range(4):                  # one column pair at a time: only the packed words stay live
+                sg += list(tree2([tuple(bf2(raw[r][wj])) for r in range(gs)]))
+            parts.append(sg)
+        s = []
+        for j in range(4):
+            s += list(tree2([(pt[2 * j], pt[2 * j + 1]) for pt in parts]))
+    else:
+        vals = [load_row8(a, vec) for a in addrs]
+        s = [tree([vals[rep][j] for rep in range(cg.reps)]) for j in range(8)]
     if cg.tpw0 == 2:
         s = [fadd(v, shfl_bfly(v, 16)) for v in s]
     if cg.nw == 1:
         return s
     # cross-warp: every warp's lanes with l0 == 0 publish their 8 column sums, warp 0 combines in warp_order
     pub = Int32(cg.l0 == 0)
+    sync = bar_sync if bar is None else bar
     for j in range(8):
         sts_f32_if(red + (cg.w * cg.D + cg.c0 + j) * 4, s[j], pub)
-    bar_sync()
+    sync()
     out = []
     for j in range(8):
         ws = [lds_f32(red + (wi * cg.D + cg.c0 + j) * 4) for wi in range(cg.nw)]
         out.append(warp_order(ws))
-    bar_sync()
+    sync()
     return out
 
 
@@ -356,75 +457,114 @@ def warps2(ws):
 class ProdA:
     """= _prod_a_kernel: 1-D grid [K-mean partials (ROWS rows) | Q tiles | V tiles], 64 threads."""
 
-    def __init__(self, D, vq, vk, vv, kal):
-        assert D in (128, 256)
-        self.D, self.vq, self.vk, self.vv, self.kal = D, vq, vk, vv, kal
+    def __init__(self, D, vq, vk, vv, kal, nw=4):
+        assert D in (128, 256) and nw in (2, 4, 8)
+        self.D, self.vq, self.vk, self.vv, self.kal, self.nw = D, vq, vk, vv, kal, nw
 
     @cute.jit
-    def __call__(self, mQ: cute.Tensor, mK: cute.Tensor, mV: cute.Tensor, mQ8: cute.Tensor, mV8: cute.Tensor,
-                 mQS: cute.Tensor, mVS: cute.Tensor, mWB: cute.Tensor, mP: cute.Tensor,
+    def __call__(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64,
+                 mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64,
                  N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32, sqh: Int32, skb: Int32, skn: Int32,
                  skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32, ROWS: Int32, stream: cuda.CUstream):
         ntl = N // TR
-        total = B * H * ntl + B * Hk * ntl + B * Hk * (N // ROWS)
+        P = self.nw // 2
+        total = (B * H * ntl) // P + (B * Hk * ntl) // P + B * Hk * (N // ROWS)
         self.kernel(mQ, mK, mV, mQ8, mV8, mQS, mVS, mWB, mP, N, H, Hk, B, sqb, sqn, sqh, skb, skn, skh, svb, svn, svh,
-                    sm, ROWS).launch(grid=[total, 1, 1], block=[NT, 1, 1], stream=stream)
+                    sm, ROWS).launch(grid=[total, 1, 1], block=[32 * self.nw, 1, 1], stream=stream)
 
     @cute.kernel
-    def kernel(self, mQ: cute.Tensor, mK: cute.Tensor, mV: cute.Tensor, mQ8: cute.Tensor, mV8: cute.Tensor,
-               mQS: cute.Tensor, mVS: cute.Tensor, mWB: cute.Tensor, mP: cute.Tensor,
+    def kernel(self, mQ: Int64, mK: Int64, mV: Int64, mQ8: Int64, mV8: Int64,
+               mQS: Int64, mVS: Int64, mWB: Int64, mP: Int64,
                N: Int32, H: Int32, Hk: Int32, B: Int32, sqb: Int32, sqn: Int32, sqh: Int32, skb: Int32, skn: Int32,
                skh: Int32, svb: Int32, svn: Int32, svh: Int32, sm: Float32, ROWS: Int32):
+        # CTA = P = nw/2 warp pairs.  Tile roles: each pair quantizes its own 32-row tile (per-thread work = the 2-warp
+        # design), pair-private smem + named barrier.  Partial role: P chunk streams (below).
         D = self.D
+        P = self.nw // 2
         tid, _, _ = cute.arch.thread_idx()
         bid, _, _ = cute.arch.block_idx()
-        red = smem_base(2 * D * 4)
+        red = smem_base(self.nw * D * 4)
+        cbuf = smem_base(16 * D * 4) if const_expr(self.nw > 2) else red
+        pp = tid // 64
         ntl = N // TR
-        nq = B * H * ntl
-        nv = B * Hk * ntl
+        nq = (B * H * ntl) // P
+        nv = (B * Hk * ntl) // P
         S = N // ROWS
         npart = B * Hk * S
         pid = bid - npart
         if bid < npart:
             pid = pid + nq + nv + npart
         if pid < nq:
-            g = TileGeo(D, tid)
-            bh = pid // ntl
+            g = TileGeo(D, tid % 64, 2)
+            t = pid * P + pp
+            bh = t // ntl
             b = bh // H
             h = bh % H
-            row0 = (pid % ntl) * TR
-            xs = load_tile(g, mQ.iterator.toint(), b, h, row0, sqb, sqn, sqh, self.vq)
-            xs = [[fmul(v, sm) for v in r] for r in xs]
-            quant_tile(g, xs, red, N, h, H, bh, row0, mQ8.iterator.toint(), mQS.iterator.toint(), None, None, b)
+            row0 = (t % ntl) * TR
+            raw = load_tile_raw(g, mQ, b, h, row0, sqb, sqn, sqh, self.vq)
+            quant_tile(g, row_fn(raw, self.vq, None, sm), red + pp * 16, N, h, H, bh, row0, mQ8, mQS,
+                       None, None, b, bar=pair_bar(pp, P))
         elif pid < nq + nv:
-            g = TileGeo(D, tid)
-            p = pid - nq
-            bh = p // ntl
+            g = TileGeo(D, tid % 64, 2)
+            t = (pid - nq) * P + pp
+            bh = t // ntl
             b = bh // Hk
             h = bh % Hk
-            row0 = (p % ntl) * TR
-            xs = load_tile(g, mV.iterator.toint(), b, h, row0, svb, svn, svh, self.vv)
-            quant_tile(g, xs, red, N, h, Hk, bh, row0, mV8.iterator.toint(), mVS.iterator.toint(),
-                       mWB.iterator.toint(), 1, b)
+            row0 = (t % ntl) * TR
+            raw = load_tile_raw(g, mV, b, h, row0, svb, svn, svh, self.vv)
+            quant_tile(g, row_fn(raw, self.vv), red + pp * 16, N, h, Hk, bh, row0, mV8, mVS,
+                       mWB, 1, b, bar=pair_bar(pp, P))
         else:
             p = pid - nq - nv
             bh = p // S
             s = p % S
             b = bh // Hk
             h = bh % Hk
-            cg = ChunkGeo(D, 2, 64, tid, self.kal)
-            acc = cute.make_rmem_tensor(8, Float32)
-            for j in cutlass.range_constexpr(8):
-                acc[j] = Float32(0.0)
-            for ci in cutlass.range(ROWS // 64, unroll=1):
-                tot = chunk_colsum(cg, mK.iterator.toint(), b, h, s * ROWS + ci * 64, skb, skn, skh, self.vk, red,
-                                   warps2)
+            if const_expr(self.nw > 2):
+                # P = nw/2 warp pairs; pair pp reduces chunks c = P i + pp with the exact 2-warp tree (own smem region,
+                # own named barrier), publishes the chunk total to cbuf[c]; then pair 0 folds cbuf[0..NCH) in chunk order:
+                # acc = ((0 + c0) + c1) + ...  -> the same sum as the sequential loop.  NCH = ROWS / 64 <= 16.
+                cg = ChunkGeo(D, 2, 64, tid % 64, self.kal)
+                pub = Int32(cg.w == 0) * Int32(cg.l0 == 0)
+                nch = ROWS // 64
+                for ci in cutlass.range((nch + P - 1) // P, unroll=1):
+                    c = ci * P + pp
+                    if c < nch:
+                        tot = chunk_colsum(cg, mK, b, h, s * ROWS + c * 64, skb, skn, skh, self.vk,
+                                           red + pp * (2 * D * 4), warps2, bar=pair_bar(pp, P))
+                        for j in cutlass.range_constexpr(8):
+                            sts_f32_if(cbuf + (c * D + cg.c0 + j) * 4, tot[j], pub)
+                bar_sync()
+                acc = cute.make_rmem_tensor(8, Float32)
                 for j in cutlass.range_constexpr(8):
-                    acc[j] = fadd(acc[j], tot[j])
-            pa = mP.iterator.toint() + ((Int64(bh) * Int64(S) + Int64(s)) * Int64(D) + Int64(cg.c0)) * 4
-            ok = Int32(cg.w == 0) * Int32(cg.l0 == 0)
-            st_v4f_if(pa, acc[0], acc[1], acc[2], acc[3], ok)
-            st_v4f_if(pa + Int64(16), acc[4], acc[5], acc[6], acc[7], ok)
+                    acc[j] = Float32(0.0)
+                for c in cutlass.range(nch, unroll=1):
+                    for j in cutlass.range_constexpr(8):
+                        acc[j] = fadd(acc[j], lds_f32(cbuf + (c * D + cg.c0 + j) * 4))
+                pa = mP + ((Int64(bh) * Int64(S) + Int64(s)) * Int64(D) + Int64(cg.c0)) * 4
+                ok = pub * Int32(pp == 0)
+                st_v4f_if(pa, acc[0], acc[1], acc[2], acc[3], ok)
+                st_v4f_if(pa + Int64(16), acc[4], acc[5], acc[6], acc[7], ok)
+            else:
+                cg = ChunkGeo(D, 2, 64, tid, self.kal)
+                acc = cute.make_rmem_tensor(8, Float32)
+                for j in cutlass.range_constexpr(8):
+                    acc[j] = Float32(0.0)
+                for ci in cutlass.range(ROWS // 64, unroll=1):
+                    tot = chunk_colsum(cg, mK, b, h, s * ROWS + ci * 64, skb, skn, skh, self.vk, red, warps2)
+                    for j in cutlass.range_constexpr(8):
+                        acc[j] = fadd(acc[j], tot[j])
+                pa = mP + ((Int64(bh) * Int64(S) + Int64(s)) * Int64(D) + Int64(cg.c0)) * 4
+                ok = Int32(cg.w == 0) * Int32(cg.l0 == 0)
+                st_v4f_if(pa, acc[0], acc[1], acc[2], acc[3], ok)
+                st_v4f_if(pa + Int64(16), acc[4], acc[5], acc[6], acc[7], ok)
+
+
+def pair_bar(pp, P):
+    """Barrier of warp pair pp: CTA-wide bar 0 when the CTA is one pair, else the pair's named barrier 1 + pp."""
+    if P == 1:
+        return bar_sync
+    return lambda: bar_named(Int32(1) + pp, 64)
 
 
 class ProdB:
@@ -435,117 +575,124 @@ class ProdB:
         self.D, self.vk = D, vk
 
     @cute.jit
-    def __call__(self, mK: cute.Tensor, mK8: cute.Tensor, mKS: cute.Tensor, mWB: cute.Tensor, mP: cute.Tensor,
-                 mM: cute.Tensor, N: Int32, Hk: Int32, B: Int32, skb: Int32, skn: Int32, skh: Int32, ROWS: Int32,
+    def __call__(self, mK: Int64, mK8: Int64, mKS: Int64, mWB: Int64, mP: Int64,
+                 mM: Int64, N: Int32, Hk: Int32, B: Int32, skb: Int32, skn: Int32, skh: Int32, ROWS: Int32,
                  stream: cuda.CUstream):
         self.kernel(mK, mK8, mKS, mWB, mP, mM, N, Hk, skb, skn, skh, ROWS).launch(
-            grid=[N // TR, B * Hk, 1], block=[NT, 1, 1], stream=stream)
+            grid=[N // TR, B * Hk, 1], block=[NT4, 1, 1], stream=stream)
 
     @cute.kernel
-    def kernel(self, mK: cute.Tensor, mK8: cute.Tensor, mKS: cute.Tensor, mWB: cute.Tensor, mP: cute.Tensor,
-               mM: cute.Tensor, N: Int32, Hk: Int32, skb: Int32, skn: Int32, skh: Int32, ROWS: Int32):
+    def kernel(self, mK: Int64, mK8: Int64, mKS: Int64, mWB: Int64, mP: Int64,
+               mM: Int64, N: Int32, Hk: Int32, skb: Int32, skn: Int32, skh: Int32, ROWS: Int32):
         D = self.D
         tid, _, _ = cute.arch.thread_idx()
         pid_n, bh, _ = cute.arch.block_idx()
-        red = smem_base(2 * 4)
+        red = smem_base(4 * 4)
         mus = smem_base(D * 4)
         S = N // ROWS
         nf = i2f(N)
-        pbase = mP.iterator.toint()
-        for jj in cutlass.range_constexpr(D // NT):
-            c = tid + jj * NT
-            acc = Float32(0.0)
-            for s in cutlass.range(S, unroll=1):
-                acc = fadd(acc, ld_f32(pbase + ((Int64(bh) * Int64(S) + Int64(s)) * Int64(D) + Int64(c)) * 4))
-            mu = fdivfull(acc, nf)
+        pbase = mP + (Int64(bh) * Int64(S) * Int64(D) + Int64(tid)) * 4
+        # R2: acc(+0) + P[0] + P[1] + ... sequentially per column; the loads are batched (FOLD per step, all columns of
+        # this thread) so they are in flight together - the add order is unchanged
+        acc = cute.make_rmem_tensor(D // NT4, Float32)
+        for jj in cutlass.range_constexpr(D // NT4):
+            acc[jj] = Float32(0.0)
+        for sg in cutlass.range(S // FOLD, unroll=1):
+            v = fold_loads(pbase, sg * FOLD, FOLD, D)
+            for i in cutlass.range_constexpr(FOLD):
+                for jj in cutlass.range_constexpr(D // NT4):
+                    acc[jj] = fadd(acc[jj], v[i][jj])
+        for s in cutlass.range(S - (S // FOLD) * FOLD, unroll=1):
+            v = fold_loads(pbase, (S // FOLD) * FOLD + s, 1, D)
+            for jj in cutlass.range_constexpr(D // NT4):
+                acc[jj] = fadd(acc[jj], v[0][jj])
+        for jj in cutlass.range_constexpr(D // NT4):
+            c = tid + jj * NT4
+            mu = fdivfull(acc[jj], nf)
             sts_f32_if(mus + c * 4, mu, Int32(1))
-            st_f32_if(mM.iterator.toint() + (Int64(bh) * Int64(D) + Int64(c)) * 4, mu, Int32(pid_n == 0))
+            st_f32_if(mM + (Int64(bh) * Int64(D) + Int64(c)) * 4, mu, Int32(pid_n == 0))
         bar_sync()
-        g = TileGeo(D, tid)
+        g = TileGeo(D, tid, 4)
         b = bh // Hk
         h = bh % Hk
         row0 = pid_n * TR
-        xs = load_tile(g, mK.iterator.toint(), b, h, row0, skb, skn, skh, self.vk)
+        raw = load_tile_raw(g, mK, b, h, row0, skb, skn, skh, self.vk)
         mu16 = [lds_f32(mus + (g.c0 + j) * 4) for j in range(16)]
-        xs = [[fsub(r[j], mu16[j]) for j in range(16)] for r in xs]
-        quant_tile(g, xs, red, N, h, Hk, bh, row0, mK8.iterator.toint(), mKS.iterator.toint(), mWB.iterator.toint(),
+        quant_tile(g, row_fn(raw, self.vk, mu16), red, N, h, Hk, bh, row0, mK8, mKS, mWB,
                    0, b)
 
 
-class Tile:
-    """Generic 32-row quant tile, grid (N/32, B*H): = _quant_do_delta (delta None / "stale" / "deq") and, with a mean /
-    prescale / UE8M0 byte, = _quant_rows and the per-tensor tiles of _quant_qkv."""
+FOLD = 8
 
-    def __init__(self, D, vx, has_mean=False, has_pre=False, w_off=None, delta=None, vo=False, xf32=False):
-        assert D in (128, 256) and delta in (None, "stale", "deq")
+
+def fold_loads(pbase, s0, n, D):
+    """PART rows s0 .. s0+n-1 of this thread's columns (tid + 128 j): n x (D/64) independent fp32 loads."""
+    return [[ld_f32(pbase + (Int64(s0 + i) * Int64(D) + Int64(jj * NT4)) * 4) for jj in range(D // NT4)] for i in range(n)]
+
+
+class Tile:
+    """Generic 32-row quant tile, grid (N/32, B*H): = _quant_do_delta (delta None / "stale") and, with a mean / prescale /
+    UE8M0 byte, = _quant_rows and the per-tensor tiles of _quant_qkv."""
+
+    def __init__(self, D, vx, has_mean=False, has_pre=False, w_off=None, delta=None, vo=False, xf32=False, nw=2, tp=1,
+                 recon=True):
+        """nw warps per 32-row tile, tp tiles per CTA (each tile its own warps, smem slot and named barrier)."""
+        assert D in (128, 256) and delta in (None, "stale") and nw in (2, 4) and tp in (1, 2, 4)
+        self.nw, self.tp, self.recon = nw, tp, recon
         self.D, self.vx, self.has_mean, self.has_pre, self.w_off, self.delta, self.vo, self.xf32 = (
             D, vx, has_mean, has_pre, w_off, delta, vo, xf32)
 
     @cute.jit
-    def __call__(self, mX: cute.Tensor, mO: cute.Tensor, mMean: cute.Tensor, mY: cute.Tensor, mS: cute.Tensor,
-                 mDL: cute.Tensor, mWB: cute.Tensor, N: Int32, H: Int32, B: Int32, sxb: Int32, sxn: Int32, sxh: Int32,
+    def __call__(self, mX: Int64, mO: Int64, mMean: Int64, mY: Int64, mS: Int64,
+                 mDL: Int64, mWB: Int64, N: Int32, H: Int32, B: Int32, sxb: Int32, sxn: Int32, sxh: Int32,
                  sob: Int32, son: Int32, soh: Int32, pre: Float32, stream: cuda.CUstream):
         self.kernel(mX, mO, mMean, mY, mS, mDL, mWB, N, H, sxb, sxn, sxh, sob, son, soh, pre).launch(
-            grid=[N // TR, B * H, 1], block=[NT, 1, 1], stream=stream)
+            grid=[N // (TR * self.tp), B * H, 1], block=[32 * self.nw * self.tp, 1, 1], stream=stream)
 
     @cute.kernel
-    def kernel(self, mX: cute.Tensor, mO: cute.Tensor, mMean: cute.Tensor, mY: cute.Tensor, mS: cute.Tensor,
-               mDL: cute.Tensor, mWB: cute.Tensor, N: Int32, H: Int32, sxb: Int32, sxn: Int32, sxh: Int32,
+    def kernel(self, mX: Int64, mO: Int64, mMean: Int64, mY: Int64, mS: Int64,
+               mDL: Int64, mWB: Int64, N: Int32, H: Int32, sxb: Int32, sxn: Int32, sxh: Int32,
                sob: Int32, son: Int32, soh: Int32, pre: Float32):
         D = self.D
         tid, _, _ = cute.arch.thread_idx()
         pid_n, bh, _ = cute.arch.block_idx()
-        red = smem_base(2 * 4)
-        g = TileGeo(D, tid)
+        red = smem_base(4 * 4 * self.tp)
+        tt = tid // (32 * self.nw)
+        g = TileGeo(D, tid % (32 * self.nw), self.nw)
         b = bh // H
         h = bh % H
-        row0 = pid_n * TR
-        xs = load_tile(g, mX.iterator.toint(), b, h, row0, sxb, sxn, sxh, self.vx, self.xf32)
-        xs = center_scale(xs, mMean.iterator.toint(), bh, D, g, self.has_mean, pre if const_expr(self.has_pre) else None)
-        mWBa = mWB.iterator.toint() if const_expr(self.w_off is not None) else None
-        os_ = load_o(g, mO.iterator.toint(), b, h, row0, sob, son, soh, self.vo, self.delta)
-        scale, words = quant_tile(g, xs, red, N, h, H, bh, row0, mY.iterator.toint(), mS.iterator.toint(), mWBa,
-                                  self.w_off, b)
-        if const_expr(self.delta is not None):
-            tile_delta(g, xs, os_, scale, words, self.delta, mDL.iterator.toint(), bh, N, row0)
+        row0 = (pid_n * self.tp + tt) * TR
+        bar = bar_sync if const_expr(self.tp == 1) else (lambda: bar_named(Int32(1) + tt, 32 * self.nw))
+        tile_body(g, self, mX, mO, mMean, mY, mS, mDL, mWB, N, H, b, h, bh, row0,
+                  sxb, sxn, sxh, sob, son, soh, pre, red + tt * 16, bar)
 
 
-def load_o(g, ob, b, h, row0, sob, son, soh, vo, delta):
-    if delta is None:
-        return None
-    os_ = []
+def tile_body(g, cfg, mX, mO, mMean, mY, mS, mDL, mWB, N, H, b, h, bh, row0, sxb, sxn, sxh, sob, son, soh, pre, red, bar):
+    D = cfg.D
+    raw = load_tile_raw(g, mX, b, h, row0, sxb, sxn, sxh, cfg.vx, cfg.xf32)
+    rawo = load_tile_raw(g, mO, b, h, row0, sob, son, soh, cfg.vo) if cfg.delta is not None else None
+    mu = load_mean(mMean, bh, D, g) if cfg.has_mean else None
+    row = row_fn(raw, cfg.vx and not cfg.xf32, mu, pre if cfg.has_pre else None, cfg.recon)
+    if cfg.delta is not None:     # delta first: O's words die before the quantization passes (registers); independent values
+        tile_delta(g, row, row_fn(rawo, cfg.vo, recon=cfg.recon), mDL, bh, N, row0)
+    quant_tile(g, row, red, N, h, H, bh, row0, mY, mS, mWB if cfg.w_off is not None else None, cfg.w_off, b, bar=bar)
+
+
+def load_mean(ma, bh, D, g):
+    ma = ma + (Int64(bh) * Int64(D) + Int64(g.c0)) * 4
+    return [ld_f32(ma + Int64(4 * j)) for j in range(16)]
+
+
+def tile_delta(g, xrow, orow, dl, bh, N, row0):
+    """Stale delta per row: R3 in-thread tree, then shfl.bfly over the D/16 column lanes (largest offset first);
+    lane l1 == 0 stores."""
     for rep in range(g.reps):
-        off = Int64(b) * Int64(sob) + Int64(h) * Int64(soh) + Int64(row0 + g.row(rep)) * Int64(son) + Int64(g.c0)
-        os_.append(load_row16(ob + off * 2, vo) if delta == "stale" else load_row16_f32(ob + off * 4, vo))
-    return os_
-
-
-def tile_delta(g, xs, os_, scale, words, delta, dl, bh, N, row0):
-    """Per row: R3 in-thread tree, then shfl.bfly over the D/16 column lanes (largest offset first); lane l1 == 0 stores."""
-    for rep in range(g.reps):
-        if delta == "stale":
-            xv = xs[rep]
-        else:
-            dq = []
-            for wd in words[rep]:
-                dq += e4m3x4_deq(wd)
-            xv = [fmul(scale, v) for v in dq]
-        t = row_delta(xv, os_[rep])
+        t = row_delta(xrow(rep, "d"), orow(rep, "o"))
         off = g.tpw1 // 2
         while off >= 1:
             t = fadd(t, shfl_bfly(t, off))
             off //= 2
-        st_f32_if(dl + (Int64(bh) * Int64(N) + Int64(row0 + g.row(rep))) * 4, t, Int32(g.l1 == 0))
-
-
-def center_scale(xs, ma, bh, D, g, has_mean, pre):
-    if has_mean:
-        ma = ma + (Int64(bh) * Int64(D) + Int64(g.c0)) * 4
-        mu = [ld_f32(ma + Int64(4 * j)) for j in range(16)]
-        xs = [[fsub(r[j], mu[j]) for j in range(16)] for r in xs]
-    if pre is not None:
-        xs = [[fmul(v, pre) for v in r] for r in xs]
-    return xs
+        st_f32_if(dl + (Int64(bh) * Int64(N) + Int64(row0 + g.row(rep))) * 4, t, Int32(g.l1 == 0))   # 1 store / row
 
 
 def warps4_02_13(ws):
@@ -560,13 +707,13 @@ class KMeanPartial:
         self.D, self.vk, self.kal = D, vk, kal
 
     @cute.jit
-    def __call__(self, mK: cute.Tensor, mP: cute.Tensor, N: Int32, Hk: Int32, B: Int32, skb: Int32, skn: Int32,
+    def __call__(self, mK: Int64, mP: Int64, N: Int32, Hk: Int32, B: Int32, skb: Int32, skn: Int32,
                  skh: Int32, ROWS: Int32, stream: cuda.CUstream):
         self.kernel(mK, mP, N, Hk, skb, skn, skh, ROWS).launch(grid=[B * Hk, N // ROWS, 1], block=[128, 1, 1],
                                                                stream=stream)
 
     @cute.kernel
-    def kernel(self, mK: cute.Tensor, mP: cute.Tensor, N: Int32, Hk: Int32, skb: Int32, skn: Int32, skh: Int32,
+    def kernel(self, mK: Int64, mP: Int64, N: Int32, Hk: Int32, skb: Int32, skn: Int32, skh: Int32,
                ROWS: Int32):
         D = self.D
         tid, _, _ = cute.arch.thread_idx()
@@ -581,11 +728,11 @@ class KMeanPartial:
             for j in cutlass.range_constexpr(8):
                 acc[j] = Float32(0.0)
             for ci in cutlass.range(ROWS // 32, unroll=1):
-                tot = chunk_colsum(cg, mK.iterator.toint(), b, h, s * ROWS + ci * 32, skb, skn, skh, self.vk, red,
+                tot = chunk_colsum(cg, mK, b, h, s * ROWS + ci * 32, skb, skn, skh, self.vk, red,
                                    warps4_02_13)
                 for j in cutlass.range_constexpr(8):
                     acc[j] = fadd(acc[j], tot[j])
-            pa = mP.iterator.toint() + ((Int64(bh) * Int64(S) + Int64(s)) * Int64(D) + Int64(cg.c0)) * 4
+            pa = mP + ((Int64(bh) * Int64(S) + Int64(s)) * Int64(D) + Int64(cg.c0)) * 4
             ok = Int32(cg.w == 0) * Int32(cg.l0 == 0)
             st_v4f_if(pa, acc[0], acc[1], acc[2], acc[3], ok)
             st_v4f_if(pa + Int64(16), acc[4], acc[5], acc[6], acc[7], ok)
@@ -595,10 +742,10 @@ class KMeanPartial:
             for j in cutlass.range_constexpr(D // 128):
                 acc[j] = Float32(0.0)
             for ci in cutlass.range(ROWS // 32, unroll=1):
-                tot = kmp_u_colsum(mK.iterator.toint(), b, h, s * ROWS + ci * 32, skb, skn, skh, tid, D)
+                tot = kmp_u_colsum(mK, b, h, s * ROWS + ci * 32, skb, skn, skh, tid, D)
                 for j in cutlass.range_constexpr(D // 128):
                     acc[j] = fadd(acc[j], tot[j])
-            pa = mP.iterator.toint() + (Int64(bh) * Int64(S) + Int64(s)) * Int64(D) * 4
+            pa = mP + (Int64(bh) * Int64(S) + Int64(s)) * Int64(D) * 4
             for j in cutlass.range_constexpr(D // 128):
                 st_f32_if(pa + Int64(tid + 128 * j) * 4, acc[j], Int32(1))
 

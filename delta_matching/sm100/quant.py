@@ -48,16 +48,20 @@ def _compile(key, obj, sig):
     """sig: list of ('t', cutlass dtype, rank) / ('i',) / ('f',) in call order (stream appended)."""
     import cutlass
     import cutlass.cute as cute
-    from cutlass import Int32, Float32
+    from cutlass import Int32, Int64, Float32
     args = []
     for a in sig:
         if a[0] == "t":
             args.append(_fake(a[1], a[2]))
+        elif a[0] == "l":
+            args.append(Int64(0))
         elif a[0] == "i":
             args.append(Int32(0))
         else:
             args.append(Float32(0.0))
-    args.append(cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True))
+    # explicit stream argument (current raw stream, passed by the host like Triton's launcher) and Int64 pointers only:
+    # no TVM-FFI tensor marshalling / env-stream lookup (measured ~3.6 us less launch latency, kda/tests/cutequant/ffi_probe.py)
+    args.append(cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=False))
     from . import fastpath
     fastpath.EPOCH[0] += 1
     return cute.compile(obj, *args, options="--enable-tvm-ffi")
@@ -91,39 +95,53 @@ def _tri_aligned(t, nheads):
     return t.data_ptr() % 16 == 0 and sb % 16 == 0 and sn % 16 == 0 and (nheads == 1 or sh % 16 == 0)
 
 
+_RAWSTREAM = torch._C._cuda_getCurrentRawStream
+
+
+def _stream(t):
+    """The current CUDA stream of t's device (raw handle), as Triton's launcher used."""
+    return _RAWSTREAM(t.get_device())
+
+
 def _u8(t):
     return t.view(_U8)
 
 
-def _dt(t):
-    import cutlass
-    return {torch.bfloat16: cutlass.BFloat16, torch.float32: cutlass.Float32, torch.uint8: cutlass.Uint8,
-            torch.int32: cutlass.Int32}[t.dtype]
+TILE_CFG = {128: (2, 1, 0), 256: (4, 1, 1)}   # Tile: (warps per 32-row tile, tiles per CTA, re-convert rows per pass)
+PRODA_NW = {128: 8, 256: 4}             # warps per ProdA CTA (warp pairs: one tile each / one K-mean chunk stream each)
 
 
-
-def _tile_fn(D, x, o, has_mean, has_pre, w_off, delta, mean_t, wb_t):
+def _tile_fn(D, x, o, has_mean, has_pre, w_off, delta, mean_t=None, wb_t=None):
+    """Compiled generic tile. Pointers are passed as Int64 addresses (TVM-FFI tensor marshalling costs ~1.5 us per tensor);
+    the codes output stays a tensor (device / env-stream anchor)."""
     import cutlass
     vx = _vec(x)
     vo = _vec(o) if delta is not None else False
     xf32 = x.dtype == torch.float32
-    key = ("tile", D, vx, has_mean, has_pre, w_off, delta, vo, xf32, str(x.dtype), str(o.dtype) if o is not None else None)
-    oo = o if o is not None else x
-    sig = [("t", _dt(x), 4), ("t", _dt(oo), 4), ("t", cutlass.Float32, 3), ("t", cutlass.Uint8, 4),
-           ("t", cutlass.Float32, 3), ("t", cutlass.Float32, 3), ("t", cutlass.Uint8, 1)] + [("i",)] * 9 + [("f",)]
-    return _get(key, lambda: qc.Tile(D, vx, has_mean, has_pre, w_off, delta, vo, xf32), sig)
+    nw, tp, rc = TILE_CFG[D]
+    key = ("tile", D, vx, has_mean, has_pre, w_off, delta, vo, xf32, nw, tp, rc)
+    sig = [("l",), ("l",), ("l",), ("l",), ("l",), ("l",), ("l",)] + [("i",)] * 9 + [("f",)]
+    return _get(key, lambda: qc.Tile(D, vx, has_mean, has_pre, w_off, delta, vo, xf32, nw, tp, bool(rc)), sig)
+
+
+_FAST = {}
 
 
 def _tile(x, prescale=None, mean=None, o=None, delta=None, y=None, s=None, dl=None, wb=None, w_off=None):
-    """Generic 32-row tile launch: codes y (uint8 view), scales s, optional delta dl, optional UE8M0 bytes wb."""
+    """Generic 32-row tile launch: codes y, scales s, optional delta dl, optional UE8M0 bytes wb (uint8 1-D view)."""
     B, N, H, D = x.shape
-    f = _tile_fn(D, x, o, mean is not None, prescale is not None, w_off, delta, mean, wb)
-    oo = o if o is not None else x
-    mm = mean if mean is not None else s
-    dd = dl if dl is not None else s
-    ww = wb if wb is not None else _u8(y).view(-1)
-    f(x, oo, mm, _u8(y), s, dd, ww, N, H, B, x.stride(0), x.stride(1), x.stride(2), oo.stride(0), oo.stride(1),
-      oo.stride(2), float(prescale) if prescale is not None else 1.0)
+    xp = x.data_ptr()
+    op = o.data_ptr() if o is not None else 0
+    k = ("t", x.shape, x.stride(), x.dtype, xp & 15, mean is not None, prescale is not None, w_off, delta,
+         None if o is None else (o.stride(), o.dtype, op & 15))
+    f = _FAST.get(k)
+    if f is None:
+        f = _FAST[k] = _tile_fn(D, x, o, mean is not None, prescale is not None, w_off, delta)
+    so = o.stride() if o is not None else (0, 0, 0)
+    sx = x.stride()
+    f(xp, op, mean.data_ptr() if mean is not None else 0, y.data_ptr(), s.data_ptr(),
+      dl.data_ptr() if dl is not None else 0, wb.data_ptr() if wb is not None else 0, N, H, B, sx[0], sx[1], sx[2],
+      so[0], so[1], so[2], float(prescale) if prescale is not None else 1.0, _stream(x))
 
 
 def quant_rows(x: torch.Tensor, prescale: float = 1.0, mean: torch.Tensor | None = None):
@@ -163,6 +181,14 @@ def quant_rows_ref(x: torch.Tensor, prescale: float = 1.0, mean: torch.Tensor | 
 # Fused producers (kda-sm100-fwd): one launch for Q, K, V (+ packed UE8M0 K/V words for the forward kernel), and a
 # deterministic two-stage K mean.  Bitwise equal to quant_rows(...) for the same mean.
 # ----------------------------------------------------------------------------------------------------------------------
+def _kmp_fn(k):
+    import cutlass
+    D, Hk = k.shape[-1], k.shape[2]
+    vk, kal = _vec(k), _tri_aligned(k, Hk)
+    return _get(("kmeanp", D, vk, kal), lambda: qc.KMeanPartial(D, vk, kal),
+                [("l",), ("l",)] + [("i",)] * 7)
+
+
 def kmean_fast(k: torch.Tensor, rows: int = 512) -> torch.Tensor:
     """(B, N, Hk, D) -> (B, Hk, D) fp32 mean over tokens; deterministic (fixed-order partials, no atomics)."""
     import cutlass
@@ -173,10 +199,8 @@ def kmean_fast(k: torch.Tensor, rows: int = 512) -> torch.Tensor:
     assert rows % 32 == 0
     S = N // rows
     part = torch.empty(B * Hk, S, D, device=k.device, dtype=torch.float32)
-    vk, kal = _vec(k), _tri_aligned(k, Hk)
-    f = _get(("kmeanp", D, vk, kal), lambda: qc.KMeanPartial(D, vk, kal),
-             [("t", cutlass.BFloat16, 4), ("t", cutlass.Float32, 3)] + [("i",)] * 7)
-    f(k, part, N, Hk, B, k.stride(0), k.stride(1), k.stride(2), rows)
+    f = _kmp_fn(k)
+    f(k.data_ptr(), part.data_ptr(), N, Hk, B, k.stride(0), k.stride(1), k.stride(2), rows, _stream(k))
     return (part.sum(dim=1) / N).view(B, Hk, D)
 
 
@@ -210,12 +234,11 @@ def _prod_fns(q, k, v):
     D = q.shape[-1]
     Hk = k.shape[2]
     vq, vk, vv, kal = _vec(q), _vec(k), _vec(v), _tri_aligned(k, Hk)
-    fa = _get(("prod_a", D, vq, vk, vv, kal), lambda: qc.ProdA(D, vq, vk, vv, kal),
-              [("t", cutlass.BFloat16, 4)] * 3 + [("t", cutlass.Uint8, 4)] * 2 + [("t", cutlass.Float32, 3)] * 2
-              + [("t", cutlass.Uint8, 1), ("t", cutlass.Float32, 3)] + [("i",)] * 13 + [("f",), ("i",)])
+    nw = PRODA_NW[D]
+    fa = _get(("prod_a", D, vq, vk, vv, kal, nw), lambda: qc.ProdA(D, vq, vk, vv, kal, nw),
+              [("l",)] * 3 + [("l",)] + [("l",)] * 5 + [("i",)] * 13 + [("f",), ("i",)])
     fb = _get(("prod_b", D, vk), lambda: qc.ProdB(D, vk),
-              [("t", cutlass.BFloat16, 4), ("t", cutlass.Uint8, 4), ("t", cutlass.Float32, 3), ("t", cutlass.Uint8, 1),
-               ("t", cutlass.Float32, 3), ("t", cutlass.Float32, 3)] + [("i",)] * 7)
+              [("l",), ("l",)] + [("l",)] * 4 + [("i",)] * 7)
     return fa, fb
 
 
@@ -225,13 +248,20 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: 
     sums, each a sum of 64-row chunk sums) / N.  Bitwise = quant_rows(...) with that mean."""
     B, N, H, D = q.shape
     Hk = k.shape[2]
-    assert N % 128 == 0 and q.stride(-1) == 1 and k.stride(-1) == 1 and v.stride(-1) == 1
-    assert (warps_a, warps_b, tr) == (2, 2, 32), "cutequant: only the shipped producer layout (2, 2, 32) is ported"
-    ROWS = rows
-    while N % ROWS:
-        ROWS //= 2
-    assert ROWS % 64 == 0
-    S = N // ROWS
+    sq, sk, sv = q.stride(), k.stride(), v.stride()
+    qp, kp, vp = q.data_ptr(), k.data_ptr(), v.data_ptr()
+    key = (q.shape, k.shape, sq, sk, sv, qp & 15, kp & 15, vp & 15, q.dtype, k.dtype, v.dtype, rows, warps_a, warps_b, tr)
+    e = _FAST.get(key)
+    if e is None:
+        assert N % 128 == 0 and sq[-1] == 1 and sk[-1] == 1 and sv[-1] == 1
+        assert (warps_a, warps_b, tr) == (2, 2, 32), "cutequant: only the shipped producer layout (2, 2, 32) is ported"
+        assert q.dtype == k.dtype == v.dtype == torch.bfloat16
+        ROWS = rows
+        while N % ROWS:
+            ROWS //= 2
+        assert ROWS % 64 == 0 and ROWS <= 1024, "64-row chunks, <= 16 per partial (ProdA chunk buffer)"
+        e = _FAST[key] = (*_prod_fns(q, k, v), ROWS, N // ROWS)
+    fa, fb, ROWS, S = e
     dev = q.device
     e4 = torch.float8_e4m3fn
     q8 = torch.empty(B, N, H, D, device=dev, dtype=e4)
@@ -243,25 +273,17 @@ def quant_qkv2(q, k, v, sm: float, rows: int = 1024, warps_a: int = 2, warps_b: 
     kvw = torch.empty(B, Hk, N // 64, device=dev, dtype=torch.int32)
     part = torch.empty(B * Hk, S, D, device=dev, dtype=torch.float32)
     mean = torch.empty(B, Hk, D, device=dev, dtype=torch.float32)
-    kvwb = kvw.view(_U8).view(-1)
-    fa, fb = _prod_fns(q, k, v)
-    fa(q, k, v, q8.view(_U8), v8.view(_U8), qs, vs, kvwb, part, N, H, Hk, B,
-       q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
-       v.stride(0), v.stride(1), v.stride(2), float(sm), ROWS)
-    fb(k, k8.view(_U8), ks, kvwb, part, mean, N, Hk, B, k.stride(0), k.stride(1), k.stride(2), ROWS)
+    wbp = kvw.data_ptr()
+    st = _stream(q)
+    fa(qp, kp, vp, q8.data_ptr(), v8.data_ptr(), qs.data_ptr(), vs.data_ptr(), wbp, part.data_ptr(), N, H, Hk, B,
+       sq[0], sq[1], sq[2], sk[0], sk[1], sk[2], sv[0], sv[1], sv[2], float(sm), ROWS, st)
+    fb(kp, k8.data_ptr(), ks.data_ptr(), wbp, part.data_ptr(), mean.data_ptr(), N, Hk, B, sk[0], sk[1], sk[2], ROWS, st)
     return q8, qs, k8, ks, v8, vs, kvw, mean
 
 
-def quant_do_delta(do: torch.Tensor, o: torch.Tensor | None, obar: torch.Tensor | None = None):
-    """obar (B, N, H, D) fp32 given -> delta = dequant(dO8) . obar (pass-0-free matched delta); else as below."""
-    if obar is not None:
-        B, N, H, D = do.shape
-        assert do.stride(-1) == 1 and obar.stride(-1) == 1 and obar.dtype == torch.float32
-        y = torch.empty(B, N, H, D, device=do.device, dtype=torch.float8_e4m3fn)
-        s = torch.empty(B, H, N // BLK, device=do.device, dtype=torch.float32)
-        dl = torch.empty(B, H, N, device=do.device, dtype=torch.float32)
-        _tile(do, o=obar, delta="deq", y=y, s=s, dl=dl)
-        return y, s, dl
+def quant_do_delta(do: torch.Tensor, o: torch.Tensor | None):
+    """(dO codes, scales, delta or None); delta = rowsum(dO * O) (stale mode) when o is given.  (The former obar /
+    DEQ_DELTA mode was never on the API path and is dropped: accuracy-audit 2026-11-10 16:1x.)"""
     return _quant_do_delta_stale(do, o)
 
 
@@ -269,6 +291,7 @@ def _quant_do_delta_stale(do: torch.Tensor, o: torch.Tensor | None):
     """(dO codes, scales, delta or None) in one pass; delta = rowsum(dO * O) fp32 (B, H, N) when o is given."""
     B, N, H, D = do.shape
     assert do.stride(-1) == 1 and (o is None or o.stride(-1) == 1)
+    assert do.dtype == torch.bfloat16 and (o is None or (o.dtype == torch.bfloat16 and o.shape == do.shape))
     y = torch.empty(B, N, H, D, device=do.device, dtype=torch.float8_e4m3fn)
     s = torch.empty(B, H, N // BLK, device=do.device, dtype=torch.float32)
     dl = torch.empty(B, H, N, device=do.device, dtype=torch.float32) if o is not None else None

@@ -466,6 +466,11 @@ class DMForwardSm100:
                          and not self.is_local and not self.is_split_kv and not self.pack_gqa
                          and self.dm_opts.get("pipe", "0") != "1" and self.dm_opts.get("exp", "f32") == "f32"
                          and self.dm_opts.get("kvpack", "1") == "1" and config.ex2_emu_freq == 0)
+        # kda-sm100-expoff (STUDY ONLY, off by default): DM_EXPOFF_FWD=<deg>:<r>:<m> -> in every 32-key slice block, exp pairs
+        # i (0..15) with i % m < r use the degree-<deg> FMA polynomial (dm_common.expoff_ex2_pair), the rest MUFU. O / LSE only.
+        from delta_matching.sm100 import dm_common as _dmc
+        self.dm_eof = _dmc.expoff_spec("DM_EXPOFF_FWD")
+        assert self.dm_eof is None or self.dm_slice, "expoff fwd: slice softmax only"
         if self.dm_slice:
             self.softmax0_warp_ids = tuple(range(16))
             self.softmax1_warp_ids = ()
@@ -3181,8 +3186,12 @@ class DMForwardSm100:
             for i in cutlass.range_constexpr(0, 32, 2):
                 rS[i], rS[i + 1] = cute.arch.fma_packed_f32x2((rS[i], rS[i + 1]), (c, c), (bias, bias))
             for i in cutlass.range_constexpr(0, 32, 2):
-                rS[i] = cute.math.exp2(rS[i], fastmath=True)
-                rS[i + 1] = cute.math.exp2(rS[i + 1], fastmath=True)
+                if const_expr(self.dm_eof is not None and (i // 2) % self.dm_eof[2] < self.dm_eof[1]):
+                    from delta_matching.sm100 import dm_common as _dmc
+                    rS[i], rS[i + 1] = _dmc.expoff_ex2_pair(rS[i], rS[i + 1], self.dm_eof[0])
+                else:
+                    rS[i] = cute.math.exp2(rS[i], fastmath=True)
+                    rS[i + 1] = cute.math.exp2(rS[i + 1], fastmath=True)
             rP8.store(rS.load().to(self.q_dtype))
             cute.copy(thr_st, rP, cute.make_tensor(tSt_st.iterator + col, tSt_st.layout))
             cute.arch.fence_view_async_tmem_store()

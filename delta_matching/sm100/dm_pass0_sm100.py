@@ -297,6 +297,11 @@ class DMPass0Sm100:
         # rows 0-15 of each quadrant, warps 8-11 / 12-15 (the "correction" ids) = stage 0 / 1 rows 16-31; MMA / epilogue /
         # load / empty move to 16-19 (640 threads). Bitwise the h2+ts path (see tl_loop).
         self.dm_tl = "tl" in _fl0 and self.q_stage == 2 and self.use_tma_KV   # else: the default h2 path
+        # kda-sm100-expoff (STUDY ONLY, off by default): DM_EXPOFF_PB=<deg>:<r>:<m> -> 32x32 blocks with (qb + kb) % m < r use
+        # the degree-<deg> FMA polynomial (dm_common.expoff_ex2_pair), the rest MUFU; same rule and op sequence as the backward
+        self.dm_eo = dm_common.expoff_pb()
+        if self.dm_eo is not None:
+            assert "tl" in _fl0, "expoff: pass 0 +tl path only"
         if self.dm_tl:
             assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
             assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
@@ -2733,10 +2738,27 @@ class DMPass0Sm100:
                                 for i in cutlass.range_constexpr(32 * h, 32 * h + 32):
                                     r[i] = -Float32.inf if kbase + 2 * i + par > row else r[i]
                         for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                            if const_expr(self.dm_eo is not None):
+                                # expoff: same FFMA as dm_bwd_p_pair, then this warp's 32x32 block (qb = row // 32 is
+                                # warp-uniform: rows quad*32 + 16*rh + 0..15; kb = n_block*4 + j) picks poly or MUFU
+                                for v in cutlass.range_constexpr(0, 16, 2):
+                                    i0 = 16 * j + v
+                                    r[i0], r[i0 + 1] = cute.arch.fma_packed_f32x2((r[i0], r[i0 + 1]), (cs[j], cs[j]), (-l2, -l2))
+                                if dm_common.expoff_uses_poly(row >> 5, n_block * (self.n_block_size // 32) + j,
+                                                              self.dm_eo[1], self.dm_eo[2]):
+                                    for v in cutlass.range_constexpr(0, 16, 2):
+                                        i0 = 16 * j + v
+                                        r[i0], r[i0 + 1] = dm_common.expoff_ex2_pair(r[i0], r[i0 + 1], self.dm_eo[0])
+                                else:
+                                    for v in cutlass.range_constexpr(0, 16):
+                                        r[16 * j + v] = cute.math.exp2(r[16 * j + v], fastmath=True)
                             for v in cutlass.range_constexpr(0, 16, 2):
                                 i0 = 16 * j + v
-                                p = dm_common.dm_bwd_p_pair(r[i0], r[i0 + 1], cs[j], l2)
-                                r[i0], r[i0 + 1] = p
+                                if const_expr(self.dm_eo is not None):
+                                    p = (r[i0], r[i0 + 1])
+                                else:
+                                    p = dm_common.dm_bwd_p_pair(r[i0], r[i0 + 1], cs[j], l2)
+                                    r[i0], r[i0 + 1] = p
                                 if const_expr("pd" in self.dm_exp_variant.split("+")[1:]):
                                     # DEBUG (P/dP dump report on +tl): this lane's P, column kbase + 2*i + par
                                     if row < seqlen.seqlen_q:

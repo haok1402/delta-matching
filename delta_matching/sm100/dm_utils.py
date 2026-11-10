@@ -618,6 +618,14 @@ def ex2_poly5_2(x: Float32, y: Float32, *, loc=None, ip=None):
     return fu.combine_int_frac_ex2(r[0], pe[0], loc=loc, ip=ip), fu.combine_int_frac_ex2(r[1], pe[1], loc=loc, ip=ip)
 
 
+def ex2_poly5z_2(x: Float32, y: Float32):
+    """kda-sm100-expoff: ex2_poly5_2 + the FTZ select of ex2_poly6_2 (x < -126, incl. -inf -> exactly 0, like ex2.approx.ftz)."""
+    import cutlass
+    ox, oy = ex2_poly5_2(x, y)
+    return (Float32(cutlass.select_(x < Float32(-126.0), Float32(0.0), ox)),
+            Float32(cutlass.select_(y < Float32(-126.0), Float32(0.0), oy)))
+
+
 # degree-6 exp2 on [0,1) in the form 1 + f*q(f) (Lawson-minimax, fp32 coefficients; kda/tests/p5acc/fit.py):
 # exhaustive over all fp32 exp arguments in (-64,-0.5] U [0.5,8): max rel 6.6e-8, mean 2.3e-8, 91.8% correctly rounded,
 # e4m3 RN-code mismatch 4.1e-7 vs MUFU ex2.approx.ftz 1.46e-7 / 4.4e-8 / 57.5% / 4.9e-7 (kda/runs/p5acc_exact.log)

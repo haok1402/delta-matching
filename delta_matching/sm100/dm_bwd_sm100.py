@@ -308,6 +308,7 @@ from flash_attn.cute.softmax import apply_score_mod_inner, apply_score_mod_bwd_i
 from flash_attn.cute.block_sparsity import BlockSparseTensors
 from flash_attn.cute.utils import AuxData
 from delta_matching.sm100 import dm_utils
+from delta_matching.sm100 import dm_common  # kda-sm100-expoff
 
 
 def utils_abs(x):
@@ -756,6 +757,10 @@ class DMBackwardSm100:
         _p3 = next((x[3:] for x in self.dm_opts if x.startswith("p3=")), None)   # p3=freq:res (deg-3)
         self.dm_p3 = tuple(int(t) for t in _p3.split(":")) if _p3 else None
         self.dm_b6 = int(next((x[3:] for x in self.dm_opts if x.startswith("b6=")), "0"))   # deg-6 poly exp blocks
+        # kda-sm100-expoff (STUDY ONLY, off by default): DM_EXPOFF_PB=<deg>:<r>:<m>, the same knob as pass 0 (bitwise P);
+        # DM_EXPOFF_CTL=p0only (planted control) keeps this kernel all-MUFU while pass 0 uses the polynomial
+        self.dm_eo = None if dm_common.expoff_ctl() == "p0only" else dm_common.expoff_pb()
+        assert self.dm_eo is None or self.dm_b6 == 0
         self.dm_sfa_dv_col = self.tmem_P_offset + self.tmem_cols_P            # 4 groups x 4 cols
         self.dm_sfb_dv_col = self.dm_sfa_dv_col + 16                         # 4 cols (const 1.0)
         self.dm_sfa_dq_col = self.dm_sfb_dv_col + 4                          # 2 cols (const 1.0)
@@ -5197,8 +5202,8 @@ class DMBackwardSm100:
                               (dm_c[stage], dm_c[stage]),
                               (-lse_pair[0], -lse_pair[1]),
                           )
-                          if const_expr("noexp" in self.dm_abl or self.dm_b6 > 0):
-                              pass   # b6: exps below, per 32x32 block
+                          if const_expr("noexp" in self.dm_abl or self.dm_b6 > 0 or self.dm_eo is not None):
+                              pass   # b6 / expoff: exps below, per 32x32 block
                           elif const_expr("poly3" in self.dm_opts):
                               # FA4 degree-3 FMA polynomial for every element: bitwise = dm_common.dm_bwd_p_pair_poly in
                               # pass 0 (own-P delta keeps rowsum(dS)=0 at round-off; P error 8.8e-5 << 2e-3 tolerance)
@@ -5212,6 +5217,18 @@ class DMBackwardSm100:
                           else:
                               tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
                               tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
+                      if const_expr(self.dm_eo is not None and "noexp" not in self.dm_abl):
+                          # expoff: this warp's 32 keys x this stage's 32 queries = one 32x32 block (the b6 indices); poly iff
+                          # (qb + kb) % m < r (warp-uniform) - the same rule, helper and op sequence as pass 0 -> bitwise P
+                          if dm_common.expoff_uses_poly(m_block * (self.tile_m // 32) + dm_qoff[stage], dm_kv_blk,
+                                                        self.dm_eo[1], self.dm_eo[2]):
+                              for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
+                                  tSrS_cur[2 * v], tSrS_cur[2 * v + 1] = dm_common.expoff_ex2_pair(
+                                      tSrS_cur[2 * v], tSrS_cur[2 * v + 1], self.dm_eo[0])
+                          else:
+                              for v in cutlass.range_constexpr(cute.size(tSrS_t2r, mode=[0]) // 2):
+                                  tSrS_cur[2 * v] = cute.math.exp2(tSrS_cur[2 * v], fastmath=True)
+                                  tSrS_cur[2 * v + 1] = cute.math.exp2(tSrS_cur[2 * v + 1], fastmath=True)
                       if const_expr(self.dm_b6 > 0 and "noexp" not in self.dm_abl):
                           # b6: this warp's 32 keys x this stage's 32 queries = one 32x32 block; deg-6 poly iff
                           # (qb + kb) % m == 0 (warp-uniform) - the same rule and op sequence as pass 0 -> bitwise P

@@ -52,7 +52,8 @@ def compile_env():
         # the AOT entries (compile inside a lease).
         _STATIC_ENV.append(f"dsl={dsl}|tcf_impl={dm_utils._TCF_IMPL}|tcf_mask={dm_utils._TCF_MASK}|"
                            f"p0regs={sorted(_p0.REGS_C3.items())}{sorted(_p0.REGS_TL.items())}")
-    return f"{_STATIC_ENV[0]}|abl={_env('DM_ABL', '')}|tcf_skip={_env('DM_TCF_SKIP', '')}"
+    eo = "".join(f"|{k}={_env(k, '')}" for k in ("DM_EXPOFF_FWD", "DM_EXPOFF_PB", "DM_EXPOFF_CTL") if _env(k, ""))
+    return f"{_STATIC_ENV[0]}|abl={_env('DM_ABL', '')}|tcf_skip={_env('DM_TCF_SKIP', '')}{eo}"   # expoff: only when set
 
 
 def _fingerprint(opts=""):

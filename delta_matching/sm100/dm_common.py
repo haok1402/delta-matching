@@ -120,3 +120,42 @@ def is_static_mix(variant: str) -> bool:
 
 
 P_PAIR_VARIANTS["mix"] = None  # needs the row parity: dispatched explicitly by the kernels
+
+
+# ---- kda-sm100-expoff (STUDY ONLY, opt-in, off by default; kda/docs/expoff-design.md) ----
+def expoff_spec(var: str):
+    """'<deg>:<r>:<m>' -> (deg, r, m) or None. deg in {3 (FA4 ex2_emulation_2), 5 (dm_utils.ex2_poly5z_2), 6 (ex2_poly6_2)}."""
+    import os
+    v = os.environ.get(var, "")
+    if not v:
+        return None
+    deg, r, m = (int(t) for t in v.split(":"))
+    assert deg in (3, 5, 6) and 0 < r < m, f"{var}={v}"
+    return deg, r, m
+
+
+def expoff_pb():
+    """DM_EXPOFF_PB: ONE knob for pass 0 AND the backward (same assignment, same polynomial -> bitwise P)."""
+    return expoff_spec("DM_EXPOFF_PB")
+
+
+def expoff_ctl() -> str:
+    """DM_EXPOFF_CTL=p0only: planted control - pass 0 uses DM_EXPOFF_PB, the backward stays all-MUFU (must break lockstep)."""
+    import os
+    return os.environ.get("DM_EXPOFF_CTL", "")
+
+
+def expoff_ex2_pair(x0: Float32, x1: Float32, deg: int):
+    """The polynomial exp2 of a pair for expoff (identical op sequence in every kernel that calls it)."""
+    from . import dm_utils
+    from flash_attn.cute import utils as fa_utils
+    if deg == 3:
+        return fa_utils.ex2_emulation_2(x0, x1)
+    if deg == 5:
+        return dm_utils.ex2_poly5z_2(x0, x1)
+    return dm_utils.ex2_poly6_2(x0, x1)
+
+
+def expoff_uses_poly(qb, kb, r: int, m: int):
+    """Element (q, k) uses the polynomial iff its 32x32 block (qb, kb) = (q // 32, k // 32) has (qb + kb) % m < r."""
+    return (qb + kb) % m < r

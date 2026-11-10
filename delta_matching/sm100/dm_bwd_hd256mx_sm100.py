@@ -217,11 +217,15 @@ class DmHd256Mx:
     KNOBS = ("acc", "cd", "od", "tw", "fin", "ld", "am", "lsk")
     DLY = 1 << 15
 
-    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = ""):
+    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False):
         """knob (positive controls of every TMEM / SMEM hand-off, bwd-plan.md ordering table; "" = shipped build):
         "<h>" = UNSAFE order for hand-off h + its delay, "<h>_safe" = shipped order + the same delay (must be bitwise
         the default build)."""
         assert mode in ("dv", "dk", "dq")
+        # ordf (fork hd256-ordinv, kda/hd256/ordinv-hd256.md sites BW1-BW3, BW9): the tcgen05 thread-sync fence pair on every
+        # cross-thread TMEM hand-off that lacks it (PTX 9.7.18.6.4.4: [ld; wait::ld; fence::before; arrive] ->
+        # [wait; fence::after; tcgen05 op], and commit -> [wait; fence::after; tcgen05 op]). False = shipped code (PTX unchanged).
+        self.ordf = bool(ordf)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")
         assert self.kn in ("",) + self.KNOBS, knob
@@ -425,6 +429,8 @@ class DmHd256Mx:
             # prologue: S(0), dP(0)
             yf = y_c.wait_and_advance()
             ae = acc_p.acquire_and_advance()
+            if const_expr(self.ordf):
+                tc_fence_after()
             mma_s.set(tcgen05.Field.ACCUMULATE, False)
             for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
                 cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
@@ -441,6 +447,8 @@ class DmHd256Mx:
                     # S(t+1): its TMEM cols were released by the compute warps (acc) after their S/dP(t) reads
                     yn = y_c.wait_and_advance()
                     an = acc_p.acquire_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_after()     # BW2: compute's S/dP(t) loads (wait::ld + fence::before + acc release) -> S(t+1)
                     mma_s.set(tcgen05.Field.ACCUMULATE, False)
                     for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
                         cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
@@ -590,7 +598,11 @@ class DmHd256Mx:
                 ce = None
                 if const_expr(self.mode == "dv" and not (self.kn == "cd" and self.unsafe)):
                     ce = cd_p.acquire_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_after()     # BW3: out(t-1) SF reads (tcgen05.commit -> cd empty) -> SF tcgen05.st
                 af = acc_c.wait_and_advance()
+                if const_expr(self.ordf):
+                    tc_fence_after()         # BW1: S/dP(t) commit -> acc full -> tcgen05.ld
                 if const_expr(self.kn == "acc"):
                     if const_expr(self.unsafe):
                         af.release()
@@ -605,6 +617,8 @@ class DmHd256Mx:
                         dv_ = tmem_ld32(tb + self.COL_DP + 32 * j)
                     cute.arch.fence_view_async_tmem_load()
                     if const_expr(j == 3 and not (self.dbg & 2) and not (self.kn == "acc" and self.unsafe)):
+                        if const_expr(self.ordf):
+                            tc_fence_before()    # BW2
                         af.release()
                     vals = cute.make_rmem_tensor(cute.make_layout(32), Float32)   # P (dv) or dS (dk / dq) of chunk j
                     id1 = Float32(0.0)
@@ -749,6 +763,8 @@ class DmHd256Mx:
                                 st_global_f32(dpa + 8, pp[u])
                                 st_global_f32(dpa + 12, dsj[i + u])
                                 dpa = dpa + dstp
+                    if const_expr(self.ordf):
+                        tc_fence_before()
                     af.release()
                 if const_expr(self.delta_only):
                     pass
@@ -775,6 +791,8 @@ class DmHd256Mx:
                     # ---- codes -> smem (after out(t-1) consumed the previous codes / SFs) ----
                     if const_expr(self.mode != "dv" and not (self.kn == "cd" and self.unsafe)):
                         ce = cd_p.acquire_and_advance()
+                        if const_expr(self.ordf):
+                            tc_fence_after()     # BW3
                     for j in cutlass.range_constexpr(4):
                         if const_expr(self.mode != "dv"):
                             inv = dm_utils.inv_pow2_from_sb(sbs[j])
@@ -889,8 +907,14 @@ class DmHd256Mx:
                         st_global_v4(ob + (32 * cblk + i) * 2, w[0], w[1], w[2], w[3])
                 if const_expr(self.kn == "fin" and self.unsafe):
                     fw = fin_c.wait_and_advance()           # UNSAFE: out was read before the final MMA completed
+                if const_expr(self.ordf):
+                    tc_fence_before()
                 fw.release()
 
         tmem.relinquish_alloc_permit()
+        if const_expr(self.ordf):
+            tc_fence_before()                # BW9: every thread's TMEM accesses before the dealloc barrier
         cute.arch.barrier(barrier_id=3, number_of_threads=self.threads)
+        if const_expr(self.ordf):
+            tc_fence_after()
         tmem.free(tmem_ptr)

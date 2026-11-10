@@ -95,6 +95,9 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
     lds_tail = [2, 2, 2, 2, 2, 2, 3, 2, 3, 2, 2, 2]
     hsh = dbg & 8
     n_t = N // 128
+    # DM_HD256_ORDF=1 (fork hd256-ordinv, opt-in): tcgen05 fence pair on the acc / cd / teardown hand-offs (sites BW1-BW3, BW9
+    # of kda/hd256/ordinv-hd256.md); default off = the shipped kernels (cache key and PTX unchanged)
+    ordf = _env("DM_HD256_ORDF", "0") == "1"
     for mode in modes:
         if mode == "dv":
             X, Xb, Y, Yb, Tw, out = k8, k8, q8, q8, do8, dv
@@ -112,7 +115,9 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         lds = [1, 1, 1, 1, 0] + lds_tail
         kd = dbg & 11 if mode == "dq" else dbg & 10
         key = (mode, causal, kd) if not knob else (mode, causal, kd, knob)
-        _run(key, lambda: DmHd256Mx(mode, causal, kd, knob), ten, lds, [n_t, H, Hk])
+        if ordf:
+            key = key + ("ordf",)
+        _run(key, lambda: DmHd256Mx(mode, causal, kd, knob, ordf=ordf), ten, lds, [n_t, H, Hk])
         if big or hsh:
             dumps[mode] = dict(dump=dump, codes=codes, sb=sb, hash=hh)
     if dbg:

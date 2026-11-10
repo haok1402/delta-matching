@@ -95,14 +95,14 @@ class DmHd256Kv2:
 
     # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e); meta: warp 10 stages l2/delta/qs/dos per
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc")   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl")   # relcl/acqcl: DEBUG: only release / only acquire at cluster   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
     DEFAULT_OPTS = "meta qb2 xpt"      # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes)
 
     def _wcl(self, mbar, ph):
         """leader-side wait on a cross-CTA arrive barrier: acquire.cluster (default) / .cta (debug opt ctasc)."""
-        if const_expr("ctasc" in self.opts):
+        if const_expr("ctasc" in self.opts or "relcl" in self.opts):
             dm_utils.mbar_wait_parity(mbar, ph)
         else:
             dm_utils.mbar_wait_parity_cluster(mbar, ph)
@@ -475,20 +475,20 @@ class DmHd256Kv2:
                 stg = t & 1
                 dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
                 if const_expr(self.kn == "cd" and self.unsafe):
-                    warp_arrive_c0(kbar + 16 + 8 * stg, "ctasc" in self.opts)   # UNSAFE: published before the codes are written
+                    warp_arrive_c0(kbar + 16 + 8 * stg, ("ctasc" in self.opts or "acqcl" in self.opts))   # UNSAFE: published before the codes are written
                     spin(self.DLY)
                 dm_utils.mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
                 tc_fence_after()
                 if const_expr(self.kn == "s"):
                     if const_expr(self.unsafe):
-                        warp_arrive_c0(E_S, "ctasc" in self.opts)   # UNSAFE: slot released before the loads
+                        warp_arrive_c0(E_S, ("ctasc" in self.opts or "acqcl" in self.opts))   # UNSAFE: slot released before the loads
                     spin(self.DLY)
                 sv = tmem_ld32(tb + self.COL_S + 32 * hf)
                 dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
                 cute.arch.fence_view_async_tmem_load()
                 tc_fence_before()
                 if const_expr(not (self.kn == "s" and self.unsafe)):
-                    warp_arrive_c0(E_S, "ctasc" in self.opts)    # release.cluster on the leader's barrier
+                    warp_arrive_c0(E_S, ("ctasc" in self.opts or "acqcl" in self.opts))    # release.cluster on the leader's barrier
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 for i in cutlass.range_constexpr(0, 32, 4):
@@ -642,7 +642,7 @@ class DmHd256Kv2:
                     if const_expr(not self.unsafe):
                         spin(self.DLY)
                 if const_expr(not (self.kn == "cd" and self.unsafe)):
-                    warp_arrive_c0(kbar + 16 + 8 * stg, "ctasc" in self.opts)    # release.cluster on the leader's barrier
+                    warp_arrive_c0(kbar + 16 + 8 * stg, ("ctasc" in self.opts or "acqcl" in self.opts))    # release.cluster on the leader's barrier
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
             if const_expr(not (self.kn == "fin" and self.unsafe)):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))
@@ -663,7 +663,7 @@ class DmHd256Kv2:
             tc_fence_before()
             if const_expr(self.kn == "fin" and self.unsafe):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))  # UNSAFE: dK / dV were read before the final commit
-            warp_arrive_c0(E_F, "ctasc" in self.opts)
+            warp_arrive_c0(E_F, ("ctasc" in self.opts or "acqcl" in self.opts))
             # code-stage tail: the last commit on each stage has landed in this CTA before teardown (no in-flight arrive)
             for s_ in cutlass.range_constexpr(2):
                 nu = (total - s_ + 1) // 2

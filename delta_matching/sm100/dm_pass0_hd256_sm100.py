@@ -2032,10 +2032,8 @@ class DMPass0Hd256Sm100:
             pipeline.PipelineUserType.Consumer, self.kv_stage
         )
         P_full_O_rescaled_phase = Int32(0)
-        dm_slot_empty_phase = Int32(1)  # P0: S/dP slots start empty
-        if const_expr(self.dm_p2t):
-            p2_ph0 = Int32(1)   # +p2t: per-stage slot phases
-            p2_ph1 = Int32(1)
+        # P0: S/dP slots start empty. +p2t: bit s = stage s's slot phase (stages advance independently)
+        dm_slot_empty_phase = Int32(3 if self.dm_p2t else 1)
         if const_expr(self.use_s_ping_pong):
             mma_pv_count = Int32(0)
 
@@ -2086,40 +2084,39 @@ class DMPass0Hd256Sm100:
                     for i in cutlass.range(n_block_max - nmx0, unroll=1):
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_s_p_o.producer_acquire_w_index_phase(1, p2_ph1)
+                        pipeline_s_p_o.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
                         gemm_Si[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(1)
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_o_acc.producer_acquire_w_index_phase(1, p2_ph1)
+                        pipeline_o_acc.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
                         gemm_dPi[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(1)
-                        p2_ph1 ^= 1
+                        dm_slot_empty_phase ^= 2
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()
                     for i in cutlass.range(nmx0 - n_block_min, unroll=1):
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_s_p_o.producer_acquire_w_index_phase(0, p2_ph0)
+                        pipeline_s_p_o.producer_acquire_w_index_phase(0, dm_slot_empty_phase & 1)
                         gemm_Si[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(0)
-                        pipeline_s_p_o.producer_acquire_w_index_phase(1, p2_ph1)
+                        pipeline_s_p_o.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
                         gemm_Si[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(1)
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        pipeline_o_acc.producer_acquire_w_index_phase(0, p2_ph0)
+                        pipeline_o_acc.producer_acquire_w_index_phase(0, dm_slot_empty_phase & 1)
                         gemm_dPi[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(0)
-                        pipeline_o_acc.producer_acquire_w_index_phase(1, p2_ph1)
+                        pipeline_o_acc.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
                         gemm_dPi[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(1)
-                        p2_ph0 ^= 1
-                        p2_ph1 ^= 1
+                        dm_slot_empty_phase ^= 3
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()
                 for i in cutlass.range(0 if const_expr(self.dm_p2t) else block_iter_count, unroll=1):

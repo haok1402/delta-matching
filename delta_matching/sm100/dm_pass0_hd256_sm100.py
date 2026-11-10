@@ -301,6 +301,9 @@ class DMPass0Hd256Sm100:
         # +ni: the correction WG and non-scheduler empty warps have no per-tile work in pass 0: they leave the
         # dynamic-scheduler consumer group and skip the schedule walk (no CLC-response spin stealing issue slots)
         self.dm_ni = "ni" in _fl0
+        # +es (fork hd256-p0opt, E1): tl_loop loads both S halves and releases the S slot before the exps (ncu: the S-slot
+        # release waited on dP(n), stalling the MMA warp's S(n+1)); bitwise the same P / dP / num / den / delta
+        self.dm_es = "es" in _fl0
         # +tl (track AG): two lanes per query row (tcgen05.ld.16x64b), 4 compute warps / SMSP: warps 0-3 / 4-7 = stage 0 / 1
         # rows 0-15 of each quadrant, warps 8-11 / 12-15 (the "correction" ids) = stage 0 / 1 rows 16-31; MMA / epilogue /
         # load / empty move to 16-19 (640 threads). Bitwise the h2+ts path (see tl_loop).
@@ -2730,16 +2733,26 @@ class DMPass0Hd256Sm100:
                         diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
                     kbase = n_block * self.n_block_size
                     r = cute.make_rmem_tensor(cute.make_layout(64), self.qk_acc_dtype)
+                    if const_expr(self.dm_es):
+                        # +es: both S halves to registers first, S slot released before any exp (values/order unchanged)
+                        for h in cutlass.range_constexpr(2):
+                            vals = dm_utils.tmem_ld_16x64b_x32(s_addr + Int32(64 * h))
+                            for i in cutlass.range_constexpr(32):
+                                r[32 * h + i] = vals[i]
+                        cute.arch.fence_view_async_tmem_load()
+                        with dm_utils.tcf_site("r0"):
+                            pipeline_s_p_o.consumer_release_w_index(stage)
                     for h in cutlass.range_constexpr(2):
-                        vals = dm_utils.tmem_ld_16x64b_x32(s_addr + Int32(64 * h))
-                        for i in cutlass.range_constexpr(32):
-                            r[32 * h + i] = vals[i]
-                        if const_expr(h == 1):
-                            cute.arch.fence_view_async_tmem_load()
-                            with dm_utils.tcf_site("r0"):
-                                pipeline_s_p_o.consumer_release_w_index(stage)
-                        else:
-                            cute.arch.fence_view_async_tmem_load()
+                        if const_expr(not self.dm_es):
+                            vals = dm_utils.tmem_ld_16x64b_x32(s_addr + Int32(64 * h))
+                            for i in cutlass.range_constexpr(32):
+                                r[32 * h + i] = vals[i]
+                            if const_expr(h == 1):
+                                cute.arch.fence_view_async_tmem_load()
+                                with dm_utils.tcf_site("r0"):
+                                    pipeline_s_p_o.consumer_release_w_index(stage)
+                            else:
+                                cute.arch.fence_view_async_tmem_load()
                         if const_expr(self.is_causal):
                             if diag:
                                 for i in cutlass.range_constexpr(32 * h, 32 * h + 32):

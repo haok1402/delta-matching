@@ -63,8 +63,10 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     if not otd:
         key = key + ("noordt",)
     lpt = bool(causal) and os.environ.get("DM_HD256_FWD_LPT", "0") == "1"   # hd256-8k L1: global longest-first CTA order (opt-in: REJECTED, 16/4 8k fwd slower)
+    # hd256-fwd5 T: split-tail CTA order (DEFAULT T = 16 for causal; 0 = the fwd4 per-(head, batch) longest-first order)
+    tsplit = int(os.environ.get("DM_HD256_FWD_TSPLIT", "16")) if (causal and not lpt) else 0
     if causal and not lpt:
-        key = key + ("nolpt",)
+        key = key + (("nolpt",) if tsplit == 0 else (f"ts{tsplit}",))
     epi = int(os.environ.get("DM_HD256_FWD_EPI", "2"))   # hd256-8k F1c: SMEM-staged coalesced O epilogue + TMEM prefetch (DEFAULT 2; 1 = F1a, 0 = old)
     if epi != 2:
         key = key + (f"epi{epi}",)
@@ -108,7 +110,7 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (AOT it first in a gpupool --gpus 0 run with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split, trace=trace, g1=g1, c8=c8, c10=c10, c11=c11, c12=c12, c13=c13)
+                                 split=split, trace=trace, g1=g1, c8=c8, c10=c10, c11=c11, c12=c12, c13=c13, tsplit=tsplit)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

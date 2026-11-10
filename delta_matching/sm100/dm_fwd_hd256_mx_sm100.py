@@ -275,7 +275,7 @@ class DMFwdHd256MxSm100:
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
                  lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0,
-                 c10: int = 0, c11: int = 0, c12: int = 0, c13: int = 0):
+                 c10: int = 0, c11: int = 0, c12: int = 0, c13: int = 0, tsplit: int = 0):
         # c8 (fork hd256-fwd3 C8, DM_HD256_FWD_C8=1; Codex hd256-fwd2-02 C, hd256-fwd3-02): column split of every tile over BOTH
         # softmax WGs.  WG h loads S columns 64h..64h+63 (blocks 2h, 2h+1) and runs the m-independent prefix op for op (bmax, kb,
         # bias, FFMA2, ex2, e4m3 codes -> sP, pairwise block sums).  WG1 publishes bmax2/3, bs2/3 (SMEM part[slot][k][128],
@@ -406,6 +406,16 @@ class DMFwdHd256MxSm100:
         # (m_block, head, batch) with the same code (bitwise); only which CTA id gets which row block changes.
         # False = the per-(head, batch) longest-first order (m_block = n_m-1-bidx, head = bidy, batch = bidz).
         self.lpt = lpt
+        # tsplit (fork hd256-fwd5 candidate T, host DM_HD256_FWD_TSPLIT; causal only, lpt off): "split tail" CTA order. With
+        # Tm = min(T, n_m) and n_hb = H*B: linear CTA ids u < n_hb*(n_m-Tm) keep the per-(head, batch) longest-first order
+        # (pair = u // (n_m-Tm), m_block = n_m-1 - u % (n_m-Tm), head = pair % H, batch = pair // H); the last n_hb*Tm ids
+        # are the short items m_block < Tm of ALL pairs, globally longest-first (v = u - n_hb*(n_m-Tm): m_block = Tm-1 - v // n_hb,
+        # pair = v % n_hb).  A bijection onto (m_block, head, batch); each CTA computes its item with the same code (bitwise).
+        # Removes the end-of-grid tail (long CTAs of the last pairs launched last) while the bulk keeps its L2 locality
+        # (global LPT, L1, lost it).  DEBUG PC 18 (non-bijective map: tail m_block shifted by one -> m_block 0 rows never written,
+        # m_block Tm duplicated) -> the hole must be caught (pc_fwdmx poisons the output allocation first).
+        assert tsplit == 0 or (is_causal and not lpt), "tsplit: causal, lpt off"
+        self.tsplit = tsplit
         # ord_td (fork hd256-ordinv, site FW15 of kda/hd256/ordinv-hd256.md; opt-in DM_HD256_ORDT=1): tcgen05 fence pair around
         # the TMEM teardown barrier (users: fence::before_thread_sync before their arrive; allocator: before + after around its
         # arrive_and_wait, then dealloc).  Host default True (DM_HD256_ORDT); False = the pre-fix code (32e0ecd PTX), debug only.
@@ -551,6 +561,28 @@ class DMFwdHd256MxSm100:
             m_block = n_m - 1 - u // n_hb
             head_idx = (u % n_hb) % n_h
             batch_idx = (u % n_hb) // n_h
+        if const_expr(self.tsplit > 0):
+            n_h = cute.arch.grid_dim()[1]
+            n_hb = n_h * cute.arch.grid_dim()[2]
+            u = bidx + n_m * (bidy + n_h * bidz)
+            tm = Int32(self.tsplit)
+            if tm > n_m:
+                tm = n_m
+            nb = n_m - tm                                   # bulk items per (head, batch) pair
+            pair = Int32(0)
+            if u < n_hb * nb:
+                pair = u // nb
+                m_block = n_m - 1 - u % nb
+            else:
+                v = u - n_hb * nb
+                pair = v % n_hb
+                m_block = tm - 1 - v // n_hb
+                if const_expr(self.pc_inj == 18):
+                    m_block = m_block + 1                   # DEBUG PC 18: non-bijective map (hole at m_block 0; in bounds)
+                    if m_block > n_m - 1:
+                        m_block = n_m - 1
+            head_idx = pair % n_h
+            batch_idx = pair // n_h
         kv_head_idx = head_idx // self.qhead_per_kvhead
         n_block_max = m_block + 1 if const_expr(self.is_causal) else n_m
         cnt = n_block_max
@@ -1046,6 +1078,9 @@ class DMFwdHd256MxSm100:
                 self.tr(j + 2, 0)
                 if const_expr(self.pc_inj != 6):
                     dm_utils.mbar_wait_parity(mbar + 96 + 8 * (j & 1), (j >> 1) & 1)   # S_empty(j)
+                else:
+                    if j == 0:
+                        dm_utils.mbar_wait_parity(mbar + 96, Int32(0))   # DEBUG PC 6: keep the j == 0 wait (as mma_c10; Codex fwd5-01)
                 if j >= 1:
                     if const_expr(self.pc_inj != 8):
                         dm_utils.mbar_wait_parity(mbar + 200 + 8 * ((j - 1) & 1), ((j - 1) >> 1) & 1)   # O_done2: PV(j-1) done

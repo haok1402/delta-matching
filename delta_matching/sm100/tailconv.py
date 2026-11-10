@@ -90,10 +90,11 @@ class DMTailConv(_Base):
         bx, by, bz = cute.arch.block_idx()
         gx, gy, gz = cute.arch.grid_dim()
         pos = bx + gx * (by + gy * bz)
-        if const_expr(self.dm_ctl == "qdrop"):
-            pos = pos + gx * gy * gz       # CONTROL: an entry that is never written (must trap)
         saddr = sbuf.iterator.toint()
         if tidx == 0:
+            if const_expr(self.dm_ctl == "qdrop"):
+                # CONTROL: wait for an entry value no producer ever writes (must trap, not hang)
+                dm_utils.poll_acquire_ge_or_trap(mDmQ.iterator.toint() + Int64(4) * Int64(1 + pos), Int32(1 << 30), Int32(1 << 22))
             v0 = dm_utils.poll_acquire_nz_or_trap(mDmQ.iterator.toint() + Int64(4) * Int64(1 + pos), Int32(1 << 24))
             dm_utils.st_shared_b32(saddr, v0)
         cute.arch.barrier()

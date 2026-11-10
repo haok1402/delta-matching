@@ -303,7 +303,8 @@ def _dm_post_convert(acc, out, *a, **k):
         return
     if _env("DM_RW8K_SEMDUMP", "0") == "1" and sem is not None and sem[1] is not None and not k.get("fake_mode", False):
         _CTX.setdefault("semdump", []).append(sem[1])   # DEBUG (rw8k): readiness counters after the call
-    if sem is not None and sem[1] is not None and sem[0] == "q" and "tconv" in _env("DM_BWD_OPTS", "").split(","):
+    if (sem is not None and sem[1] is not None and sem[0] == "q" and "tconv" in _env("DM_BWD_OPTS", "").split(",")
+            and _env("DM_TCONV_OFF", "0") != "1"):   # DM_TCONV_OFF=1: DEBUG, serial FA4 postprocess (isolates bwd main)
         # rw8k tconv: PDL tail converter (tailconv.py): same conversion, each tile as soon as its det counter is final
         from .tailconv import tconv_convert
         kind, sem_t, causal_, G, ctn = sem

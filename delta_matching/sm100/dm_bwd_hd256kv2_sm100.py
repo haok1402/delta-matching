@@ -286,7 +286,9 @@ class DmHd256Kv2:
         cute.arch.cluster_arrive()
         cute.arch.cluster_wait()
         tmem.allocate(512)
+        tc_fence_before()            # canonical: tcgen05 alloc -> fence::before_thread_sync -> bar.sync -> fence::after -> ld.shared
         tmem.wait_for_alloc()
+        tc_fence_after()
         tmem_ptr = tmem.retrieve_ptr(Float32)
         tmem_base = Int32(tmem_ptr.toint())
 

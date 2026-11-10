@@ -999,6 +999,12 @@ class DMFwdHd256MxSm100:
                 self.tr(j + 2, 0)
                 if const_expr(self.pc_inj != 6):
                     dm_utils.mbar_wait_parity(mbar + 96 + 8 * (j & 1), (j >> 1) & 1)   # S_empty(j): S(j) in registers
+                else:
+                    if j == 0:
+                        # DEBUG PC 6 keeps the j == 0 wait: nothing else gates QK(2), so skipping it can complete QK(0) and QK(2)
+                        # before the owner's first S_full[0] wait (parity overrun -> deadlock, not corruption); for j >= 1 QK(j+2)
+                        # is gated by O_full(PV(j-1)) <- W1L(j) <- the owner's S(j) load, so the skip is a pure data race.
+                        dm_utils.mbar_wait_parity(mbar + 96, Int32(0))
                 if j >= 1:
                     if const_expr(self.pc_inj != 8):
                         dm_utils.mbar_wait_parity(mbar + 32, (j - 1) & 1)             # O_full(PV(j-1)): SF(j-1) read

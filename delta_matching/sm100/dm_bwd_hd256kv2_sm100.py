@@ -326,29 +326,24 @@ class DmHd256Kv2:
         c_lo = Int32(0)
         if const_expr(self.causal):
             c_lo = kt
-        q0 = Int32(0)
-        nfull = n_t
-        cin = Int32(0)
-        cout = Int32(0)
-        nfirst = Int32(0)        # dqc: 1 = this launch continues the key tile's reduction (carry restore, no zero-init)
-        tilesb = Int64(0)
-        if const_expr(self.dqc):
+        if const_expr(self.dqc):   # (names defined only in dqc builds: the default build's IR / loop-carried values are untouched)
+            # nfirst: 1 = this launch continues the key tile's reduction (carry restore, no zero-init)
             dsc = _gaddr(mSBP)
-            q0 = ld_global_s32(dsc)
+            cq0 = ld_global_s32(dsc)
             nfull = ld_global_s32(dsc + 4)
             cin = ld_global_s32(dsc + 8)
             cout = ld_global_s32(dsc + 12)
             nfirst = cin
             if const_expr(self.causal):
-                c_lo = cutlass.max(kt, q0)
-                nfirst = cutlass.max(cin, Int32(cutlass.select_(kt < q0, Int32(1), Int32(0))))
-            tilesb = Int64((n_t * (n_t + 1) - q0 * (q0 + 1)) // 2)
+                c_lo = cutlass.max(kt, cq0)
+                nfirst = cutlass.max(cin, Int32(cutlass.select_(kt < cq0, Int32(1), Int32(0))))
+            tilesb = Int64((n_t * (n_t + 1) - cq0 * (cq0 + 1)) // 2)
         ncs = n_t - c_lo
         total = rep * ncs
         if const_expr(self.dqc and self.kn == "dd"):
             if cute.arch.thread_idx()[0] == 0:
                 dda = _gaddr(mDump) + Int64(bx + hx * 2 * n_t) * 32
-                st_global_v4(dda, q0, nfull, cin, cout)
+                st_global_v4(dda, cq0, nfull, cin, cout)
                 st_global_v4(dda + 16, c_lo, nfirst, total, Int32(tilesb))
 
         smem = cutlass.utils.SmemAllocator()
@@ -521,7 +516,7 @@ class DmHd256Kv2:
                     stg = t & 1
                     wtile = Int64(0)
                     if const_expr(self.dqc and self.causal):
-                        wtile = Int64(l) * tilesb + (ct * (ct + 1) - q0 * (q0 + 1)) // 2 + kt
+                        wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
                     elif const_expr(self.causal):
                         wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
                     else:
@@ -662,7 +657,7 @@ class DmHd256Kv2:
                 wtile = Int64(0)
                 if const_expr(self.wsp):
                     if const_expr(self.dqc and self.causal):
-                        wtile = Int64(l) * tilesb + (ct * (ct + 1) - q0 * (q0 + 1)) // 2 + kt
+                        wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
                     elif const_expr(self.causal):
                         wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
                     else:

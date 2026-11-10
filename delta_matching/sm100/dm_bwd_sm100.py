@@ -2395,10 +2395,16 @@ class DMBackwardSm100:
                 # allocf: the 2-CTA dealloc handshake inside TmemAllocator.free (remote mbarrier arrive -> wait -> tcgen05.dealloc) gets
                 # the fence pair too (blanket tcf mode for this call: fence::before the arrive, fence::after the wait)
                 _tcf_saved = dm_utils.TCF[0]
+                # the build-trap guard (tcf_end) must keep counting only the marked-pipeline wrapper fences: the blanket fences
+                # of this one call are not evidence that the pipeline wrappers are bound (S6 positive control)
+                _tcf_st = getattr(dm_utils, "_TCF_STATS", None)
+                _tcf_f0 = _tcf_st["fences"] if _tcf_st is not None else None
                 dm_utils.TCF[0] = 2
             tmem.free(tmem_ptr)
             if const_expr(self.dm_allocf):
                 dm_utils.TCF[0] = _tcf_saved
+                if _tcf_st is not None:
+                    _tcf_st["fences"] = _tcf_f0
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if cute.arch.lane_idx() == 0:
                     dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 7), dm_utils.globaltimer())

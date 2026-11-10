@@ -56,7 +56,8 @@ class DmHd256Mx2:
     DQCTL = ("xh0", "xh1", "xi", "s1", "s3", "s4", "sf0", "sf1", "cw0", "cw1", "sfb0", "sfb1")
     DLY = 1 << 15
 
-    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False):
+    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
+                 q3: bool = False, lpt: str = ""):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -67,6 +68,14 @@ class DmHd256Mx2:
         # Same scale bytes, same MMA order: bitwise.
         self.dqopt = bool(dqopt) and mode == "dq"
         self.SFB_OFF = 8 if self.dqopt else 4
+        # candidates (fork hd256-dqopt, codex/hd256-dqopt-02-q3lpt.md), dq + dqopt only, bitwise by construction:
+        # q3: MMA order per tile S(t) -> dP(t) -> out(t-1) (was S(t) -> out(t-1) -> dP(t)); the TMA warp issues in that consumer
+        #     order Ya(t), Yb(t), T(t-1) and drains T(last) after the loop.
+        # lpt (causal): "g" = global longest-first CTA order (L = x + n_t (y + H z) -> rt = n_t-1 - L // (H B)), "1" = per head
+        #     reversed rt.  Each CTA keeps its ascending key traversal.
+        self.q3 = bool(q3) and self.dqopt
+        self.lpt = lpt if (self.dqopt and causal) else ""
+        assert self.lpt in ("", "g", "1") and (self.q3 or not q3)
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
         self.kn = knob.replace("_safe", "")
@@ -146,6 +155,15 @@ class DmHd256Mx2:
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         lane = cute.arch.lane_idx()
         rt, hx, b = cute.arch.block_idx()
+        if const_expr(self.lpt == "1"):
+            rt = n_t - 1 - rt
+        elif const_expr(self.lpt == "g"):
+            nbz = cute.arch.grid_dim()[2]
+            lin = rt + n_t * (hx + H * b)
+            rt = n_t - 1 - lin // (H * nbz)
+            rr_ = lin - (lin // (H * nbz)) * (H * nbz)
+            hx = rr_ % H
+            b = rr_ // H
         rep = H // Hk
         N = n_t * 128
         nhl = Int32(1)
@@ -252,8 +270,16 @@ class DmHd256Mx2:
                     if const_expr(self.has_dp):
                         yb = yb_p.acquire_and_advance()
                         cute.copy(tma_Yb, tYbg[(None, ct)], tYbs[(None, 0)], tma_bar_ptr=yb.barrier)
+                    if const_expr(self.q3):
+                        if ci > 0:       # q3: T(t-1) after Ya(t), Yb(t) (consumer order)
+                            te = t_p.acquire_and_advance()
+                            cute.copy(tma_T, tTg[(None, ct - 1)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
+                    else:
+                        te = t_p.acquire_and_advance()
+                        cute.copy(tma_T, tTg[(None, ct)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
+                if const_expr(self.q3):  # q3: drain T(last) before the producer tails
                     te = t_p.acquire_and_advance()
-                    cute.copy(tma_T, tTg[(None, ct)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
+                    cute.copy(tma_T, tTg[(None, c_hi - 1)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
             ya_p.tail()
             if const_expr(self.has_dp):
                 yb_p.tail()
@@ -278,26 +304,27 @@ class DmHd256Mx2:
                         mma_s.set(tcgen05.Field.ACCUMULATE, True)
                     se.commit()
                     yf.release()
-                if t > 0:
-                    # out(t-1): codes stage / SF set (t-1) & 1
-                    if const_expr(self.kn in ("cd", "fin")):
-                        spin(self.DLY)
-                    tp = t - 1
-                    s = tp & 1
-                    if const_expr(self.kn == "cd" and self.unsafe):
-                        s = tp * 0
-                    tf = t_c.wait_and_advance()
-                    cf = cd_c.wait_and_advance()
-                    tc_fence_after()
-                    dm_utils.gemm_ptx_bs(
-                        mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                        sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                        tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                        ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
-                        tuple((0, 0) for k in range(4)),
-                        zero_init=cutlass.Boolean(tp == 0))
-                    tf.release()
-                    cf.release()
+                if const_expr(not self.q3):
+                    if t > 0:
+                        # out(t-1): codes stage / SF set (t-1) & 1
+                        if const_expr(self.kn in ("cd", "fin")):
+                            spin(self.DLY)
+                        tp = t - 1
+                        s = tp & 1
+                        if const_expr(self.kn == "cd" and self.unsafe):
+                            s = tp * 0
+                        tf = t_c.wait_and_advance()
+                        cf = cd_c.wait_and_advance()
+                        tc_fence_after()
+                        dm_utils.gemm_ptx_bs(
+                            mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                            sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                            tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                            ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                            tuple((0, 0) for k in range(4)),
+                            zero_init=cutlass.Boolean(tp == 0))
+                        tf.release()
+                        cf.release()
                 if const_expr(self.has_dp):
                     if t < total:
                         yg = yb_c.wait_and_advance()
@@ -312,6 +339,27 @@ class DmHd256Mx2:
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
                         de.commit()
                         yg.release()
+                if const_expr(self.q3):     # q3: out(t-1) after dP(t)
+                    if t > 0:
+                        # out(t-1): codes stage / SF set (t-1) & 1
+                        if const_expr(self.kn in ("cd", "fin")):
+                            spin(self.DLY)
+                        tp = t - 1
+                        s = tp & 1
+                        if const_expr(self.kn == "cd" and self.unsafe):
+                            s = tp * 0
+                        tf = t_c.wait_and_advance()
+                        cf = cd_c.wait_and_advance()
+                        tc_fence_after()
+                        dm_utils.gemm_ptx_bs(
+                            mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                            sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                            tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                            ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                            tuple((0, 0) for k in range(4)),
+                            zero_init=cutlass.Boolean(tp == 0))
+                        tf.release()
+                        cf.release()
             fe = fin_p.acquire_and_advance()
             fe.commit()
             sc_p.tail()

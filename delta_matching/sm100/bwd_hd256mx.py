@@ -23,6 +23,9 @@ from .fastpath import env as _env
 D = 256
 NUMERICS = "sm100-mx-d256"
 DETERMINISTIC = True
+# DmHd256Mx2 impls beyond "2": "3" = dqopt (Q1+Q2, the dq default); "4" = + q3 MMA/TMA order; "5" = + causal global LPT order;
+# "6" = + per-head LPT order (fork hd256-dqopt candidates, codex/hd256-dqopt-02-q3lpt.md)
+IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(dqopt=True, lpt="g"), "6": dict(dqopt=True, lpt="1")}
 IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "3"}   # O3-Q12 (DmHd256Mx2 dqopt) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}
@@ -84,7 +87,7 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         impl = _env("DM_H256_MX_IMPL", "")
         impl = (IMPL_DEFAULT if not knob else "1") if impl == "" else impl   # knobs are per class: one impl for all modes
     impls = dict(impl) if isinstance(impl, dict) else {m: str(impl) for m in ("dv", "dk", "dq")}
-    assert all(v in ("1", "2", "3") for v in impls.values()), impls   # "3" = DmHd256Mx2 + dqopt (dq Q1+Q2 candidate)
+    assert all(v in IMPL_EXTRA or v in ("1", "2") for v in impls.values()), impls
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -128,11 +131,10 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
             key = key + ("noordf",)
         cls = DmHd256Mx
         extra = {}
-        if impls[mode] in ("2", "3"):
+        if impls[mode] == "2" or impls[mode] in IMPL_EXTRA:
             from .dm_bwd_hd256mx2_sm100 import DmHd256Mx2 as cls  # noqa: N813
             key = ("i" + impls[mode],) + key
-            if impls[mode] == "3":
-                extra = dict(dqopt=True)
+            extra = dict(IMPL_EXTRA.get(impls[mode], {}))
         _run(key, lambda: cls(mode, causal, kd, knob, ordf=ordf, **extra), ten, lds, [n_t, H, Hk], mode=mode)
         if big or hsh:
             dumps[mode] = dict(dump=dump, codes=codes, sb=sb, hash=hh)

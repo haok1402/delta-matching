@@ -756,7 +756,7 @@ class DMBackwardSm100:
         self.dm_xp = next((x[3:] for x in self.dm_opts if x.startswith("xp:")), "") if self.dm_rasy else ""
         self.dm_rasy_slots = (0 if not self.dm_rasy else 1 if self.dm_rasy == 5 else 68)
         if self.dm_rasy:
-            self.dm_xs_arrive, self.dm_xs_wait = self.dm_rasy, (3 if self.dm_xd else 2)
+            self.dm_xs_arrive, self.dm_xs_wait = self.dm_rasy, (3 if (self.dm_xd or self.dm_xp == "r") else 2)   # bounded (trap) leader waits under a control that can stall
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)
         self.dm_xs_roles = next((x[4:] for x in self.dm_opts if x.startswith("xsr:")), "rmcdq")
         self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else (2 if "ordpc2" in self.dm_opts else 0))

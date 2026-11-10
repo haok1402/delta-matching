@@ -270,7 +270,7 @@ def _guard(cnt, launch):
     except BaseException:
         cnt.zero_()
         raise
-    if _CHECK:
+    if _CHECK and not torch.cuda.is_current_stream_capturing():     # a sync is illegal inside CUDA-graph capture
         torch.cuda.synchronize()
         assert int(cnt.count_nonzero()) == 0, "cutequant: K-mean counters not zero after a call"
 

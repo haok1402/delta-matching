@@ -5765,6 +5765,19 @@ class DMBackwardSm100:
         lane_base = q * 32
         if const_expr(dm_tr is not None):
             dm_tq = dm_utils.clock64()
+        HH = const_expr("hhoist" in self.dm_opts)   # brain7 (legal, bitwise): scale-exponent global loads before the fp32 wait
+        if const_expr(HH):
+            dm_idx = [dsq[h][0].partition_D(self._cluster_S_coords(thr_mma_S, work_n, 0)) for h in range(2)]
+            dm_kv_blk = dm_idx[0][0][0] // 32
+            dm_kv_blk = cutlass.min(dm_kv_blk, (seqlen.seqlen_k + 31) // 32 - 1)
+            dm_ksb = dm_utils.pow2_exponent_byte(Float32(aux_data.tensors[1][batch_idx, kv_head, dm_kv_blk]))
+            nst_h = cute.size(dsq[0][2], mode=[1])
+            dm_qsb = [[None] * nst_h, [None] * nst_h]
+            for h in cutlass.range_constexpr(2):
+                for st in cutlass.range_constexpr(nst_h):
+                    qoff_h = dm_idx[h][None, st, 0, 0][0][1] // 32
+                    dm_qsb[h][st] = dm_utils.pow2_exponent_byte(
+                        Float32(aux_data.tensors[0][batch_idx, head_idx, m_block * (self.tile_m // 32) + qoff_h]))
         # fp32 dS of this tile stored by every compute warp
         if const_expr(not self.dm_dsqbadraw):
             dm_utils.mbar_wait_parity(dm_mbar + 8 * 9, dsq_j & 1)
@@ -5774,10 +5787,11 @@ class DMBackwardSm100:
                 dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * 44, Int64(dm_utils.clock64() - dm_tq))
             dm_tq = dm_utils.clock64()
         # scales: query blocks of the 4 (half, stage) chunks, key block of this warp (hoisted per tile like compute)
-        dm_idx = [dsq[h][0].partition_D(self._cluster_S_coords(thr_mma_S, work_n, 0)) for h in range(2)]
-        dm_kv_blk = dm_idx[0][0][0] // 32
-        dm_kv_blk = cutlass.min(dm_kv_blk, (seqlen.seqlen_k + 31) // 32 - 1)
-        dm_ksb = dm_utils.pow2_exponent_byte(Float32(aux_data.tensors[1][batch_idx, kv_head, dm_kv_blk]))
+        if const_expr(not HH):
+            dm_idx = [dsq[h][0].partition_D(self._cluster_S_coords(thr_mma_S, work_n, 0)) for h in range(2)]
+            dm_kv_blk = dm_idx[0][0][0] // 32
+            dm_kv_blk = cutlass.min(dm_kv_blk, (seqlen.seqlen_k + 31) // 32 - 1)
+            dm_ksb = dm_utils.pow2_exponent_byte(Float32(aux_data.tensors[1][batch_idx, kv_head, dm_kv_blk]))
         nst = cute.size(dsq[0][2], mode=[1])
         if const_expr(dm_tr is not None and "htr" in self.dm_opts):
             dm_hp = dm_utils.clock64()
@@ -5796,8 +5810,12 @@ class DMBackwardSm100:
                 if const_expr(dm_tr is not None and "htr" in self.dm_opts):
                     dm_hw = dm_hw + (dm_utils.clock64() - dm_hl)
                 fv = frag[None, 0, 0]
-                for v in cutlass.range_constexpr(cute.size(fv) // 2):
-                    ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
+                if const_expr("hmx" in self.dm_abl):
+                    # brain7 timing-only (outputs WRONG): keep pass-1 TMEM loads, drop the |max| ALU (one element only)
+                    ds_amax = cute.arch.fmax(ds_amax, utils_abs(fv[0]))
+                else:
+                    for v in cutlass.range_constexpr(cute.size(fv) // 2):
+                        ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
         ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
         if const_expr(dm_tr is not None and "htr" in self.dm_opts):
             dm_hp2 = dm_utils.clock64()
@@ -5855,8 +5873,11 @@ class DMBackwardSm100:
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
                 qoff = dm_idx[h][None, st, 0, 0][0][1] // 32
-                qsb = dm_utils.pow2_exponent_byte(
-                    Float32(aux_data.tensors[0][batch_idx, head_idx, m_block * (self.tile_m // 32) + qoff]))
+                if const_expr(HH):
+                    qsb = dm_qsb[h][st]
+                else:
+                    qsb = dm_utils.pow2_exponent_byte(
+                        Float32(aux_data.tensors[0][batch_idx, head_idx, m_block * (self.tile_m // 32) + qoff]))
                 dm_utils.tmem_st_x1((lane_base << 16) + self.dm_sfa_dk_col + qoff * 4 + q,
                                     dm_utils.bytes4_same(dm_utils.add_sb_clamp(ds_sb, qsb)))
         dm_one = Int32(0x7F7F7F7F)

@@ -97,20 +97,22 @@ def _bands(nt, fits):
     return out
 
 
-def _carry_plan(B, H, Hk, N, causal, cap):
+def _carry_plan(B, H, Hk, N, causal, cap, mode="1"):
     """exact-carry chunks (KV2 opt dqc) when one KV-head group does not fit: per batch element, a set of G KV groups (largest G that
     works), its q heads hi in ranges [h0, h1) (all q tiles) or, one q head at a time, causal q bands -- order (b, group set, hi, band)
     = the unchunked per-key-tile reduction order (q head asc, q tile asc).  Returns the plan with the fewest chunks, or None."""
     r, nt = H // Hk, N // 128
     best = None
     for G in range(Hk, 0, -1):
+        if mode == "heads" and G != Hk:
+            continue
         for nh in range(r - 1, 0, -1):     # head ranges, full q range
             if G * nh * _tiles(nt, 0, nt, causal) * 16388 + _tmp_bytes(1, N, G * nh, G, True) <= cap:
                 hs = _balanced(r, nh)
                 sub = [(h0, h1, 0, nt) for h0, h1 in hs]
                 break
         else:
-            if not causal:
+            if not causal or mode == "heads":
                 continue
             bands = _bands(nt, lambda a, b_: G * _tiles(nt, a, b_, True) * 16388 + _tmp_bytes(1, N, G, G, True) <= cap)
             if bands is None:
@@ -127,7 +129,9 @@ def plan(B, H, Hk, N, causal):
     """Chunk plan (list of dicts b0 b1 g0 g1 h0 h1 q0 q1: batch range x KV-group range x q-head-in-group range x q-tile band), ascending,
     whose workspace (+ head-split temporaries + carry) fits the cap, or None (-> the kv2 fallback).  Order of preference (sm90 split.py
     convention, kda-hd256 16:5x): whole call, balanced batch chunks, KV-head-group chunks (no carry), then exact-carry chunks (q heads
-    of a group / causal q bands; DM_H256_DQR_CARRY=0 disables them).  Every reduction keeps its unchunked order -> bitwise."""
+    of a group / causal q bands).  DM_H256_DQR_CARRY: "heads" (DEFAULT) = carry only over q-head ranges with ALL KV groups in each
+    chunk (no bands; the only carry class measured >= 2% faster than the kv2 path at 2 GiB: 32k 8/2 x1.08, while band plans lost 1-6%,
+    runs/hd256-dqr2/sweep_7052303), "1" = every carry class (bands, group subsets), "0" = none (kv2 fallback above the KV-group split).  Every reduction keeps its unchunked order -> bitwise."""
     from .fastpath import env as _env
     cap = _cfg()[0] * (1 << 30)
     r, nt = H // Hk, N // 128
@@ -146,9 +150,11 @@ def plan(B, H, Hk, N, causal):
     for n in range(Hk - 1, 0, -1):                     # largest KV-group count per chunk that fits
         if _ws_bytes(1, n * r, N, causal) + _tmp_bytes(1, N, n * r, n, False) <= cap:
             return [full(b, b + 1, g0, g1) for b in range(B) for g0, g1 in _balanced(Hk, n)]
-    if _env("DM_H256_DQR_CARRY", "1") != "1":
+    cm = _env("DM_H256_DQR_CARRY", "heads")
+    assert cm in ("0", "1", "heads"), cm
+    if cm == "0":
         return None
-    return _carry_plan(B, H, Hk, N, causal, cap)
+    return _carry_plan(B, H, Hk, N, causal, cap, cm)
 
 
 def dqw_fits(B, H, N, causal, Hk=None):
@@ -210,7 +216,7 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
             _kv.kv2_launch(*[sl(x) for x in (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)], causal, knob=knob, opts=base, dqw=ws,
                            out=(sl(dk), sl(dv)))
             if _CHUNK_HOOK is not None:
-                _CHUNK_HOOK(ci_all - 1, "dqg", None)
+                _CHUNK_HOOK(ci_all - 1, "dqg", dict(W=W, Wsb=Wsb, carry=carry, chunk=c, T=T))
             dqg_launch(*ws, sl(k8), sl(ks), nb, N, H, causal, knob=dqg_knob, wsw=mode == "dqt", out=sl(dq))
             continue
         # head-split chunk: contiguous copies of its heads, group-major (g, hi) -> kernel head h = g_local * nh + hi_local
@@ -232,7 +238,7 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
         bd = None if (q0 == 0 and q1 == nt) else (q0, q1)
         dqc_ = torch.empty(nb, N, ng * nh, D, device=dev, dtype=torch.bfloat16) if bd else None
         if _CHUNK_HOOK is not None:
-            _CHUNK_HOOK(ci_all - 1, "dqg", None)
+            _CHUNK_HOOK(ci_all - 1, "dqg", dict(W=W, Wsb=Wsb, carry=carry, chunk=c, T=T))
         dqc_ = dqg_launch(*ws, k8c, ksc, nb, N, ng * nh, causal, knob=dqg_knob, wsw=mode == "dqt", band=bd, out=dqc_)
         rows_ = slice(q0 * 128, q1 * 128)
         for j, hh in enumerate(hql):

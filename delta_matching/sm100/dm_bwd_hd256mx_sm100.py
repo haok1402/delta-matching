@@ -447,7 +447,7 @@ class DmHd256Mx:
                     if const_expr(self.has_dp):
                         dv_ = tmem_ld32(tb + self.COL_DP + 32 * j)
                     cute.arch.fence_view_async_tmem_load()
-                    if const_expr(j == 3):
+                    if const_expr(j == 3 and not (self.dbg & 2)):
                         af.release()
                     id1 = Float32(0.0)
                     id2 = Float32(0.0)
@@ -497,22 +497,46 @@ class DmHd256Mx:
                                     id1 = add_f32(id1, vals[32 * j + i + q])
                                     id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dv_[i + q], ca[j]))))
                                     id3 = add_f32(id3, pv[q])
-                        if const_expr(self.dbg & 2):
-                            for q in cutlass.range_constexpr(4):
-                                ctok = ctok0 + 32 * j + i + q
-                                qi = rtok
-                                ki = ctok
-                                if const_expr(self.rows_are_keys):
-                                    qi = ctok
-                                    ki = rtok
-                                da = _gaddr(mDump) + ((Int64(l) * N + qi) * N + ki) * 16
-                                dsv = Float32(0.0)
-                                if const_expr(self.mode != "dv" and not self.delta_only):
-                                    dsv = vals[32 * j + i + q]
-                                st_global_v4f(da, sv[i + q], dv_[i + q], pv[q], dsv)
                     if const_expr((self.dbg & 1) and self.mode == "dq" and not self.delta_only):
                         ia = _gaddr(mIdent) + ((Int64(l) * N + rtok) * (N // 32) + ct * 4 + j) * 16
                         st_global_v4f(ia, id1, id2, id3, Float32(0.0))
+                if const_expr(self.dbg & 2):
+                    # raw dump pass (dbg only): re-read S / dP, recompute P with the same helper, dS from vals
+                    for j in cutlass.range_constexpr(4):
+                        sv = tmem_ld32(tb + 32 * j)
+                        dv_ = [Float32(0.0)] * 32
+                        if const_expr(self.has_dp):
+                            dv_ = tmem_ld32(tb + self.COL_DP + 32 * j)
+                        cute.arch.fence_view_async_tmem_load()
+                        for i in cutlass.range_constexpr(0, 32, 2):
+                            c0 = ctok0 + 32 * j + i
+                            s0 = sv[i]
+                            s1 = sv[i + 1]
+                            if const_expr(self.causal):
+                                if const_expr(self.rows_are_keys):
+                                    s0 = -Float32.inf if rtok > c0 else s0
+                                    s1 = -Float32.inf if rtok > c0 + 1 else s1
+                                else:
+                                    s0 = -Float32.inf if c0 > rtok else s0
+                                    s1 = -Float32.inf if c0 + 1 > rtok else s1
+                            if const_expr(self.rows_are_keys):
+                                p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs[j], ld_shared_f32(ldb + (32 * j + i) * 4),
+                                                              ld_shared_f32(ldb + (32 * j + i + 1) * 4))
+                            else:
+                                p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[j], l2r)
+                            pp = [p0, p1]
+                            for u in cutlass.range_constexpr(2):
+                                qi = rtok
+                                ki = c0 + u
+                                if const_expr(self.rows_are_keys):
+                                    qi = c0 + u
+                                    ki = rtok
+                                dsv = Float32(0.0)
+                                if const_expr(self.mode != "dv" and not self.delta_only):
+                                    dsv = vals[32 * j + i + u]
+                                da = _gaddr(mDump) + ((Int64(l) * N + qi) * N + ki) * 16
+                                st_global_v4f(da, sv[i + u], dv_[i + u], pp[u], dsv)
+                    af.release()
                 if const_expr(self.delta_only):
                     pass
                 else:

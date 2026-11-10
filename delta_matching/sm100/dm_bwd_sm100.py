@@ -6179,24 +6179,34 @@ class DMBackwardSm100:
             nt = cute.size(mdQ_semaphore, mode=[3]) * nh * mt
             base = dm_tcq.iterator.toint()
             cnt = Int32(0)
-            for m in cutlass.range(m_block_min, m_block_max, unroll=1):
-                lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info, seqlen, m,
-                                                     work_n)
-                if lock == block_info.get_n_block_max_for_m_block(seqlen, m) - 1:
-                    cnt = cnt + 1
+            if const_expr(self.spt):
+                # spt: lock = writers - 1 - work_n, so the last writer of every m of this tile is work_n == 0
+                if work_n == 0:
+                    cnt = m_block_max - m_block_min
+            else:
+                for m in cutlass.range(m_block_min, m_block_max, unroll=1):
+                    lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info, seqlen,
+                                                         m, work_n)
+                    if lock == block_info.get_n_block_max_for_m_block(seqlen, m) - 1:
+                        cnt = cnt + 1
             if cnt > 0:
                 wt = (batch_idx * nh + head_idx) * mt + work_n
                 old = dm_utils.atom_add_relaxed_gpu_s32(base + Int64(4) * Int64(1 + nt + wt), Int32(1))
                 if old == self.cta_group_size - 1:
                     pos = dm_utils.atom_add_relaxed_gpu_s32(base, cnt)
-                    i = Int32(0)
-                    for m in cutlass.range(m_block_min, m_block_max, unroll=1):
-                        lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info,
-                                                             seqlen, m, work_n)
-                        if lock == block_info.get_n_block_max_for_m_block(seqlen, m) - 1:
+                    if const_expr(self.spt):
+                        for i in cutlass.range(cnt, unroll=1):
                             dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + pos + i),
-                                                        (batch_idx * nh + head_idx) * mt + m + 1)
-                            i = i + 1
+                                                        (batch_idx * nh + head_idx) * mt + m_block_min + i + 1)
+                    else:
+                        i = Int32(0)
+                        for m in cutlass.range(m_block_min, m_block_max, unroll=1):
+                            lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info,
+                                                                 seqlen, m, work_n)
+                            if lock == block_info.get_n_block_max_for_m_block(seqlen, m) - 1:
+                                dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + pos + i),
+                                                            (batch_idx * nh + head_idx) * mt + m + 1)
+                                i = i + 1
 
     @cute.jit
     def dQacc_reduce(

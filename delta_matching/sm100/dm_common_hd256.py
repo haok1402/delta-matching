@@ -88,3 +88,11 @@ def dm_mx256_dp_scale(vs: Float32, dos: Float32) -> Float32:
 def dm_mx256_p_pair(s0: Float32, s1: Float32, c: Float32, l2: Float32):
     """(P0, P1) = ex2.approx.ftz.f32(fma.rn((s0, s1), c, -l2))  (= dm_common.dm_bwd_p_pair)."""
     return dm_common.dm_bwd_p_pair(s0, s1, c, l2)
+
+
+def dm_mx256_p_pair2(s0: Float32, s1: Float32, c: Float32, l20: Float32, l21: Float32):
+    """Keys-on-rows form (backward dK/dV kernels: the two elements of a pair are two QUERIES of one key, so each has its
+    own l2): (P0, P1) = ex2.approx.ftz.f32(fma.rn((s0, s1), c, (-l20, -l21))).  Per element this is the same FFMA RN +
+    MUFU.EX2 as dm_mx256_p_pair (fma_packed_f32x2 is per-element FFMA RN), hence bitwise the same P."""
+    x0, x1 = cute.arch.fma_packed_f32x2((s0, s1), (c, c), (-l20, -l21))
+    return cute.math.exp2(x0, fastmath=True), cute.math.exp2(x1, fastmath=True)

@@ -2389,7 +2389,9 @@ class DMBackwardSm100:
             # Dealloc the tensor memory buffer
             tmem.relinquish_alloc_permit()
             tmem_alloc_barrier.arrive_and_wait()
+            dm_utils.XS[1] = int(self.dm_xscope)   # ordinv Part III: the 2-CTA dealloc handshake (peer arrive -> wait) too
             tmem.free(tmem_ptr)
+            dm_utils.XS[1] = 0
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if cute.arch.lane_idx() == 0:
                     dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 7), dm_utils.globaltimer())

@@ -323,6 +323,8 @@ class DMFwdHd256MxSm100:
         # sleeps 20 us before PV(last) of every item -> must corrupt; 24 QK warp releases Q before the item's last QK and sleeps
         # 20 us before it, load warp issues Q before K0 (else Q(k+1) waits behind K0's stage = the last QK's) -> must corrupt.
         # DEBUG 25 (probe, not a control): row 0 LSE of each item = k + 1000*smid (items per persistent CTA).
+        # DEBUG 26 (probe, not a control): LSE rows 0..5 (int32 bits): k | smid<<16, correction item start, epilogue start, end
+        # (globaltimer ns mod 2^31), rows 4/5 of the CTA's first item = correction entry / exit (runs/hd256-fwd6/dev/dprobe2.py).
         self.pers = bool(pers)
         if pers:
             c13 = 1
@@ -2308,8 +2310,18 @@ class DMFwdHd256MxSm100:
                 cute.arch.setmaxregister_increase(self.num_regs_correction)
             else:
                 cute.arch.setmaxregister_decrease(self.num_regs_correction)
+            t_in = Int32(0)
+            if const_expr(self.pc_inj == 26):
+                t_in = Int32(dm_utils.globaltimer() & Int64(0x7FFFFFFF))
             tmem_alloc_barrier.arrive_and_wait_unaligned()
             self.correction_pers(mbar, stats, mO, mLSE, mKVW, Int32(sK.iterator.toint()), resp_base, u0, tsd)
+            if const_expr(self.pc_inj == 26):
+                # DEBUG probe 26: rows 4 / 5 of the CTA's first item = correction entry (before the TMEM barrier) / exit time
+                mb0, h0, b0 = self.item_t2(u0, tsd)
+                if cute.arch.thread_idx()[0] % 128 == 0:
+                    mLSE[b0, h0, mb0 * self.m_block_size + 4] = dm_utils.bitcast_i32_f32(t_in)
+                    mLSE[b0, h0, mb0 * self.m_block_size + 5] = dm_utils.bitcast_i32_f32(
+                        Int32(dm_utils.globaltimer() & Int64(0x7FFFFFFF)))
             if const_expr(self.ord_td):
                 dm_utils.tc_fence_before()
             tmem_alloc_barrier.arrive_unaligned()
@@ -2561,6 +2573,9 @@ class DMFwdHd256MxSm100:
             l_last = Float32(0.0)
             self.tr_item(u)
             self.tr(-1, 16, None, tidx == 0)
+            t_c0 = Int32(0)
+            if const_expr(self.pc_inj == 26):
+                t_c0 = Int32(dm_utils.globaltimer() & Int64(0x7FFFFFFF))
             m_last, l_last = self.tail_c11(Int32(0), n_block_max - 1, True, mbar, stats, tidx, lane, obase, mKVW, kv_head_idx,
                                            batch_idx, cnt, m_last, l_last, J=J0)
             for i in cutlass.range(cnt - 1, unroll=1):
@@ -2585,11 +2600,25 @@ class DMFwdHd256MxSm100:
                 mb_n, h_n, b_n = self.item_t2(u_n, tsd)
                 cnt_n = mb_n + 1
             stage = (2 * J0n + 1 + 2 * Int32(cnt_n >= 2)) % self.kv_stage
+            if const_expr(self.pc_inj == 26):
+                dm_utils.mbar_wait_parity(mbar + 32, (J0n - 1) & 1)            # DEBUG probe 26: epilogue start time
+                if tidx == 0:
+                    mLSE[batch_idx, head_idx, m_block * self.m_block_size + 2] = dm_utils.bitcast_i32_f32(
+                        Int32(dm_utils.globaltimer() & Int64(0x7FFFFFFF)))
             self.epilogue_pers(mbar, mO, m_block, head_idx, batch_idx, J0n - 1, sk_base + stage * (self.tma_bytes_kv), tidx,
                                obase, scale)
             if const_expr(self.trace):
                 self.tr(-1, 5, None, tidx == 0)
                 self.tr(-1, 6, dm_utils.globaltimer(), tidx == 0)
+            if const_expr(self.pc_inj == 26):
+                # DEBUG probe 26 (not a control): LSE rows 0..3 of the item (as int32 bits) = k | smid << 16, correction item
+                # start, epilogue start (O_full(last) seen = t_e, from the warp's epilogue), end (globaltimer ns mod 2^31)
+                t_c1 = Int32(dm_utils.globaltimer() & Int64(0x7FFFFFFF))
+                rb = m_block * self.m_block_size
+                if tidx == 0:
+                    mLSE[batch_idx, head_idx, rb] = dm_utils.bitcast_i32_f32(k | (Int32(dm_utils.smid()) << 16))
+                    mLSE[batch_idx, head_idx, rb + 1] = dm_utils.bitcast_i32_f32(t_c0)
+                    mLSE[batch_idx, head_idx, rb + 3] = dm_utils.bitcast_i32_f32(t_c1)
             J0 = J0n
             k = k + 1
             u = u_n
@@ -2604,6 +2633,7 @@ class DMFwdHd256MxSm100:
         dm_utils.mbar_wait_parity(mbar + 32, Jlast & 1)                         # O_full(PV(last))
         dm_utils.tc_fence_after()
         self.tr(-1, 13, None, tidx == 0)
+
         fence_proxy_async_shared()                                              # ring last written by TMA (async proxy)
         N = mO.shape[1]
         H = mO.shape[2]

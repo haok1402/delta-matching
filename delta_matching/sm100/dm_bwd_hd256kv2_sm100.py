@@ -96,14 +96,14 @@ class DmHd256Kv2:
         a1 = cute.select(a_l, mode=[0, 1, 2])
         b1 = cute.select(b_l, mode=[0, 1, 2])
         t1 = cute.select(t_l, mode=[0, 1, 2])
-        self.vmnk = cute.tiled_divide(cute.make_layout((2, 1, 1)), (mma_s.thr_id,))
+        vmnk = cute.tiled_divide(cute.make_layout((2, 1, 1)), (mma_s.thr_id,))
         op = cpasync.CopyBulkTensorTileG2SOp(cg2)
-        tma_K, tK = cute.nvgpu.make_tiled_tma_atom_A(op, mK, a1, s_tiler, mma_s, self.vmnk.shape)
-        tma_V, tV = cute.nvgpu.make_tiled_tma_atom_A(op, mV, a1, s_tiler, mma_s, self.vmnk.shape)
-        tma_Q, tQ = cute.nvgpu.make_tiled_tma_atom_B(op, mQ, b1, s_tiler, mma_s, self.vmnk.shape)
-        tma_dO, tdO = cute.nvgpu.make_tiled_tma_atom_B(op, mdO, b1, s_tiler, mma_s, self.vmnk.shape)
-        tma_Qd, tQd = cute.nvgpu.make_tiled_tma_atom_B(op, mQd, t1, o_tiler, mma_o, self.vmnk.shape)
-        tma_dOd, tdOd = cute.nvgpu.make_tiled_tma_atom_B(op, mdOd, t1, o_tiler, mma_o, self.vmnk.shape)
+        tma_K, tK = cute.nvgpu.make_tiled_tma_atom_A(op, mK, a1, s_tiler, mma_s, vmnk.shape)
+        tma_V, tV = cute.nvgpu.make_tiled_tma_atom_A(op, mV, a1, s_tiler, mma_s, vmnk.shape)
+        tma_Q, tQ = cute.nvgpu.make_tiled_tma_atom_B(op, mQ, b1, s_tiler, mma_s, vmnk.shape)
+        tma_dO, tdO = cute.nvgpu.make_tiled_tma_atom_B(op, mdO, b1, s_tiler, mma_s, vmnk.shape)
+        tma_Qd, tQd = cute.nvgpu.make_tiled_tma_atom_B(op, mQd, t1, o_tiler, mma_o, vmnk.shape)
+        tma_dOd, tdOd = cute.nvgpu.make_tiled_tma_atom_B(op, mdOd, t1, o_tiler, mma_o, vmnk.shape)
         self.bytes_a = cute.size_in_bytes(F8, a1)
         self.bytes_b = cute.size_in_bytes(F8, b1)
         self.bytes_t = cute.size_in_bytes(F8, t1)
@@ -176,26 +176,27 @@ class DmHd256Kv2:
         if warp == self.LOAD_WARP:
             for a_ in (tma_K, tma_V, tma_Q, tma_dO, tma_Qd, tma_dOd):
                 cpasync.prefetch_descriptor(a_)
+        vmnk = cute.tiled_divide(cute.make_layout((2, 1, 1)), (mma_s.thr_id,))
         one = _coop(1)
         comp2 = _coop(2 * self.NCOMP)       # compute threads of BOTH CTAs arrive on the leader's barrier
         comp1 = _coop(self.NCOMP)
         kv_p, kv_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=one, consumer_group=one,
                                                      tx_count=2 * 2 * self.bytes_a, barrier_storage=bars,
-                                                     cta_layout_vmnk=self.vmnk, defer_sync=True).make_participants()
+                                                     cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         q_p, q_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=one, consumer_group=one,
                                                    tx_count=2 * 2 * self.bytes_b, barrier_storage=bars + 2,
-                                                   cta_layout_vmnk=self.vmnk, defer_sync=True).make_participants()
+                                                   cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         d_p, d_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=one, consumer_group=one,
                                                    tx_count=2 * 2 * self.bytes_t, barrier_storage=bars + 4,
-                                                   cta_layout_vmnk=self.vmnk, defer_sync=True).make_participants()
+                                                   cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         s_p, s_c = pipeline.PipelineUmmaAsync.create(num_stages=1, producer_group=one, consumer_group=comp2,
-                                                     barrier_storage=bars + 6, cta_layout_vmnk=self.vmnk,
+                                                     barrier_storage=bars + 6, cta_layout_vmnk=vmnk,
                                                      defer_sync=True).make_participants()
         cd_p, cd_c = pipeline.PipelineAsyncUmma.create(num_stages=2, producer_group=comp2, consumer_group=one,
-                                                       barrier_storage=bars + 8, cta_layout_vmnk=self.vmnk,
+                                                       barrier_storage=bars + 8, cta_layout_vmnk=vmnk,
                                                        defer_sync=True).make_participants()
         f_p, f_c = pipeline.PipelineUmmaAsync.create(num_stages=1, producer_group=one, consumer_group=comp2,
-                                                     barrier_storage=bars + 12, cta_layout_vmnk=self.vmnk,
+                                                     barrier_storage=bars + 12, cta_layout_vmnk=vmnk,
                                                      defer_sync=True).make_participants()
         cute.arch.mbarrier_init_fence()
 

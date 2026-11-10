@@ -967,17 +967,17 @@ class DMBackwardSm100:
         )
         self.sdK_epi_tile = (
             self.tile_n,
-            math.gcd(128 // (self.dk_dtype.width // 8), self.tile_hdim // 2),  # 64 or 32
+            math.gcd(128 // (self.dk_dtype.width // 8), self.tile_hdim // (len(self.compute_warp_ids) // 4)),  # 64 or 32 (cwg4: per-WG hdim slice)
         )  # subtiles mma_tiler_dsq[:2] = mma_tiler_pdo[:2]
         self.sdV_epi_tile = (
             self.tile_n,
-            math.gcd(128 // (self.dk_dtype.width // 8), self.tile_hdimv // 2),  # 64 or 32
+            math.gcd(128 // (self.dk_dtype.width // 8), self.tile_hdimv // (len(self.compute_warp_ids) // 4)),  # 64 or 32
         )  # subtiles mma_tiler_dsq[:2] = mma_tiler_pdo[:2]
         # headdim_64 gets 1 stage
-        self.num_epi_stages = max(1, (self.tile_hdim // 2) // self.sdK_epi_tile[1])
-        self.num_epi_stages_v = max(1, (self.tile_hdimv // 2) // self.sdV_epi_tile[1])
-        self.sdK_flat_epi_tile = self.tile_n * (self.tile_hdim // 2) // self.num_epi_stages
-        self.sdV_flat_epi_tile = self.tile_n * (self.tile_hdimv // 2) // self.num_epi_stages_v
+        self.num_epi_stages = max(1, (self.tile_hdim // (len(self.compute_warp_ids) // 4)) // self.sdK_epi_tile[1])
+        self.num_epi_stages_v = max(1, (self.tile_hdimv // (len(self.compute_warp_ids) // 4)) // self.sdV_epi_tile[1])
+        self.sdK_flat_epi_tile = self.tile_n * (self.tile_hdim // (len(self.compute_warp_ids) // 4)) // self.num_epi_stages
+        self.sdV_flat_epi_tile = self.tile_n * (self.tile_hdimv // (len(self.compute_warp_ids) // 4)) // self.num_epi_stages_v
         if const_expr(not self.dKV_postprocess):
             # One (tile_n, epi) stage per compute warpgroup; with the M=64 layout the whole CTA
             # stages the (tile_n, hdim) tile, i.e. hdim / epi stages (the same bytes for hdim 128).
@@ -985,13 +985,13 @@ class DMBackwardSm100:
                 self.dk_dtype,
                 LayoutEnum.ROW_MAJOR,
                 self.sdK_epi_tile,
-                self.tile_hdim // self.sdK_epi_tile[1] if self.acc_m64 else 2,
+                self.tile_hdim // self.sdK_epi_tile[1] if self.acc_m64 else (len(self.compute_warp_ids) // 4),
             )
             self.sdV_layout = sm100_utils_basic.make_smem_layout_epi(
                 self.dv_dtype,
                 LayoutEnum.ROW_MAJOR,
                 self.sdV_epi_tile,
-                self.tile_hdimv // self.sdV_epi_tile[1] if self.acc_m64 else 2,
+                self.tile_hdimv // self.sdV_epi_tile[1] if self.acc_m64 else (len(self.compute_warp_ids) // 4),
             )
         elif self.acc_m64:
             # fp32 row-major staging of half the (tile_n, hdim) tile (NOTE [M=64 accumulator
@@ -999,9 +999,9 @@ class DMBackwardSm100:
             self.sdK_layout = cute.make_layout((self.tile_n // 2) * self.tile_hdim)
             self.sdV_layout = cute.make_layout((self.tile_n // 2) * self.tile_hdimv)
         else:
-            self.sdK_layout = cute.make_layout((self.tile_n * self.dK_reduce_ncol, 2))
+            self.sdK_layout = cute.make_layout((self.tile_n * self.dK_reduce_ncol, (len(self.compute_warp_ids) // 4)))
             # self.dK_reduce_ncol same for dV
-            self.sdV_layout = cute.make_layout((self.tile_n * self.dK_reduce_ncol, 2))
+            self.sdV_layout = cute.make_layout((self.tile_n * self.dK_reduce_ncol, (len(self.compute_warp_ids) // 4)))
 
     @cute.jit
     def __call__(

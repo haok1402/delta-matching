@@ -544,6 +544,10 @@ class DMBackwardSm100:
             registers = type(registers)(reduce=r_[0], compute=r_[1], load=r_[2], mma=r_[2], empty=24)
             self.num_regs_dsq = r_[3]
         self.dsq_sync_barrier = cutlass.pipeline.NamedBarrier(barrier_id=12, num_threads=4 * cute.arch.WARP_SIZE)
+        # track BI esrhelp: dsqs = split each dS scale block's quantization between the dsqw helper (query half 0) and the
+        # reduce warps (query half 1); exact fp32 partial-max join; helper keeps the dP release / dS commit / peer exchange.
+        self.dm_dsqs = self.dm_dsqw and "dsqs" in _o
+        self.dsqs_barrier = cutlass.pipeline.NamedBarrier(barrier_id=13, num_threads=8 * cute.arch.WARP_SIZE)
 
         # 16 warps -> 512 threads (dsqw: 20 warps -> 640)
         self.threads_per_cta = cute.arch.WARP_SIZE * len(
@@ -5710,8 +5714,12 @@ class DMBackwardSm100:
         self, dsq, tidx: Int32, q: Int32, thr_mma_S, work_n: Int32, m_block: Int32, head_idx: Int32, kv_head: Int32,
         batch_idx: Int32, seqlen, aux_data, sdS, sdS_xchg_src, pipeline_dP, pipeline_dS, dsq_dP_state, dsq_dS_state,
         dS_cluster_full_mbar_ptr, dm_sdm: Int32, dm_mbar: Int32, cta_rank: Int32, dsq_j: Int32, dsq_sr: Int32, dsq_last,
+        role: cutlass.Constexpr = 0,
     ):
-        """DM dsq: quantize dS of one m_block (the reduce warps' share of compute_loop's dS phase, same values)."""
+        """DM dsq: quantize dS of one m_block (the reduce warps' share of compute_loop's dS phase, same values).
+        role 0: whole tile (dsq / dsqw). dsqs split (track BI): role 1 = dsqw helper (query half 0, owns dP release, dS commit,
+        peer exchange), role 2 = reduce warps (query half 1). Exact join of the fp32 partial |max| -> identical scale byte."""
+        HS = (0, 1) if const_expr(role == 0) else ((0,) if const_expr(role == 1) else (1,))
         lane_base = q * 32
         # fp32 dS of this tile stored by every compute warp
         dm_utils.mbar_wait_parity(dm_mbar + 8 * 9, dsq_j & 1)
@@ -5724,30 +5732,65 @@ class DMBackwardSm100:
         nst = cute.size(dsq[0][2], mode=[1])
         # pass 1: tile amax over this warp's 32 keys x all 128 queries (max is exact: same scale byte as the 2-warp exchange)
         ds_amax = Float32(0.0)
+        codes = [[None] * nst, [None] * nst]
+        HQ2 = const_expr("hq2" in self.dm_abl and role == 0)   # track BI timing-only ceiling of exact speculation
+        # track BI dsqk (legal, bitwise): keep pass-1 fp32 values of query half 1 in registers -> pass 2 reloads only half 0
+        KEEP = const_expr("dsqk" in self.dm_opts and role == 0 and "hq1" not in self.dm_abl and "hhalf" not in self.dm_abl)
+        keep = [None] * nst
         if const_expr("hq1" in self.dm_abl):
             # brain6 timing-only ablation (outputs WRONG): skip pass 1 (no amax TMEM pass) = one-pass helper ceiling
             ds_amax = Float32(1.0)
         else:
-            for h in cutlass.range_constexpr(1 if const_expr("hhalf" in self.dm_abl) else 2):
+            for hi in cutlass.range_constexpr(len(HS) if const_expr(role != 0) else (1 if const_expr("hhalf" in self.dm_abl) else 2)):
+                h = HS[hi] if const_expr(role != 0) else hi
                 for st in cutlass.range_constexpr(nst):
                     frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
                     cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
                     cute.arch.fence_view_async_tmem_load()
                     fv = frag[None, 0, 0]
-                    for v in cutlass.range_constexpr(cute.size(fv) // 2):
-                        ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
+                    if const_expr("dsqm4" in self.dm_opts):
+                        # track BI dsqm4: 4 independent |max| chains, exact final max (max is associative/commutative on these
+                        # finite values -> identical ds_amax and scale byte), shorter dependency chain in pass 1
+                        acc4 = [Float32(0.0), Float32(0.0), Float32(0.0), Float32(0.0)]
+                        for v in cutlass.range_constexpr(cute.size(fv) // 2):
+                            acc4[v % 4] = cute.arch.fmax(acc4[v % 4], cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
+                        ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(cute.arch.fmax(acc4[0], acc4[1]), cute.arch.fmax(acc4[2], acc4[3])))
+                    else:
+                        for v in cutlass.range_constexpr(cute.size(fv) // 2):
+                            ds_amax = cute.arch.fmax(ds_amax, cute.arch.fmax(utils_abs(fv[2 * v]), utils_abs(fv[2 * v + 1])))
+                    if const_expr(KEEP and h == 1):
+                        keep[st] = frag
+                    if const_expr(HQ2):
+                        # abl:hq2 (timing only, WRONG scale): quantize in pass 1 with a stand-in scale, no pass 2
+                        fq = cute.make_fragment_like(fv, Float32)
+                        for v in cutlass.range_constexpr(cute.size(fv) // 2):
+                            fq[2 * v], fq[2 * v + 1] = cute.arch.mul_packed_f32x2((fv[2 * v], fv[2 * v + 1]), (Float32(1.0), Float32(1.0)))
+                        c = cute.make_fragment_like(fv, self.ds_dtype)
+                        c.store(fq.load().to(self.ds_dtype))
+                        codes[h][st] = c
             ds_amax = dm_utils.redux_max_abs_f32(ds_amax)
+            if const_expr(role != 0):
+                # exact join: fp32 partial maxima (not scale bytes) of the two 64-query halves, double-buffered by tile parity
+                dm_px = dm_sdm + 4 * (40 + 8 * (dsq_j & 1) + 2 * q)
+                if cute.arch.lane_idx() == 0:
+                    dm_utils.st_shared_b32(dm_px + 4 * (role - 1), dm_utils.bitcast_f32_i32(ds_amax))
+                self.dsqs_barrier.arrive_and_wait()                         # X1: partials visible
+                dm_other = dm_utils.bitcast_i32_f32(dm_utils.ld_shared_b32(dm_px + 4 * (2 - role)))
+                ds_amax = cute.arch.fmax(ds_amax, dm_other)
         ds_sb = dm_utils.pow2_sb(ds_amax)
         ds_inv = dm_utils.inv_pow2_from_sb(ds_sb)
         dm_sfb_dq = dm_utils.add_sb_clamp(ds_sb, dm_ksb)
-        if cute.arch.lane_idx() == 0:
-            dm_utils.st_shared_b32(dm_sdm + 4 * (16 + q), dm_sfb_dq)
+        if const_expr(role != 2):
+            if cute.arch.lane_idx() == 0:
+                dm_utils.st_shared_b32(dm_sdm + 4 * (16 + q), dm_sfb_dq)
         # pass 2: re-load, scale, e4m3 (codes kept in registers until every fp32 read of the dP region is done)
-        codes = [[None] * nst, [None] * nst]
-        for h in cutlass.range_constexpr(2):
+        for hi in cutlass.range_constexpr(0 if const_expr(HQ2) else len(HS)):
+            h = HS[len(HS) - 1 - hi] if const_expr(KEEP) else HS[hi]   # dsqk: convert the retained half first
             for st in cutlass.range_constexpr(nst):
                 frag = cute.make_rmem_tensor(dsq[h][2][None, 0, None, None].shape, Float32)
-                if const_expr("hhalf" in self.dm_abl and h == 1):
+                if const_expr(KEEP and h == 1):
+                    frag = keep[st]
+                elif const_expr("hhalf" in self.dm_abl and h == 1):
                     frag.fill(0.0)   # brain6 abl:hhalf (timing only, WRONG): other half done by a free helper
                 else:
                     cute.copy(dsq[h][0], dsq[h][1][None, st, None, None], frag)
@@ -5759,66 +5802,87 @@ class DMBackwardSm100:
                 c = cute.make_fragment_like(fv, self.ds_dtype)
                 c.store(fq.load().to(self.ds_dtype))
                 codes[h][st] = c
+        if const_expr(role != 0):
+            # X2: every fp32 read of the dP region by BOTH halves is complete before any code / SF TMEM store (cross-reader WAR)
+            dm_utils.tc_fence_before()
+            self.dsqs_barrier.arrive_and_wait()
+            dm_utils.tc_fence_after()
         # dK operand: dS codes (TS A operand) + dK SFA / constant SFB, then release dP -> dS to the MMA warp
-        for h in cutlass.range_constexpr(2):
+        for hi in cutlass.range_constexpr(len(HS)):
+            h = HS[hi]
             for st in cutlass.range_constexpr(nst):
                 cute.copy(dsq[h][3], cute.recast_tensor(codes[h][st], Float32), dsq[h][4][None, st, 0, 0])
-        for h in cutlass.range_constexpr(2):
+        for hi in cutlass.range_constexpr(len(HS)):
+            h = HS[hi]
             for st in cutlass.range_constexpr(nst):
                 qoff = dm_idx[h][None, st, 0, 0][0][1] // 32
                 qsb = dm_utils.pow2_exponent_byte(
                     Float32(aux_data.tensors[0][batch_idx, head_idx, m_block * (self.tile_m // 32) + qoff]))
                 dm_utils.tmem_st_x1((lane_base << 16) + self.dm_sfa_dk_col + qoff * 4 + q,
                                     dm_utils.bytes4_same(dm_utils.add_sb_clamp(ds_sb, qsb)))
-        dm_one = Int32(0x7F7F7F7F)
-        dm_utils.tmem_st_x4((lane_base << 16) + self.dm_sfb_dk_col, dm_one, dm_one, dm_one, dm_one)
+        if const_expr(role != 2):
+            dm_one = Int32(0x7F7F7F7F)
+            dm_utils.tmem_st_x4((lane_base << 16) + self.dm_sfb_dk_col, dm_one, dm_one, dm_one, dm_one)
         cute.arch.fence_view_async_tmem_store()
         dm_utils.tc_fence_before()
-        cute.arch.sync_warp()
-        with cute.arch.elect_one():
-            pipeline_dP.consumer_release(dsq_dP_state)
+        if const_expr(role != 0):
+            self.dsqs_barrier.arrive_and_wait()                             # X3: both halves' codes + SFs stored
+        if const_expr(role != 2):
+            if const_expr(role == 1):
+                dm_utils.tc_fence_after()
+                dm_utils.tc_fence_before()
+            cute.arch.sync_warp()
+            with cute.arch.elect_one():
+                pipeline_dP.consumer_release(dsq_dP_state)
         # dQ operand: dS codes in SMEM (own query half) + the peer's half in the exchange buffer
-        pipeline_dS.producer_acquire(dsq_dS_state)
+        if const_expr(role != 2):
+            pipeline_dS.producer_acquire(dsq_dS_state)
+        if const_expr(role != 0):
+            self.dsqs_barrier.arrive_and_wait()                             # X4: dS SMEM slot acquired by the helper
         exchange_stage = cta_rank ^ 1
-        for h in cutlass.range_constexpr(2):
+        for hi in cutlass.range_constexpr(len(HS)):
+            h = HS[hi]
             for st in cutlass.range_constexpr(nst):
                 if exchange_stage == st:
                     cute.autovec_copy(codes[h][st], dsq[h][6][None, 0])
                 else:
                     cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
         cute.arch.fence_view_async_shared()
-        if const_expr(self.dm_dsqw):
+        if const_expr(role != 0):
+            self.dsqs_barrier.arrive_and_wait()                             # X5: both halves' SMEM codes written
+        elif const_expr(self.dm_dsqw):
             self.dsq_sync_barrier.arrive_and_wait()
         else:
             self.reduce_sync_barrier.arrive_and_wait()
-        peer = cta_rank ^ 1
-        if tidx == 0:
-            slot = dsq_j & 1
-            word = dm_utils.pack_bytes4(
-                dm_utils.ld_shared_b32(dm_sdm + 4 * 16), dm_utils.ld_shared_b32(dm_sdm + 4 * 17),
-                dm_utils.ld_shared_b32(dm_sdm + 4 * 18), dm_utils.ld_shared_b32(dm_sdm + 4 * 19))
-            dm_utils.st_shared_b32(dm_sdm + 4 * (24 + slot), word)
-            dm_utils.st_async_peer_b32(dm_sdm + 4 * (32 + slot), dm_mbar + 8 * slot, peer, word)
-            dm_utils.mbar_arrive_expect_tx(dm_mbar + 8 * slot, 4)
-            stage_copy_bytes = const_expr(self.tma_copy_bytes["dS"] // 2)
-            stage_copy_elems = const_expr(stage_copy_bytes // (self.ds_dtype.width // 8))
-            cute.arch.mbarrier_arrive_and_expect_tx(
-                dS_cluster_full_mbar_ptr, stage_copy_bytes, peer_cta_rank_in_cluster=peer)
-            copy_utils.cpasync_bulk_s2cluster(
-                sdS_xchg_src.iterator, sdS.iterator + cta_rank * stage_copy_elems, dS_cluster_full_mbar_ptr,
-                stage_copy_bytes, peer_cta_rank_in_cluster=peer)
-        # pipeline_dS(t): dQ(t) overwrites the S tail -> every compute warp must have loaded S(t+1) first
-        if const_expr("nosr" not in self.dm_abl):
-            if not dsq_last:
-                dm_utils.mbar_wait_parity(dm_mbar + 8 * 10, dsq_sr & 1)
-                dm_utils.tc_fence_after()
-        # brain6 abl:nosr (timing only, outputs WRONG: dQ may overwrite the S tail before S(t+1) is read)
-        self._dm_write_dq_sf(dsq_j, dm_sdm, dm_mbar, cta_rank)
-        cute.arch.fence_view_async_tmem_store()
-        dm_utils.tc_fence_before()
-        cute.arch.sync_warp()
-        with cute.arch.elect_one():
-            pipeline_dS.producer_commit(dsq_dS_state)
+        if const_expr(role != 2):
+            peer = cta_rank ^ 1
+            if tidx == 0:
+                slot = dsq_j & 1
+                word = dm_utils.pack_bytes4(
+                    dm_utils.ld_shared_b32(dm_sdm + 4 * 16), dm_utils.ld_shared_b32(dm_sdm + 4 * 17),
+                    dm_utils.ld_shared_b32(dm_sdm + 4 * 18), dm_utils.ld_shared_b32(dm_sdm + 4 * 19))
+                dm_utils.st_shared_b32(dm_sdm + 4 * (24 + slot), word)
+                dm_utils.st_async_peer_b32(dm_sdm + 4 * (32 + slot), dm_mbar + 8 * slot, peer, word)
+                dm_utils.mbar_arrive_expect_tx(dm_mbar + 8 * slot, 4)
+                stage_copy_bytes = const_expr(self.tma_copy_bytes["dS"] // 2)
+                stage_copy_elems = const_expr(stage_copy_bytes // (self.ds_dtype.width // 8))
+                cute.arch.mbarrier_arrive_and_expect_tx(
+                    dS_cluster_full_mbar_ptr, stage_copy_bytes, peer_cta_rank_in_cluster=peer)
+                copy_utils.cpasync_bulk_s2cluster(
+                    sdS_xchg_src.iterator, sdS.iterator + cta_rank * stage_copy_elems, dS_cluster_full_mbar_ptr,
+                    stage_copy_bytes, peer_cta_rank_in_cluster=peer)
+            # pipeline_dS(t): dQ(t) overwrites the S tail -> every compute warp must have loaded S(t+1) first
+            if const_expr("nosr" not in self.dm_abl):
+                if not dsq_last:
+                    dm_utils.mbar_wait_parity(dm_mbar + 8 * 10, dsq_sr & 1)
+                    dm_utils.tc_fence_after()
+            # brain6 abl:nosr (timing only, outputs WRONG: dQ may overwrite the S tail before S(t+1) is read)
+            self._dm_write_dq_sf(dsq_j, dm_sdm, dm_mbar, cta_rank)
+            cute.arch.fence_view_async_tmem_store()
+            dm_utils.tc_fence_before()
+            cute.arch.sync_warp()
+            with cute.arch.elect_one():
+                pipeline_dS.producer_commit(dsq_dS_state)
 
     def _dm_setmaxreg_dec(self, n: int):
         if not self.dm_noreg:   # trace-time python
@@ -5871,7 +5935,7 @@ class DMBackwardSm100:
                     self._dsq_quant_tile(
                         dsq, tidx, q, thr_mma_S, work_n, m_block, head_idx, kv_head, batch_idx, seqlen, aux_data, sdS,
                         dsq_xchg_src, pipeline_dP, pipeline_dS, dsq_dP_state, dsq_dS_state, dS_cluster_full_mbar_ptr,
-                        dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last)
+                        dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last, 1 if const_expr(self.dm_dsqs) else 0)
                     dsq_dP_state.advance()
                     dsq_dS_state.advance()
                     if not dsq_last:
@@ -5938,7 +6002,7 @@ class DMBackwardSm100:
 
         read_flag = const_expr(not self.deterministic)
 
-        if const_expr(self.dm_dsq and not self.dm_dsqw):
+        if const_expr(self.dm_dsq and (not self.dm_dsqw or self.dm_dsqs)):
             dsq = self._dsq_setup(tidx, thr_mma_S, tdPtdP, sdS, sdS_xchg)
             dsq_xchg_src = self._dS_exchange_source(sdS_xchg, sdS_dK, cta_rank_in_cluster ^ 1)
             dsq_dP_state = pipeline.make_pipeline_state(cutlass.pipeline.PipelineUserType.Consumer, 1)
@@ -6088,7 +6152,7 @@ class DMBackwardSm100:
                     # followed consumer_release, so the MMA warp could start the next dQ MMA during
                     # the poll; now the poll overlaps the current dQ MMA instead, which measured
                     # faster. This m_block's adds are only issued below, after the acquire.
-                    if const_expr(self.dm_dsq and not self.dm_dsqw):
+                    if const_expr(self.dm_dsq and (not self.dm_dsqw or self.dm_dsqs)):
                         # DM dsq: quantize this m_block's dS before waiting for its dQ (dQ(t) needs these codes)
                         dsq_last = iter_idx == loop_count - 1
                         if const_expr(self.dm_gloop):
@@ -6096,7 +6160,8 @@ class DMBackwardSm100:
                         self._dsq_quant_tile(
                             dsq, tidx, warp_idx, thr_mma_S, work_n, m_block, head_idx, dsq_kv_head, batch_idx, seqlen,
                             aux_data, sdS, dsq_xchg_src, pipeline_dP, pipeline_dS, dsq_dP_state, dsq_dS_state,
-                            dS_cluster_full_mbar_ptr, dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last)
+                            dS_cluster_full_mbar_ptr, dsq_sdm, dsq_mbar, cta_rank_in_cluster, dsq_j, dsq_sr, dsq_last,
+                            2 if const_expr(self.dm_dsqs) else 0)
                         dsq_dP_state.advance()
                         dsq_dS_state.advance()
                         if not dsq_last:

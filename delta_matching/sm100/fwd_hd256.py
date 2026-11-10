@@ -63,13 +63,15 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     if not otd:
         key = key + ("noordt",)
     lpt = bool(causal) and os.environ.get("DM_HD256_FWD_LPT", "0") == "1"   # hd256-8k L1: global longest-first CTA order (opt-in: REJECTED, 16/4 8k fwd slower)
+    # hd256-fwd5 T: split-tail CTA order (DEFAULT T = 16 for causal; 0 = the fwd4 per-(head, batch) longest-first order)
+    tsplit = int(os.environ.get("DM_HD256_FWD_TSPLIT", "16")) if (causal and not lpt) else 0
     if causal and not lpt:
-        key = key + ("nolpt",)
+        key = key + (("nolpt",) if tsplit == 0 else (f"ts{tsplit}",))
     epi = int(os.environ.get("DM_HD256_FWD_EPI", "2"))   # hd256-8k F1c: SMEM-staged coalesced O epilogue + TMEM prefetch (DEFAULT 2; 1 = F1a, 0 = old)
     if epi != 2:
         key = key + (f"epi{epi}",)
     split = int(os.environ.get("DM_HD256_FWD_SPLIT", "0"))  # hd256-fwd2 C7b: SF at slot+112, QK N112+N16, early S release (2); 0 = C6
-    assert split in (0, 2), split
+    assert split in (0, 2, 3), split   # hd256-fwd4: 2 + C8 = C9, 3 = C9r (C8 only)
     if split:
         key = key + (f"split{split}",)
     g1 = int(os.environ.get("DM_HD256_FWD_G1", "0"))   # hd256-fwd3 G1 critical-path trims (bitmask, see DMFwdHd256MxSm100); 0 = C6
@@ -78,6 +80,27 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     c8 = int(os.environ.get("DM_HD256_FWD_C8", "1"))   # hd256-fwd3 C8 column split (implies G1a): 1 = C8 (DEFAULT), 2 = C8b; 0 = C6
     if c8 != 1:
         key = key + (f"c8_{c8}",)
+    c13 = int(os.environ.get("DM_HD256_FWD_C13", "0"))   # hd256-fwd4 C13: C12 + second MMA issuer (warp 15 PV) (opt-in)
+    # hd256-fwd6 C14: persistent CTAs (CLC claims, cross-item overlap; implies C13; causal T2 order, epi 2) (opt-in)
+    pers = int(os.environ.get("DM_HD256_FWD_PERS", "0"))
+    if pers and not (causal and tsplit > 0 and epi == 2 and c8 == 1 and split == 0 and kv_stage == 4):
+        pers = 0
+    if pers:
+        c13 = 1
+        key = key + (f"pers{pers}",)
+    if c13:
+        key = key + (f"c13_{c13}",)
+    c12 = int(os.environ.get("DM_HD256_FWD_C12", "1"))   # hd256-fwd4 C12 (DEFAULT 1): C10 SF placement + C11 tail in the correction
+    if c8 != 1 or split != 0:                               # C12 needs the C8 column / C0 layout settings (C6 / C7 / C8b arms: off)
+        c12 = 0
+    if c12 != 1:                                           # WG + tile-parity prefix-only softmax WGs; 0 = C8 (fwd3 a168e8c path)
+        key = key + (f"c12_{c12}",)
+    c11 = int(os.environ.get("DM_HD256_FWD_C11", "0"))   # hd256-fwd4 C11: C10 + ordered tail in the correction WG (opt-in)
+    if c11:
+        key = key + (f"c11_{c11}",)
+    c10 = int(os.environ.get("DM_HD256_FWD_C10", "0"))   # hd256-fwd4 C10: SF in the next tile's slot, 3-deep softmax rings (opt-in)
+    if c10:
+        key = key + (f"c10_{c10}",)
     trace = os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"   # DEBUG (hd256-fwd3): per-event %clock64 trace -> TRACE["buf"]
     dbg = None
     if trace:
@@ -94,7 +117,8 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (AOT it first in a gpupool --gpus 0 run with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split, trace=trace, g1=g1, c8=c8)
+                                 split=split, trace=trace, g1=g1, c8=c8, c10=c10, c11=c11, c12=c12, c13=c13, tsplit=tsplit,
+                                 **({"pers": pers} if pers else {}))
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

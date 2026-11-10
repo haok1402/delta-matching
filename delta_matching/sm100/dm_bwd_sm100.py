@@ -751,10 +751,16 @@ class DMBackwardSm100:
         # Planted controls (DEBUG): xd:<roles c d q r> drop CTA 1's 6th signal of that role (bounded leader wait -> trap);
         # xp:d4 / xp:d5 / xp:r = CTA 1 publishes zero dS codes (TMEM, dP empty) / zero own sdS half (dS full) / forwards the relay
         # BEFORE its copy landed, then writes the real data ~2 us after the signal.
-        self.dm_rasy = (6 if "rasyagg" in _xm else 7 if "rasyc" in _xm else 5) if (self.dm_xscope and "rasy" in _xm) else 0
+        self.dm_rasy = ((6 if "rasyagg" in _xm else 7 if "rasyc" in _xm else 8 if "rrasy" in _xm else 5)
+                        if (self.dm_xscope and "rasy" in _xm) else 0)
+        # xs:rrasy (Part III (d)): X3-X7 via ordinv's relay structure (CTA-1 local .cta arrives, CTA-1 MMA-warp lane 0 polls the local copies)
+        # but each forward is ONE red.async complete_tx; CTA 0 arms 4 B in the role's first warp. X10 direct rasy, X11 pwq.
+        # xd:f<k> (DEBUG) = the relay skips its 6th forward of site k (bounded leader wait -> trap).
         self.dm_xd = next((x[3:] for x in self.dm_opts if x.startswith("xd:")), "") if self.dm_rasy else ""
         self.dm_xp = next((x[3:] for x in self.dm_opts if x.startswith("xp:")), "") if self.dm_rasy else ""
         self.dm_rasy_slots = (0 if not self.dm_rasy else 68 if self.dm_rasy == 6 else 1)
+        if self.dm_rasy == 8:
+            self.dm_xs_relay = True
         if self.dm_rasy:
             self.dm_xs_arrive, self.dm_xs_wait = self.dm_rasy, (3 if (self.dm_xd or self.dm_xp == "r") else 2)   # bounded (trap) leader waits under a control that can stall
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)
@@ -1944,6 +1950,8 @@ class DMBackwardSm100:
                         len(self.reduce_warp_ids),
                     )
             if const_expr(self.dm_rasy):
+                dm_utils.XS_FIRST[0] = tuple(sorted({self.compute_warp_ids[0], self.reduce_warp_ids[0]}
+                                                    | ({self.dsq_warp_ids[0]} if self.dsq_warp_ids else set())))
                 dm_utils.XS_DUMMY[0] = Int32((storage.dm_xchg_mbar.data_ptr()
                                               + (11 + (2 if (self.dm_ordw_v or self.dm_ordw_k) else 0))).toint())
                 if warp_idx == 5:
@@ -2450,7 +2458,7 @@ class DMBackwardSm100:
             self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "c" in self.dm_xs_roles else 0
+            dm_utils.XS[0] = ((8 if self.dm_rasy == 8 else 4) if self.dm_xs_relay else self.dm_xs_arrive) if "c" in self.dm_xs_roles else 0
             dm_utils.XS_DROP[0] = "c" in self.dm_xd
             self.compute_loop(
                 thr_mma_S,
@@ -2512,7 +2520,7 @@ class DMBackwardSm100:
                     self._dm_setmaxreg_inc(self.num_regs_dsq)
                 tmem.wait_for_alloc()
                 tmem_ptr = tmem.retrieve_ptr(Float32)
-                dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "d" in self.dm_xs_roles else 0
+                dm_utils.XS[0] = ((8 if self.dm_rasy == 8 else 4) if self.dm_xs_relay else self.dm_xs_arrive) if "d" in self.dm_xs_roles else 0
                 dm_utils.XS_DROP[0] = "d" in self.dm_xd
                 self.dsq_loop(
                     thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
@@ -2530,7 +2538,7 @@ class DMBackwardSm100:
                 self._dm_setmaxreg_inc(self.num_regs_reduce)
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "q" in self.dm_xs_roles else 0
+            dm_utils.XS[0] = ((8 if self.dm_rasy == 8 else 4) if self.dm_xs_relay else self.dm_xs_arrive) if "q" in self.dm_xs_roles else 0
             dm_utils.XS_DROP[0] = "q" in self.dm_xd
             self.dQacc_reduce(
                 mdQaccum,
@@ -2572,6 +2580,7 @@ class DMBackwardSm100:
         dm_utils.XS[1] = 0
         dm_utils.XS_DROP[0] = False
         dm_utils.XS_DUMMY[0] = None
+        dm_utils.XS_FIRST[0] = ()
         return
 
     @cute.jit
@@ -3796,6 +3805,8 @@ class DMBackwardSm100:
         tile_scheduler = TileSchedulerCls()
         work_tile = tile_scheduler.initial_work_tile_info()
         dm_pt = Int32(0)
+        dm_ntot = Int32(0)    # xexempt: phases of the per-iteration empty barriers over all processed tiles
+        dm_ntile = Int32(0)   # xexempt: processed tiles (dKV empty phases per stage)
         while work_tile.is_valid_tile:
             self._dm_prog(Int32(2), dm_pt, Int32(0), Int32(1))
             _, kv_block, head_idx, _, batch_idx, _, m_block_min, m_block_max, process_tile = (
@@ -3814,6 +3825,10 @@ class DMBackwardSm100:
                 process_tile = block_iter_count > Int32(0)
             else:
                 block_iter_count = (m_block_max - m_block_min) * self.dm_G
+            if const_expr(self.dm_rasy):
+                if process_tile:
+                    dm_ntot = dm_ntot + block_iter_count
+                    dm_ntile = dm_ntile + 1
 
             if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_SERIAL):
                 if is_leader_cta and process_tile:
@@ -4308,6 +4323,15 @@ class DMBackwardSm100:
             dm_pt = dm_pt + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
+        if const_expr(self.dm_rasy):
+            # xexempt terminal waits (Codex 3 item 6): every red.async complete-tx into the leader's empty barriers has landed before the
+            # leader's CTA can dealloc / exit (the last phases are otherwise never waited: producer tails are off).
+            if is_leader_cta and dm_ntot > 0:
+                for dm_b in (pipeline_S_P.sync_object_empty.get_barrier(0), pipeline_dP.sync_object_empty.get_barrier(0),
+                             pipeline_dQ.sync_object_empty.get_barrier(0)):
+                    dm_utils.mbar_wait_parity_cluster(Int32(dm_b.toint()), (dm_ntot - 1) & 1)
+                for dm_b in (pipeline_dKV.sync_object_empty.get_barrier(0), pipeline_dKV.sync_object_empty.get_barrier(1)):
+                    dm_utils.mbar_wait_parity_cluster(Int32(dm_b.toint()), (dm_ntile - 1) & 1)
         dm_utils.XS[1] = 0
         # Currently it hangs if we have this S_P.producer_tail, will need to understand why
         # pipeline_S_P.producer_tail(producer_state_S_P)
@@ -4358,7 +4382,14 @@ class DMBackwardSm100:
                         if const_expr(self.dm_xrp == k):
                             lim = cutlass.min(ob[k] + 1, tgt)   # DEBUG planted control: forward one phase EARLY
                         if dn[k] < lim:
-                            dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(cnts[k]))
+                            if const_expr(self.dm_rasy == 8):
+                                if const_expr(self.dm_xd == "f" + str(k)):
+                                    if dn[k] != 5:   # DEBUG drop control: the 6th forward of site k in a tile is skipped
+                                        dm_utils.red_async_fwd(a, Int32(0), dm_utils.XS_DUMMY[0])
+                                else:
+                                    dm_utils.red_async_fwd(a, Int32(0), dm_utils.XS_DUMMY[0])
+                            else:
+                                dm_utils.mbar_arrive_rank_cnt(a, Int32(0), Int32(cnts[k]))
                             dn[k] = dn[k] + 1
                             left = left - 1
             tile_scheduler.advance_to_next_work()

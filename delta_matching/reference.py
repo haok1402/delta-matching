@@ -250,6 +250,12 @@ _register(Preset("sm90-d256", q="blockrows:64", k="blockrows:32", v="blockrows:3
                        "under a descending 128-key online max (12-binade floor), P' = 2^8 P, dS psi per 64x64; delta = sum P dP / sum P "
                        "(lead ruling 2026-11-10: num/den as at hd128 - rowsum(dS)=0 by the method's definition; measured equal "
                        "to the sm90 no-division form up to rounding); F2b psi floor not modelled; hd256 accuracy floor"))
+# info-only: the sm90 delta form without / sum P (breaks rowsum(dS)=0 at fp32 round-off; accuracy-audit 03:5x) - never accepted
+_register(replace(PRESETS["sm90-d256"], name="sm90-d256-nodiv", delta_norm=False,
+                  notes="info only: sm90-d256 with the no-division delta of the sm90 kernel"))
+# accuracy-audit 03:5x (4): the ONE accepted swap - backward P^T for dV as pow2 MX per (key x 32 queries); measured 1.000 vs the floor
+_register(replace(PRESETS["sm90-d256"], name="sm90-d256-ptmx", p_bwd="mx:queries:32",
+                  notes="sm90-d256 with P^T for dV quantized MX pow2 per (key x 32 queries); accepted swap (ablation 1.000)"))
 
 
 def make_kda_preset(name, tok_block=32, pow2=True, p_block=32, pt_block=32, ds_block=(32, 32), delta_norm=True,

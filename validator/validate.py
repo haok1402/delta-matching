@@ -106,7 +106,7 @@ ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
 # hd256 (lead ruling 2026-11-10, no accuracy trade-off): the [64,32] contract (sm90-d256) is the floor. A finer / different scheme is
 # added here only after it is measured at least as accurate as sm90-d256 on every metric (sm100-d256 = [64,32] inputs + sm100-mx P/dS
 # is NOT: O 5-6% worse on randn / peaked / bigmag, from the forward P quantization).
-ACCEPTED_NUMERICS_HD256 = ("sm90-d256",)
+ACCEPTED_NUMERICS_HD256 = ("sm90-d256", "sm90-d256-ptmx")   # ptmx: accuracy-audit 03:5x (4), 1.000 vs the floor
 
 
 def rel(a, b):

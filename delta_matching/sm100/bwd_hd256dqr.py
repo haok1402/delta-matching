@@ -169,6 +169,21 @@ def batch_chunks(B, H, N, causal):
     return _balanced(B, int(_cfg()[0] * (1 << 30) // _ws_bytes(1, H, N, causal)))
 
 
+_DESC = {}
+
+
+def _descs(rows, dev):
+    """device copy of the chunk descriptors, cached per (device, rows): the plan is a pure function of (shape, cap, env), so a call
+    never synchronises the host (a blocking H2D copy inside a call deadlocks harnesses that queue a host-released spin kernel ahead of
+    the call -- attnbench).  The first use issues ONE pinned non-blocking copy (stream ordered); the pinned source is kept alive in the
+    cache with the device tensor, and both are immutable afterwards."""
+    key = (str(dev), tuple(tuple(r) for r in rows))
+    if key not in _DESC:
+        src = torch.tensor(rows, dtype=torch.int32).pin_memory()
+        _DESC[key] = (src, src.to(dev, non_blocking=True))
+    return _DESC[key][1]
+
+
 _CHUNK_HOOK = None      # tests only (positive controls csk / wsk2): hook(chunk index, "chunk" | "dqg", buffers) before each chunk / Dqg
 
 
@@ -199,7 +214,7 @@ def dm_bwd_hd256dqr(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
         rows = []
         for c in carried:
             rows.append([c["q0"], nt, int(c["h0"] > 0), int(not (c["h1"] == r and c["q1"] == nt)), 0, 0, 0, 0])
-        descs = torch.tensor(rows, dtype=torch.int32).to(dev)     # pageable source: the copy is complete on return, stream ordered
+        descs = _descs(rows, dev)
         gmax = max(c["g1"] - c["g0"] for c in carried)
         carry = (torch.empty(1, N, gmax, D, device=dev, dtype=torch.float32), torch.empty(1, N, gmax, D, device=dev, dtype=torch.float32))
     ci = ci_all = 0

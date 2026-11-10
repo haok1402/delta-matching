@@ -951,3 +951,30 @@ def tmem_ld_16x64b_x16(addr: Int32, *, loc=None, ip=None):
         ",".join(["=f"] * 16) + ",r", has_side_effects=True, is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
     return [Float32(llvm.extractvalue(T.f32(), res, [i], loc=loc, ip=ip)) for i in range(16)]
+
+
+# ---- track BA (kda-sm100-squeue) timing-only helpers: S-queue snapshot / SMEM S-load ablations ----
+@dsl_user_op
+def tmem_ld_32x32b_x16(addr: Int32, *, loc=None, ip=None):
+    regs = ",".join(f"${i}" for i in range(16))
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 16), [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "tcgen05.ld.sync.aligned.32x32b.x16.b32 {" + regs + "}, [$16];",
+        ",".join(["=f"] * 16) + ",r", has_side_effects=True, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return [Float32(llvm.extractvalue(T.f32(), res, [i], loc=loc, ip=ip)) for i in range(16)]
+
+
+@dsl_user_op
+def ld_shared_v4_f32(addr: Int32, *, loc=None, ip=None):
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 4), [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "ld.volatile.shared.v4.f32 {$0, $1, $2, $3}, [$4];", "=f,=f,=f,=f,r",
+        has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return [Float32(llvm.extractvalue(T.f32(), res, [i], loc=loc, ip=ip)) for i in range(4)]
+
+
+@dsl_user_op
+def sink_f32(x: Float32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Float32(x).ir_value(loc=loc, ip=ip)], "", "f", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)

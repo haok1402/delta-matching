@@ -1399,6 +1399,13 @@ class DMBackwardSm100:
                     "sdS_xchg does not fit in the sdQaccum storage it aliases"
                 )
 
+            if const_expr(bool(__import__("os").environ.get("DM_PRINT_SMEM"))):
+                print("DM_SMEM_PARTS", "sQ", cute.cosize(self.sQ_layout), "sK", dm_sK_alloc_bytes, "sV", dm_sV_alloc_bytes,
+                      "sdO", cute.cosize(self.sdO_layout), "sQt", sQt_size, "sdOt", sdOt_size, "xchg", sdS_xchg_size,
+                      "sP", sP_size, "sdS_dK", sdS_dK_size, "sKt", cute.cosize(self.sKt_layout), "sdS", cute.cosize(self.sdSt_layout),
+                      "sLSE", cute.cosize(self.sLSE_layout), "sdPsum", cute.cosize(self.sdPsum_layout),
+                      "sdQaccum", cute.cosize(self.sdQaccum_layout), "Qst", self.Q_stage, "dOst", self.dO_stage,
+                      "sdQst", self.sdQaccum_stage, "m64", self.acc_m64)
             @cute.struct
             class SharedStorage:
                 Q_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 2 * self.Q_stage]
@@ -1484,6 +1491,11 @@ class DMBackwardSm100:
                 sdQaccum: cute.struct.Align[
                     cute.struct.MemRange[self.dqaccum_dtype, cute.cosize(self.sdQaccum_layout)],
                     self.buffer_align_bytes if sdS_xchg_size == 0 else 128,
+                ]
+                # track BA (kda-sm100-squeue) timing-only: disposable 64 KiB S-snapshot slot (abl:snapred / abl:sldsmem)
+                dm_sSnap: cute.struct.Align[
+                    cute.struct.MemRange[cute.Uint8, 65536 if const_expr("snapred" in self.dm_abl or "sldsmem" in self.dm_abl) else 1024],
+                    1024,
                 ]
 
         else:
@@ -1574,6 +1586,8 @@ class DMBackwardSm100:
 
         # 2-CTA: 231424 and 1-CTA: 232448
         # print("SMEM: ", self.shared_storage.size_in_bytes())
+        if const_expr(bool(__import__("os").environ.get("DM_PRINT_SMEM"))):
+            print("DM_SMEM_BYTES", self.shared_storage.size_in_bytes())
         if const_expr(self.use_block_sparsity):
             assert all(x is None for x in (mCuSeqlensQ, mCuSeqlensK, mSeqUsedQ, mSeqUsedK)), (
                 "Variable sequence length is not supported yet for blocksparse in bwd"
@@ -2331,6 +2345,7 @@ class DMBackwardSm100:
                 sDm=sDm,
                 dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts and ("trace" in self.dm_opts or "prog" in self.dm_opts)) else None,
                 dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.use_2cta_instrs) else None,
+                dm_snap=storage.dm_sSnap.data_ptr().toint() if const_expr(self.use_2cta_instrs) else None,
             )
             tmem_alloc_barrier.arrive()
 
@@ -2382,6 +2397,9 @@ class DMBackwardSm100:
                 sDm=sDm if const_expr(self.dm_dsq) else None,
                 dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.dm_dsq) else None,
                 aux_data=aux_data if const_expr(self.dm_dsq) else None,
+                dm_trace=aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts and "trace" in self.dm_opts) else None,
+                dm_snap=storage.dm_sSnap.data_ptr().toint() if const_expr(self.use_2cta_instrs) else None,
+                tmem_ptr=tmem_ptr,
             )
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if warp_idx == self.reduce_warp_ids[0] and cute.arch.lane_idx() == 0:
@@ -4370,6 +4388,7 @@ class DMBackwardSm100:
         sDm: Optional[cute.Tensor] = None,
         dm_xchg_mbar=None,
         dm_trace=None,
+        dm_snap=None,
     ):
         sLSE_2D = cute.make_tensor(
             sLSE.iterator,
@@ -4778,6 +4797,18 @@ class DMBackwardSm100:
                       #### TMEM->RMEM (Load S from TMEM)
                       tSrS_t2r = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
                       cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
+                      if const_expr("sldsmem" in self.dm_abl and dm_snap is not None):
+                          # track BA timing-only: the compute thread also reads its 64 fp32 S values from the S-queue
+                          # SMEM slot (row = TMEM lane, XOR-swizzled 16-B chunks), as the S-queue structure would
+                          dm_cw = cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.compute_warp_ids[0]
+                          dm_row = (dm_cw % 4) * 32 + cute.arch.lane_idx()
+                          dm_half = dm_cw // 4
+                          dm_acc = Float32(0.0)
+                          for dm_c in cutlass.range_constexpr(16):
+                              dm_ch = (dm_half * 16 + dm_c) ^ (dm_row % 8)
+                              dm_v = dm_utils.ld_shared_v4_f32(dm_snap + dm_row * 512 + dm_ch * 16)
+                              dm_acc = dm_acc + (dm_v[0] + dm_v[1]) + (dm_v[2] + dm_v[3])
+                          dm_utils.sink_f32(dm_acc)
                   if const_expr(dm_tr is not None):
                       dm_now = dm_utils.clock32()
                       dm_s3 = dm_s3 + (dm_now - dm_tprev)
@@ -5889,6 +5920,9 @@ class DMBackwardSm100:
         sDm=None,
         dm_xchg_mbar=None,
         aux_data=None,
+        dm_trace=None,
+        dm_snap=None,
+        tmem_ptr=None,
     ):
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
@@ -5939,6 +5973,8 @@ class DMBackwardSm100:
             pipeline.PipelineUserType.Producer, self.sdQaccum_stage
         )
         dm_pt = Int32(0)
+        if const_expr(dm_trace is not None):
+            dm_r0, dm_r1, dm_r2, dm_r3, dm_rn = Int64(0), Int64(0), Int64(0), Int64(0), Int64(0)
         while work_tile.is_valid_tile:
             self._dm_prog(Int32(5), dm_pt, Int32(0), Int32(1))
             (
@@ -6116,7 +6152,12 @@ class DMBackwardSm100:
                                 # DM lwc: the last writer in the deterministic order converts (accum + own partial) * sm
                                 # to bf16 dQ itself (no postprocess kernel)
                                 dm_last = lock_value == block_info.get_n_block_max_for_m_block(seqlen, m_block) - 1
+                    if const_expr(dm_trace is not None):
+                        dm_ta = dm_utils.clock64()
                     pipeline_dQ.consumer_wait(dQ_consumer_state)
+                    if const_expr(dm_trace is not None):
+                        dm_tb = dm_utils.clock64()
+                        dm_r0 = dm_r0 + (dm_tb - dm_ta)
                     # TMEM -> RMEM
                     tdQrdQ_t2r = cute.make_rmem_tensor(tdQrdQ_t2r_shape, Float32)
                     if const_expr(not self.dm_dqstream):
@@ -6127,6 +6168,9 @@ class DMBackwardSm100:
                         with cute.arch.elect_one():
                             pipeline_dQ.consumer_release(dQ_consumer_state)
                         dQ_consumer_state.advance()
+                    if const_expr(dm_trace is not None):
+                        dm_tc = dm_utils.clock64()
+                        dm_r1 = dm_r1 + (dm_tc - dm_tb)
                     if const_expr(self.deterministic and "dqearly" in self.dm_opts):
                         # DM dqearly: the dQ tile is already in registers and its TMEM (= the S columns) handed back to
                         # the MMA warp; only now poll the deterministic order (same adds, same order: bitwise)
@@ -6248,6 +6292,29 @@ class DMBackwardSm100:
                                     cta_rank_in_cluster,
                                     1,
                                 )
+                    if const_expr(dm_trace is not None):
+                        dm_td = dm_utils.clock64()
+                        dm_r2 = dm_r2 + (dm_td - dm_tc)
+                    if const_expr("snapred" in self.dm_abl and dm_snap is not None):
+                        # track BA timing-only: the reduce warps snapshot the S region (their TMEM lane quadrant,
+                        # 128 fp32 cols) into the disposable S-queue SMEM slot, as the S-queue copier would.
+                        # Values are garbage (S may be mid-write); never read by anything that affects outputs.
+                        dm_q = warp_idx % 4
+                        dm_srow = dm_q * 32 + cute.arch.lane_idx()
+                        dm_sbase = tmem_ptr.toint() + self.tmem_S_offset + ((dm_q * 32) << 16)
+                        for dm_c in cutlass.range_constexpr(8):
+                            dm_v = dm_utils.tmem_ld_32x32b_x16(dm_sbase + 16 * dm_c)
+                            cute.arch.fence_view_async_tmem_load()
+                            for dm_j in cutlass.range_constexpr(4):
+                                dm_ch = (4 * dm_c + dm_j) ^ (dm_srow % 8)
+                                dm_utils.st_shared_v4_b32(
+                                    dm_snap + dm_srow * 512 + dm_ch * 16,
+                                    dm_utils.bitcast_f32_i32(dm_v[4 * dm_j]), dm_utils.bitcast_f32_i32(dm_v[4 * dm_j + 1]),
+                                    dm_utils.bitcast_f32_i32(dm_v[4 * dm_j + 2]), dm_utils.bitcast_f32_i32(dm_v[4 * dm_j + 3]))
+                    if const_expr(dm_trace is not None):
+                        dm_te = dm_utils.clock64()
+                        dm_r3 = dm_r3 + (dm_te - dm_td)
+                        dm_rn = dm_rn + Int64(1)
 
                     # With more than one staging stage the tile's newest bulk adds are still in
                     # flight here (each stage only waits for the older groups). Drain them once
@@ -6311,6 +6378,12 @@ class DMBackwardSm100:
 
         if const_expr(not self.deterministic):
             cute.arch.cp_async_bulk_wait_group(0, read=True)
+        if const_expr(dm_trace is not None):
+            # track BA: reduce warp 0 lane 0: dQ-ready wait, ready->TMEM release, release->stage loop done, snapshot, tiles
+            if warp_idx == 0 and cute.arch.lane_idx() == 0:
+                dm_rb = dm_trace.iterator.toint()
+                for k_, a_ in enumerate((dm_r0, dm_r1, dm_r2, dm_r3, dm_rn)):
+                    dm_utils.red_add_u64(dm_rb + 8 * (54 + k_), a_)
 
     @cute.jit
     def epilogue_dKV(

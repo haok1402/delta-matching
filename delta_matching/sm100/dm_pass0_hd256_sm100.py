@@ -304,6 +304,8 @@ class DMPass0Hd256Sm100:
         # +es (fork hd256-p0opt, E1): tl_loop loads both S halves and releases the S slot before the exps (ncu: the S-slot
         # release waited on dP(n), stalling the MMA warp's S(n+1)); bitwise the same P / dP / num / den / delta
         self.dm_es = "es" in _fl0
+        self.dm_es2 = "es2" in _fl0   # (Codex p0-02) S half 1 loaded + S released after the h0 exps, before the dP wait
+        assert not (self.dm_es and self.dm_es2)
         # +tl (track AG): two lanes per query row (tcgen05.ld.16x64b), 4 compute warps / SMSP: warps 0-3 / 4-7 = stage 0 / 1
         # rows 0-15 of each quadrant, warps 8-11 / 12-15 (the "correction" ids) = stage 0 / 1 rows 16-31; MMA / epilogue /
         # load / empty move to 16-19 (640 threads). Bitwise the h2+ts path (see tl_loop).
@@ -2743,7 +2745,7 @@ class DMPass0Hd256Sm100:
                         with dm_utils.tcf_site("r0"):
                             pipeline_s_p_o.consumer_release_w_index(stage)
                     for h in cutlass.range_constexpr(2):
-                        if const_expr(not self.dm_es):
+                        if const_expr(not self.dm_es and not (self.dm_es2 and h == 1)):
                             vals = dm_utils.tmem_ld_16x64b_x32(s_addr + Int32(64 * h))
                             for i in cutlass.range_constexpr(32):
                                 r[32 * h + i] = vals[i]
@@ -2766,6 +2768,14 @@ class DMPass0Hd256Sm100:
                                     d01 = cute.arch.add_packed_f32x2(d01, p)
                                 else:
                                     d23 = cute.arch.add_packed_f32x2(d23, p)
+                        if const_expr(h == 0 and self.dm_es2):
+                            # +es2: S half 1 to registers and S slot released after the h0 exps, before the dP wait
+                            vals = dm_utils.tmem_ld_16x64b_x32(s_addr + Int32(64))
+                            for i in cutlass.range_constexpr(32):
+                                r[32 + i] = vals[i]
+                            cute.arch.fence_view_async_tmem_load()
+                            with dm_utils.tcf_site("r0"):
+                                pipeline_s_p_o.consumer_release_w_index(stage)
                         if const_expr(h == 0):
                             pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
                         for j in cutlass.range_constexpr(2 * h, 2 * h + 2):

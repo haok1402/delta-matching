@@ -84,6 +84,24 @@ def warp_arrive_local(mbar: Int32, *, loc=None, ip=None):
          "setp.eq.u32 p, l, 0;\n\t@p mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];\n\t}", "r", True, loc, ip)
 
 
+@dsl_user_op
+def warp_signal_rasy(mbar: Int32, dummy: Int32, crank: Int32, w0: Int32, *, loc=None, ip=None):
+    """opt rasy cross-CTA hand-off signal, per warp after bar.warp.sync (lane 0 only):
+    CTA 0: mbarrier.arrive.release.cta on the leader (own CTA) barrier; warp 0's arrive also expects 32 tx bytes (8 CTA-1 warps);
+    CTA 1: red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 into the LEADER CTA (complete-tx has
+    .release semantics at .cluster scope per PTX; non-blocking for the issuing thread)."""
+    _asm(None, [Int32(x).ir_value(loc=loc, ip=ip) for x in (mbar, dummy, crank, w0)],
+         "{\n\t.reg .pred pl, p0, p0e, p0n, p1;\n\t.reg .b32 l, ra, rm;\n\tbar.warp.sync 0xffffffff;\n\t"
+         "mov.u32 l, %laneid;\n\tsetp.eq.u32 pl, l, 0;\n\t"
+         "setp.eq.and.u32 p0, $2, 0, pl;\n\tsetp.ne.and.u32 p1, $2, 0, pl;\n\t"
+         "setp.ne.and.u32 p0e, $3, 0, p0;\n\tsetp.eq.and.u32 p0n, $3, 0, p0;\n\t"
+         "@p0e mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [$0], 32;\n\t"
+         "@p0n mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];\n\t"
+         "mapa.shared::cluster.u32 ra, $1, 0;\n\tmapa.shared::cluster.u32 rm, $0, 0;\n\t"
+         "@p1 red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 [ra], 1, [rm];\n\t}",
+         "r,r,r,r", True, loc, ip)
+
+
 def _coop(n):
     return pipeline.CooperativeGroup(pipeline.Agent.Thread, n)
 
@@ -107,13 +125,21 @@ class DmHd256Kv2:
     # C2 (Codex kv2-05) = C1 (meta qb2 xpt rly, all required) + separate S / dP / P / dS hand-offs, early P publication, two
     # exchange barriers, 4-event relay.  c1d: second S slot + MMA order S(t), dK(t-1), dP(t), dV(t) (else look-ahead order
     # S(t+1), dP(t+1), dV(t), dK(t)).
-    OPTS = ("qb2", "xpt", "meta", "rly", "c1d")
+    # rasy: cross-CTA signals from CTA 1 via red.async complete_tx (release.cluster, non-blocking) - no relay warp
+    OPTS = ("qb2", "xpt", "meta", "rly", "c1d", "rasy")
     DEFAULT_OPTS = "meta qb2 xpt rly"
 
     def _arr(self, leader_bar, relay_bar, crank):
         """compute-warp arrive for a cross-CTA hand-off: CTA 0 -> the leader barrier (.cta, same CTA); CTA 1 -> its local
-        relay barrier, forwarded by the relay warp with ONE arrive.release.cluster (accuracy-audit 08:2x)."""
-        warp_arrive_local(leader_bar + (relay_bar - leader_bar) * crank)
+        relay barrier, forwarded by the relay warp with ONE arrive.release.cluster (accuracy-audit 08:2x); opt rasy: CTA 1
+        warps red.async complete_tx into the leader barrier directly."""
+        if const_expr("rasy" in self.opts):
+            w0 = Int32(0)
+            if cute.arch.make_warp_uniform(cute.arch.warp_idx()) == 0:
+                w0 = Int32(1)
+            warp_signal_rasy(leader_bar, self._dummy, crank, w0)
+        else:
+            warp_arrive_local(leader_bar + (relay_bar - leader_bar) * crank)
 
     def _wcl(self, mbar, ph):
         """leader-side wait on a cross-CTA hand-off barrier: try_wait.parity.acquire.cluster."""
@@ -183,6 +209,7 @@ class DmHd256Kv2:
             kb: cute.struct.Align[cute.struct.MemRange[cutlass.Int64, 24], 8]
             tmem_hold: Int32
             tmem_dealloc: cutlass.Int64
+            rdummy: Int32
             sLD: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 2 * 128], 16]     # [par][l2 | delta][q]
             sXP: cute.struct.Align[cute.struct.MemRange[Int32, 2 * 64 * 4], 16]        # [par][row][q-block] p_sb
             sXS: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 8], 16]           # [par][warp] |dS| warp max
@@ -263,6 +290,7 @@ class DmHd256Kv2:
                                                    cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         kbar = Int32(st.kb.data_ptr().toint())
         bars_a = Int32(bars.toint())
+        self._dummy = Int32(st.rdummy.ptr.toint())
         # raw barriers (Codex kv2-05 table): index -> kbar + 8 i
         #  0,1 F_S[2] (commit)   2,3 E_S[2] (8+1)   4 F_DP (commit)   5 E_DP (8+1)   6,7 F_PC[2] (8+1)   8,9 E_PC[2] (commit)
         #  10,11 F_DSC[2] (8+1)  12,13 E_DSC[2] (commit)   14 F_FIN (commit)   15 E_FIN (8+1)
@@ -272,7 +300,7 @@ class DmHd256Kv2:
                 for i_ in cutlass.range_constexpr(24):
                     cnt = 1
                     if const_expr(i_ in (2, 3, 5, 6, 7, 10, 11, 15)):
-                        cnt = self.NCOMP // 32 + 1
+                        cnt = self.NCOMP // 32 + (0 if "rasy" in self.opts else 1)
                     if const_expr(i_ >= 16):
                         cnt = self.NCOMP // 32
                     dm_utils.mbar_init(kbar + 8 * i_, cnt)
@@ -363,7 +391,7 @@ class DmHd256Kv2:
         NS = self.NS
 
         # ------------------------------------------------------------------ relay warp (CTA 1): local acquire -> release.cluster
-        if warp == self.RELAY_WARP:
+        if const_expr("rasy" not in self.opts and warp == self.RELAY_WARP):
             if crank % 2 == 1:
                 for t in cutlass.range(total, unroll=1):
                     ss = t % NS

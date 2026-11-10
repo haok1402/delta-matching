@@ -864,6 +864,12 @@ def tcf_begin(on):
     _TCF_STATS["fences"] = 0
 
 
+def _tcf_restore_fences(st, n):
+    """allocf helper (plain Python, called at trace time): restore the guard's wrapper-fence tally."""
+    if st is not None:
+        st["fences"] = n
+
+
 def tcf_end():
     """Ends a kernel trace. Raises TcfBuildTrap (before cute.compile -> nothing is compiled or cached) when fences were on,
     pipelines were marked, and no wrapper fence came out: the wrappers are not bound to this state (BUILD TRAP)."""

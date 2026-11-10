@@ -2019,6 +2019,11 @@ class DMPass0Hd256Sm100:
             )
             for stage in range(self.q_stage)
         ]
+        if const_expr(self.dm_p2t):
+            # +p2t stage-1-only prefix: the Q / dO descriptor variables sit at stage 1 between pairs (S0 applies -stride, S1
+            # +stride), so a lone stage-1 MMA must not move them (offset 0)
+            gemm_S1_only = partial(gemm_Si[1].func, *gemm_Si[1].args, **{**gemm_Si[1].keywords, "smem_offset": 0})
+            gemm_dP1_only = partial(gemm_dPi[1].func, *gemm_dPi[1].args, **{**gemm_dPi[1].keywords, "smem_offset": 0})
         gemm_Pi = None  # P0: no PV
         # gemm_Pi = [
         #     partial(
@@ -2085,14 +2090,14 @@ class DMPass0Hd256Sm100:
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
                         pipeline_s_p_o.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
-                        gemm_Si[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                        gemm_S1_only(smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(1)
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
                         pipeline_o_acc.producer_acquire_w_index_phase(1, dm_slot_empty_phase >> 1)
-                        gemm_dPi[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
+                        gemm_dP1_only(smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(1)
                         dm_slot_empty_phase ^= 2
                         pipeline_kv.consumer_release(mma_kv_consumer_state)

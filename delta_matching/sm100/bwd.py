@@ -10,7 +10,7 @@ import flash_attn.cute.interface as fi
 from flash_attn.cute import cache_utils
 
 from .dm_bwd_sm100 import DMBackwardSm100
-from .fwd import _fingerprint
+from .fwd import _fingerprint, compile_env
 from . import fastpath
 _env = fastpath.env
 
@@ -24,14 +24,15 @@ def _dm_bwd_cache():
     """One compile cache per DM_BWD_OPTS string (kernel variant knobs read in DMBackwardSm100.__init__), so A/B
     variants can run in one process."""
     opts = _env("DM_BWD_OPTS", "")
-    if opts not in _CACHES:
+    mk = (opts, compile_env())   # kda-sm100-cachekey: memo keyed on every compile-time input, not only the opts
+    if mk not in _CACHES:
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
-            _CACHES[opts] = cache_utils.JITPersistentCache(
+            _CACHES[mk] = cache_utils.JITPersistentCache(
                 cache_utils.get_cache_path() / "dm_sm100" / _fingerprint(opts) / "bwd")
         else:
-            _CACHES[opts] = cache_utils.JITCache()
-        _CACHES[opts] = fastpath.RecCache(_CACHES[opts])
-    return _CACHES[opts]
+            _CACHES[mk] = cache_utils.JITCache()
+        _CACHES[mk] = fastpath.RecCache(_CACHES[mk])
+    return _CACHES[mk]
 
 
 _CTX = {}
@@ -364,7 +365,7 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
             s2 = _CTX.pop("staged")
             mst.wait_event(s2[2])
 
-        return fastpath.call("bwd", inp, (key, _ao, float(sm), bool(deterministic)), slow, pre=pre, reset=reset,
+        return fastpath.call("bwd", inp, (key, _ao, float(sm), bool(deterministic), compile_env()), slow, pre=pre, reset=reset,
                              loose=() if deterministic else ((0, 1, 2) if q8.shape[2] > k8.shape[2] else (0,)))   # nd: dQ unordered; dK/dV only for GQA (MHA nd dK/dV stay bitwise: audit 16:30)
     opts0 = _env("DM_BWD_OPTS", "")
     os.environ["DM_BWD_OPTS"] = _ao     # kernel knobs + compile cache follow the effective opts

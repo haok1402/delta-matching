@@ -519,6 +519,9 @@ class DMBackwardSm100:
         self.empty_warp_id = 15
         # DM cwg4: 4 compute warpgroups (16 warps, 32 query columns per thread) -> 24 warps / 768 threads
         self.dm_cwg4 = "cwg4" in tuple(x for x in os.environ.get("DM_BWD_OPTS", "").split(",") if x)
+        if self.dm_cwg4 and os.environ.get("DM_ALLOW_BROKEN_CWG4", "0") != "1":
+            # track BB (2026-11-10, CWG4OWN-cwg4-broken): on the dsqw/fence-v3 base cwg4 is NOT bitwise and produces NaN (6/6 t_bits shapes)
+            raise ValueError("DM_BWD_OPTS cwg4 is broken on this base (not bitwise, NaN); set DM_ALLOW_BROKEN_CWG4=1 only for timing ablations")
         if self.dm_cwg4:
             self.compute_warp_ids = tuple(range(4, 20))
             self.mma_warp_id = 20

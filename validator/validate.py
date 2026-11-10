@@ -103,10 +103,9 @@ SPREAD_BLK = 1e-3   # accuracy-audit 19:05: under the max(block, head-RMS) norma
 SPREAD_ELEM = 1.6e-2          # per element, relative to its row's max |x|: 2 bf16 ulp (1 ulp flip can be 2^-7 = 7.8e-3)
 # promotable numerics: only presets at least as accurate as sm100-mx (P / dS codes correctly rounded e4m3)
 ACCEPTED_NUMERICS = ("sm100-mx", "sm100-mx-ds32")
-# hd256 (lead ruling 2026-11-10, no accuracy trade-off): the [64,32] contract (sm90-d256) is the floor. A finer / different scheme is
-# added here only after it is measured at least as accurate as sm90-d256 on every metric (sm100-d256 = [64,32] inputs + sm100-mx P/dS
-# is NOT: O 5-6% worse on randn / peaked / bigmag, from the forward P quantization).
-ACCEPTED_NUMERICS_HD256 = ("sm90-d256", "sm90-d256-ptmx")   # ptmx: accuracy-audit 03:5x (4), 1.000 vs the floor
+# hd256 (USER DECISION 2026-11-10: MXFP8, Blackwell's native format, is the sm100 spec at both head dims): the sm100-mx scheme at
+# D=256 (sm100-mx-d256); the ds32 variant (finer dS blocks) as at hd128.  The sm90-d256 [64,32] floor is retired as a gate.
+ACCEPTED_NUMERICS_HD256 = ("sm100-mx-d256", "sm100-mx-d256-ds32")
 
 
 def rel(a, b):

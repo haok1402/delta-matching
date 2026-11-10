@@ -623,6 +623,11 @@ make_kda_preset("sm100-mx-lq", ds_block=(128, 32), delta_norm=True, l_from_codes
 make_kda_preset("sm100-mx-x", ds_block=(128, 32), p_fwd="none", delta_from_o=True)
 # kda-sm100-bwd8 proposal (2026-11-09): dS scaled per 32 keys x 32 queries (MXFP8 granularity), everything else sm100-mx
 make_kda_preset("sm100-mx-ds32", ds_block=(32, 32), delta_norm=True)
+# USER DECISION 2026-11-10 ("leverage MXFP8 ... the format introduced and native with Blackwell"): MXFP8 is THE sm100 spec at both head
+# dims.  hd256 spec = the sm100-mx scheme at D=256 (pow2 E8M0 scale per 32 tokens over all D, P per row x 32 keys, P^T per key x 32
+# queries, dS 128x32, num/den delta); the exact sm90 [64,32] fp32-scale floor (sm90-d256) is retired as a gate (kept as info).
+make_kda_preset("sm100-mx-d256", ds_block=(128, 32), delta_norm=True)
+make_kda_preset("sm100-mx-d256-ds32", ds_block=(32, 32), delta_norm=True)
 
 
 # ------------------------------------------------------------------------------------------ hd256 residual-folding routes

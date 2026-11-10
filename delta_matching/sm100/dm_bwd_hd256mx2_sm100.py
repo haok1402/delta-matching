@@ -61,7 +61,7 @@ class DmHd256Mx2:
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
                  q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False,
-                 yr: bool = False):
+                 yr: bool = False, pe: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -99,6 +99,12 @@ class DmHd256Mx2:
         #     (kda/runs/hd256-dq3/yr/lay.log), and both TMA-load the same k8 bytes -> the out MMA reads the same values.  Ya gets 2
         #     stages (released by out(t-1)'s commit instead of S(t)'s); the T TMA load / pipeline are dropped.
         self.yr = bool(yr) and self.dqopt and not self.q3 and not self.sp
+        # fork hd256-dq4 (profile hd256-bwd-r5, codex/hd256-dq4-01-ncu.md C1b), dq + dqopt + non-x2, values bitwise by construction:
+        # pe: all 64 P (ex2) finished before the dP(t)-full blocking decision.  ptxas sank 17 of the 64 MUFU.EX2 past the dP wait
+        #     branch into the dS / quant phase.  The dP full barrier is probed (try_wait, not advanced) right after the S release; the
+        #     blocking wait then runs only if (probe | dep) == 0 where dep = XOR-fold of all 64 P bit patterns AND (n_t >> 24) (== 0:
+        #     N = 128 n_t < 2^31), so the branch depends on every P.  Same barrier, same phase, same acquire + fences + release.
+        self.pe = bool(pe) and self.dqopt and not self.x2
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
@@ -665,6 +671,9 @@ class DmHd256Mx2:
                     if const_expr(self.ordf):
                         tc_fence_before()                      # BW2
                     sf.release()
+                pe_tok = Int32(0)
+                if const_expr(self.pe and not (self.kn in ("s3", "s4") and self.unsafe)):
+                    pe_tok = Int32(sc_c.try_wait())            # pe: early non-blocking probe of dP(t) full (not advanced)
                 if const_expr(self.q3 and self.kn in ("sf0", "sf1", "cw0", "cw1")):
                     # q3: out(t-1) runs only after dP(t), i.e. after this release: the window for tile t-1's late stores
                     if t > 0:
@@ -767,7 +776,15 @@ class DmHd256Mx2:
                         dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
                         cute.arch.fence_view_async_tmem_load()
                     else:
-                        df = sc_c.wait_and_advance()
+                        if const_expr(self.pe):
+                            # pe: blocking decision depends on every P bit pattern (dep == 0 at runtime, opaque to ptxas)
+                            pfold = Int32(0)
+                            for jj in cutlass.range_constexpr(2):
+                                for i in cutlass.range_constexpr(0, 32, 2):
+                                    pfold = pfold ^ f2i(vals[jj][i]) ^ f2i(vals[jj][i + 1])
+                            df = sc_c.wait_and_advance(pe_tok | (pfold & (n_t >> 24)))
+                        else:
+                            df = sc_c.wait_and_advance()
                         if const_expr(self.ordf):
                             tc_fence_after()                   # BW1
                         if const_expr(self.kn == "s4"):

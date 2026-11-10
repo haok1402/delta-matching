@@ -221,8 +221,10 @@ def _dz_str(dz, idx, a_is_tmem):
 
 @dsl_user_op
 def opaque_zero(i: Int32, *, loc=None, ip=None) -> Int32:
-    """DM d3nh: i >> 30 for a main-loop counter i (< 2^30): 0, but not foldable by LLVM (inline asm) nor ptxas (the trip
-    count is a run-time value), and loop-variant."""
+    """DM d3nh: i >> 30 for a main-loop counter 0 <= i < 2^30 (bwd.py asserts the trip-count bound): 0 at run time and
+    loop-variant. LLVM cannot fold it (inline asm); ptxas does not today (the trip count is a run-time value), but that is
+    compiler behaviour, not a guarantee: if it ever folds, only the speed is lost (descriptors hoisted again), never
+    correctness. Regression check: kda/tests/d3/spills.sh (MMA-role STL/LDL must stay 0)."""
     return Int32(llvm.inline_asm(T.i32(), [Int32(i).ir_value(loc=loc, ip=ip)], "shr.u32 $0, $1, 30;", "=r,r",
                                  has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT,
                                  loc=loc, ip=ip))
@@ -258,7 +260,7 @@ def gemm_ptx_ss_w_idx(tiled_mma, acc, tCrA, tCrB, sA, sB, A_idx=None, B_idx=None
     pred_str = "p" if isinstance(zero_init, cutlass.Boolean) else "0" if zero_init else "1"
     input_args = [Int32(cute.arch.make_warp_uniform(start_a)).ir_value(),
                   Int32(cute.arch.make_warp_uniform(start_b)).ir_value(),
-                  Int32(not zero_init).ir_value(),
+                  ((Int32(1) - Int32(zero_init)) if isinstance(zero_init, cutlass.Boolean) else Int32(not zero_init)).ir_value(),
                   Int32(cute.arch.make_warp_uniform(acc_tmem_addr)).ir_value()]
     if dz is not None:
         input_args.append(Int32(dz).ir_value())

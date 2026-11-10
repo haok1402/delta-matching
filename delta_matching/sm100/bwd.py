@@ -306,6 +306,8 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     """Main backward pass. q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D), do8 (B,N,H,D) e4m3; scales (B,H|Hk,N/32) fp32
     pow2; lse (B,H,N) natural; delta (B,H,N) fp32 in dP units. Returns dq, dk, dv bf16 (dk/dv per KV head)."""
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
+    # DM d3nh precondition (MMA-warp opaque zero = loop counter >> 30): per-tile main-loop trip count < 2^30
+    assert (q8.shape[1] // 128 + 1) * max(1, q8.shape[2] // k8.shape[2]) < 2 ** 30, "d3nh: main-loop trip count >= 2^30"
     if "lwc" in _env("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)

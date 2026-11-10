@@ -54,10 +54,14 @@ class DmHd256Mx2:
     # tcgen05.ld (RAW); s4 ld dP(t) -> S(t+1) (WAR); sf0/sf1 SFA st -> out (per half / SFA block); cw0/cw1 codes st.shared -> out
     # (per half); sfb0/sfb1 one-time SFB write -> first out of SF set 0 / 1.
     DQCTL = ("xh0", "xh1", "xi", "s1", "s3", "s4", "sf0", "sf1", "cw0", "cw1", "sfb0", "sfb1")
+    # yr (Ya reuse) control: yw = out(t-1) completion -> TMA overwrite of its Ya stage (WAR); unsafe = the stage released right
+    # after S(t-1)'s commit (the pre-yr place) instead of after out(t-1); both arms delay out(t-1) in the MMA warp.
+    YRCTL = ("yw",)
     DLY = 1 << 15
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
-                 q3: bool = False, lpt: str = ""):
+                 q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False,
+                 yr: bool = False):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -75,12 +79,33 @@ class DmHd256Mx2:
         #     reversed rt.  Each CTA keeps its ascending key traversal.
         self.q3 = bool(q3) and self.dqopt
         self.lpt = lpt if (self.dqopt and causal) else ""
+        # xs (codex/hd256-dqopt-04-xchg.md X3): per-half max exchange read as ONE lane-distributed LDS.32 (lane l: slot 8 hf + (l & 7))
+        #     + xor-1 / xor-2 shuffles (the same max(max(m0, m1), max(m2, m3)) tree) + 2 broadcasts, instead of 2 x LDS.128.
+        # sp (Q4 split out): out(t-1) k-steps 0-1 -> dP(t) (committed) -> out(t-1) k-steps 2-3 (non-q3 order only).
+        self.xs = bool(xs) and self.dqopt
+        self.sp = bool(sp) and self.dqopt and not self.q3
+        # fork hd256-dq3 (codex/hd256-dq3-01-x2.md), dq + dqopt + non-q3, bitwise by construction:
+        # x2: S(t+1) chunk 0 (score cols col0 .. +31) read between the per-half exchange loads and their use (blocking sc full
+        #     wait on the NEXT phase without advancing, tcgen05.ld + wait::ld), carried in registers; the loop top then reads only
+        #     chunk 1 and releases as before (tile 0: chunk 0 read before the loop).  Same S values, same release point.
+        # esf: the SFA word (sfw) is stored to TMEM right after the cd acquire, before the code quantization / st.shared
+        #     (was after them); same completion (wait::st), fences and commit.
+        self.x2 = bool(x2) and self.dqopt and not self.q3 and not self.xs
+        self.esf = bool(esf) and self.dqopt and not self.q3
+        assert not (self.x2 and knob.replace("_safe", "") in ("s1", "sc")), knob    # s1 / sc not relocated for x2 (screen build)
+        # yr (Ya reuse, codex/hd256-dq3-01-x2.md + 02): the out MMA's B operand (K, MN-major, N = d, K = keys) is read from the
+        #     Ya stage that S used (K-major K tile): T's smem layout make_smem_layout_b(mma_o) is ((1, 16384), 128) x k-step 4096 =
+        #     byte d % 128 + 16384 (d // 128) + 128 key, Ya's is ((128, 1), (32, 16384)) = the same map, same swizzle S<3,4,3>
+        #     (kda/runs/hd256-dq3/yr/lay.log), and both TMA-load the same k8 bytes -> the out MMA reads the same values.  Ya gets 2
+        #     stages (released by out(t-1)'s commit instead of S(t)'s); the T TMA load / pipeline are dropped.
+        self.yr = bool(yr) and self.dqopt and not self.q3 and not self.sp
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")
-        assert self.kn in ("",) + self.KNOBS + self.DQCTL, knob
+        assert self.kn in ("",) + self.KNOBS + self.DQCTL + self.YRCTL, knob
+        assert self.kn not in self.YRCTL or self.yr, knob
         assert self.kn not in self.DQCTL or self.dqopt, knob
         self.mode = mode
         self.causal = bool(causal)
@@ -132,9 +157,9 @@ class DmHd256Mx2:
             sId: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 128 * 8], 16]
             sXa: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(a_l)], 1024]
             sXb: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(a_l) if nx == 2 else 1024], 1024]
-            sYa: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(b_l)], 1024]
+            sYa: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(b_l) * (2 if self.yr else 1)], 1024]
             sYb: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(b_l) if nx == 2 else 1024], 1024]
-            sT: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(t_l)], 1024]
+            sT: cute.struct.Align[cute.struct.MemRange[F8, 1024 if self.yr else cute.cosize(t_l)], 1024]
             sC: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(c_l)], 1024]
         self.SS = SS
         nh = Hk if const_expr(self.rows_are_keys) else H
@@ -183,9 +208,16 @@ class DmHd256Mx2:
         st = smem.allocate(self.SS)
         sXa = st.sXa.get_tensor(a_l.outer, swizzle=a_l.inner)
         sXb = st.sXb.get_tensor(a_l.outer, swizzle=a_l.inner)
-        sYa = st.sYa.get_tensor(b_l.outer, swizzle=b_l.inner)
         sYb = st.sYb.get_tensor(b_l.outer, swizzle=b_l.inner)
-        sT = st.sT.get_tensor(t_l.outer, swizzle=t_l.inner)
+        if const_expr(self.yr):
+            ya2_l = sm100_utils.make_smem_layout_b(mma_s, (self.TM, self.TN, self.D), F8, 2)
+            ty2_l = sm100_utils.make_smem_layout_b(mma_o, (self.TM, self.D, self.TN), F8, 2)
+            assert cute.cosize(ya2_l) == 2 * cute.cosize(b_l) and cute.cosize(ty2_l) == 2 * cute.cosize(t_l)
+            sYa = st.sYa.get_tensor(ya2_l.outer, swizzle=ya2_l.inner)
+            sT = st.sYa.get_tensor(ty2_l.outer, swizzle=ty2_l.inner)      # out-B view of the same 2 Ya stages
+        else:
+            sYa = st.sYa.get_tensor(b_l.outer, swizzle=b_l.inner)
+            sT = st.sT.get_tensor(t_l.outer, swizzle=t_l.inner)
         sC = st.sC.get_tensor(c_l.outer, swizzle=c_l.inner)
         sC_addr = Int32(st.sC.data_ptr().toint())
         sLD_addr = Int32(st.sLD.data_ptr().toint())
@@ -205,8 +237,9 @@ class DmHd256Mx2:
         thr256 = pipeline.CooperativeGroup(pipeline.Agent.Thread, 256)
         x_p, x_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=thr1, consumer_group=thr1,
                                                    tx_count=nx * self.bytes_a, barrier_storage=bars).make_participants()
-        ya_p, ya_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=thr1, consumer_group=thr1,
-                                                     tx_count=self.bytes_b, barrier_storage=bars + 2).make_participants()
+        ya_p, ya_c = pipeline.PipelineTmaUmma.create(num_stages=2 if self.yr else 1, producer_group=thr1, consumer_group=thr1,
+                                                     tx_count=self.bytes_b,
+                                                     barrier_storage=bars + (16 if self.yr else 2)).make_participants()
         yb_p, yb_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=thr1, consumer_group=thr1,
                                                      tx_count=self.bytes_b, barrier_storage=bars + 4).make_participants()
         t_p, t_c = pipeline.PipelineTmaUmma.create(num_stages=1, producer_group=thr1, consumer_group=thr1,
@@ -266,7 +299,10 @@ class DmHd256Mx2:
                 for ci in cutlass.range(ncs, unroll=1):
                     ct = c_lo + ci
                     ye = ya_p.acquire_and_advance()
-                    cute.copy(tma_Ya, tYag[(None, ct)], tYas[(None, 0)], tma_bar_ptr=ye.barrier)
+                    if const_expr(self.yr):
+                        cute.copy(tma_Ya, tYag[(None, ct)], tYas[(None, ye.index)], tma_bar_ptr=ye.barrier)
+                    else:
+                        cute.copy(tma_Ya, tYag[(None, ct)], tYas[(None, 0)], tma_bar_ptr=ye.barrier)
                     if const_expr(self.has_dp):
                         yb = yb_p.acquire_and_advance()
                         cute.copy(tma_Yb, tYbg[(None, ct)], tYbs[(None, 0)], tma_bar_ptr=yb.barrier)
@@ -274,7 +310,7 @@ class DmHd256Mx2:
                         if ci > 0:       # q3: T(t-1) after Ya(t), Yb(t) (consumer order)
                             te = t_p.acquire_and_advance()
                             cute.copy(tma_T, tTg[(None, ct - 1)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
-                    else:
+                    elif const_expr(not self.yr):
                         te = t_p.acquire_and_advance()
                         cute.copy(tma_T, tTg[(None, ct)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
                 if const_expr(self.q3):  # q3: drain T(last) before the producer tails
@@ -283,13 +319,17 @@ class DmHd256Mx2:
             ya_p.tail()
             if const_expr(self.has_dp):
                 yb_p.tail()
-            t_p.tail()
+            if const_expr(not self.yr):
+                t_p.tail()
 
         # ------------------------------------------------------------------ MMA warp
         if warp == 8:
             x_c.wait_and_advance()
             mma_op = cute.make_mma_atom(mma_o.op).op
             accS = cute.make_tensor(tmem_ptr, acc_l)
+            ya_o = None
+            if const_expr(self.yr):
+                ya_o = ya_c.clone()                            # yr: second cursor over the Ya stages, released by out(t-1)
             for t in cutlass.range(total + 1, unroll=1):
                 if t < total:
                     yf = ya_c.wait_and_advance()
@@ -300,33 +340,77 @@ class DmHd256Mx2:
                         spin(self.DLY)                         # control s1: S(t) producer late
                     mma_s.set(tcgen05.Field.ACCUMULATE, False)
                     for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
-                        cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
+                        if const_expr(self.yr):
+                            cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, yf.index)], accS)
+                        else:
+                            cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
                         mma_s.set(tcgen05.Field.ACCUMULATE, True)
                     se.commit()
-                    yf.release()
-                if const_expr(not self.q3):
+                    if const_expr(not self.yr or (self.kn == "yw" and self.unsafe)):
+                        yf.release()                           # yr: released after out(t) instead (control yw unsafe: here)
+                if const_expr(self.sp):
+                    # Q4 split: out(t-1) k 0-1 -> dP(t) (commit) -> out(t-1) k 2-3; same k order, zero init on k 0 of tile 0
                     if t > 0:
-                        # out(t-1): codes stage / SF set (t-1) & 1
-                        if const_expr(self.kn in ("cd", "fin")):
-                            spin(self.DLY)
-                        tp = t - 1
-                        s = tp & 1
-                        if const_expr(self.kn == "cd" and self.unsafe):
-                            s = tp * 0
-                        tf = t_c.wait_and_advance()
-                        cf = cd_c.wait_and_advance()
-                        tc_fence_after()
-                        dm_utils.gemm_ptx_bs(
-                            mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                            sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                            tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                            ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
-                            tuple((0, 0) for k in range(4)),
-                            zero_init=cutlass.Boolean(tp == 0))
-                        tf.release()
-                        cf.release()
-                if const_expr(self.has_dp):
-                    if t < total:
+                        if t < total:
+                            # out(t-1): codes stage / SF set (t-1) & 1
+                            if const_expr(self.kn in ("cd", "fin")):
+                                spin(self.DLY)
+                            tp = t - 1
+                            s = tp & 1
+                            if const_expr(self.kn == "cd" and self.unsafe):
+                                s = tp * 0
+                            tf = t_c.wait_and_advance()
+                            cf = cd_c.wait_and_advance()
+                            tc_fence_after()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=cutlass.Boolean(tp == 0), k_range=(0, 1))
+                            yg = yb_c.wait_and_advance()
+                            de = sc_p.acquire_and_advance()        # compute read S(t)
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW2
+                            if const_expr(self.kn == "s3"):
+                                spin(self.DLY)                     # control s3: dP(t) producer late
+                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                            for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                                cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                            de.commit()
+                            yg.release()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=False, k_range=(2, 3))
+                            tf.release()
+                            cf.release()
+                        else:
+                            # out(t-1): codes stage / SF set (t-1) & 1
+                            if const_expr(self.kn in ("cd", "fin")):
+                                spin(self.DLY)
+                            tp = t - 1
+                            s = tp & 1
+                            if const_expr(self.kn == "cd" and self.unsafe):
+                                s = tp * 0
+                            tf = t_c.wait_and_advance()
+                            cf = cd_c.wait_and_advance()
+                            tc_fence_after()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=cutlass.Boolean(tp == 0))
+                            tf.release()
+                            cf.release()
+                    else:
                         yg = yb_c.wait_and_advance()
                         de = sc_p.acquire_and_advance()        # compute read S(t)
                         if const_expr(self.ordf):
@@ -339,6 +423,65 @@ class DmHd256Mx2:
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
                         de.commit()
                         yg.release()
+                else:
+                    if const_expr(self.yr):
+                        if t > 0:
+                            # out(t-1): codes stage / SF set (t-1) & 1; B = K(t-1) from its Ya stage (ya_o cursor)
+                            if const_expr(self.kn in ("cd", "fin", "yw")):
+                                spin(self.DLY)
+                            tp = t - 1
+                            s = tp & 1
+                            if const_expr(self.kn == "cd" and self.unsafe):
+                                s = tp * 0
+                            yo = ya_o.current_handle()
+                            cf = cd_c.wait_and_advance()
+                            tc_fence_after()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, yo.index)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=cutlass.Boolean(tp == 0))
+                            if const_expr(not (self.kn == "yw" and self.unsafe)):
+                                yo.release()                       # Ya stage free once out(t-1) (and S(t-1) before it) completed
+                            ya_o.advance()
+                            cf.release()
+                    if const_expr(not self.q3 and not self.yr):
+                        if t > 0:
+                            # out(t-1): codes stage / SF set (t-1) & 1
+                            if const_expr(self.kn in ("cd", "fin")):
+                                spin(self.DLY)
+                            tp = t - 1
+                            s = tp & 1
+                            if const_expr(self.kn == "cd" and self.unsafe):
+                                s = tp * 0
+                            tf = t_c.wait_and_advance()
+                            cf = cd_c.wait_and_advance()
+                            tc_fence_after()
+                            dm_utils.gemm_ptx_bs(
+                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                tuple((0, 0) for k in range(4)),
+                                zero_init=cutlass.Boolean(tp == 0))
+                            tf.release()
+                            cf.release()
+                    if const_expr(self.has_dp):
+                        if t < total:
+                            yg = yb_c.wait_and_advance()
+                            de = sc_p.acquire_and_advance()        # compute read S(t)
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW2
+                            if const_expr(self.kn == "s3"):
+                                spin(self.DLY)                     # control s3: dP(t) producer late
+                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                            for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                                cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                            de.commit()
+                            yg.release()
                 if const_expr(self.q3):     # q3: out(t-1) after dP(t)
                     if t > 0:
                         # out(t-1): codes stage / SF set (t-1) & 1
@@ -433,6 +576,13 @@ class DmHd256Mx2:
             # q3 interior controls (codex/hd256-dqopt-03-combo.md): tile t-1's delayed code / SFA stores carried into tile t
             pend_c = [(Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)) for _ in range(4)]
             sfw_c = Int32(0)
+            sx0 = [Float32(0.0)] * 32         # x2: S chunk 0 of the next tile (carried)
+            if const_expr(self.x2):
+                sc_c.wait()                   # S(0) full (not advanced: the loop top's wait_and_advance consumes it)
+                if const_expr(self.ordf):
+                    tc_fence_after()
+                sx0 = tmem_ld32(tb + col0)
+                cute.arch.fence_view_async_tmem_load()
             for t in cutlass.range(total, unroll=1):
                 hi = t // ncs
                 ct = c_lo + t - hi * ncs
@@ -495,6 +645,12 @@ class DmHd256Mx2:
                     sf = sc_c.wait_and_advance()
                     if const_expr(self.ordf):
                         tc_fence_after()
+                elif const_expr(self.x2):
+                    sf = sc_c.wait_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_after()                       # BW1
+                    sv = [sx0, tmem_ld32(tb + col0 + 32)]      # chunk 0 read early (previous tile's exchange / prologue)
+                    cute.arch.fence_view_async_tmem_load()
                 else:
                     sf = sc_c.wait_and_advance()
                     if const_expr(self.ordf):
@@ -721,6 +877,26 @@ class DmHd256Mx2:
                         sb = dm_utils.pow2_sb(dm_utils.redux_max_abs_f32(cute.arch.fmax(cute.arch.fmax(am2[0], am2[1]), mo)))
                         sbs = [sb, sb]
                         sball = [sb] * 4
+                    elif const_expr(self.dqopt and self.xs):
+                        sball = [Int32(0)] * 4
+                        xv = ld_shared_f32(xb + (8 * hf + (lane & 7)) * 4)       # lanes 4c..4c+3: chunk 2 hf + c, quadrants 0..3
+                        xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=1))   # lane 4c: max(m0, m1); 4c+2: max(m2, m3)
+                        xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=2))   # lane 4c: max(max(m0, m1), max(m2, m3))
+                        sbs[0] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=0))
+                        sbs[1] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=4))
+                    elif const_expr(self.dqopt and self.x2):
+                        sball = [Int32(0)] * 4
+                        m4s = [ld_shared_v4f(xb + (2 * hf + jj) * 16) for jj in range(2)]
+                        if t + 1 < total:
+                            # x2: S(t+1) chunk 0 while the exchange loads are in flight (S(t+1) issued at dP(t)'s release)
+                            sc_c.wait()
+                            if const_expr(self.ordf):
+                                tc_fence_after()               # BW1
+                            sx0 = tmem_ld32(tb + col0)
+                            cute.arch.fence_view_async_tmem_load()
+                        for jj in cutlass.range_constexpr(2):
+                            m4 = m4s[jj]
+                            sbs[jj] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
                     elif const_expr(self.dqopt):
                         sball = [Int32(0)] * 4
                         for jj in cutlass.range_constexpr(2):
@@ -766,6 +942,13 @@ class DmHd256Mx2:
                         ce = cd_p.acquire_and_advance()
                         if const_expr(self.ordf):
                             tc_fence_after()                   # BW3
+                if const_expr(self.esf and self.kn not in ("cw0", "cw1", "sf0", "sf1")):
+                    # esf: this thread's SFA word first (after the cd acquire + BW3 fence above), completed with the codes below
+                    v0e = dm_utils.add_sb_clamp(sbs[0], osbo[0])
+                    v1e = dm_utils.add_sb_clamp(sbs[1], osbo[1])
+                    ze = Int32(0)
+                    sfe = sel_eq_i32(hf, Int32(0), pack4(v0e, v1e, ze, ze), pack4(ze, ze, v0e, v1e))
+                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfe)
                 # ---- codes -> smem stage stg (own two chunks) ----
                 cbase = crow + stg * self.bytes_c
                 pend = []                    # control cw<h>: code stores deferred (emitted below), else stored here
@@ -882,7 +1065,8 @@ class DmHd256Mx2:
                             sfw_c = sfw
                 else:
                     if const_expr(self.dqopt):
-                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                        if const_expr(not self.esf):          # esf: stored before the quantization (above)
+                            dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
                     elif hf == 0:
                         sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),
                                     dm_utils.add_sb_clamp(sball[2], osb[2]), dm_utils.add_sb_clamp(sball[3], osb[3]))

@@ -705,6 +705,10 @@ class DMBackwardSm100:
         # MMA warp's smem descriptor starts keeps ptxas from hoisting every per-k-step 64-bit descriptor into the
         # uniform registers (UR exhaustion -> 69 STL/LDL in the 48-register MMA warp in det). Same MMAs: bitwise.
         self.dm_d3nh = "d3nh" in self.dm_opts or (self.deterministic and "nod3nh" not in self.dm_opts)
+        # allocf (DEFAULT; 'noallocf' = DEBUG previous build): the TMEM-alloc hand-off gets the canonical tcgen05 fence pair
+        # (PTX 9.7.18.6.4.4: tcgen05.alloc -> fence::before_thread_sync -> bar.sync -> fence::after_thread_sync -> ld.shared tmem_hold);
+        # the cutlass TmemAllocator.wait_for_alloc barrier emitted neither (fwd / pass 0 already have both). Fences only: bitwise.
+        self.dm_allocf = "noallocf" not in self.dm_opts
         # ordinv (kda/docs/ordinv-design.md; DEFAULT ON since the lead decision 2026-11-10; 'noordw' = DEBUG ONLY, the pre-ordinv
         # issue-order build). 2-CTA pipelined schedule: dV(t) reads its SFA/SFB scale
         # factors from TMEM cols in the S region (P 0..31, SF 32..51) and the next S^T MMA overwrites the S region; dK(t)
@@ -2333,7 +2337,11 @@ class DMBackwardSm100:
 
             # Alloc tmem buffer
             tmem.allocate(self.tmem_alloc_cols)
+            if const_expr(self.dm_allocf):
+                dm_utils.tc_fence_before()   # allocf: tcgen05.alloc (writes tmem_hold) ordered before the alloc barrier
             tmem.wait_for_alloc()
+            if const_expr(self.dm_allocf):
+                dm_utils.tc_fence_after()    # allocf: ... and the tmem_hold read (retrieve_ptr) after it
             tmem_ptr = tmem.retrieve_ptr(Float32)
 
             self.mma(
@@ -2383,7 +2391,18 @@ class DMBackwardSm100:
             # Dealloc the tensor memory buffer
             tmem.relinquish_alloc_permit()
             tmem_alloc_barrier.arrive_and_wait()
+            if const_expr(self.dm_allocf):
+                # allocf: the 2-CTA dealloc handshake inside TmemAllocator.free (remote mbarrier arrive -> wait -> tcgen05.dealloc) gets
+                # the fence pair too (blanket tcf mode for this call: fence::before the arrive, fence::after the wait)
+                _tcf_saved = dm_utils.TCF[0]
+                # the build-trap guard (tcf_end) must keep counting only the marked-pipeline wrapper fences: the blanket fences
+                # of this one call are not evidence that the pipeline wrappers are bound (S6 positive control)
+                _tcf_f0 = dm_utils._tcf_save_fences()
+                dm_utils.TCF[0] = 2
             tmem.free(tmem_ptr)
+            if const_expr(self.dm_allocf):
+                dm_utils.TCF[0] = _tcf_saved
+                dm_utils._tcf_restore_fences(_tcf_f0)
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if cute.arch.lane_idx() == 0:
                     dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 7), dm_utils.globaltimer())
@@ -2393,6 +2412,8 @@ class DMBackwardSm100:
         if warp_idx >= self.compute_warp_ids[0] and warp_idx <= self.compute_warp_ids[-1]:
             self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
             tmem.wait_for_alloc()
+            if const_expr(self.dm_allocf):
+                dm_utils.tc_fence_after()    # allocf: canonical alloc -> fence::before -> bar -> fence::after -> ld tmem_hold
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.compute_loop(
                 thr_mma_S,
@@ -2453,6 +2474,8 @@ class DMBackwardSm100:
                 else:
                     self._dm_setmaxreg_inc(self.num_regs_dsq)
                 tmem.wait_for_alloc()
+                if const_expr(self.dm_allocf):
+                    dm_utils.tc_fence_after()    # allocf (see the MMA warp)
                 tmem_ptr = tmem.retrieve_ptr(Float32)
                 self.dsq_loop(
                     thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
@@ -2469,6 +2492,8 @@ class DMBackwardSm100:
             else:
                 self._dm_setmaxreg_inc(self.num_regs_reduce)
             tmem.wait_for_alloc()
+            if const_expr(self.dm_allocf):
+                dm_utils.tc_fence_after()    # allocf: canonical alloc -> fence::before -> bar -> fence::after -> ld tmem_hold
             tmem_ptr = tmem.retrieve_ptr(Float32)
             self.dQacc_reduce(
                 mdQaccum,

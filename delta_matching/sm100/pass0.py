@@ -14,7 +14,7 @@ import flash_attn.cute.interface as fi
 from flash_attn.cute import cache_utils
 
 from .dm_pass0_sm100 import DMPass0Sm100
-from .fwd import _fingerprint
+from .fwd import _fingerprint, compile_env
 from . import fastpath
 _env = fastpath.env
 
@@ -41,11 +41,13 @@ _CLASSES = {}
 def _variant(exp_variant: str):
     if exp_variant not in _CLASSES:
         _CLASSES[exp_variant] = type(f"DMPass0Sm100_{exp_variant.replace('+', '_F_')}", (DMPass0Sm100,), {"dm_exp_variant": exp_variant})
+    mk = (exp_variant, compile_env())   # kda-sm100-cachekey: memo keyed on every compile-time input
+    if mk not in _CACHES:
         c = _make_cache()
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
             c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / _fingerprint() / f"pass0_{exp_variant}")
-        _CACHES[exp_variant] = c
-    return _CLASSES[exp_variant], _CACHES[exp_variant]
+        _CACHES[mk] = c
+    return _CLASSES[exp_variant], _CACHES[mk]
 
 
 DPDUMP = None
@@ -85,7 +87,7 @@ def dm_delta(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, config_overrid
     names = ["qs", "ks", "vs", "dos", "do8", "lse"]
     inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
     # the O output of pass 0 is an unused scratch buffer: returned to the fast path (as an output) and dropped here
-    return fastpath.call("pass0", inp, (bool(causal), exp_variant, repr(sorted(over.items()))),
+    return fastpath.call("pass0", inp, (bool(causal), exp_variant, repr(sorted(over.items())), compile_env()),
                          lambda: _dm_delta_slow(q8, k8, v8, aux, causal, over, exp_variant), cmp=[1])[1]
 
 

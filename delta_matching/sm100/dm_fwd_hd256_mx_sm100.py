@@ -36,6 +36,7 @@ from flash_attn.cute.named_barrier import NamedBarrierFwdSm100
 from flash_attn.cute import utils
 
 from delta_matching.sm100 import dm_utils
+from delta_matching.sm100.dm_utils import tmem_st_x4
 
 LOG2E = float(np.float32(math.log2(math.e)))           # float(M_LOG2E) in fp32
 LN2 = float(np.float32(math.log(2.0)))                 # __logf: lg2.approx * 0x3F317218
@@ -273,7 +274,15 @@ class DMFwdHd256MxSm100:
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
-                 lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False):
+                 lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0):
+        # g1 (fork hd256-fwd3, DM_HD256_FWD_G1 bitmask; profile/hd256-fwd3-tl/REPORT.md): critical-path trims of C6, values bitwise
+        # (same ops, same tensor-pipe MMAs; only program order / issue form).  1 = G1a: the softmax publishes acc_scale
+        # (stats_full) right after the ordered m rule, before the SF stores / P_full (O_ready no longer trails P_full).
+        # 2 = G1b: QK(j) issued as raw PTX (gemm_qk_ptx, the N128 QK op's idesc and descriptors) instead of 8 cute.gemm.
+        # 4 = G1c: the MMA warp waits K(j) (TMA full) before the C0 O_full(PV(j-2)) wait (off the PV -> QK path).
+        # 8 = G1d: SFB (V scale word, m-independent) stored before the mailbox wait; SFA / SFB as tcgen05.st x4 (same columns).
+        self.g1 = g1
+        assert g1 == 0 or (two_wg and not sf_bank and split == 0), "G1 trims apply to C6 (two_wg, C0 layout, split 0)"
         # trace (DEBUG, fork hd256-fwd3; DM_HD256_FWD_TRACE=1; False = compiled out, default PTX unchanged): %clock64 per event
         # into mDbg (int64 [n_cta, n_m + 1, TR_E]); events listed in tr().  Warps 13 / 15 (idle) observe S_full / O_full
         # completions.  Numerics untouched (stores to a separate buffer; lane-0 predicated, no divergence).
@@ -380,6 +389,7 @@ class DMFwdHd256MxSm100:
             self.q_dtype, self.q_dtype, K, K, Float32, cta_group, (128, 112)).op).op
         self.op_qb = cute.make_mma_atom(sm100_utils_basic.make_trivial_tiled_mma(
             self.q_dtype, self.q_dtype, K, K, Float32, cta_group, (128, 16)).op).op
+        self.op_q128 = cute.make_mma_atom(tiled_mma_qk.op).op
         cluster_layout_vmnk = cute.tiled_divide(cute.make_layout((1, 1, 1)), (tiled_mma_qk.thr_id.shape,))
         sQ_layout = sm100_utils_basic.make_smem_layout_a(tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, 1)
         sK_layout = sm100_utils_basic.make_smem_layout_b(tiled_mma_qk, self.mma_tiler_qk, self.q_dtype, self.kv_stage)
@@ -647,15 +657,15 @@ class DMFwdHd256MxSm100:
                            q_state)
         else:
             self.mma_c6(atom_qk, tSrQ, tSrK, tOrP, tOrV, sP, sV, acc_qk, acc_pv, pv_op, pipeline_q, pipeline_kv, mbar, cnt,
-                        kv_state, q_state)
+                        kv_state, q_state, sQ, sK)
 
     @cute.jit
     def mma_c6(self, atom_qk, tSrQ, tSrK, tOrP, tOrV, sP, sV, acc_qk, acc_pv, pv_op, pipeline_q, pipeline_kv, mbar, cnt,
-               kv_state, q_state):
+               kv_state, q_state, sQ, sK):
         pipeline_q.consumer_wait(q_state)
         pipeline_kv.consumer_wait(kv_state)
         self.tr(0, 2)
-        self.mma_qk(atom_qk, acc_qk, tSrQ, tSrK, kv_state.index, Int32(0))
+        self.qk128(atom_qk, acc_qk, tSrQ, tSrK, sQ, sK, kv_state.index, Int32(0))
         with cute.arch.elect_one():
             dm_utils.tc_commit(mbar + 0)
         self.tr(0, 3)
@@ -674,13 +684,19 @@ class DMFwdHd256MxSm100:
                     dm_utils.tc_fence_after()
                 slot = Int32(0)
             elif const_expr(self.sf_wait) and i >= 1:
+                if const_expr(self.g1 & 4):
+                    pipeline_kv.consumer_wait(kv_state)                 # G1c: K(j) first (no dependency on PV(j-2))
                 self.tr(j, 0)
                 dm_utils.mbar_wait_parity(mbar + 32, (j - 2) & 1)
                 dm_utils.tc_fence_after()
                 self.tr(j, 1)
-            pipeline_kv.consumer_wait(kv_state)
+            if const_expr((self.g1 & 4) and self.sf_wait and not self.sf_bank):
+                if i < 1:
+                    pipeline_kv.consumer_wait(kv_state)
+            else:
+                pipeline_kv.consumer_wait(kv_state)
             self.tr(j, 2)
-            self.mma_qk(atom_qk, acc_qk, tSrQ, tSrK, kv_state.index, slot)
+            self.qk128(atom_qk, acc_qk, tSrQ, tSrK, sQ, sK, kv_state.index, slot)
             with cute.arch.elect_one():
                 dm_utils.tc_commit(mbar + 8 * slot)      # S_full (sf_bank: always mbar+0, slot 0)
             self.tr(j, 3)
@@ -787,6 +803,15 @@ class DMFwdHd256MxSm100:
     def kv_wait(self, pipeline_kv, seq):
         pipeline_kv.consumer_wait_w_index_phase(seq % self.kv_stage, (seq // self.kv_stage) & 1)
         dm_utils.tc_fence_after()
+
+    @cute.jit
+    def qk128(self, atom_qk, acc_qk, tSrQ, tSrK, sQ, sK, stage, slot):
+        """QK(j) into S slot `slot`: 8 cute.gemm (C6) or, G1b, the same N128 chain as raw PTX (gemm_qk_ptx, b_off 0)."""
+        if const_expr(self.g1 & 2):
+            gemm_qk_ptx(self.op_q128, Int32(slot) * 128, tSrQ[None, None, None, 0], tSrK[None, None, None, stage],
+                        sQ[None, None, None, 0], sK[None, None, None, stage], 0)
+        else:
+            self.mma_qk(atom_qk, acc_qk, tSrQ, tSrK, stage, slot)
 
     @cute.jit
     def mma_qk(self, atom_qk, acc_qk, tSrQ, tSrK, stage, slot):
@@ -1065,6 +1090,12 @@ class DMFwdHd256MxSm100:
             for i in cutlass.range_constexpr(2, 32, 2):
                 ps = cute.arch.add_packed_f32x2(ps, (s[32 * b + i], s[32 * b + i + 1]))
             dm_bs[b] = ps[0] + ps[1]
+        if const_expr(self.g1 & 8):
+            sfb0 = (lane << 16) + slot * 128
+            # G1d: SFB(j) = the V scale word (m-independent) before the mailbox wait.  Columns slot+64..71 of this thread's TMEM
+            # lane: its own S(j) load completed (wait::ld above); PV(j-2)'s SF read completed before QK(j) (C0) -> S_full(j).
+            tmem_st_x4(sfb0 + self.sfb_off, dm_vw, dm_vw, dm_vw, dm_vw)
+            tmem_st_x4(sfb0 + self.sfb_off + 4, dm_vw, dm_vw, dm_vw, dm_vw)
         # ---- ordered tail: the previous tile's (m, l) from the other WG ----
         self.tr(j, 12, None, tr_w == 0)
         m_old = -Float32.inf
@@ -1086,6 +1117,11 @@ class DMFwdHd256MxSm100:
             if dm_mcand > m_old + Float32(self.rescale_T):
                 row_max = dm_mcand
                 acc_scale = dm_utils.exp2i_f32(m_old - dm_mcand)
+        if const_expr(self.g1 & 1):
+            # G1a: acc_scale(j) -> correction now (stats[slot] reuse: correction(j-2) read it before O_ready(j-2) -> PV(j-2) ->
+            # (C0) QK(j) -> S_full(j), which this thread waited)
+            st_shared_f32(stats + 4 * (slot * 128 + tidx), acc_scale)
+            dm_utils.mbar_arrive(mbar + 48 + 8 * slot)          # stats_full[slot]
         m_safe = row_max if row_max != -Float32.inf else Float32(0.0)
         dm_w = [None] * 4
         dm_sfa = [None] * 4
@@ -1095,10 +1131,13 @@ class DMFwdHd256MxSm100:
             dm_w[b] = dm_utils.byte_shl23_f32(dm_sfa[b])
         sfa_word = dm_utils.pack_bytes4(dm_sfa[0], dm_sfa[1], dm_sfa[2], dm_sfa[3])
         sfbase = (lane << 16) + slot * 128
-        for r in cutlass.range_constexpr(4):
-            tmem_st1(sfbase + self.sfa_off + r, sfa_word)
-        for r in cutlass.range_constexpr(8):
-            tmem_st1(sfbase + self.sfb_off + r, dm_vw)
+        if const_expr(self.g1 & 8):
+            tmem_st_x4(sfbase + self.sfa_off, sfa_word, sfa_word, sfa_word, sfa_word)
+        else:
+            for r in cutlass.range_constexpr(4):
+                tmem_st1(sfbase + self.sfa_off + r, sfa_word)
+            for r in cutlass.range_constexpr(8):
+                tmem_st1(sfbase + self.sfb_off + r, dm_vw)
         cute.arch.fence_view_async_shared()
         tmem_wait_st()
         dm_utils.tc_fence_before()
@@ -1107,8 +1146,9 @@ class DMFwdHd256MxSm100:
             self.tr(j, 14, None, tr_w == 0)
             for q in cutlass.range_constexpr(4):
                 self.tr(j, 20 + q, None, tr_w == q)
-        st_shared_f32(stats + 4 * (slot * 128 + tidx), acc_scale)
-        dm_utils.mbar_arrive(mbar + 48 + 8 * slot)          # stats_full[slot]
+        if const_expr(not (self.g1 & 1)):
+            st_shared_f32(stats + 4 * (slot * 128 + tidx), acc_scale)
+            dm_utils.mbar_arrive(mbar + 48 + 8 * slot)          # stats_full[slot]
         dm_l = Float32(0.0) if const_expr(is_first) else row_sum * acc_scale
         for b in cutlass.range_constexpr(4):
             dm_l = dm_l + dm_bs[b] * dm_w[b]

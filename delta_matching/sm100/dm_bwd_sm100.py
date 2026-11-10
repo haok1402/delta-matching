@@ -117,6 +117,74 @@ def dm_posmajor_scheduler(qh: int):
     return DMPosMajLPTBwdScheduler
 
 
+_DM_PM1_CLS = {}
+
+
+def dm_posmajor_once_scheduler(qh: int):
+    """DM pm1 (det GQA): the posmaj scheduler with the SAME tile mapping, but the work tile is computed once at create()
+    and the scheduler state is only (block, head, batch, split, valid). advance_to_next_work just clears valid, so no
+    role keeps the LPT FastDivmod parameters live across its main loop (they cost the 48-register MMA/load warps
+    ~60 spill instructions in det). Same CTA -> tile mapping and lock orders: bitwise."""
+    if qh in _DM_PM1_CLS:
+        return _DM_PM1_CLS[qh]
+    base = dm_posmajor_scheduler(qh)
+
+    class DMPosMajOnceScheduler:
+        Params = base.Params
+
+        def __init__(self, c0, c1, c2, c3, v, *, loc=None, ip=None):
+            self._c = [c0, c1, c2, c3]
+            self._v = v
+            self._loc = loc
+            self._ip = ip
+
+        @staticmethod
+        def to_underlying_arguments(args, *, scheduling_mode=None, loc=None, ip=None):
+            return base.to_underlying_arguments(args, loc=loc, ip=ip)
+
+        @staticmethod
+        def get_grid_shape(params, *, loc=None, ip=None):
+            return base.get_grid_shape(params, loc=loc, ip=ip)
+
+        @staticmethod
+        @cute.jit
+        def create(params, *, loc=None, ip=None):
+            w = base.create(params, loc=loc, ip=ip).get_current_work()
+            b_, h_, z_, s_ = w.tile_idx
+            return DMPosMajOnceScheduler(Int32(b_), Int32(h_), Int32(z_), Int32(s_), Int32(w.is_valid_tile), loc=loc, ip=ip)
+
+        @cute.jit
+        def get_current_work(self, *, loc=None, ip=None):
+            return _DMWorkTileInfo((self._c[0], self._c[1], self._c[2], self._c[3]), self._v != Int32(0))
+
+        def initial_work_tile_info(self, *, loc=None, ip=None):
+            return self.get_current_work(loc=loc, ip=ip)
+
+        def prefetch_next_work(self, *, loc=None, ip=None):
+            pass
+
+        def advance_to_next_work(self, *, loc=None, ip=None):
+            self._v = Int32(0)
+            return self.get_current_work()
+
+        def __extract_mlir_values__(self):
+            values = []
+            for obj in self._c + [self._v]:
+                values += cutlass.extract_mlir_values(obj)
+            return values
+
+        def __new_from_mlir_values__(self, values):
+            objs = []
+            for obj in self._c + [self._v]:
+                n = len(cutlass.extract_mlir_values(obj))
+                objs.append(cutlass.new_from_mlir_values(obj, values[:n]))
+                values = values[n:]
+            return self.__class__(*objs, loc=self._loc)
+
+    _DM_PM1_CLS[qh] = DMPosMajOnceScheduler
+    return DMPosMajOnceScheduler
+
+
 _DM_PERS_CLS = {}
 
 
@@ -1315,7 +1383,8 @@ class DMBackwardSm100:
             TileScheduler = SingleTileScheduler
         elif const_expr(self.deterministic and "noposmaj" not in self.dm_opts and self.qhead_per_kvhead > 1
                         and not self.pack_gqa and self.cta_group_size > 1):
-            TileScheduler = dm_posmajor_scheduler(self.qhead_per_kvhead)
+            TileScheduler = (dm_posmajor_once_scheduler(self.qhead_per_kvhead) if const_expr("pm1" in self.dm_opts)
+                             else dm_posmajor_scheduler(self.qhead_per_kvhead))
         elif const_expr(self.deterministic and self.dm_pers > 0 and not self.pack_gqa):
             if const_expr(self.dm_pdyn):
                 TileScheduler = dm_dynamic_scheduler(self.qhead_per_kvhead, "nohswz" not in self.dm_opts, self.dm_pers,

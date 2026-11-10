@@ -2081,16 +2081,11 @@ class DMPass0Hd256Sm100:
                     pipeline_q.consumer_wait_w_index_phase(stage, mma_q_consumer_phase)
                 mma_q_consumer_phase ^= 1
                 if const_expr(self.dm_p2t):
+                    # stage-1-only prefix (stage 0's fully masked top n-blocks), then both stages
                     nmx0 = self._stage_n_max(seqlen, work_m, 0, n_block_min, n_block_max)
-                    for i in cutlass.range(block_iter_count, unroll=1):
-                        n_block = n_block_max - 1 - i
-                        on0 = n_block < nmx0
+                    for i in cutlass.range(n_block_max - nmx0, unroll=1):
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        if on0:
-                            pipeline_s_p_o.producer_acquire_w_index_phase(0, p2_ph0)
-                            gemm_Si[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
-                            pipeline_s_p_o.producer_commit_w_index(0)
                         pipeline_s_p_o.producer_acquire_w_index_phase(1, p2_ph1)
                         gemm_Si[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
                         pipeline_s_p_o.producer_commit_w_index(1)
@@ -2098,14 +2093,32 @@ class DMPass0Hd256Sm100:
                         mma_kv_consumer_state.advance()
                         pipeline_kv.consumer_wait(mma_kv_consumer_state)
                         sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
-                        if on0:
-                            pipeline_o_acc.producer_acquire_w_index_phase(0, p2_ph0)
-                            gemm_dPi[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
-                            pipeline_o_acc.producer_commit_w_index(0)
-                            p2_ph0 ^= 1
                         pipeline_o_acc.producer_acquire_w_index_phase(1, p2_ph1)
                         gemm_dPi[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
                         pipeline_o_acc.producer_commit_w_index(1)
+                        p2_ph1 ^= 1
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                    for i in cutlass.range(nmx0 - n_block_min, unroll=1):
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        pipeline_s_p_o.producer_acquire_w_index_phase(0, p2_ph0)
+                        gemm_Si[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                        pipeline_s_p_o.producer_commit_w_index(0)
+                        pipeline_s_p_o.producer_acquire_w_index_phase(1, p2_ph1)
+                        gemm_Si[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator))
+                        pipeline_s_p_o.producer_commit_w_index(1)
+                        pipeline_kv.consumer_release(mma_kv_consumer_state)
+                        mma_kv_consumer_state.advance()
+                        pipeline_kv.consumer_wait(mma_kv_consumer_state)
+                        sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
+                        pipeline_o_acc.producer_acquire_w_index_phase(0, p2_ph0)
+                        gemm_dPi[0](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
+                        pipeline_o_acc.producer_commit_w_index(0)
+                        pipeline_o_acc.producer_acquire_w_index_phase(1, p2_ph1)
+                        gemm_dPi[1](smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator))
+                        pipeline_o_acc.producer_commit_w_index(1)
+                        p2_ph0 ^= 1
                         p2_ph1 ^= 1
                         pipeline_kv.consumer_release(mma_kv_consumer_state)
                         mma_kv_consumer_state.advance()

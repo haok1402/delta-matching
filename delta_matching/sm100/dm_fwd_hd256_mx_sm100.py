@@ -764,6 +764,8 @@ class DMFwdHd256MxSm100:
         if j + 1 < cnt:
             if const_expr(self.pc_inj == 5):
                 dm_utils.mbar_arrive(mbar + 80 + 8 * slot)
+                for _d in cutlass.range_constexpr(20):          # widen the window: payload lands ~20 us after the arrive
+                    dm_utils.nanosleep_1us()
             st_shared_f32(stats + 4 * (512 + slot * 128 + tidx), row_max)
             st_shared_f32(stats + 4 * (768 + slot * 128 + tidx), dm_l)
             if const_expr(self.pc_inj != 5):

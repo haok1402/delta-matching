@@ -479,6 +479,13 @@ def check_case(case, cr, preset, dev, verbose):
             rec["metrics"][f"{key}"] = st
             chk(f"{key}:finite_every_call", st["nonfinite_calls"] == 0,
                 f"{st['nonfinite_calls']}/{st['calls']} calls had NaN/Inf outputs")
+            if CAND_DETERMINISTIC[0]:
+                # user 2026-11-10: deterministic only - a det build must be BITWISE identical on every repeated call
+                # (any spread at all is a race / ordering bug, not reassociation)
+                chk(f"{key}:det_bitwise_every_call", st.get("rel_max", 0.0) == 0.0 and st.get("block_rel_max", 0.0) == 0.0
+                    and st.get("elem_rel_max", 0.0) == 0.0,
+                    f"deterministic build varied between identical calls: whole {st.get('rel_max', 0.0):.2e}, block "
+                    f"{st.get('block_rel_max', 0.0):.2e}, element {st.get('elem_rel_max', 0.0):.2e} (must be 0)")
             chk(f"{key}:close_every_call", st.get("rel_max", 0.0) <= NONDET_REL,
                 f"outputs varied by up to {st.get('rel_max', 0.0):.2e} rel between calls (allowed {NONDET_REL:.0e})")
             # accuracy-audit 05:35 (1): a race corrupting one block hides in the whole-tensor norm -> per block / element

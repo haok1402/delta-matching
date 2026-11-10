@@ -306,6 +306,9 @@ class DMPass0Hd256Sm100:
         self.dm_es = "es" in _fl0
         self.dm_es2 = "es2" in _fl0   # (Codex p0-02) S half 1 loaded + S released after the h0 exps, before the dP wait
         assert not (self.dm_es and self.dm_es2)
+        # +ea (E2, needs +es): all 64 exps + den chains (same order) before the dP wait, then the 4 num chunks j = 0..3
+        self.dm_ea = "ea" in _fl0
+        assert not self.dm_ea or self.dm_es
         # +tl (track AG): two lanes per query row (tcgen05.ld.16x64b), 4 compute warps / SMSP: warps 0-3 / 4-7 = stage 0 / 1
         # rows 0-15 of each quadrant, warps 8-11 / 12-15 (the "correction" ids) = stage 0 / 1 rows 16-31; MMA / epilogue /
         # load / empty move to 16-19 (640 threads). Bitwise the h2+ts path (see tl_loop).
@@ -2776,9 +2779,13 @@ class DMPass0Hd256Sm100:
                             cute.arch.fence_view_async_tmem_load()
                             with dm_utils.tcf_site("r0"):
                                 pipeline_s_p_o.consumer_release_w_index(stage)
-                        if const_expr(h == 0):
+                        if const_expr(h == 0 and not self.dm_ea):
                             pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
-                        for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
+                        if const_expr(self.dm_ea and h == 1):
+                            # +ea: every exp (and the den chains, same order) is done; now the dP wait and all 4 num chunks
+                            pipeline_dp.consumer_wait_w_index_phase(stage, s_full_phase)
+                        jlo, jhi = (2 * h, 2 * h + 2) if not self.dm_ea else ((0, 4) if h == 1 else (0, 0))
+                        for j in cutlass.range_constexpr(jlo, jhi):
                             dpv = dm_utils.tmem_ld_16x64b_x16(d_addr + Int32(32 * j))
                             cute.arch.fence_view_async_tmem_load()
                             if const_expr(j == 3):

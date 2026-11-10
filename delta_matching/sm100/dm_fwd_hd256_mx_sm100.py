@@ -256,8 +256,13 @@ class DMFwdHd256MxSm100:
         # 1 = C7a: split only (QK_a right after PV(j) issue, no S_empty).  0 = C6 (SF at +32/+64, N=128 QK).
         # DEBUG PC (C7b): pc_inj 6 = MMA skips the S_empty wait (QK_a(j+2) may overwrite S(j) before the softmax loaded it ->
         # must corrupt); 7 = the softmax arrives S_empty BEFORE its tcgen05.ld of S(j) (-> must corrupt).
+        # 8 = MMA skips the O_full(PV(i)) wait before QK_b(i+2) (the SF WAR edge; like SFWAIT=0 it may stay clean in practice
+        # because the tensor pipe executes in order -> informational, not a must-corrupt control).
+        # C7c (Codex hd256-fwd2-02/03): the schedule is QK_a(i+2), PV(i), [O_full(PV(i))] QK_b(i+2) -> S_full (see mma_split).
         self.split = split
+        assert split in (0, 2), "split: 0 (C6) or 2 (C7c)"
         assert split == 0 or (two_wg and not sf_bank), "C7 split requires C6 (two_wg) and the C0 layout"
+        assert split == 0 or kv_stage >= 4, "C7c ring order needs >= 4 K/V stages (Codex hd256-fwd2-03 P1: deadlock below)"
         # epi (fork hd256-8k F1a/F1c; host default DM_HD256_FWD_EPI=2): O epilogue through SMEM. 0 = row-per-thread st.global.v4
         # (each warp store hits 32 rows H*512 B apart). 1 = each correction thread writes its bf16 row (same mul.rn + cvt bits)
         # into a 528 B-strided staging row in the (by then idle) sK ring, bar.warp.sync, then each warp copies ITS OWN 32 rows
@@ -616,20 +621,17 @@ class DMFwdHd256MxSm100:
     @cute.jit
     def load_split(self, tma_atom_Q, tma_atom_K, tma_atom_V, tQgQ, tQsQ, tKgK, tKsK, tVgV, tVsV, pipeline_q, pipeline_kv, q_state,
                    n_block_max, cnt):
-        """C7b load order = the MMA consumption order: K0, Q, K1, K2, then for t = 1..cnt: [K(t+2) if t+2 < cnt], V(t-1).
+        """C7c load order = the MMA consumption order: K0, Q, K1, then for i = 0..cnt-1: [K(i+2) if i+2 < cnt], V(i).
         Tile j = key block n_block_max-1-j.  Sequence number n -> stage n % S, producer phase ((n // S) & 1) ^ 1."""
-        S = self.kv_stage
         self.load_one(tma_atom_K, tKgK, tKsK, pipeline_kv, n_block_max - 1, Int32(0))
         pipeline_q.producer_acquire(q_state)
         cute.copy(tma_atom_Q, tQgQ, tQsQ[None, 0], tma_bar_ptr=pipeline_q.producer_get_barrier(q_state))
         if cnt > 1:
             self.load_one(tma_atom_K, tKgK, tKsK, pipeline_kv, n_block_max - 2, Int32(1))
-        if cnt > 2:
-            self.load_one(tma_atom_K, tKgK, tKsK, pipeline_kv, n_block_max - 3, Int32(2))
-        for t in cutlass.range(1, cnt + 1, unroll=1):
-            if t + 2 < cnt:
-                self.load_one(tma_atom_K, tKgK, tKsK, pipeline_kv, n_block_max - 3 - t, self.kseq(t + 2))
-            self.load_one(tma_atom_V, tVgV, tVsV, pipeline_kv, n_block_max - t, self.vseq(t - 1, cnt))
+        for i in cutlass.range(cnt, unroll=1):
+            if i + 2 < cnt:
+                self.load_one(tma_atom_K, tKgK, tKsK, pipeline_kv, n_block_max - 3 - i, self.kseq(i + 2))
+            self.load_one(tma_atom_V, tVgV, tVsV, pipeline_kv, n_block_max - 1 - i, self.vseq(i, cnt))
 
     @cute.jit
     def load_one(self, atom, tg, ts, pipeline_kv, blk, seq):
@@ -652,53 +654,55 @@ class DMFwdHd256MxSm100:
     @cute.jit
     def mma_split(self, tSrQ, tSrK, tOrP, tOrV, sQ, sK, sP, sV, acc_qk, acc_pv, pv_op, pipeline_q, pipeline_kv, mbar, cnt,
                   q_state):
-        """C7b MMA program (see __init__ split).  Iteration t = 0..cnt:
-            [t+2 < cnt: S_empty(t) -> QK_a(t+2)]  [t >= 1: P_full(t-1), O_ready(t-1) -> PV(t-1) -> O_full]
-            [t+1 < cnt: (t >= 1: O_full(PV(t-1))) -> QK_b(t+1) -> S_full[(t+1)&1], release K(t+1)]
-        Ring: consumption (= load) order K0, K1, K2, then per t >= 1: K(t+2), V(t-1); sequence numbers kseq / vseq; releases
-        by stage index (K(t+1) is released after V(t-1) is acquired)."""
+        """C7c MMA program (Codex hd256-fwd2-02 repaired schedule; see __init__ split).
+            prologue: QK(0) = QK_a(0)+QK_b(0) -> S_full[0]; QK(1) -> S_full[1]
+            for i = 0..cnt-1:  [i+2 < cnt: S_empty(i) -> QK_a(i+2)]   (slot i&1: S(i) already in the softmax's registers)
+                               P_full(i), O_ready(i) -> PV(i) -> O_full
+                               [i+2 < cnt: O_full(PV(i)) -> QK_b(i+2) -> S_full[i&1], release K(i+2)]
+        S_full(i+2)'s commit tracks only QK_a(i+2), PV(i) (complete) and QK_b(i+2): no unrelated MMA on its path (C7b's
+        order made S_full(t+1) track QK_a(t+2): Codex hd256-fwd2-03).  Ring order K0, K1, then per i: [K(i+2)], V(i)."""
         pipeline_q.consumer_wait(q_state)
         S = self.kv_stage
-        self.kv_wait(pipeline_kv, self.kseq(Int32(0)))
-        self.qk_part(0, tSrQ, tSrK, sQ, sK, acc_qk, self.kseq(Int32(0)) % S, Int32(0))
-        self.qk_part(1, tSrQ, tSrK, sQ, sK, acc_qk, self.kseq(Int32(0)) % S, Int32(0))
-        with cute.arch.elect_one():
-            dm_utils.tc_commit(mbar + 0)                                                  # S_full[0]
-        pipeline_kv.consumer_release_w_index(self.kseq(Int32(0)) % S)
-        if cnt > 1:
-            self.kv_wait(pipeline_kv, self.kseq(Int32(1)))
-            self.qk_part(0, tSrQ, tSrK, sQ, sK, acc_qk, self.kseq(Int32(1)) % S, Int32(1))
-        for t in cutlass.range(cnt + 1, unroll=1):
-            if t + 2 < cnt:
-                if const_expr(self.pc_inj != 6):
-                    dm_utils.mbar_wait_parity(mbar + 96 + 8 * (t & 1), (t >> 1) & 1)      # S_empty(t): S(t) in registers
-                    dm_utils.tc_fence_after()
-                ks = self.kseq(t + 2)
-                self.kv_wait(pipeline_kv, ks)
-                self.qk_part(0, tSrQ, tSrK, sQ, sK, acc_qk, ks % S, t & 1)               # QK_a(t+2): cols 0..111
-            if t >= 1:
-                vs = self.vseq(t - 1, cnt)
-                self.mma_pv(pv_op, acc_pv, tOrP, tOrV, sP, sV, pipeline_kv, None, mbar, t - 1, vs % S, (vs // S) & 1)
-            if t + 1 < cnt:
-                if t >= 1:
-                    dm_utils.mbar_wait_parity(mbar + 32, (t - 1) & 1)                       # O_full(PV(t-1)): SF(t-1) read
-                    dm_utils.tc_fence_after()
-                ks1 = self.kseq(t + 1)
-                self.qk_part(1, tSrQ, tSrK, sQ, sK, acc_qk, ks1 % S, (t + 1) & 1)        # QK_b(t+1): cols 112..127
+        for j0 in cutlass.range_constexpr(2):
+            if j0 < cnt:
+                ks0 = self.kseq(Int32(j0))
+                self.kv_wait(pipeline_kv, ks0)
+                self.qk_part(0, tSrQ, tSrK, sQ, sK, acc_qk, ks0 % S, Int32(j0))
+                self.qk_part(1, tSrQ, tSrK, sQ, sK, acc_qk, ks0 % S, Int32(j0))
                 with cute.arch.elect_one():
-                    dm_utils.tc_commit(mbar + 8 * ((t + 1) & 1))                          # S_full[(t+1)&1]
-                pipeline_kv.consumer_release_w_index(ks1 % S)
+                    dm_utils.tc_commit(mbar + 8 * j0)                                     # S_full[j0]
+                pipeline_kv.consumer_release_w_index(ks0 % S)
+        for i in cutlass.range(cnt, unroll=1):
+            slot = i & 1
+            if i + 2 < cnt:
+                if const_expr(self.pc_inj != 6):
+                    dm_utils.mbar_wait_parity(mbar + 96 + 8 * slot, (i >> 1) & 1)        # S_empty(i): S(i) in registers
+                    dm_utils.tc_fence_after()
+                ks = self.kseq(i + 2)
+                self.kv_wait(pipeline_kv, ks)
+                self.qk_part(0, tSrQ, tSrK, sQ, sK, acc_qk, ks % S, slot)                # QK_a(i+2): cols 0..111
+            vs = self.vseq(i, cnt)
+            self.mma_pv(pv_op, acc_pv, tOrP, tOrV, sP, sV, pipeline_kv, None, mbar, i, vs % S, (vs // S) & 1)
+            if i + 2 < cnt:
+                if const_expr(self.pc_inj != 8):
+                    dm_utils.mbar_wait_parity(mbar + 32, i & 1)                          # O_full(PV(i)): SF(i) read
+                    dm_utils.tc_fence_after()
+                ks2 = self.kseq(i + 2)
+                self.qk_part(1, tSrQ, tSrK, sQ, sK, acc_qk, ks2 % S, slot)               # QK_b(i+2): cols 112..127
+                with cute.arch.elect_one():
+                    dm_utils.tc_commit(mbar + 8 * slot)                                   # S_full[slot] (tile i+2)
+                pipeline_kv.consumer_release_w_index(ks2 % S)
         pipeline_q.consumer_release(q_state)
 
     def kseq(self, m):
-        """C7b ring sequence number of K(m): K0, K1, K2 first, then K(m) at 2m-3."""
-        lt = Int32(Int32(m) < 3)
-        return Int32(m) * lt + (2 * Int32(m) - 3) * (1 - lt)
+        """C7c ring sequence number of K(m): K0, K1, then K(m) at 2m-2 (each followed by V(m-2))."""
+        lt = Int32(Int32(m) < 2)
+        return Int32(m) * lt + (2 * Int32(m) - 2) * (1 - lt)
 
     def vseq(self, m, cnt):
-        """C7b ring sequence number of V(m): 2m+4 while K loads still follow, else m + cnt (tail of V loads)."""
-        c = Int32(Int32(m) + 3 < cnt)
-        return (2 * Int32(m) + 4) * c + (Int32(m) + cnt) * (1 - c)
+        """C7c ring sequence number of V(m): 2m+3 while K(m+2) precedes it, else m + cnt (tail of V loads)."""
+        c = Int32(Int32(m) + 2 < cnt)
+        return (2 * Int32(m) + 3) * c + (Int32(m) + cnt) * (1 - c)
 
     @cute.jit
     def kv_wait(self, pipeline_kv, seq):

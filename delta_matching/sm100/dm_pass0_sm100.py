@@ -274,6 +274,10 @@ class DMPass0Sm100:
         self.dm_h2 = "h2" in _fl0   # two 64-column halves: S half -> exp/den -> (dP wait) dP half -> num
         self.dm_pf = "pf" in _fl0   # prefetch the next n_block's raw K/V scales one iteration ahead
         self.dm_tr = "tr" in _fl0   # per-segment clock trace of the softmax loop into aux[6] (int64[64])
+        # DIAGNOSTIC ablations (p02cta bound, wrong results): +xnm no S/dP MMAs issued (commits kept, stale TMEM);
+        # +xnkv no K/V TMA (expect_tx completed by mbarrier.complete_tx, stale SMEM)
+        self.dm_xnm = "xnm" in _fl0
+        self.dm_xnkv = "xnkv" in _fl0
         # +f64: per-tile fp32 partial sums (short chains), accumulated across tiles in fp64; delta = num / den in fp64,
         # rounded once to fp32. P and dP are untouched (bitwise the backward's), only the row-sum round-off shrinks.
         self.dm_f64 = "f64" in _fl0 or "f64x" in _fl0 or "f64y" in _fl0 or any(f.startswith("f64k") for f in _fl0)
@@ -2057,7 +2061,8 @@ class DMPass0Sm100:
                     sK_cur = sK[None, None, None, mma_kv_consumer_state.index]
                     for stage in cutlass.range_constexpr(self.q_stage):
                         pipeline_s_p_o.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
-                        gemm_Si[stage](
+                        if const_expr(not self.dm_xnm):
+                            gemm_Si[stage](
                             smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sK_cur.iterator)
                         )
                         pipeline_s_p_o.producer_commit_w_index(stage)
@@ -2067,7 +2072,8 @@ class DMPass0Sm100:
                     sV_cur = sK[None, None, None, mma_kv_consumer_state.index]
                     for stage in cutlass.range_constexpr(self.q_stage):
                         pipeline_o_acc.producer_acquire_w_index_phase(stage, dm_slot_empty_phase)
-                        gemm_dPi[stage](
+                        if const_expr(not self.dm_xnm):
+                            gemm_dPi[stage](
                             smem_desc_start_b=sm100_desc.make_smem_desc_start_addr(sV_cur.iterator)
                         )
                         pipeline_o_acc.producer_commit_w_index(stage)
@@ -3565,7 +3571,10 @@ class DMPass0Sm100:
             if stage == 0:
                 pipeline_kv.sync_object_empty.wait(1, phase)
 
-        if const_expr(self.use_tma_KV):
+        if const_expr(self.use_tma_KV and self.dm_xnkv):
+            dm_utils.mbar_complete_tx(pipeline_kv.producer_get_barrier(producer_state).toint(),
+                                      self.tma_copy_bytes[K_or_V])
+        elif const_expr(self.use_tma_KV):
             assert tXgX is not None and tXsX is not None and tma_atom is not None
             tXsX_cur = tXsX[None, stage]
             if const_expr(self.uneven_kv_smem):

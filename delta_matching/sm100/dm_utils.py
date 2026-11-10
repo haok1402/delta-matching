@@ -403,6 +403,14 @@ def mbar_arrive_expect_tx(mbar: Int32, nbytes: int, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def mbar_complete_tx(mbar: Int32, nbytes: int, *, loc=None, ip=None):
+    """DIAGNOSTIC (p02cta ablation): complete nbytes of expected tx on an mbarrier without any copy."""
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip)],
+                    f"mbarrier.complete_tx.relaxed.cta.shared::cta.b64 [$0], {nbytes};", "r",
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def mbar_wait_parity_nh(mbar: Int32, phase: Int32, *, loc=None, ip=None):
     """mbar_wait_parity without the try_wait suspend-time hint (hardware default time limit)."""
     llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(phase).ir_value(loc=loc, ip=ip)],

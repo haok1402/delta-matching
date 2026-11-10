@@ -753,6 +753,8 @@ class DMBackwardSm100:
         # BEFORE its copy landed, then writes the real data ~2 us after the signal.
         self.dm_rasy = ((6 if "rasyagg" in _xm else 7 if "rasyc" in _xm else 8 if "rrasy" in _xm else 5)
                         if (self.dm_xscope and "rasy" in _xm) else 0)
+        # xs:rrasyq: relay-forward ONLY X6 (dQ empty, reduce role; the relay polls that one barrier); X3-X5, X7, X10 direct rasy
+        self.dm_rr_sites = ((3,) if "rrasyq" in _xm else (0, 1, 2, 3, 4, 5)) if self.dm_rasy == 8 else ()
         # xs:rrasy (Part III (d)): X3-X7 via ordinv's relay structure (CTA-1 local .cta arrives, CTA-1 MMA-warp lane 0 polls the local copies)
         # but each forward is ONE red.async complete_tx; CTA 0 arms 4 B in the role's first warp. X10 direct rasy, X11 pwq.
         # xd:f<k> (DEBUG) = the relay skips its 6th forward of site k (bounded leader wait -> trap).
@@ -764,7 +766,7 @@ class DMBackwardSm100:
         if self.dm_rasy == 8:
             self.dm_xs_relay = True
         if self.dm_rasy:
-            self.dm_xs_arrive, self.dm_xs_wait = self.dm_rasy, (3 if (self.dm_xd or self.dm_xp == "r") else 2)   # bounded (trap) leader waits under a control that can stall
+            self.dm_xs_arrive, self.dm_xs_wait = self.dm_rasy, (3 if (self.dm_xd or self.dm_xp == "r" or self.dm_xrp >= 0) else 2)   # bounded (trap) leader waits under a control that can stall
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)
         self.dm_xs_roles = next((x[4:] for x in self.dm_opts if x.startswith("xsr:")), "rmcdq")
         self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else (2 if "ordpc2" in self.dm_opts else 0))
@@ -2460,7 +2462,7 @@ class DMBackwardSm100:
             self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            dm_utils.XS[0] = ((8 if self.dm_rasy == 8 else 4) if self.dm_xs_relay else self.dm_xs_arrive) if "c" in self.dm_xs_roles else 0
+            dm_utils.XS[0] = ((((8 if 0 in self.dm_rr_sites else 5) if self.dm_rasy == 8 else 4)) if self.dm_xs_relay else self.dm_xs_arrive) if "c" in self.dm_xs_roles else 0
             dm_utils.XS_DROP[0] = "c" in self.dm_xd
             self.compute_loop(
                 thr_mma_S,
@@ -2522,7 +2524,7 @@ class DMBackwardSm100:
                     self._dm_setmaxreg_inc(self.num_regs_dsq)
                 tmem.wait_for_alloc()
                 tmem_ptr = tmem.retrieve_ptr(Float32)
-                dm_utils.XS[0] = ((8 if self.dm_rasy == 8 else 4) if self.dm_xs_relay else self.dm_xs_arrive) if "d" in self.dm_xs_roles else 0
+                dm_utils.XS[0] = ((((8 if 1 in self.dm_rr_sites else 5) if self.dm_rasy == 8 else 4)) if self.dm_xs_relay else self.dm_xs_arrive) if "d" in self.dm_xs_roles else 0
                 dm_utils.XS_DROP[0] = "d" in self.dm_xd
                 self.dsq_loop(
                     thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
@@ -4370,9 +4372,12 @@ class DMBackwardSm100:
                 for k in cutlass.range_constexpr(6):
                     dn[k] = Int32(0)
                     ob[k] = Int32(0)
-                left = 2 * (4 * num_iters + 2)     # observations + forwards still to do in this tile
+                if const_expr(self.dm_rasy == 8):
+                    left = 2 * (sum(1 for k in self.dm_rr_sites if k < 4) * num_iters + sum(1 for k in self.dm_rr_sites if k >= 4))
+                else:
+                    left = 2 * (4 * num_iters + 2)     # observations + forwards still to do in this tile
                 while left > 0:
-                    for k in cutlass.range_constexpr(6):
+                    for k in cutlass.range_constexpr(6) if const_expr(self.dm_rasy != 8) else self.dm_rr_sites:
                         tgt = num_iters if const_expr(k < 4) else Int32(1)
                         a = Int32(bars[k].toint())
                         if ob[k] < tgt:
@@ -4388,7 +4393,7 @@ class DMBackwardSm100:
                                 for _w in cutlass.range_constexpr(self.dm_xw):
                                     dm_utils.nanosleep_1us()
                                 if const_expr(self.dm_xd == "f" + str(k)):
-                                    if dn[k] != 5:   # DEBUG drop control: the 6th forward of site k in a tile is skipped
+                                    if dn[k] != (5 if k < 4 else 0):   # DEBUG drop control: 6th forward (X3-X6) / the tile's forward (X7) skipped
                                         dm_utils.red_async_fwd(a, Int32(0), dm_utils.XS_DUMMY[0])
                                 else:
                                     dm_utils.red_async_fwd(a, Int32(0), dm_utils.XS_DUMMY[0])

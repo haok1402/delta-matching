@@ -3572,8 +3572,9 @@ class DMPass0Sm100:
                 pipeline_kv.sync_object_empty.wait(1, phase)
 
         if const_expr(self.use_tma_KV and self.dm_xnkv):
-            dm_utils.mbar_complete_tx(pipeline_kv.producer_get_barrier(producer_state).toint(),
-                                      self.tma_copy_bytes[K_or_V])
+            with cute.arch.elect_one():
+                dm_utils.mbar_complete_tx(pipeline_kv.producer_get_barrier(producer_state).toint(),
+                                          self.tma_copy_bytes[K_or_V])
         elif const_expr(self.use_tma_KV):
             assert tXgX is not None and tXsX is not None and tma_atom is not None
             tXsX_cur = tXsX[None, stage]

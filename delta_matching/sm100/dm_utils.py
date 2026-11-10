@@ -745,33 +745,92 @@ def tc_fence_before(*, loc=None, ip=None):
 # traced with TCF on, every mbarrier / named-barrier wait gets fence::after and every arrive gets fence::before.
 # On sm_100a (CUDA 13.0) both fences emit no SASS: they only forbid ptxas from moving tcgen05 ops across the sync
 # (kda/docs/fence-audit.md). Knobs: fwd DM_FWD_OPTS tcf=0, bwd DM_BWD_OPTS notcf, pass0 exp variant +ntcf.
-TCF = [False]
+# kda-sm100-buildtrap: the fence state lives in ONE process-wide holder (sys.modules["_dm_tcf_state"], outside the
+# delta_matching.* namespace that harnesses purge). The wrappers below are installed on SHARED classes (cutlass.pipeline,
+# flash_attn.cute.pipeline, cutlass.cute.arch) that survive a purge; before this, a purge + re-import of delta_matching left
+# the installed wrappers reading the purged module's TCF flag, which the new kernels never set -> every pipeline fence
+# silently vanished from the PTX (the "BUILD TRAP"; kda/docs/buildtrap-design.md). Now (1) TCF / _TCF_SKIP are the shared
+# lists, (2) every (re-)import unwraps any installed wrapper (ours or an older tree's) to the raw method and re-wraps it with
+# this module's code, and (3) tcf_end() raises if a kernel marked tcgen05 pipelines but no wrapper fence was emitted.
 import os as _os_tcf
+import sys as _sys_tcf
+import types as _types_tcf
+
+
+def _tcf_state():
+    m = _sys_tcf.modules.get("_dm_tcf_state")
+    if m is None:
+        m = _types_tcf.ModuleType("_dm_tcf_state")
+        m.TCF = [False]          # current mode while a DM kernel body is traced (0 / 1 minimal / 2 blanket)
+        m.SKIP = [False]         # tcf_site debug suppression
+        m.STATS = {"marks": 0, "fences": 0}   # per kernel trace (reset by tcf_begin): marked objects, wrapper fences
+        _sys_tcf.modules["_dm_tcf_state"] = m
+    return m
+
+
+_TCF_STATE = _tcf_state()
+TCF = _TCF_STATE.TCF
+_TCF_STATS = _TCF_STATE.STATS
 _TCF_MASK = int(_os_tcf.environ.get("DM_TCF_MASK", "15"))   # DEBUG bisect: 1 waits(after) 2 releases(before) 4 relay 8 bars
+
+
+class TcfBuildTrap(RuntimeError):
+    """A DM kernel was traced with tcgen05 fences on, but the pipeline fence wrappers emitted none (stale binding)."""
 
 
 def tcf_begin(on):
     """0 = off (94ec380 code), 1 = minimal (default: tcgen05 pipelines / barriers marked with tcf_mark, explicit
     relay sites), 2 = blanket (every mbarrier / named-barrier wait and arrive, every sync_warp / elect_one)."""
+    tcf_verify()
     TCF[0] = int(on)
+    _TCF_STATS["marks"] = 0
+    _TCF_STATS["fences"] = 0
 
 
 def tcf_end():
+    """Ends a kernel trace. Raises TcfBuildTrap (before cute.compile -> nothing is compiled or cached) when fences were on,
+    pipelines were marked, and no wrapper fence came out: the wrappers are not bound to this state (BUILD TRAP)."""
+    mode, marks, fences = TCF[0], _TCF_STATS["marks"], _TCF_STATS["fences"]
     TCF[0] = False
+    if (mode and marks and not fences and _TCF_MASK == 15 and not _os_tcf.environ.get("DM_TCF_SKIP")
+            and _os_tcf.environ.get("DM_TCF_NOGUARD", "0") != "1"):
+        raise TcfBuildTrap(f"[dm_utils] BUILD TRAP: kernel traced with TCF={mode} and {marks} marked tcgen05 pipelines / "
+                           "barriers, but the pipeline fence wrappers emitted 0 fences (wrappers bound to a stale "
+                           "delta_matching import?). Refusing to compile a fence-less kernel (kda/docs/buildtrap-design.md).")
+
+
+def _tcf_raw(f):
+    """Strip installed fence wrappers (this tree's: __wrapped__; older trees': the closure cell of the wrapped callable)."""
+    while callable(f) and (getattr(f, "_dm_tcf", False) or getattr(f, "_dm_tcfm", False)):
+        g = getattr(f, "__wrapped__", None)
+        if g is None:
+            code, cl = getattr(f, "__code__", None), getattr(f, "__closure__", None) or ()
+            names = code.co_freevars if code is not None else ()
+            for n in ("f", "_el"):
+                if n in names:
+                    g = cl[names.index(n)].cell_contents
+                    break
+        if g is None:
+            raise TcfBuildTrap(f"[dm_utils] cannot unwrap installed fence wrapper {f!r}")
+        f = g
+    return f
 
 
 def _tcf_wrap(f, before, after, mode=2):
-    if getattr(f, "_dm_tcf", False):
-        return f
+    f = _tcf_raw(f)
 
     def w(*a, **kw):
         if TCF[0] >= mode and before:
             tc_fence_before()
+            _TCF_STATS["fences"] += 1
         r = f(*a, **kw)
         if TCF[0] >= mode and after:
             tc_fence_after()
+            _TCF_STATS["fences"] += 1
         return r
     w._dm_tcf = True
+    w._dm_tcf_state = _TCF_STATE
+    w.__wrapped__ = f
     w.__name__ = getattr(f, "__name__", "w")
     w.__doc__ = f.__doc__
     return w
@@ -795,19 +854,22 @@ def _tcf_install():
     # warp -> elected-leader relays (Codex review 1): every lane fences its own tcgen05 ops before the warp sync, so the
     # leader's later arrive publishes the whole warp's ops. elect.sync already requires the full warp, so the added
     # bar.warp.sync is legal wherever elect_one is.
-    _sw = _A.sync_warp
+    _sw = _tcf_raw(_A.sync_warp)
     _tcf_raw_sync_warp[0] = _sw
     _A.sync_warp = _tcf_wrap(_sw, True, True)
-    _el = _A.elect_one
-    if not getattr(_el, "_dm_tcf", False):
-        def elect_one(*a, **kw):
-            if TCF[0] >= 2:
-                tc_fence_before()
-                _sw()
-            return _el(*a, **kw)
-        elect_one._dm_tcf = True
-        elect_one.__doc__ = _el.__doc__
-        _A.elect_one = elect_one
+    _el = _tcf_raw(_A.elect_one)
+
+    def elect_one(*a, **kw):
+        if TCF[0] >= 2:
+            tc_fence_before()
+            _TCF_STATS["fences"] += 1
+            _sw()
+        return _el(*a, **kw)
+    elect_one._dm_tcf = True
+    elect_one._dm_tcf_state = _TCF_STATE
+    elect_one.__wrapped__ = _el
+    elect_one.__doc__ = _el.__doc__
+    _A.elect_one = elect_one
     # flash_attn NamedBarrier.arrive_and_wait_unaligned calls nvvm.barrier_cta_sync directly (bypasses cute.arch.barrier)
     try:
         import flash_attn.cute.pipeline as _fp
@@ -836,12 +898,12 @@ def tcf_mark(kind, *objs):
         if k not in _TCF_SUB:
             _TCF_SUB[k] = type(c.__name__, (c,), {"_dm_tcf": kind})
         object.__setattr__(o, "__class__", _TCF_SUB[k])
+        _TCF_STATS["marks"] += 1
     return objs
 
 
 def _tcf_mwrap(f, role):
-    if getattr(f, "_dm_tcfm", False):
-        return f
+    f = _tcf_raw(f)
 
     def w(self, *a, **kw):
         k = getattr(type(self), "_dm_tcf", None) if TCF[0] == 1 and not _TCF_SKIP[0] else None
@@ -862,38 +924,65 @@ def _tcf_mwrap(f, role):
             before = False   # DEBUG bisect: no before-fence on thread releases of MMA-produced buffers
         if before and (_TCF_MASK & 2 or k == "bar"):
             tc_fence_before()
+            _TCF_STATS["fences"] += 1
         r = f(self, *a, **kw)
         if after and (_TCF_MASK & 1 or k == "bar"):
             tc_fence_after()
+            _TCF_STATS["fences"] += 1
         return r
     w._dm_tcfm = True
+    w._dm_tcf_state = _TCF_STATE
+    w.__wrapped__ = f
     w.__name__ = f.__name__
     return w
 
 
-def _tcf_install_min():
+_TCF_ROLES = {"consumer_wait": "wait", "producer_acquire": "wait", "consumer_release": "rel", "producer_commit": "rel",
+              "arrive": "rel", "arrive_unaligned": "rel", "arrive_w_index": "rel", "wait": "wait",
+              "wait_unaligned": "wait", "arrive_and_wait": "both", "arrive_and_wait_unaligned": "both",
+              "arrive_and_wait_w_index": "both", "sync": "both"}
+
+
+def _tcf_min_classes():
     import cutlass.pipeline as _cp
     import flash_attn.cute.pipeline as _fp
-    roles = {"consumer_wait": "wait", "producer_acquire": "wait", "consumer_release": "rel", "producer_commit": "rel",
-             "arrive": "rel", "arrive_unaligned": "rel", "arrive_w_index": "rel", "wait": "wait",
-             "wait_unaligned": "wait", "arrive_and_wait": "both", "arrive_and_wait_unaligned": "both",
-             "arrive_and_wait_w_index": "both", "sync": "both"}
-    seen = set()
+    seen = []
     for mod in (_cp, _fp):
         for n in dir(mod):
             c = getattr(mod, n)
             if not isinstance(c, type) or c in seen:
                 continue
-            seen.add(c)
-            if not (n.startswith("Pipeline") or n == "NamedBarrier"):
-                continue
-            for m, r in roles.items():
-                f = c.__dict__.get(m)
-                if f is not None and callable(f):
-                    setattr(c, m, _tcf_mwrap(f, r))
+            seen.append(c)
+            if n.startswith("Pipeline") or n == "NamedBarrier":
+                yield c
 
 
-_TCF_SKIP = [False]
+def _tcf_install_min():
+    for c in _tcf_min_classes():
+        for m, r in _TCF_ROLES.items():
+            f = c.__dict__.get(m)
+            if f is not None and callable(f):
+                setattr(c, m, _tcf_mwrap(f, r))
+
+
+def tcf_verify():
+    """True when every installed fence wrapper is bound to this process's fence state (this tree's wrappers). Otherwise
+    (another delta_matching import re-wrapped the shared classes, e.g. an older tree without the shared state) the wrappers
+    are re-installed from this module, with a warning on stderr."""
+    import cutlass.cute.arch as _A
+    ok = all(getattr(c.__dict__[m], "_dm_tcf_state", None) is _TCF_STATE
+             for c in _tcf_min_classes() for m in _TCF_ROLES if callable(c.__dict__.get(m)))
+    ok = ok and all(getattr(getattr(_A, n), "_dm_tcf_state", None) is _TCF_STATE
+                    for n in ("sync_warp", "elect_one", "barrier") if hasattr(_A, n))
+    if not ok:
+        print("[dm_utils] tcgen05 fence wrappers were not bound to this delta_matching import: re-installed "
+              "(kda/docs/buildtrap-design.md)", file=_sys_tcf.stderr, flush=True)
+        _tcf_install()
+        _tcf_install_min()
+    return ok
+
+
+_TCF_SKIP = _TCF_STATE.SKIP
 
 
 class tcf_site:

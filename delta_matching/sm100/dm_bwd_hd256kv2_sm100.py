@@ -280,6 +280,11 @@ class DmHd256Kv2:
                                    barrier_for_retrieve=pipeline.NamedBarrier(barrier_id=1, num_threads=self.threads),
                                    allocator_warp_id=self.LOAD_WARP, is_two_cta=True,
                                    two_cta_tmem_dealloc_mbar_ptr=st.tmem_dealloc.ptr)
+        # bundle-3 racecheck site (dm-validator 11:0x, :283): tcgen05.alloc.cta_group::2 lowers to a peer handshake (UTCATOMSWS.2CTA,
+        # remote STAS of the TMEM address + remote SYNCS.ARRIVE on a reserved smem mbarrier). Both CTAs pass a cluster barrier (all their
+        # threads, mbarrier inits fenced) before the allocator warps start it, as in the hd128 2-CTA bwd where it runs after the cluster sync.
+        cute.arch.cluster_arrive()
+        cute.arch.cluster_wait()
         tmem.allocate(512)
         tmem.wait_for_alloc()
         tmem_ptr = tmem.retrieve_ptr(Float32)

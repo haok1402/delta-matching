@@ -130,7 +130,7 @@ def expoff_spec(var: str):
     if not v:
         return None
     deg, r, m = (int(t) for t in v.split(":"))
-    assert deg in (3, 5, 6) and 0 < r < m, f"{var}={v}"
+    assert deg in (3, 5, 6) and 0 < r <= m, f"{var}={v}"   # r == m: every block (diagnostic)
     return deg, r, m
 
 

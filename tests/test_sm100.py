@@ -58,6 +58,18 @@ def run(q, k, v, do, causal, mode, deterministic=True):
 
 
 # B, N, H, Hk, causal: MHA / GQA / MQA, short sequences (one 128-row tile), odd numbers of 128-row blocks
+EMU_DIST = {"O": 3e-4, "dQ": 5e-3, "dK": 5e-3, "dV": 5e-3}   # rel L2(kernel, emulation), ~3x the measured worst
+
+
+def _record(case, name, v):
+    """DM_TEST_RECORD=<file>: append the measured kernel-vs-emulation distances (to re-derive EMU_DIST)."""
+    import json
+    f = os.environ.get("DM_TEST_RECORD")
+    if f:
+        with open(f, "a") as fh:
+            fh.write(json.dumps({"t": "hd128", "case": case, "out": name, "dist": v}) + "\n")
+
+
 SHAPES = [(1, 128, 2, 2, True), (2, 256, 4, 1, True), (1, 384, 4, 4, False), (1, 1152, 4, 4, True),
           (2, 1408, 8, 2, False), (1, 2048, 8, 2, True)]
 
@@ -65,8 +77,8 @@ SHAPES = [(1, 128, 2, 2, True), (2, 256, 4, 1, True), (1, 384, 4, 4, False), (1,
 @pytest.mark.parametrize("mode", ["matched", "stale"])
 @pytest.mark.parametrize("B,N,H,Hk,causal", SHAPES)
 def test_matches_emulation(B, N, H, Hk, causal, mode):
-    """Kernel outputs sit within the fp8 floor of exact attention and close to the emulation of the sm100-mx numerics
-    (the validator's accuracy / faithful rules, on the candidate's own K-centering mean)."""
+    """Kernel outputs are at most 1% (+1e-5) further from exact attention than the emulation of the sm100-mx numerics (on the
+    kernel's own K-centering mean), and close to the emulation itself (rel L2 bounds at ~3x the measured worst)."""
     q, k, v, do = inputs(B, N, H, Hk)
     got = run(q, k, v, do, causal, mode)
     for nm in NAMES:
@@ -77,8 +89,10 @@ def test_matches_emulation(B, N, H, Hk, causal, mode):
     ex = R.attention_fp32(q, k, v, do, causal)
     for nm in NAMES:
         e_c, e_e = rel(got[nm], ex[nm]), rel(em[nm], ex[nm])
-        assert e_c <= 1.25 * e_e + 2e-3, f"{nm}: err vs exact {e_c:.3e}, emulation {e_e:.3e}"
-        assert rel(got[nm], em[nm]) <= 0.5 * e_e, f"{nm}: dist to emulation {rel(got[nm], em[nm]):.3e}, emul err {e_e:.3e}"
+        assert e_c <= 1.01 * e_e + 1e-5, f"{nm}: err vs exact {e_c:.3e}, emulation {e_e:.3e}"
+        dist = rel(got[nm], em[nm])
+        _record(f"{B}_{N}_{H}_{Hk}_{int(causal)}_{mode}", nm, dist)
+        assert dist <= EMU_DIST[nm], f"{nm}: dist to emulation {dist:.3e} > {EMU_DIST[nm]:.1e}"
 
 
 @pytest.mark.parametrize("B,N,H,Hk,causal", [(1, 1024, 4, 4, True), (1, 2048, 8, 2, True), (1, 1152, 4, 4, False)])

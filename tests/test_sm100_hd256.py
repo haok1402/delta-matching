@@ -94,6 +94,19 @@ def _bits_equal(xs, ys):
 
 
 # ------------------------------------------------------------------------------------------------------------------- accuracy
+EMU_DIST = {"O": 5e-3, "dQ": 1e-3, "dK": 1.2e-3, "dV": 2e-3}   # rel L2(kernel, emulation), ~3x the measured worst (O: 5e-3)
+
+
+def _record(tag, case, name, v):
+    """DM_TEST_RECORD=<file>: append the measured kernel-vs-emulation distances (to re-derive EMU_DIST)."""
+    import json
+    import os
+    f = os.environ.get("DM_TEST_RECORD")
+    if f:
+        with open(f, "a") as fh:
+            fh.write(json.dumps({"t": tag, "case": case, "out": name, "dist": v}) + "\n")
+
+
 ACC_CASES = [  # B, N, H, Hk, causal, mode, family
     (1, 1024, 4, 4, True, "matched", "randn"),
     (1, 1024, 8, 2, True, "matched", "ramp"),
@@ -107,8 +120,9 @@ ACC_CASES = [  # B, N, H, Hk, causal, mode, family
 
 @pytest.mark.parametrize("B,N,H,Hk,causal,mode,family", ACC_CASES)
 def test_accuracy_vs_exact_and_spec_emulation(B, N, H, Hk, causal, mode, family):
-    """Every output at most 5% (+1e-4) further from exact fp64 attention than the spec's torch emulation (same quantization points,
-    same K-centering mean), and (Gaussian inputs) inside the fp8 floor's absolute bounds; LSE equals the emulation's to fp32 round-off (summation order only)."""
+    """Every output at most 1% (+1e-5) further from exact fp64 attention than the spec's torch emulation (same quantization points,
+    same K-centering mean), close to the emulation itself (rel L2 bounds at ~3x the measured worst), and (Gaussian inputs)
+    inside the fp8 floor's absolute bounds; LSE equals the emulation's to fp32 round-off (summation order only)."""
     from delta_matching import reference as R
     from delta_matching.sm100.api import dm_attn_debug
     from delta_matching.sm100.quant import quant_qkv2
@@ -119,15 +133,18 @@ def test_accuracy_vs_exact_and_spec_emulation(B, N, H, Hk, causal, mode, family)
     em = R.dm_reference(q, k, v, do, causal, mode, "sm100-mx-d256", q_block=512, k_mean=mean,
                         o_for_stale=out[0] if mode == "stale" else None)
     ex = R.attention_fp32(q, k, v, do, causal, dtype=torch.float64)
-    floor = {"O": 8e-2, "dQ": 1.6e-1, "dK": 1.6e-1, "dV": 8e-2}
+    floor = {"O": 6e-2, "dQ": 7.5e-2, "dK": 7.5e-2, "dV": 6e-2}
     for name, got in zip(("O", "dQ", "dK", "dV"), out):
         err, emu_err = _rel(got, ex[name]), _rel(em[name].bfloat16(), ex[name])
-        assert err <= 1.05 * emu_err + 1e-4, f"{name}: kernel err {err:.4e} vs spec emulation {emu_err:.4e}"
+        assert err <= 1.01 * emu_err + 1e-5, f"{name}: kernel err {err:.4e} vs spec emulation {emu_err:.4e}"
+        dist = _rel(got, em[name].bfloat16())
+        _record("hd256", f"{B}_{N}_{H}_{Hk}_{int(causal)}_{mode}_{family}", name, dist)
+        assert dist <= EMU_DIST[name], f"{name}: kernel vs spec emulation rel L2 {dist:.3e} > {EMU_DIST[name]:.1e}"
         if family == "randn":     # the structured families sit far above the Gaussian fp8 floor in the emulation too
             assert err <= floor[name], f"{name}: err {err:.4e} above the fp8 floor bound {floor[name]}"
     lse = dm_attn_debug(q, k, v, do, causal=causal, mode=mode)["lse"]
     el = em["LSE"].double()
-    assert ((lse.double() - el).abs() <= 1e-4 + 4e-6 * el.abs()).all()       # a few fp32 ulp at |LSE| up to ~1e3 (outliers)
+    assert ((lse.double() - el).abs() <= 1e-5 + 1e-6 * el.abs()).all()       # fp32 round-off at |LSE| up to ~1e3 (outliers)
 
 
 # ---------------------------------------------------------------------------------------------------------------- determinism

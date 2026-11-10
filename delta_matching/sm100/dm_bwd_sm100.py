@@ -6165,38 +6165,38 @@ class DMBackwardSm100:
             work_tile = tile_scheduler.get_current_work()
 
     @cute.jit
-    def _tcq_step(self, st, dm_tcq, mdQ_semaphore, m, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx,
-                  is_final_site=True):
+    def _tcq_push_tile(self, dm_tcq, mdQ_semaphore, m_block_min, m_block_max, work_n, head_idx, batch_idx, seqlen,
+                       block_info, tidx):
         """rw8k tconv readiness queue (a scheduling hint for the PDL tail converter; correctness rests on the converter's
-        own ld.acquire of the det counters). After the LAST writer of dQ tile m in the det order (lock value == number of
-        writers - 1) released the tile's counter, it bumps the tile's pair count; the second CTA of the 2-CTA pair appends
-        the tile id: pos = atom.add(tail), entry[pos] = tile + 1. Relaxed atomics, and every returned value is consumed one
-        step later (st = (pending tile, its pair count, pending entry tile, its position); -1 = none), so the reduce warp
-        never waits on an atomic round trip inside the m loop. Layout (int32, zeroed per call on the prestage side stream):
-        [0] tail, [1, 1 + T) entries, [1 + T, 1 + 2T) pair counts."""
-        pt, po, p2t, p2p = st
+        own ld.acquire of the det counters). At the end of its work tile (after its last dQ release), each CTA counts the
+        dQ tiles it was the LAST writer of in the det order (lock value == writers - 1); the second CTA of the 2-CTA pair
+        (pair count per work tile) appends them in m order: pos = atom.add(tail, count), entry[pos + i] = tile + 1.
+        Two relaxed atomics per CTA, outside the m loop. Layout (int32, zeroed per call on the prestage side stream):
+        [0] tail, [1, 1 + T) entries, [1 + T, 1 + 2T) pair counts per (b, h, n) work tile."""
         if tidx == 0:
+            mt = cute.size(mdQ_semaphore, mode=[0])     # (Mt, rank, H, B) view (semaphore_transpose)
+            nh = cute.size(mdQ_semaphore, mode=[2])
+            nt = cute.size(mdQ_semaphore, mode=[3]) * nh * mt
             base = dm_tcq.iterator.toint()
-            if p2t >= 0:
-                dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + p2p), p2t + 1)
-                p2t = Int32(-1)
-            if pt >= 0:
-                if po == self.cta_group_size - 1:
-                    p2p = dm_utils.atom_add_relaxed_gpu_s32(base, Int32(1))
-                    p2t = pt
-                pt = Int32(-1)
-            if const_expr(is_final_site):
-                nmax = block_info.get_n_block_max_for_m_block(seqlen, m)
+            cnt = Int32(0)
+            for m in cutlass.range(m_block_min, m_block_max, unroll=1):
                 lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info, seqlen, m,
                                                      work_n)
-                if lock == nmax - 1:
-                    mt = cute.size(mdQ_semaphore, mode=[0])     # (Mt, rank, H, B) view (semaphore_transpose)
-                    nh = cute.size(mdQ_semaphore, mode=[2])
-                    nt = cute.size(mdQ_semaphore, mode=[3]) * nh * mt
-                    tile = (batch_idx * nh + head_idx) * mt + m
-                    po = dm_utils.atom_add_relaxed_gpu_s32(base + Int64(4) * Int64(1 + nt + tile), Int32(1))
-                    pt = tile
-        return pt, po, p2t, p2p
+                if lock == block_info.get_n_block_max_for_m_block(seqlen, m) - 1:
+                    cnt = cnt + 1
+            if cnt > 0:
+                wt = (batch_idx * nh + head_idx) * mt + work_n
+                old = dm_utils.atom_add_relaxed_gpu_s32(base + Int64(4) * Int64(1 + nt + wt), Int32(1))
+                if old == self.cta_group_size - 1:
+                    pos = dm_utils.atom_add_relaxed_gpu_s32(base, cnt)
+                    i = Int32(0)
+                    for m in cutlass.range(m_block_min, m_block_max, unroll=1):
+                        lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info,
+                                                             seqlen, m, work_n)
+                        if lock == block_info.get_n_block_max_for_m_block(seqlen, m) - 1:
+                            dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + pos + i),
+                                                        (batch_idx * nh + head_idx) * mt + m + 1)
+                            i = i + 1
 
     @cute.jit
     def dQacc_reduce(
@@ -6392,8 +6392,6 @@ class DMBackwardSm100:
                 # dQacc_reduce mainloop
                 # Block sparsity: iterate over sparse m_block count and derive actual m_block
                 # from Q_IDX/FULL_Q_IDX tensors. Dense: iterate m_block_min..m_block_max directly.
-                if const_expr(dm_tcq is not None):
-                    dm_tq_st = (Int32(-1), Int32(0), Int32(-1), Int32(0))   # rw8k tconv deferred queue push state
                 for iter_idx in cutlass.range(loop_count, unroll=1):
                     m_block = m_block_min + iter_idx
                     m_block_oob_upper = False
@@ -6608,8 +6606,6 @@ class DMBackwardSm100:
                                     cta_rank_in_cluster,
                                     1,
                                 )
-                                if const_expr(dm_tcq is not None):
-                                    dm_tq_st = self._tcq_step(dm_tq_st, dm_tcq, mdQ_semaphore, m_block - 1, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx)
 
                     # With more than one staging stage the tile's newest bulk adds are still in
                     # flight here (each stage only waits for the older groups). Drain them once
@@ -6641,8 +6637,6 @@ class DMBackwardSm100:
                                 cta_rank_in_cluster,
                                 dq_sem_release_inc,
                             )
-                            if const_expr(dm_tcq is not None):
-                                dm_tq_st = self._tcq_step(dm_tq_st, dm_tcq, mdQ_semaphore, m_block, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx)
 
                 if process_tile:
                     if is_tma_warp:
@@ -6659,14 +6653,11 @@ class DMBackwardSm100:
                                 cta_rank_in_cluster,
                                 1,
                             )
-                            if const_expr(dm_tcq is not None):
-                                dm_tq_st = self._tcq_step(dm_tq_st, dm_tcq, mdQ_semaphore, m_block_max - 1, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx)
 
                 if const_expr(dm_tcq is not None):
-                    # flush the deferred queue push (pair count -> append -> entry store)
-                    for _f in cutlass.range_constexpr(2):
-                        dm_tq_st = self._tcq_step(dm_tq_st, dm_tcq, mdQ_semaphore, m_block_min, m_block_min, work_n, head_idx,
-                                                  batch_idx, seqlen, block_info, tidx, is_final_site=False)
+                    if process_tile:
+                        self._tcq_push_tile(dm_tcq, mdQ_semaphore, m_block_min, m_block_max, work_n, head_idx, batch_idx,
+                                            seqlen, block_info, tidx)
                 if const_expr(
                     self.deterministic
                     and not self.spt

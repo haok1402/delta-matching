@@ -110,6 +110,8 @@ def _auto_opts_impl(q8, k8, causal=False):
     # DM tconv (rw8k, det, auto): PDL tail converter for dQ (tailconv.py) for N <= tconvN (default 16384): 8k e2e -1.0..-1.5%
     # per call (both GQA shapes); measured +0.8..+1.6% at 64k-128k, so long sequences keep the serial postprocess.
     # 'tconv' forces it, 'notconv' disables, tconvN=<N> moves the cut.
+    if "abl:dqr0" in ol and "notconv" not in ol:
+        ol = ol + ["notconv"]     # DM dqr0 (timing-only bound): no dQ semaphores to convert from
     tN = int(next((o[7:] for o in ol if o.startswith("tconvN=")), "16384"))
     if ("tconv" not in ol and "notconv" not in ol and q8.shape[1] <= tN
             and not any(o in ol for o in ("lwc", "trace", "pdyn", "rsdbg", "pdump"))):
@@ -306,6 +308,8 @@ _ns = dict(vars(fi))
 def _dm_post_convert(acc, out, *a, **k):
     """FA4 postprocess wrapper: skipped for dQ when the kernel's last writer already wrote bf16 dQ (DM lwc)."""
     sem = _CTX.pop("dm_sem", None)
+    if sem is not None and sem[0] == "q" and "abl:dqr0" in _env("DM_BWD_OPTS", "").split(","):
+        return   # DM dqr0 (timing only): the dQ GEMM stand-in writes bf16 dQ itself (no dQ postprocess)
     if _CTX.get("dq") is not None and out is _CTX["dq"]:
         return
     if _env("DM_RW8K_SEMDUMP", "0") == "1" and sem is not None and sem[1] is not None and not k.get("fake_mode", False):
@@ -357,6 +361,11 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
         aux.append(_CTX["dq"])
     _ao = _auto_opts(q8, k8, causal)
+    if "abl:dqr0" in _ao.split(","):
+        # DM dqr0 (kda-sm100-dqr128 stage-1 bound, timing only): 2 GiB dS-code workspace ring (aux[4]), fresh per call
+        # (caching allocator; recorded by fastpath as a fresh allocation)
+        assert trace is None and "lwc" not in _ao.split(","), "dqr0: aux[4] = workspace ring"
+        aux.append(torch.empty((1 << 31) // 4, dtype=torch.int32, device=q8.device))
     if "pdyn" in _ao.split(","):
         # DM pdyn: claim counter for the dynamic persistent scheduler (last aux tensor), zeroed per launch
         _CTX["pdyn_ctr"] = torch.zeros(1, dtype=torch.int32, device=q8.device)

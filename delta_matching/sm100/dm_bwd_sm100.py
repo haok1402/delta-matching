@@ -728,6 +728,10 @@ class DMBackwardSm100:
         # ordpc2: SFA_dv poison right after dV(t) issue (after dV(t)'s completion wait with ordw): B1's window is closed in
         # practice by the dQ-empty wait before S^T(t+1) (ordpc1 never fires), so ordpc2 shows the harness sees a dV SF overwrite
         self.dm_abl = self.dm_abl + tuple(x[4:] for x in self.dm_opts if x.startswith("abl:"))
+        # DM dqr0 (kda-sm100-dqr128 stage-1 bound, TIMING ONLY, wrong dQ): the main kernel does no dQ work at all (no dQ MMA,
+        # no dQ-empty wait, no dS exchange / dS operand pipeline, no dQ SF word, no reduce warps) and the dS helper instead
+        # bulk-stores its 16 KiB dS-code tile to a workspace ring (aux[4]), as the dqr design would.
+        self.dm_dqr0 = "dqr0" in self.dm_abl
         # DM dsq (track L, kda/docs/bwdalt-design.md): the dS tile amax / pow2 scale / e4m3 quantization / dS code+SF stores /
         # dQ SF word + peer dS exchange move from the 8 compute warps to the 4 reduce (dQ drain) warps. Reduce warp q owns
         # TMEM lanes 32q..32q+31 = 32 keys = exactly one dS scale block (32 keys x 128 queries): no cross-WG amax exchange.
@@ -2507,37 +2511,38 @@ class DMBackwardSm100:
             if const_expr(self.dm_allocf):
                 dm_utils.tc_fence_after()    # allocf: canonical alloc -> fence::before -> bar -> fence::after -> ld tmem_hold
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            self.dQacc_reduce(
-                mdQaccum,
-                sdQaccum,
-                thr_mma_dQ,
-                tdQtdQ,
-                pipeline_dQ,
-                dQaccum_empty_mbar_ptr,
-                block_info,
-                SeqlenInfoCls,
-                TileSchedulerCls,
-                mdQ_semaphore,
-                blocksparse_tensors,
-                dm_dq=aux_data.tensors[4] if const_expr("lwc" in self.dm_opts) else None,
-                thr_mma_S=thr_mma_S if const_expr(self.dm_dsq) else None,
-                tdPtdP=tdPtdP if const_expr(self.dm_dsq) else None,
-                sdS=sdS if const_expr(self.dm_dsq) else None,
-                sdS_xchg=sdS_xchg if const_expr(self.dm_dsq) else None,
-                sdS_dK=sdS_dK if const_expr(self.dm_dsq) else None,
-                pipeline_dP=pipeline_dP if const_expr(self.dm_dsq) else None,
-                pipeline_dS=pipeline_dS if const_expr(self.dm_dsq) else None,
-                dS_cluster_full_mbar_ptr=dS_cluster_full_mbar_ptr if const_expr(self.dm_dsq) else None,
-                sDm=sDm if const_expr(self.dm_dsq) else None,
-                dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.dm_dsq) else None,
-                aux_data=aux_data if const_expr(self.dm_dsq) else None,
-                dm_trw=(aux_data.tensors[4].iterator.toint() + 8 * 44
-                        if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
-                                      and "trace" in self.dm_opts and "semw" in self.dm_opts) else None),
-                dm_tlv=(aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
-                                                         and "trace" in self.dm_opts and self.dm_tlev >= 0) else None),
-                dm_tcq=aux_data.tensors[4] if const_expr(self.dm_tconv and self.deterministic) else None,
-            )
+            if const_expr(not self.dm_dqr0):
+              self.dQacc_reduce(
+                  mdQaccum,
+                  sdQaccum,
+                  thr_mma_dQ,
+                  tdQtdQ,
+                  pipeline_dQ,
+                  dQaccum_empty_mbar_ptr,
+                  block_info,
+                  SeqlenInfoCls,
+                  TileSchedulerCls,
+                  mdQ_semaphore,
+                  blocksparse_tensors,
+                  dm_dq=aux_data.tensors[4] if const_expr("lwc" in self.dm_opts) else None,
+                  thr_mma_S=thr_mma_S if const_expr(self.dm_dsq) else None,
+                  tdPtdP=tdPtdP if const_expr(self.dm_dsq) else None,
+                  sdS=sdS if const_expr(self.dm_dsq) else None,
+                  sdS_xchg=sdS_xchg if const_expr(self.dm_dsq) else None,
+                  sdS_dK=sdS_dK if const_expr(self.dm_dsq) else None,
+                  pipeline_dP=pipeline_dP if const_expr(self.dm_dsq) else None,
+                  pipeline_dS=pipeline_dS if const_expr(self.dm_dsq) else None,
+                  dS_cluster_full_mbar_ptr=dS_cluster_full_mbar_ptr if const_expr(self.dm_dsq) else None,
+                  sDm=sDm if const_expr(self.dm_dsq) else None,
+                  dm_xchg_mbar=storage.dm_xchg_mbar.data_ptr() if const_expr(self.dm_dsq) else None,
+                  aux_data=aux_data if const_expr(self.dm_dsq) else None,
+                  dm_trw=(aux_data.tensors[4].iterator.toint() + 8 * 44
+                          if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
+                                        and "trace" in self.dm_opts and "semw" in self.dm_opts) else None),
+                  dm_tlv=(aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
+                                                           and "trace" in self.dm_opts and self.dm_tlev >= 0) else None),
+                  dm_tcq=aux_data.tensors[4] if const_expr(self.dm_tconv and self.deterministic) else None,
+              )
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if warp_idx == self.reduce_warp_ids[0] and cute.arch.lane_idx() == 0:
                     dm_utils.red_add_u64(aux_data.tensors[4].iterator.toint() + 8 * (64 + 8 * bidx + 6), dm_utils.globaltimer())
@@ -3878,7 +3883,8 @@ class DMBackwardSm100:
                     if const_expr(self.dm_pers > 0):
                         # DM pers: S(0) of this tile writes the TMEM columns that hold the previous tile's last dQ;
                         # wait until the reduce warps drained it (the main loop's S waits the same way)
-                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                        if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                            pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(4))
                     if const_expr(self.dm_ordw_v):
                         self._dm_ord_wait(0, dm_dvn)   # previous work tile's last dV (SF in the S region)
@@ -3941,7 +3947,8 @@ class DMBackwardSm100:
                         self._tlev(dm_trace, dm_mi, 0, True)
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
-                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                        if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                            pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                         if const_expr(dm_trace is not None):
                             dm_acc1 = dm_acc1 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 1, True)
@@ -4008,19 +4015,24 @@ class DMBackwardSm100:
                         # (5) dQ = dS @ K (cur)
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
-                        pipeline_dS.consumer_wait(consumer_state_dS)
+                        if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                            pipeline_dS.consumer_wait(consumer_state_dS)
                         if const_expr(dm_trace is not None):
                             dm_acc5 = dm_acc5 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 5, True)
                         if const_expr(dm_trace is not None):
                             dm_t0 = dm_utils.clock64()
-                        cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
+                        if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                            cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
                         if const_expr(dm_trace is not None):
                             dm_acc6 = dm_acc6 + (dm_utils.clock64() - dm_t0)
                         self._tlev(dm_trace, dm_mi, 6, True)
-                        mma_dsk_fn(dz=dmz)
-                        pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
-                        pipeline_dS.consumer_release(consumer_state_dS)
+                        if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                            mma_dsk_fn(dz=dmz)
+                        if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                            pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
+                        if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                            pipeline_dS.consumer_release(consumer_state_dS)
                         consumer_state_dS.advance()
                         dS_cluster_phase ^= 1
                         producer_phase_dQ ^= 1
@@ -4089,15 +4101,21 @@ class DMBackwardSm100:
                     producer_phase_dKV ^= 1
 
                     # dQ = dS @ K
-                    pipeline_dS.consumer_wait(consumer_state_dS)
+                    if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                        pipeline_dS.consumer_wait(consumer_state_dS)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(11))
-                    cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
+                    if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                        cute.arch.mbarrier_wait(dS_cluster_leader_mbar_ptr, phase=dS_cluster_phase)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(12))
-                    pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
+                    if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                        pipeline_dQ.sync_object_empty.wait(0, producer_phase_dQ)
                     self._dm_prog(Int32(2), dm_pt, producer_phase_acc, Int32(13))
-                    mma_dsk_fn()
-                    pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
-                    pipeline_dS.consumer_release(consumer_state_dS)
+                    if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                        mma_dsk_fn()
+                    if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                        pipeline_dQ.sync_object_full.arrive(0, pipeline_dQ.producer_mask, cta_group)
+                    if const_expr(not self.dm_dqr0):   # DM dqr0 (timing-only bound): no dQ MMA / dQ-empty / dS operand / exchange
+                        pipeline_dS.consumer_release(consumer_state_dS)
                     pipeline_Kt.consumer_release(consumer_state_Kt)
                     consumer_state_dS.advance()
                     consumer_state_Kt.advance()
@@ -6052,6 +6070,23 @@ class DMBackwardSm100:
             pipeline_dP.consumer_release(dsq_dP_state)
         if const_expr(dm_tr is not None):
             self._tlev(dm_tr, dsq_j, 18, tidx == 0)
+        if const_expr(self.dm_dqr0):
+            # DM dqr0: previous tile's workspace bulk store must have READ sdS before the codes are rewritten
+            if tidx == 0:
+                cute.arch.cp_async_bulk_wait_group(0, read=True)
+            self.dsq_sync_barrier.arrive_and_wait()
+            for h in cutlass.range_constexpr(2):
+                for st in cutlass.range_constexpr(nst):
+                    cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
+            cute.arch.fence_view_async_shared()
+            self.dsq_sync_barrier.arrive_and_wait()
+            if tidx == 0:
+                ws_bytes = const_expr(self.tma_copy_bytes["dS"])
+                t_lin = (((batch_idx * Int32(4096) + head_idx) * Int32(4096) + m_block) * Int32(2048) + work_n) * Int32(2) + cta_rank
+                ws_off = Int64(t_lin & Int32((1 << 31) // ws_bytes - 1)) * Int64(ws_bytes)
+                dm_utils.cpasync_bulk_store_s2g_addr(sdS.iterator, aux_data.tensors[4].iterator.toint() + ws_off, ws_bytes)
+                cute.arch.cp_async_bulk_commit_group()
+            return   # trace-time (const_expr) early exit: the dqr0 build has no dQ operand / exchange / dQ SF
         # dQ operand: dS codes in SMEM (own query half) + the peer's half in the exchange buffer
         pipeline_dS.producer_acquire(dsq_dS_state)
         if const_expr(dm_tr is not None):
@@ -6167,6 +6202,9 @@ class DMBackwardSm100:
                     dsq_j = dsq_j + 1
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
+        if const_expr(self.dm_dqr0):
+            if tidx == 0:
+                cute.arch.cp_async_bulk_wait_group(0, read=True)   # DM dqr0: smem source read before CTA exit
 
     @cute.jit
     def _tcq_empty(self, dm_tcq, mdQ_semaphore, TileSchedulerCls, SeqlenInfoCls, block_info):

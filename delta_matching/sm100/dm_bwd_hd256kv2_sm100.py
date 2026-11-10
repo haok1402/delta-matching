@@ -153,7 +153,7 @@ class DmHd256Kv2:
     # SW128 swizzled bytes) issued by a store warp per CTA (CTA 0 warp 11, CTA 1 warp 8) -> W tile T = [CTA 0 image | CTA 1 image]
     # (the MN-major SW128 A image of the dQ GEMM).  New hand-offs: wr (codes written -> bulk read: the existing codes-ready
     # barrier, CTA 0 F_cd / CTA 1 relay L_cd) and ww (bulk read done -> compute rewrites the stage: new local mbarrier SD[stg]).
-    DQTCTL = ("wr", "ww", "cr")
+    DQTCTL = ("wr", "ww", "cr", "dd")      # dd: DEBUG dump of the dqc chunk state (thread 0 of each CTA -> carry dK row bx)
     # dqw (fork hd256-dqr): also store the dS codes + raw dS block exponents to a dQ workspace for the dQ GEMM kernel DmHd256Dqg
     # (dm_bwd_hd256dqg_sm100.py). The workspace tensors are passed in the mCodesS / mSBS slots (dbg 2 must be off):
     #   mCodesS = W  uint8 (T, 128, 128): tile T = (l, q tile ct, key tile kt) [key in tile][query in tile] (plain row-major,
@@ -345,6 +345,11 @@ class DmHd256Kv2:
             tilesb = Int64((n_t * (n_t + 1) - q0 * (q0 + 1)) // 2)
         ncs = n_t - c_lo
         total = rep * ncs
+        if const_expr(self.dqc and self.kn == "dd"):
+            if cute.arch.thread_idx()[0] == 0:
+                dda = _gaddr(mDump) + Int64(bx + hx * 2 * n_t) * 32
+                st_global_v4(dda, q0, nfull, cin, cout)
+                st_global_v4(dda + 16, c_lo, nfirst, total, Int32(tilesb))
 
         smem = cutlass.utils.SmemAllocator()
         st = smem.allocate(self.SS)

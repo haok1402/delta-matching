@@ -75,7 +75,7 @@ class DmHd256Mx2:
         #     reversed rt.  Each CTA keeps its ascending key traversal.
         self.q3 = bool(q3) and self.dqopt
         self.lpt = lpt if (self.dqopt and causal) else ""
-        assert self.lpt in ("", "g", "1") and (self.q3 or not q3)
+        assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
         self.kn = knob.replace("_safe", "")

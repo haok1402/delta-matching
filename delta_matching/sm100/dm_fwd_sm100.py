@@ -1697,6 +1697,7 @@ class DMForwardSm100:
                     SeqlenInfoCls,
                     blocksparse_tensors,
                     tile_scheduler=tile_scheduler,
+                    aux_tensors_q=aux_data.tensors if const_expr(self.dm_opts.get("qq8", "0") == "1") else None,
                 )
                 tmem_alloc_barrier.arrive_unaligned()
 
@@ -3804,6 +3805,40 @@ class DMForwardSm100:
         return s_p_o_consumer_count ^ 1, sm_stats_producer_phase ^ 1, s0_s1_sequence_phase ^ 1
 
     @cute.jit
+    def _qq8_quant(self, aux, w, lane, m_block, head_idx, batch_idx, seqlen):
+        """rw8k qq8: warp w quantizes the 32-token block rows m_block*128 + 32w + [0, 32) of Q (lane l: columns 4l..4l+3).
+        quant.py _qtile arithmetic: x = fp32(q) * D^-0.5 (rn), amax, pow2 scale, (x * inv) -> e4m3 rn satfinite."""
+        H = cute.size(aux[0], mode=[2])
+        N = seqlen.seqlen_q
+        r0 = m_block * self.m_block_size + w * 32
+        sc = Float32(self.head_dim_padded ** -0.5)
+        rs = Int64(H) * Int64(256)
+        base = aux[0].iterator.toint() + (Int64(batch_idx) * Int64(N) + Int64(r0)) * rs + Int64(head_idx) * Int64(256) + Int64(8 * lane)
+        am = Float32(0.0)
+        for hh in cutlass.range_constexpr(4):
+            ws = [dm_utils.ld_global_b64(base + Int64(8 * hh + j) * rs) for j in range(8)]
+            for j in cutlass.range_constexpr(8):
+                am = cute.arch.fmax(am, dm_utils.bf16x4_absmax_s(ws[j], sc))
+        for off in cutlass.range_constexpr(5):
+            am = cute.arch.fmax(am, cute.arch.shuffle_sync_bfly(am, offset=1 << off))
+        ab = dm_utils.bitcast_f32_i32(am)
+        eb = ((ab >> 23) & 0xFF) - 8
+        if (ab & 0x7FFFFF) > 0x600000:
+            eb = eb + 1
+        eb = cutlass.min(cutlass.max(eb, Int32(1)), Int32(254))
+        if am == Float32(0.0):
+            eb = Int32(127)
+        inv = dm_utils.bitcast_i32_f32((Int32(254) - eb) << 23)
+        rsq = Int64(H) * Int64(128)
+        obase = aux[1].iterator.toint() + (Int64(batch_idx) * Int64(N) + Int64(r0)) * rsq + Int64(head_idx) * Int64(128) + Int64(4 * lane)
+        for hh in cutlass.range_constexpr(4):
+            ws2 = [dm_utils.ld_global_b64(base + Int64(8 * hh + j) * rs) for j in range(8)]
+            for j in cutlass.range_constexpr(8):
+                dm_utils.st_global_b32(obase + Int64(8 * hh + j) * rsq, dm_utils.bf16x4_quant_e4m3_s(ws2[j], sc, inv))
+        if lane == 0:
+            aux[2][batch_idx, head_idx, r0 // 32] = dm_utils.bitcast_i32_f32(eb << 23)
+
+    @cute.jit
     def correction_loop(
         self,
         thr_mma_qk: cute.ThrMma,
@@ -3830,6 +3865,7 @@ class DMForwardSm100:
         SeqlenInfoCls: Callable,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         tile_scheduler=None,
+        aux_tensors_q=None,
     ):
         tidx = cute.arch.thread_idx()[0] % (cute.arch.WARP_SIZE * len(self.correction_warp_ids))
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4
@@ -3922,6 +3958,12 @@ class DMForwardSm100:
             else:
                 total_block_count = n_block_max - n_block_min
                 has_work = self.process_work_tile(block_info, seqlen, n_block_min, n_block_max)
+            if const_expr(self.dm_opts.get("qq8", "0") == "1"):
+                # rw8k 2c (cost check): the correction warps quantize this work tile's Q rows (bf16 aux[0] -> e4m3 aux[1],
+                # pow2 scales aux[2]; quant.py arithmetic with prescale D^-0.5) before their first stats wait
+                for qq_stage in cutlass.range_constexpr(self.q_stage):
+                    self._qq8_quant(aux_tensors_q, warp_idx, cute.arch.lane_idx(), self._q_block(work_m, qq_stage),
+                                    head_idx, batch_idx, seqlen)
 
             if has_work:
                 # Ignore first signal from softmax as no correction is required

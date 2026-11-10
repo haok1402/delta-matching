@@ -127,7 +127,7 @@ def pack_kv_scales(ks, vs):
     return torch.stack([_ue8m0_words(ks), _ue8m0_words(vs)], dim=-1).flatten(-2).contiguous()
 
 
-def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = None):
+def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = None, qq8_io=None):
     """q8 (B,N,H,D) e4m3 (sm baked), k8/v8 (B,N,Hk,D) e4m3; qs (B,H,N/32), ks/vs (B,Hk,N/32) fp32 powers of 2.
     Returns O (B,N,H,D) bf16, LSE (B,H,N) fp32 natural log."""
     over = dict(FORCE)
@@ -146,12 +146,21 @@ def dm_fwd(q8, qs, k8, ks, v8, vs, causal: bool, config_override: dict | None = 
     else:
         qsc, ksc, vsc = qs.contiguous(), ks.contiguous(), vs.contiguous()
     fopts = _env("DM_FWD_OPTS", "")
+    aux = None
+    if "qq8=1" in fopts.split(","):
+        # rw8k 2c (cost check): (q bf16 (B,N,H,D), q8 out (B,N,H,D) e4m3, qs out (B,H,N/32) fp32) as aux tensors
+        qb, q8o, qso = qq8_io
+        aux = [qb.view(torch.int64), q8o.view(torch.uint8).view(torch.int32), qso]
+        for t, ld in zip(aux, (3, 3, 2)):
+            t.__leading_dim__ = ld
+            t.__assumed_align__ = 4
+        return _dm_fwd_slow(q8, k8, v8, qsc, ksc, vsc, causal, over, aux)
     return fastpath.call("fwd", dict(q8=q8, k8=k8, v8=v8, qsc=qsc, ksc=ksc, vsc=vsc),
                          (bool(causal), fopts, repr(sorted(over.items())), compile_env()),
                          lambda: _dm_fwd_slow(q8, k8, v8, qsc, ksc, vsc, causal, over))
 
 
-def _dm_fwd_slow(q8, k8, v8, qsc, ksc, vsc, causal, over):
+def _dm_fwd_slow(q8, k8, v8, qsc, ksc, vsc, causal, over, aux=None):
     ids = {id(qsc), id(ksc), id(vsc)} - {id(None)}
     orig = (fi.FlashAttentionForwardSm100, fi._validate_tensor, fi._flash_attn_fwd.compile_cache, fi.select_fwd_config,
             fi.to_cute_tensor)
@@ -182,7 +191,8 @@ def _dm_fwd_slow(q8, k8, v8, qsc, ksc, vsc, causal, over):
         try:
             out, lse, *_ = fi._flash_attn_fwd(
                 q8, k8, v8, softmax_scale=1.0, causal=causal, return_lse=True,
-                q_descale=qsc, k_descale=ksc, v_descale=vsc, pack_gqa=False)
+                q_descale=qsc, k_descale=ksc, v_descale=vsc, pack_gqa=False,
+                **({"aux_tensors": aux} if aux is not None else {}))
             ret = (out, lse)
         finally:
             _fu.ex2_emulation_2 = _emu0

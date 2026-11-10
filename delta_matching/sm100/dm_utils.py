@@ -563,6 +563,38 @@ def bf16x4_quant_e4m3(w: cutlass.Int64, inv: Float32, *, loc=None, ip=None) -> I
 
 
 @dsl_user_op
+def bf16x4_absmax_s(w: cutlass.Int64, sc: Float32, *, loc=None, ip=None) -> Float32:
+    """max |fp32(bf16) * sc| of the 4 bf16 packed in w (rn multiply, as quant.py's x * prescale)."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [cutlass.Int64(w).ir_value(loc=loc, ip=ip), Float32(sc).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 lo, hi, a, b, c, d;\n\t.reg .f32 fa, fb, fc, fd;\n\t"
+        "mov.b64 {lo, hi}, $1;\n\t"
+        "shl.b32 a, lo, 16;\n\tand.b32 b, lo, 0xffff0000;\n\tshl.b32 c, hi, 16;\n\tand.b32 d, hi, 0xffff0000;\n\t"
+        "mov.b32 fa, a;\n\tmov.b32 fb, b;\n\tmov.b32 fc, c;\n\tmov.b32 fd, d;\n\t"
+        "mul.rn.f32 fa, fa, $2;\n\tmul.rn.f32 fb, fb, $2;\n\tmul.rn.f32 fc, fc, $2;\n\tmul.rn.f32 fd, fd, $2;\n\t"
+        "abs.f32 fa, fa;\n\tabs.f32 fb, fb;\n\tabs.f32 fc, fc;\n\tabs.f32 fd, fd;\n\t"
+        "max.f32 fa, fa, fb;\n\tmax.f32 fc, fc, fd;\n\tmax.f32 $0, fa, fc;\n\t}",
+        "=f,l,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def bf16x4_quant_e4m3_s(w: cutlass.Int64, sc: Float32, inv: Float32, *, loc=None, ip=None) -> Int32:
+    """4 x rn_e4m3((fp32(bf16) * sc) * inv), two separate rn multiplies (quant.py: x * prescale, then x3 * inv)."""
+    return Int32(llvm.inline_asm(
+        T.i32(), [cutlass.Int64(w).ir_value(loc=loc, ip=ip), Float32(sc).ir_value(loc=loc, ip=ip),
+                  Float32(inv).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .b32 lo, hi, a, b, c, d;\n\t.reg .f32 fa, fb, fc, fd;\n\t.reg .b16 c0, c1;\n\t"
+        "mov.b64 {lo, hi}, $1;\n\t"
+        "shl.b32 a, lo, 16;\n\tand.b32 b, lo, 0xffff0000;\n\tshl.b32 c, hi, 16;\n\tand.b32 d, hi, 0xffff0000;\n\t"
+        "mov.b32 fa, a;\n\tmov.b32 fb, b;\n\tmov.b32 fc, c;\n\tmov.b32 fd, d;\n\t"
+        "mul.rn.f32 fa, fa, $2;\n\tmul.rn.f32 fb, fb, $2;\n\tmul.rn.f32 fc, fc, $2;\n\tmul.rn.f32 fd, fd, $2;\n\t"
+        "mul.rn.f32 fa, fa, $3;\n\tmul.rn.f32 fb, fb, $3;\n\tmul.rn.f32 fc, fc, $3;\n\tmul.rn.f32 fd, fd, $3;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 c0, fb, fa;\n\tcvt.rn.satfinite.e4m3x2.f32 c1, fd, fc;\n\t"
+        "mov.b32 $0, {c0, c1};\n\t}",
+        "=r,l,f,f", has_side_effects=False, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
 def red_max_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
     """debug (rw8k tlq): red.global.max.u64."""
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), cutlass.Int64(val).ir_value(loc=loc, ip=ip)],

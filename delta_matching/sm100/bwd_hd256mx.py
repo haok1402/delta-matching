@@ -27,7 +27,7 @@ DETERMINISTIC = True
 # "6" = + per-head LPT order; "7" = + q3 + global LPT (fork hd256-dqopt candidates, codex/hd256-dqopt-02-q3lpt.md)
 IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(dqopt=True, lpt="g"), "6": dict(dqopt=True, lpt="1"),
               "7": dict(dqopt=True, q3=True, lpt="g")}
-IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "3"}   # O3-Q12 (DmHd256Mx2 dqopt) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
+IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "5"}   # Q12 + causal global LPT (HD256-DQ-LPTG) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}
 PROF = []
@@ -83,7 +83,7 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
                    knob="", impl=None):
     """impl per mode: "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values).
     impl "1" / "2" = all modes; a dict mode -> impl; None = env DM_H256_MX_IMPL (all modes; renamed from DM_H256_BWD_IMPL in bundle 3, which now names the api-level mx|kv2 switch) if set, else IMPL_DEFAULT
-    (dq "3" = DmHd256Mx2 + dqopt, dv / dk "1"; the api's default dK/dV is KV2)."""
+    (dq "5" = DmHd256Mx2 + dqopt + causal global LPT order, dv / dk "1"; the api's default dK/dV is KV2)."""
     if impl is None:
         impl = _env("DM_H256_MX_IMPL", "")
         impl = (IMPL_DEFAULT if not knob else "1") if impl == "" else impl   # knobs are per class: one impl for all modes

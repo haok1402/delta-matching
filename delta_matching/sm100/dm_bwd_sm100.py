@@ -2499,6 +2499,8 @@ class DMBackwardSm100:
                                       and "trace" in self.dm_opts and "semw" in self.dm_opts) else None),
                 dm_tlv=(aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
                                                          and "trace" in self.dm_opts and self.dm_tlev >= 0) else None),
+                dm_tq=(aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
+                                                        and "trace" in self.dm_opts and "tlq" in self.dm_opts) else None),
             )
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if warp_idx == self.reduce_warp_ids[0] and cute.arch.lane_idx() == 0:
@@ -6158,6 +6160,7 @@ class DMBackwardSm100:
         aux_data=None,
         dm_trw=None,
         dm_tlv=None,
+        dm_tq=None,
     ):
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
@@ -6246,6 +6249,24 @@ class DMBackwardSm100:
                 if const_expr(self.deterministic):
                     assert mdQ_semaphore is not None
                     mdQ_semaphore_cur = mdQ_semaphore[None, None, head_idx, batch_idx]
+                if const_expr(dm_tq is not None and self.deterministic):
+                    # DM tlq (rw8k 2a, debug only): trace[64 + 8 * grid + 64 + ...]: per (b, h, m) the latest dQ semaphore
+                    # release time (red.max of globaltimer after each release = the final release), then per CTA
+                    # (b << 40 | h << 20 | n) + 1. Timing/readiness instrumentation only; arithmetic untouched.
+                    dm_tq_mt = cute.size(mdQ_semaphore, mode=[0])
+                    dm_tq_h = cute.size(mdQ_semaphore, mode=[2])
+                    dm_tq_b = cute.size(mdQ_semaphore, mode=[3])
+                    dm_tq_q = dm_tq.iterator.toint() + Int64(8) * Int64(64 + 8 * cute.arch.grid_dim()[0] + 64)
+                    dm_tq_row = dm_tq_q + Int64(8) * Int64((batch_idx * dm_tq_h + head_idx) * dm_tq_mt)
+                    if tidx == 0:
+                        dm_utils.red_add_u64(dm_tq_q + Int64(8) * Int64(dm_tq_b * dm_tq_h * dm_tq_mt + cute.arch.block_idx()[0]),
+                                             (Int64(batch_idx) << 40) + (Int64(head_idx) << 20) + Int64(work_n) + Int64(1))
+                        if cute.arch.block_idx()[0] == 0:
+                            # header [60..63]: Mt, H, B, grid (dims of the tlq regions)
+                            dm_utils.red_add_u64(dm_tq.iterator.toint() + Int64(8 * 60), Int64(dm_tq_mt))
+                            dm_utils.red_add_u64(dm_tq.iterator.toint() + Int64(8 * 61), Int64(dm_tq_h))
+                            dm_utils.red_add_u64(dm_tq.iterator.toint() + Int64(8 * 62), Int64(dm_tq_b))
+                            dm_utils.red_add_u64(dm_tq.iterator.toint() + Int64(8 * 63), Int64(cute.arch.grid_dim()[0]))
 
                 dq_sem_release_inc = Int32(1)
                 if const_expr(
@@ -6533,6 +6554,9 @@ class DMBackwardSm100:
                                     cta_rank_in_cluster,
                                     1,
                                 )
+                                if const_expr(dm_tq is not None):
+                                    if tidx == 0:
+                                        dm_utils.red_max_u64(dm_tq_row + Int64(8) * Int64(m_block - 1), dm_utils.globaltimer())
 
                     # With more than one staging stage the tile's newest bulk adds are still in
                     # flight here (each stage only waits for the older groups). Drain them once
@@ -6562,6 +6586,9 @@ class DMBackwardSm100:
                                 cta_rank_in_cluster,
                                 dq_sem_release_inc,
                             )
+                            if const_expr(dm_tq is not None):
+                                if tidx == 0:
+                                    dm_utils.red_max_u64(dm_tq_row + Int64(8) * Int64(m_block), dm_utils.globaltimer())
 
                 if process_tile:
                     if is_tma_warp:
@@ -6576,6 +6603,9 @@ class DMBackwardSm100:
                                 cta_rank_in_cluster,
                                 1,
                             )
+                            if const_expr(dm_tq is not None):
+                                if tidx == 0:
+                                    dm_utils.red_max_u64(dm_tq_row + Int64(8) * Int64(m_block_max - 1), dm_utils.globaltimer())
 
                 if const_expr(
                     self.deterministic

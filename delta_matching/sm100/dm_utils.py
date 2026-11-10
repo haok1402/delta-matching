@@ -519,6 +519,14 @@ def red_add_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def red_max_u64(addr: cutlass.Int64, val: cutlass.Int64, *, loc=None, ip=None):
+    """debug (rw8k tlq): red.global.max.u64."""
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), cutlass.Int64(val).ir_value(loc=loc, ip=ip)],
+                    "red.global.max.u64 [$0], $1;", "l,l", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def red_add_f64_from_f32(addr: cutlass.Int64, val: Float32, *, loc=None, ip=None):
     """debug: red.global.add.f64 of an fp32 value (exactly widened)."""
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Float32(val).ir_value(loc=loc, ip=ip)],

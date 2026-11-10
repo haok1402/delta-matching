@@ -2532,6 +2532,7 @@ class DMBackwardSm100:
                                       and "trace" in self.dm_opts and "semw" in self.dm_opts) else None),
                 dm_tlv=(aux_data.tensors[4] if const_expr(aux_data.tensors is not None and len(aux_data.tensors) > 4 and "lwc" not in self.dm_opts
                                                          and "trace" in self.dm_opts and self.dm_tlev >= 0) else None),
+                dm_tcq=aux_data.tensors[4] if const_expr(self.dm_tconv and self.deterministic) else None,
             )
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
                 if warp_idx == self.reduce_warp_ids[0] and cute.arch.lane_idx() == 0:
@@ -6164,6 +6165,27 @@ class DMBackwardSm100:
             work_tile = tile_scheduler.get_current_work()
 
     @cute.jit
+    def _tcq_push(self, dm_tcq, mdQ_semaphore, m, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx):
+        """rw8k tconv readiness queue (scheduling hint for the PDL tail converter; correctness rests on the converter's own
+        ld.acquire of the det counters). After releasing dQ tile m's counter, the LAST writer of the tile in the det order
+        (lock value == number of writers - 1) bumps the tile's pair count (atom.acq_rel.gpu); the second CTA of the 2-CTA
+        pair to get there appends the tile id: pos = atom.add(tail); st.release.gpu entry[pos] = tile + 1.
+        Layout (int32, zeroed per call on the prestage side stream): [0] tail, [1, 1 + T) entries, [1 + T, 1 + 2T) pair counts."""
+        if tidx == 0:
+            nmax = block_info.get_n_block_max_for_m_block(seqlen, m)
+            lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info, seqlen, m, work_n)
+            if lock == nmax - 1:
+                mt = cute.size(mdQ_semaphore, mode=[0])     # (Mt, rank, H, B) view (semaphore_transpose)
+                nh = cute.size(mdQ_semaphore, mode=[2])
+                nt = cute.size(mdQ_semaphore, mode=[3]) * nh * mt
+                tile = (batch_idx * nh + head_idx) * mt + m
+                base = dm_tcq.iterator.toint()
+                old = dm_utils.atom_add_acqrel_gpu_s32(base + Int64(4) * Int64(1 + nt + tile), Int32(1))
+                if old == self.cta_group_size - 1:
+                    pos = dm_utils.atom_add_relaxed_gpu_s32(base, Int32(1))
+                    dm_utils.st_release_gpu_s32(base + Int64(4) * Int64(1 + pos), tile + 1)
+
+    @cute.jit
     def dQacc_reduce(
         self,
         mdQaccum: cute.Tensor,
@@ -6191,6 +6213,7 @@ class DMBackwardSm100:
         aux_data=None,
         dm_trw=None,
         dm_tlv=None,
+        dm_tcq=None,
     ):
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
@@ -6570,6 +6593,8 @@ class DMBackwardSm100:
                                     cta_rank_in_cluster,
                                     1,
                                 )
+                                if const_expr(dm_tcq is not None):
+                                    self._tcq_push(dm_tcq, mdQ_semaphore, m_block - 1, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx)
 
                     # With more than one staging stage the tile's newest bulk adds are still in
                     # flight here (each stage only waits for the older groups). Drain them once
@@ -6601,6 +6626,8 @@ class DMBackwardSm100:
                                 cta_rank_in_cluster,
                                 dq_sem_release_inc,
                             )
+                            if const_expr(dm_tcq is not None):
+                                self._tcq_push(dm_tcq, mdQ_semaphore, m_block, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx)
 
                 if process_tile:
                     if is_tma_warp:
@@ -6617,6 +6644,8 @@ class DMBackwardSm100:
                                 cta_rank_in_cluster,
                                 1,
                             )
+                            if const_expr(dm_tcq is not None):
+                                self._tcq_push(dm_tcq, mdQ_semaphore, m_block_max - 1, m_block_min, work_n, head_idx, batch_idx, seqlen, block_info, tidx)
 
                 if const_expr(
                     self.deterministic

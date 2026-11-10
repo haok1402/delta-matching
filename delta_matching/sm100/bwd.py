@@ -241,6 +241,14 @@ def _patched_source():
         ("fa_bwd_obj = FlashAttentionBackwardSm100(", "fa_bwd_obj = _DMBackwardSm100("),
         ("_flash_attn_bwd.compile_cache", "_dm_bwd_cache()"),
         ("dk_accum, dk, softmax_scale,", "dk_accum, dk, 1.0,"),
+        # rw8k tconv: readiness queue for the tail converter, allocated with the scratch pool (zeroed per call by the
+        # prestage side stream, which waits for the previous call's converter) and passed to the kernel as aux[4]
+        ("    else:\n        dQ_semaphore = None\n",
+         "    else:\n        dQ_semaphore = None\n"
+         "    if dQ_semaphore is not None and _dm_tconv():\n"
+         "        _dm_tcq = torch.zeros(1 + 2 * (dQ_semaphore.numel() // dQ_semaphore.shape[-1]), dtype=torch.int32, device=device)\n"
+         "        _CTX['tcq_cur'] = _dm_tcq\n"
+         "        aux_tensors = list(aux_tensors[:4]) + [_dm_tcq] + list(aux_tensors[4:])\n"),
         # rw8k tconv: hand each postprocess call its readiness semaphore (det dQ / dK / dV lock counters)
         ("        _bwd_postprocess_convert(\n            dq_accum, dq,",
          "        _CTX['dm_sem'] = ('q', dQ_semaphore, causal, qhead_per_kvhead, cluster_size * tile_n)\n        _bwd_postprocess_convert(\n            dq_accum, dq,"),
@@ -295,12 +303,12 @@ def _dm_post_convert(acc, out, *a, **k):
         return
     if _env("DM_RW8K_SEMDUMP", "0") == "1" and sem is not None and sem[1] is not None and not k.get("fake_mode", False):
         _CTX.setdefault("semdump", []).append(sem[1])   # DEBUG (rw8k): readiness counters after the call
-    if sem is not None and sem[1] is not None and "tconv" in _env("DM_BWD_OPTS", "").split(","):
+    if sem is not None and sem[1] is not None and sem[0] == "q" and "tconv" in _env("DM_BWD_OPTS", "").split(","):
         # rw8k tconv: PDL tail converter (tailconv.py): same conversion, each tile as soon as its det counter is final
         from .tailconv import tconv_convert
         kind, sem_t, causal_, G, ctn = sem
         return tconv_convert(sem_t, acc, out, *a, dm_kind=kind, dm_causal=bool(causal_), dm_ctn=int(ctn),
-                             dm_G=int(G), **k)
+                             dm_G=int(G), queue=_CTX["tcq_cur"], **k)
     return _ORIG_POST(acc, out, *a, **k)
 
 
@@ -312,6 +320,14 @@ def _dm_gloop():
 
 
 _ns.update(_dm_gloop=_dm_gloop)
+
+
+def _dm_tconv():
+    """DM_BWD_OPTS tconv (rw8k): PDL tail converter for dQ (tailconv.py)."""
+    return "tconv" in _env("DM_BWD_OPTS", "").split(",")
+
+
+_ns.update(_dm_tconv=_dm_tconv)
 _ns.update(_dm_zeros=_dm_zeros, _dm_empty=_dm_empty, _DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _dm_bwd_cache=_dm_bwd_cache, _dm_cfg=_dm_cfg)
 exec(compile(_patched_source(), fi.__file__ + ":dm_patched_bwd", "exec"), _ns)
 _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]
@@ -325,6 +341,9 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     aux = [qs.contiguous(), ks.contiguous(), vs.contiguous(), dos.contiguous()]
     # DM d3nh precondition (MMA-warp opaque zero = loop counter >> 30): per-tile main-loop trip count < 2^30
     assert (q8.shape[1] // 128 + 1) * max(1, q8.shape[2] // k8.shape[2]) < 2 ** 30, "d3nh: main-loop trip count >= 2^30"
+    if "tconv" in _env("DM_BWD_OPTS", "").split(","):
+        assert deterministic and trace is None and not any(o in _env("DM_BWD_OPTS", "").split(",") for o in ("lwc", "trace")), \
+            "tconv: det only, aux[4] = readiness queue (no trace / lwc)"
     if "lwc" in _env("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)

@@ -34,23 +34,25 @@ def _patch(src: str) -> str:
         ("class FlashAttentionBackwardPostprocess:", "class DMTailConv:"),
         # __call__: two extra arguments (readiness counters, kind) before the stream
         ("        mCuTotalMBlocks: Optional[cute.Tensor] = None,\n        # Always keep stream as the last parameter",
-         "        mCuTotalMBlocks: Optional[cute.Tensor] = None,\n        mDmSem: Optional[cute.Tensor] = None,\n"
+         "        mCuTotalMBlocks: Optional[cute.Tensor] = None,\n        mDmSem: Optional[cute.Tensor] = None,\n        mDmQ: Optional[cute.Tensor] = None,\n"
          "        # Always keep stream as the last parameter"),
         ("            tile_sched_params,\n            TileScheduler,\n        ).launch(\n            grid=grid_dim,\n"
          "            block=[self.num_threads, 1, 1],\n            smem=smem_size,\n            stream=stream,\n        )",
-         "            tile_sched_params,\n            TileScheduler,\n            mDmSem,\n        ).launch(\n            grid=grid_dim,\n"
+         "            tile_sched_params,\n            TileScheduler,\n            mDmSem,\n            mDmQ,\n        ).launch(\n            grid=grid_dim,\n"
          "            block=[self.num_threads, 1, 1],\n            smem=smem_size,\n            stream=stream,\n"
          "            use_pdl=True,\n        )"),
         ("        tile_sched_params: ParamsBase,\n        TileScheduler: cutlass.Constexpr[Callable],\n    ):\n"
          "        # ///////////////////////////////////////////////////////////////////////////////\n"
          "        # Get shared memory buffer",
          "        tile_sched_params: ParamsBase,\n        TileScheduler: cutlass.Constexpr[Callable],\n"
-         "        mDmSem: Optional[cute.Tensor],\n    ):\n"
+         "        mDmSem: Optional[cute.Tensor],\n        mDmQ: Optional[cute.Tensor],\n    ):\n"
          "        # ///////////////////////////////////////////////////////////////////////////////\n"
          "        # Get shared memory buffer"),
         ("        m_block, head_idx, batch_idx, _ = work_tile.tile_idx\n",
          "        m_block, head_idx, batch_idx, _ = work_tile.tile_idx\n"
-         "        cute.arch.griddepcontrol_launch_dependents()   # rw8k: the next converter (dK / dV) may launch now\n"
+         "        cute.arch.griddepcontrol_launch_dependents()   # rw8k: the next kernel may launch now\n"
+         "        if const_expr(mDmQ is not None):\n"
+         "            m_block, head_idx, batch_idx = self._dm_pick(mDmSem, mDmQ)\n"
          "        if work_tile.is_valid_tile:\n"
          "            self._dm_ready(mDmSem, m_block, head_idx, batch_idx, tidx, mdQ.shape[1])\n"),
     ]
@@ -78,6 +80,20 @@ class DMTailConv(_Base):
     def __init__(self, *a, dm_kind="q", dm_causal=True, dm_ctn=256, dm_G=1, dm_ctl="", **k):
         super().__init__(*a, **k)
         self.dm_kind, self.dm_causal, self.dm_ctn, self.dm_G, self.dm_ctl = dm_kind, dm_causal, dm_ctn, dm_G, dm_ctl
+
+    @cute.jit
+    def _dm_pick(self, mDmSem, mDmQ):
+        """Readiness queue: the CTA with linear block id i converts the i-th tile that became final (bwd main appends tile
+        ids in completion order), so CTAs dispatched in launch order never wait behind a late tile. Every thread polls the
+        entry itself (ld.acquire.gpu, bounded -> trap); the det counters are re-checked in _dm_ready."""
+        bx, by, bz = cute.arch.block_idx()
+        gx, gy, _ = cute.arch.grid_dim()
+        pos = bx + gx * (by + gy * bz)
+        v = dm_utils.poll_acquire_nz_or_trap(mDmQ.iterator.toint() + Int64(4) * Int64(1 + pos), Int32(1 << 26))
+        t = v - 1
+        mt = cute.size(mDmSem, mode=[2])
+        nh = cute.size(mDmSem, mode=[1])
+        return t % mt, (t // mt) % nh, t // (mt * nh)
 
     @cute.jit
     def _dm_ready(self, mDmSem, m_block, head_idx, batch_idx, tidx, seqlen):
@@ -124,17 +140,18 @@ def _compile(key):
         make_fake_bwd_tensors(dtype, has_gqa=True, varlen_q=False, varlen_k=False)
     from quack.compile_utils import make_fake_tensor as _ft
     mSem = _ft(Int32, (cute.sym_int(), cute.sym_int(), cute.sym_int(), 2), divisibility=1)
+    mQ_ = _ft(Int32, (cute.sym_int(),), divisibility=1) if dm_kind == "q" else None
     conv = DMTailConv(dtype, hdim, arch, block_size, num_threads, atom_layout, swap_ab, use_2cta_instrs=use_2cta_instrs,
                       cluster_size=cluster_size, hdim_multiple_of=hdim_multiple_of, accum_order=accum_order,
                       pack_factor=1, dm_kind=dm_kind, dm_causal=dm_causal, dm_ctn=dm_ctn, dm_G=dm_G, dm_ctl=ctl)
-    return cute.compile(conv, mdQaccum, mdQ, cutlass.Float32(0.0), None, None, None, None, mSem,
+    return cute.compile(conv, mdQaccum, mdQ, cutlass.Float32(0.0), None, None, None, None, mSem, mQ_,
                         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True), options="--enable-tvm-ffi")
 
 
 def tconv_convert(sem, accum, output, scale, cu_seqlens, seqused, arch, dtype, hdim, block_size, num_threads,
                   atom_layout, swap_ab, use_2cta_instrs=False, cluster_size=1, cu_total_m_blocks=None,
                   sink_tensors=None, hdim_multiple_of=32, accum_order=None, pack_factor=1, *, fake_mode,
-                  dm_kind, dm_causal, dm_ctn, dm_G):
+                  dm_kind, dm_causal, dm_ctn, dm_G, queue=None):
     """Drop-in for interface._bwd_postprocess_convert with the readiness semaphore and the kind / counts."""
     global _CACHE
     assert cu_seqlens is None and seqused is None and sink_tensors is None and pack_factor == 1, "tconv: dense only"
@@ -147,4 +164,4 @@ def tconv_convert(sem, accum, output, scale, cu_seqlens, seqused, arch, dtype, h
     if key not in _CACHE:
         _CACHE[key] = _compile(key)
     if not fake_mode:
-        _CACHE[key](accum, output, scale, None, None, None, None, sem)
+        _CACHE[key](accum, output, scale, None, None, None, None, sem, queue)

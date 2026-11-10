@@ -538,6 +538,39 @@ def fence_proxy_async_global(*, loc=None, ip=None):
 
 
 @dsl_user_op
+def atom_add_acqrel_gpu_s32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
+                                 "atom.acq_rel.gpu.global.add.s32 $0, [$1], $2;", "=r,l,r", has_side_effects=True,
+                                 is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def atom_add_relaxed_gpu_s32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(llvm.inline_asm(T.i32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
+                                 "atom.relaxed.gpu.global.add.s32 $0, [$1], $2;", "=r,l,r", has_side_effects=True,
+                                 is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def st_release_gpu_s32(addr: cutlass.Int64, val: Int32, *, loc=None, ip=None):
+    llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(val).ir_value(loc=loc, ip=ip)],
+                    "st.release.gpu.global.s32 [$0], $1;", "l,r", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def poll_acquire_nz_or_trap(addr: cutlass.Int64, limit: Int32, *, loc=None, ip=None) -> Int32:
+    """rw8k tconv: spin with ld.acquire.gpu until the int32 at addr is non-zero (trap after `limit` polls); returns it."""
+    return Int32(llvm.inline_asm(
+        T.i32(), [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Int32(limit).ir_value(loc=loc, ip=ip)],
+        "{\n\t.reg .pred p;\n\t.reg .b32 it;\n\tmov.b32 it, 0;\n"
+        "DM_PNZ:\n\tld.acquire.gpu.global.b32 $0, [$1];\n\tsetp.ne.s32 p, $0, 0;\n\t@p bra DM_PNZD;\n\t"
+        "add.s32 it, it, 1;\n\tsetp.gt.s32 p, it, $2;\n\t@p trap;\n\tnanosleep.u32 32;\n\tbra DM_PNZ;\n"
+        "DM_PNZD:\n\t}",
+        "=r,l,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip))
+
+
+@dsl_user_op
 def red_add_f64_from_f32(addr: cutlass.Int64, val: Float32, *, loc=None, ip=None):
     """debug: red.global.add.f64 of an fp32 value (exactly widened)."""
     llvm.inline_asm(None, [cutlass.Int64(addr).ir_value(loc=loc, ip=ip), Float32(val).ir_value(loc=loc, ip=ip)],

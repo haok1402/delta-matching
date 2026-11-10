@@ -73,7 +73,7 @@ def _dm_empty(*a, **k):
 
 def _fws(deterministic):
     """dQ first-writer-stores in the kernel (DMBackwardSm100.dm_fws): dq_accum needs no zero-fill."""
-    return bool(deterministic) and "nofws" not in _env("DM_BWD_OPTS", "").split(",")
+    return bool(deterministic)
 
 
 _AUTO_MEMO = {}
@@ -112,7 +112,7 @@ def _auto_opts_impl(q8, k8, causal=False):
     # 'tconv' forces it, 'notconv' disables, tconvN=<N> moves the cut.
     tN = int(next((o[7:] for o in ol if o.startswith("tconvN=")), "16384"))
     if ("tconv" not in ol and "notconv" not in ol and q8.shape[1] <= tN
-            and not any(o in ol for o in ("lwc", "trace", "pdyn", "rsdbg", "pdump"))):
+            and not any(o in ol for o in ("lwc", "pdyn", "rsdbg"))):
         ol = ol + ["tconv"]
     pN = int(next((o[6:] for o in ol if o.startswith("persN=")), "0"))   # off by default: no gain at 8k-64k
     # DM pcN / pdyn REMOVED: the dynamic persistent scheduler no longer compiles, its "+6-8% at causal 8k"
@@ -350,8 +350,8 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     # DM d3nh precondition (MMA-warp opaque zero = loop counter >> 30): per-tile main-loop trip count < 2^30
     assert (q8.shape[1] // 128 + 1) * max(1, q8.shape[2] // k8.shape[2]) < 2 ** 30, "d3nh: main-loop trip count >= 2^30"
     if "tconv" in _auto_opts(q8, k8, causal).split(",") and deterministic:
-        assert trace is None and not any(o in _env("DM_BWD_OPTS", "").split(",") for o in ("lwc", "trace")), \
-            "tconv: det only, aux[4] = readiness queue (no trace / lwc)"
+        assert trace is None and "lwc" not in _env("DM_BWD_OPTS", "").split(","), \
+            "tconv: det only, aux[4] = readiness queue (no identity trace / lwc)"
     if "lwc" in _env("DM_BWD_OPTS", "").split(","):
         assert trace is None and deterministic and abs(sm - q8.shape[-1] ** -0.5) < 1e-12, "lwc: det, sm = D^-0.5, no trace"
         _CTX["dq"] = torch.empty(q8.shape, dtype=torch.bfloat16, device=q8.device)
@@ -360,14 +360,10 @@ def dm_bwd_main(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal: bool, sm: 
     if "pdyn" in _ao.split(","):
         # DM pdyn: claim counter for the dynamic persistent scheduler (last aux tensor), zeroed per launch
         _CTX["pdyn_ctr"] = torch.zeros(1, dtype=torch.int32, device=q8.device)
-    if trace is not None and "rsdbg" in _env("DM_BWD_OPTS", ""):
-        if isinstance(trace, (tuple, list)):   # (rs, pdump (B, H, N, N) fp32) with DM_BWD_OPTS=rsdbg,pdump
-            aux.extend(trace)
-        else:
-            aux.append(trace)          # DEBUG rsdbg: float64 (B, H, N, 2) = (rowsum dS, sum |P dP|) accumulators
+    if trace is not None:
+        assert "rsdbg" in _env("DM_BWD_OPTS", "").split(","), "trace = the identity accumulators of the rsdbg build"
+        aux.append(trace)          # rsdbg: float64 (B, H, N, 2) = (rowsum dS, sum |P dP|) accumulators
         trace = None
-    if trace is not None:          # int64 (16,) accumulators of MMA-warp wait cycles (DM_BWD_OPTS must contain 'trace')
-        aux.append(trace)
     if "pdyn" in _ao.split(","):
         aux.append(_CTX.pop("pdyn_ctr"))
     _CTX["delta"] = delta

@@ -25,7 +25,7 @@ def compile_env():
     Every compile-time input of the sm100 kernels that neither FA4's compile key (dtypes, head dims,
     causal, GQA ratio, config incl. registers, deterministic, arch) nor the callers' opts strings
     carry, as one string hashed into the persistent-cache fingerprint and the in-process memos:
-    DM_ABL, DM_TCF_SKIP, the fence emission settings (DM_TCF_IMPL, DM_TCF_MASK), the pass-0 register
+    DM_TCF_SKIP, the fence emission settings (DM_TCF_IMPL, DM_TCF_MASK), the pass-0 register
     splits and the CuTe DSL compile settings (its own cache_key_str() without arch, which FA4's key
     has, and without the runtime library path).
     """
@@ -42,7 +42,7 @@ def compile_env():
         # the AOT entries (compile inside a lease).
         STATIC_ENV.append(f"dsl={dsl}|tcf_impl={TCF_IMPL}|tcf_mask={TCF_MASK}|"
                            f"p0regs={sorted(REGS_C3.items())}{sorted(REGS_TL.items())}")
-    return f"{STATIC_ENV[0]}|abl={env('DM_ABL', '')}|tcf_skip={env('DM_TCF_SKIP', '')}"
+    return f"{STATIC_ENV[0]}|tcf_skip={env('DM_TCF_SKIP', '')}"
 
 
 def fingerprint(opts=""):

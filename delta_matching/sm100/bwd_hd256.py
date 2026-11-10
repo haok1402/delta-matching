@@ -78,7 +78,16 @@ def plan_chunks(B, N, H, Hk, budget_gb=None):
     return max(1, min(H, int(gb * 2 ** 30) // per))
 
 
-def dm_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, heads_per_chunk=None, dbg=0, ws=None):
+def fold_mode():
+    """DM_H256_FOLD: 'plana' (default; per-chunk fp32 fma fold for dV/dK/dQ, accuracy-audit accepted in principle) or 'floor'
+    (dV / dQ = the sm90 floor's in-window ratio rescale + 512-token promote verbatim; dK is plan-A in both)."""
+    m = _env("DM_H256_FOLD", "plana")
+    assert m in ("plana", "floor"), m
+    return m
+
+
+def dm_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, heads_per_chunk=None, dbg=0, ws=None,
+                 fold=None):
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -111,6 +120,7 @@ def dm_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, heads_
     multi = Hc < H
     dk_acc = torch.empty(B, N, Hk, D, device=dev) if multi else torch.empty(1, 1, 1, D, device=dev)
     dv_acc = torch.empty(B, N, Hk, D, device=dev) if multi else torch.empty(1, 1, 1, D, device=dev)
+    ratio = (fold or fold_mode()) == "floor"
     fdv_all = dos * (1.0 / 256.0)            # f = (1/256) * do8s (exact: power-of-2 scaling)
     dbgout = []
     for h0 in range(0, H, Hc):
@@ -125,7 +135,7 @@ def dm_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, heads_
         fdv = torch.zeros(B * Hc, nmb, device=dev)
         fdv.view(B, Hc, nmb)[:, :hcn] = fdv_all[:, h0:h1]
         # dV: f[la][c] (fsm = 0)
-        _run(("fold", "dv", causal), lambda: DmHd256Fold("dv", causal),
+        _run(("fold", "dv", causal, ratio), lambda: DmHd256Fold("dv", causal, ratio),
              [A(wPt), Bt(dot), fdv.view(-1), ks, dv, dv_acc], [1, 1, 0, 2, 3, 3],
              [h0, h1, rep, g0, Hc, H, 1, nmb, 0, 1, nkt, ng, B, Hk])
         # dK: F[la][m64 = nb][c = mb] = g[la, mb, nb]
@@ -133,7 +143,7 @@ def dm_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, heads_
              [A(wdSt), Bt(qt), wG.view(-1), ks, dk, dk_acc], [1, 1, 0, 2, 3, 3],
              [h0, h1, rep, g0, Hc, H, 1, nmb * nmb, 1, nmb, nkt, ng, B, Hk])
         # dQ: F[la][m64 = mb][c = nb] = psi[la, mb, nb]; B = Kt of the kv head
-        _run(("fold", "dq", causal), lambda: DmHd256Fold("dq", causal),
+        _run(("fold", "dq", causal, ratio), lambda: DmHd256Fold("dq", causal, ratio),
              [A(wdS), Bt(kt), wPsi.view(-1), ks, dq, dq], [1, 1, 0, 2, 3, 3],
              [h0, h1, 1, h0, Hc, Hk, rep, nmb * nmb, nmb, 1, nkt, hcn, B, H])
         if dbg:

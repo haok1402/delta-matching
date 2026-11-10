@@ -492,12 +492,16 @@ class DmHd256Fold:
     TM, D, KC = 128, 256, 64
     STAGES = 3
 
-    def __init__(self, mode: str, causal: bool):
+    def __init__(self, mode: str, causal: bool, ratio: bool = False):
+        """ratio=False (default, plan-A, accuracy-audit 03:5x 'accepted in principle'): every mode folds acc = fma(temp, f_c, acc)
+        with f_c = g (dk), (1/256) do8s (dv), psi (dq; psi = 0 on F2 tiles is an exact no-op, no dominance skip).
+        ratio=True: dv / dq use the floor's in-window ratio rescale + 512-token promote verbatim (dk is plan-A in the floor)."""
         assert mode in ("dk", "dv", "dq")
         self.mode = mode
         self.causal = bool(causal)
         self.threads = 320   # warps 0-7 fold (lane quadrant w%4, column half w//4), 8 MMA, 9 load
-        self.win = mode in ("dv", "dq")
+        self.win = bool(ratio) and mode in ("dv", "dq")
+        self.STAGES = 3 if self.win else 6
 
     @cute.jit
     def __call__(self, mA: cute.Tensor, mB: cute.Tensor, mF: cute.Tensor, mKs: cute.Tensor, mOut: cute.Tensor,
@@ -661,7 +665,7 @@ class DmHd256Fold:
                             tv[32 * p + i] = vv[i]
                     cute.arch.fence_view_async_tmem_load()
                     af.release()
-                    if const_expr(self.mode == "dk"):
+                    if const_expr(not self.win):
                         for i in cutlass.range_constexpr(128):
                             acc[i] = fma_f32(tv[i], fc, acc[i])
                     elif const_expr(self.mode == "dv"):

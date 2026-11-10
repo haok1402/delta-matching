@@ -33,7 +33,11 @@ IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(d
               "7": dict(dqopt=True, q3=True, lpt="g"), "8": dict(dqopt=True, lpt="g", xs=True),
               "9": dict(dqopt=True, lpt="g", sp=True), "10": dict(dqopt=True, lpt="g", x2=True),
               "11": dict(dqopt=True, lpt="g", esf=True), "12": dict(dqopt=True, lpt="g", x2=True, esf=True),
-              "13": dict(dqopt=True, lpt="g", yr=True), "14": dict(dqopt=True, lpt="g", yr=True, esf=True)}
+              "13": dict(dqopt=True, lpt="g", yr=True), "14": dict(dqopt=True, lpt="g", yr=True, esf=True),
+              # fork hd256-dqb (codex/hd256-dqb-01-pers.md): "30" = 13 + persistent static snake-LPT (one CTA per SM: pers=-1 -> the
+              # device SM count, env FLASH_ATTENTION_NUM_SMS / DM_NSM first); "31" = the same kernel with 7 CTAs (test-only stress
+              # build: every CTA runs many items, so the item hand-offs are exercised at small shapes)
+              "30": dict(dqopt=True, lpt="g", yr=True, pers=-1), "31": dict(dqopt=True, lpt="g", yr=True, pers=7)}
 IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "13"}  # Q12 + causal global LPT + Ya reuse (HD256-DQ-YR) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}
@@ -102,6 +106,14 @@ def twins(q8, do8, k8):
     return tw(q8), tw(do8), tw(k8)
 
 
+def _nsm(dev):
+    """SM count of the persistent dq grid: env FLASH_ATTENTION_NUM_SMS / DM_NSM (AOT in fake mode needs it), else the device's."""
+    n = int(_env("FLASH_ATTENTION_NUM_SMS", "0") or 0) or int(_env("DM_NSM", "0") or 0)
+    if n:
+        return n
+    return int(torch.cuda.get_device_properties(dev).multi_processor_count)
+
+
 def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, modes=("dv", "dk", "dq"), tw=None,
                    knob="", impl=None):
     """impl per mode: "1" = DmHd256Mx (14df86c schedule), "2" = DmHd256Mx2 (O1 / A1 schedule, bitwise the same values).
@@ -160,6 +172,9 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
             from .dm_bwd_hd256mx2_sm100 import DmHd256Mx2 as cls  # noqa: N813
             key = ("i" + impls[mode],) + key
             extra = dict(IMPL_EXTRA.get(impls[mode], {}))
+            if extra.get("pers", 0) < 0:
+                extra["pers"] = _nsm(dev)
+                key = key + ("pers%d" % extra["pers"],)
         _run(key, lambda: cls(mode, causal, kd, knob, ordf=ordf, **extra), ten, lds, [n_t, H, Hk], mode=mode)
         if big or hsh:
             dumps[mode] = dict(dump=dump, codes=codes, sb=sb, hash=hh)

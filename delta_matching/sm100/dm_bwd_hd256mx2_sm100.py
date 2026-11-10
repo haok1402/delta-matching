@@ -57,11 +57,15 @@ class DmHd256Mx2:
     # yr (Ya reuse) control: yw = out(t-1) completion -> TMA overwrite of its Ya stage (WAR); unsafe = the stage released right
     # after S(t-1)'s commit (the pre-yr place) instead of after out(t-1); both arms delay out(t-1) in the MMA warp.
     YRCTL = ("yw",)
+    # pers controls (fork hd256-dqb): xw = the item's last dP -> TMA overwrite of X by the next item (WAR; unsafe = X released after
+    # the second-to-last dP, last S / dP delayed); ep = epilogue TMEM read of item k -> zero-init out(0) of item k+1 (WAR; the ep
+    # builds defer item k's epilogue to after item k+1's first codes commit, delayed; unsafe = out(0) skips the fin-empty wait).
+    PSCTL = ("xw", "ep")
     DLY = 1 << 15
 
     def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = "", ordf: bool = False, dqopt: bool = False,
                  q3: bool = False, lpt: str = "", xs: bool = False, sp: bool = False, x2: bool = False, esf: bool = False,
-                 yr: bool = False):
+                 yr: bool = False, pers: int = 0):
         """ordf: tcgen05 thread-sync fence pairs on every cross-thread TMEM hand-off (ordinv sites BW1-BW3, BW9 mapped to this
         schedule: sc full -> ld (after), ld -> sc release (before), sc acquire -> S/dP MMA (after), cd acquire -> SF st (after),
         epilogue / teardown); host default True (DM_HD256_ORDF), as DmHd256Mx."""
@@ -99,13 +103,21 @@ class DmHd256Mx2:
         #     (kda/runs/hd256-dq3/yr/lay.log), and both TMA-load the same k8 bytes -> the out MMA reads the same values.  Ya gets 2
         #     stages (released by out(t-1)'s commit instead of S(t)'s); the T TMA load / pipeline are dropped.
         self.yr = bool(yr) and self.dqopt and not self.q3 and not self.sp
+        # pers (fork hd256-dqb, codex/hd256-dqb-01-pers.md): PERSISTENT dq, pers = number of CTAs (> 0).  Items (q tile, head, batch)
+        #     in the lpt "g" order L (longest first), CTA c takes L = r G + c (round r even) / r G + G-1-c (odd): static snake LPT.
+        #     Every role loops over its items; all pipelines continue across items; codes stage / SF set / exchange parity follow the
+        #     CTA's global tile count (U + t); X released by the MMA warp after the item's last dP (UMMA commit) so the TMA warp loads
+        #     the next item's X during Q(last) / out(last) / epilogue; the first out of an item (zero init) waits fin-empty (the
+        #     previous item's epilogue read the accumulator).  Per-tile body unchanged: bitwise.
+        self.pers = int(pers) if (self.yr and mode == "dq") else 0
         assert lpt in ("", "g", "1")          # dv / dk: q3 / lpt do not apply (as dqopt), the build equals impl 2
         assert mode in ("dv", "dk", "dq")
         assert not (dbg & 4)
         self.kn = knob.replace("_safe", "")
         self.unsafe = bool(knob) and not knob.endswith("_safe")
-        assert self.kn in ("",) + self.KNOBS + self.DQCTL + self.YRCTL, knob
+        assert self.kn in ("",) + self.KNOBS + self.DQCTL + self.YRCTL + self.PSCTL, knob
         assert self.kn not in self.YRCTL or self.yr, knob
+        assert self.kn not in self.PSCTL or self.pers, knob
         assert self.kn not in self.DQCTL or self.dqopt, knob
         self.mode = mode
         self.causal = bool(causal)
@@ -113,6 +125,16 @@ class DmHd256Mx2:
         self.has_dp = mode != "dv"
         self.rows_are_keys = mode != "dq"
         self.threads = 320
+
+    def _pitem(self, it, cta, G, nbz, n_t, H):
+        """pers: item it of CTA cta -> (rt, hx, b, c_hi, ncs, total) (dq: c_lo = 0, one head per item)."""
+        L = it * G + cta + (it % 2) * (G - 1 - 2 * cta)
+        hb = H * nbz
+        q_ = L // hb
+        r_ = L - q_ * hb
+        rt = n_t - 1 - q_
+        c_hi = rt + 1 if self.causal else n_t
+        return rt, r_ % H, r_ // H, c_hi, c_hi, c_hi
 
     @cute.jit
     def __call__(self, mXa: cute.Tensor, mXb: cute.Tensor, mYa: cute.Tensor, mYb: cute.Tensor, mT: cute.Tensor,
@@ -163,9 +185,12 @@ class DmHd256Mx2:
             sC: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(c_l)], 1024]
         self.SS = SS
         nh = Hk if const_expr(self.rows_are_keys) else H
+        grid = [n_t, nh, cute.size(mXa, mode=[3])]
+        if const_expr(self.pers):
+            grid = [cutlass.min(n_t * nh * cute.size(mXa, mode=[3]), Int32(self.pers)), 1, 1]
         self.kernel(mma_s, mma_o, tma_Xa, tXa, tma_Xb, tXb, tma_Ya, tYa, tma_Yb, tYb, tma_T, tT, a_l, b_l, c_l, t_l,
                     mQs, mKs, mVs, mdOs, mLse, mDelta, mOut, mIdent, mDump, mCodes, mSB, mHash, n_t, H, Hk).launch(
-            grid=[n_t, nh, cute.size(mXa, mode=[3])], block=[self.threads, 1, 1], smem=SS.size_in_bytes(), stream=stream)
+            grid=grid, block=[self.threads, 1, 1], smem=SS.size_in_bytes(), stream=stream)
 
     @cute.kernel
     def kernel(self, mma_s: cute.TiledMma, mma_o: cute.TiledMma, tma_Xa: cute.CopyAtom, mXa: cute.Tensor,
@@ -180,9 +205,10 @@ class DmHd256Mx2:
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         lane = cute.arch.lane_idx()
         rt, hx, b = cute.arch.block_idx()
+        cta = rt
         if const_expr(self.lpt == "1"):
             rt = n_t - 1 - rt
-        elif const_expr(self.lpt == "g"):
+        elif const_expr(self.lpt == "g" and not self.pers):
             nbz = cute.arch.grid_dim()[2]
             lin = rt + n_t * (hx + H * b)
             rt = n_t - 1 - lin // (H * nbz)
@@ -203,6 +229,18 @@ class DmHd256Mx2:
                 c_hi = rt + 1
         ncs = c_hi - c_lo
         total = nhl * ncs
+        G = Int32(1)
+        nbz = Int32(1)
+        nit = 1
+        if const_expr(self.pers):
+            G = cute.arch.grid_dim()[0]
+            nbz = cute.size(mQs, mode=[0])
+            ni_ = n_t * H * nbz
+            fr_ = ni_ // G
+            nit = fr_
+            if cta + (fr_ % 2) * (G - 1 - 2 * cta) < ni_ - fr_ * G:       # snake position in the last (partial) round
+                nit = fr_ + 1
+            rt, hx, b, c_hi, ncs, total = self._pitem(Int32(0), cta, G, nbz, n_t, H)
 
         smem = cutlass.utils.SmemAllocator()
         st = smem.allocate(self.SS)
@@ -269,53 +307,56 @@ class DmHd256Mx2:
 
         # ------------------------------------------------------------------ TMA warp
         if warp == 9:
-            hy0 = hx
-            if const_expr(not self.rows_are_keys):
-                hy0 = hx // rep
-            gXa = cute.local_tile(mXa[None, None, hx, b], (self.TM, D), (None, 0))
-            tXas, tXag = cpasync.tma_partition(tma_Xa, 0, cute.make_layout(1), cute.group_modes(sXa, 0, 3),
-                                               cute.group_modes(thr_s.partition_A(gXa), 0, 3))
-            xe = x_p.acquire_and_advance()
-            cute.copy(tma_Xa, tXag[(None, rt)], tXas[(None, 0)], tma_bar_ptr=xe.barrier)
-            if const_expr(self.has_dp):
-                gXb = cute.local_tile(mXb[None, None, hx, b], (self.TM, D), (None, 0))
-                tXbs, tXbg = cpasync.tma_partition(tma_Xb, 0, cute.make_layout(1), cute.group_modes(sXb, 0, 3),
-                                                   cute.group_modes(thr_s.partition_A(gXb), 0, 3))
-                cute.copy(tma_Xb, tXbg[(None, rt)], tXbs[(None, 0)], tma_bar_ptr=xe.barrier)
-            thr_o = mma_o.get_slice(0)
-            for hi in cutlass.range(nhl, unroll=1):
-                hy = hy0
-                if const_expr(self.rows_are_keys):
-                    hy = hx * rep + hi
-                gYa = cute.local_tile(mYa[None, None, hy, b], (self.TN, D), (None, 0))
-                tYas, tYag = cpasync.tma_partition(tma_Ya, 0, cute.make_layout(1), cute.group_modes(sYa, 0, 3),
-                                                   cute.group_modes(thr_s.partition_B(gYa), 0, 3))
-                gYb = cute.local_tile(mYb[None, None, hy, b], (self.TN, D), (None, 0))
-                tYbs, tYbg = cpasync.tma_partition(tma_Yb, 0, cute.make_layout(1), cute.group_modes(sYb, 0, 3),
-                                                   cute.group_modes(thr_s.partition_B(gYb), 0, 3))
-                gT = cute.local_tile(mT[None, None, hy, b], (D, self.TN), (0, None))
-                tTs, tTg = cpasync.tma_partition(tma_T, 0, cute.make_layout(1), cute.group_modes(sT, 0, 3),
-                                                 cute.group_modes(thr_o.partition_B(gT), 0, 3))
-                for ci in cutlass.range(ncs, unroll=1):
-                    ct = c_lo + ci
-                    ye = ya_p.acquire_and_advance()
-                    if const_expr(self.yr):
-                        cute.copy(tma_Ya, tYag[(None, ct)], tYas[(None, ye.index)], tma_bar_ptr=ye.barrier)
-                    else:
-                        cute.copy(tma_Ya, tYag[(None, ct)], tYas[(None, 0)], tma_bar_ptr=ye.barrier)
-                    if const_expr(self.has_dp):
-                        yb = yb_p.acquire_and_advance()
-                        cute.copy(tma_Yb, tYbg[(None, ct)], tYbs[(None, 0)], tma_bar_ptr=yb.barrier)
-                    if const_expr(self.q3):
-                        if ci > 0:       # q3: T(t-1) after Ya(t), Yb(t) (consumer order)
+            for it in cutlass.range(nit, unroll=1):
+                if const_expr(self.pers):
+                    rt, hx, b, c_hi, ncs, total = self._pitem(it, cta, G, nbz, n_t, H)
+                hy0 = hx
+                if const_expr(not self.rows_are_keys):
+                    hy0 = hx // rep
+                gXa = cute.local_tile(mXa[None, None, hx, b], (self.TM, D), (None, 0))
+                tXas, tXag = cpasync.tma_partition(tma_Xa, 0, cute.make_layout(1), cute.group_modes(sXa, 0, 3),
+                                                   cute.group_modes(thr_s.partition_A(gXa), 0, 3))
+                xe = x_p.acquire_and_advance()
+                cute.copy(tma_Xa, tXag[(None, rt)], tXas[(None, 0)], tma_bar_ptr=xe.barrier)
+                if const_expr(self.has_dp):
+                    gXb = cute.local_tile(mXb[None, None, hx, b], (self.TM, D), (None, 0))
+                    tXbs, tXbg = cpasync.tma_partition(tma_Xb, 0, cute.make_layout(1), cute.group_modes(sXb, 0, 3),
+                                                       cute.group_modes(thr_s.partition_A(gXb), 0, 3))
+                    cute.copy(tma_Xb, tXbg[(None, rt)], tXbs[(None, 0)], tma_bar_ptr=xe.barrier)
+                thr_o = mma_o.get_slice(0)
+                for hi in cutlass.range(nhl, unroll=1):
+                    hy = hy0
+                    if const_expr(self.rows_are_keys):
+                        hy = hx * rep + hi
+                    gYa = cute.local_tile(mYa[None, None, hy, b], (self.TN, D), (None, 0))
+                    tYas, tYag = cpasync.tma_partition(tma_Ya, 0, cute.make_layout(1), cute.group_modes(sYa, 0, 3),
+                                                       cute.group_modes(thr_s.partition_B(gYa), 0, 3))
+                    gYb = cute.local_tile(mYb[None, None, hy, b], (self.TN, D), (None, 0))
+                    tYbs, tYbg = cpasync.tma_partition(tma_Yb, 0, cute.make_layout(1), cute.group_modes(sYb, 0, 3),
+                                                       cute.group_modes(thr_s.partition_B(gYb), 0, 3))
+                    gT = cute.local_tile(mT[None, None, hy, b], (D, self.TN), (0, None))
+                    tTs, tTg = cpasync.tma_partition(tma_T, 0, cute.make_layout(1), cute.group_modes(sT, 0, 3),
+                                                     cute.group_modes(thr_o.partition_B(gT), 0, 3))
+                    for ci in cutlass.range(ncs, unroll=1):
+                        ct = c_lo + ci
+                        ye = ya_p.acquire_and_advance()
+                        if const_expr(self.yr):
+                            cute.copy(tma_Ya, tYag[(None, ct)], tYas[(None, ye.index)], tma_bar_ptr=ye.barrier)
+                        else:
+                            cute.copy(tma_Ya, tYag[(None, ct)], tYas[(None, 0)], tma_bar_ptr=ye.barrier)
+                        if const_expr(self.has_dp):
+                            yb = yb_p.acquire_and_advance()
+                            cute.copy(tma_Yb, tYbg[(None, ct)], tYbs[(None, 0)], tma_bar_ptr=yb.barrier)
+                        if const_expr(self.q3):
+                            if ci > 0:       # q3: T(t-1) after Ya(t), Yb(t) (consumer order)
+                                te = t_p.acquire_and_advance()
+                                cute.copy(tma_T, tTg[(None, ct - 1)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
+                        elif const_expr(not self.yr):
                             te = t_p.acquire_and_advance()
-                            cute.copy(tma_T, tTg[(None, ct - 1)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
-                    elif const_expr(not self.yr):
+                            cute.copy(tma_T, tTg[(None, ct)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
+                    if const_expr(self.q3):  # q3: drain T(last) before the producer tails
                         te = t_p.acquire_and_advance()
-                        cute.copy(tma_T, tTg[(None, ct)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
-                if const_expr(self.q3):  # q3: drain T(last) before the producer tails
-                    te = t_p.acquire_and_advance()
-                    cute.copy(tma_T, tTg[(None, c_hi - 1)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
+                        cute.copy(tma_T, tTg[(None, c_hi - 1)], tTs[(None, 0)], tma_bar_ptr=te.barrier)
             ya_p.tail()
             if const_expr(self.has_dp):
                 yb_p.tail()
@@ -324,130 +365,195 @@ class DmHd256Mx2:
 
         # ------------------------------------------------------------------ MMA warp
         if warp == 8:
-            x_c.wait_and_advance()
             mma_op = cute.make_mma_atom(mma_o.op).op
             accS = cute.make_tensor(tmem_ptr, acc_l)
             ya_o = None
             if const_expr(self.yr):
                 ya_o = ya_c.clone()                            # yr: second cursor over the Ya stages, released by out(t-1)
-            for t in cutlass.range(total + 1, unroll=1):
-                if t < total:
-                    yf = ya_c.wait_and_advance()
-                    se = sc_p.acquire_and_advance()            # score region free (compute read dP(t-1) / S(t-1))
-                    if const_expr(self.ordf):
-                        tc_fence_after()                       # BW2
-                    if const_expr(self.kn == "s1"):
-                        spin(self.DLY)                         # control s1: S(t) producer late
-                    mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                    for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
-                        if const_expr(self.yr):
-                            cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, yf.index)], accS)
-                        else:
-                            cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
-                        mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                    se.commit()
-                    if const_expr(not self.yr or (self.kn == "yw" and self.unsafe)):
-                        yf.release()                           # yr: released after out(t) instead (control yw unsafe: here)
-                if const_expr(self.sp):
-                    # Q4 split: out(t-1) k 0-1 -> dP(t) (commit) -> out(t-1) k 2-3; same k order, zero init on k 0 of tile 0
-                    if t > 0:
-                        if t < total:
-                            # out(t-1): codes stage / SF set (t-1) & 1
-                            if const_expr(self.kn in ("cd", "fin")):
-                                spin(self.DLY)
-                            tp = t - 1
-                            s = tp & 1
-                            if const_expr(self.kn == "cd" and self.unsafe):
-                                s = tp * 0
-                            tf = t_c.wait_and_advance()
-                            cf = cd_c.wait_and_advance()
-                            tc_fence_after()
-                            dm_utils.gemm_ptx_bs(
-                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
-                                tuple((0, 0) for k in range(4)),
-                                zero_init=cutlass.Boolean(tp == 0), k_range=(0, 1))
-                            yg = yb_c.wait_and_advance()
-                            de = sc_p.acquire_and_advance()        # compute read S(t)
-                            if const_expr(self.ordf):
-                                tc_fence_after()                   # BW2
-                            if const_expr(self.kn == "s3"):
-                                spin(self.DLY)                     # control s3: dP(t) producer late
-                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                            for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
-                                cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
-                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                            de.commit()
-                            yg.release()
-                            dm_utils.gemm_ptx_bs(
-                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
-                                tuple((0, 0) for k in range(4)),
-                                zero_init=False, k_range=(2, 3))
-                            tf.release()
-                            cf.release()
-                        else:
-                            # out(t-1): codes stage / SF set (t-1) & 1
-                            if const_expr(self.kn in ("cd", "fin")):
-                                spin(self.DLY)
-                            tp = t - 1
-                            s = tp & 1
-                            if const_expr(self.kn == "cd" and self.unsafe):
-                                s = tp * 0
-                            tf = t_c.wait_and_advance()
-                            cf = cd_c.wait_and_advance()
-                            tc_fence_after()
-                            dm_utils.gemm_ptx_bs(
-                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                                sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                                ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
-                                tuple((0, 0) for k in range(4)),
-                                zero_init=cutlass.Boolean(tp == 0))
-                            tf.release()
-                            cf.release()
-                    else:
-                        yg = yb_c.wait_and_advance()
-                        de = sc_p.acquire_and_advance()        # compute read S(t)
+            U = Int32(0)
+            for it in cutlass.range(nit, unroll=1):
+                if const_expr(self.pers):
+                    rt, hx, b, c_hi, ncs, total = self._pitem(it, cta, G, nbz, n_t, H)
+                xf = x_c.wait_and_advance()
+                for t in cutlass.range(total + 1, unroll=1):
+                    if t < total:
+                        yf = ya_c.wait_and_advance()
+                        se = sc_p.acquire_and_advance()            # score region free (compute read dP(t-1) / S(t-1))
                         if const_expr(self.ordf):
-                            tc_fence_after()                   # BW2
-                        if const_expr(self.kn == "s3"):
-                            spin(self.DLY)                     # control s3: dP(t) producer late
+                            tc_fence_after()                       # BW2
+                        if const_expr(self.kn == "s1"):
+                            spin(self.DLY)                         # control s1: S(t) producer late
+                        if const_expr(self.kn == "xw"):
+                            if t + 1 == total:
+                                if t > 0:
+                                    spin(self.DLY)                 # control xw: the item's last S / dP late
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                        for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
-                            cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                        for kb in cutlass.range_constexpr(cute.size(tCrXa, mode=[2])):
+                            if const_expr(self.yr):
+                                cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, yf.index)], accS)
+                            else:
+                                cute.gemm(mma_s, accS, tCrXa[(None, None, kb, 0)], tCrYa[(None, None, kb, 0)], accS)
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                        de.commit()
-                        yg.release()
-                else:
-                    if const_expr(self.yr):
+                        se.commit()
+                        if const_expr(not self.yr or (self.kn == "yw" and self.unsafe)):
+                            yf.release()                           # yr: released after out(t) instead (control yw unsafe: here)
+                    if const_expr(self.sp):
+                        # Q4 split: out(t-1) k 0-1 -> dP(t) (commit) -> out(t-1) k 2-3; same k order, zero init on k 0 of tile 0
                         if t > 0:
-                            # out(t-1): codes stage / SF set (t-1) & 1; B = K(t-1) from its Ya stage (ya_o cursor)
-                            if const_expr(self.kn in ("cd", "fin", "yw")):
-                                spin(self.DLY)
-                            tp = t - 1
-                            s = tp & 1
-                            if const_expr(self.kn == "cd" and self.unsafe):
-                                s = tp * 0
-                            yo = ya_o.current_handle()
-                            cf = cd_c.wait_and_advance()
-                            tc_fence_after()
-                            dm_utils.gemm_ptx_bs(
-                                mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                                sC[(None, None, None, s)], sT[(None, None, None, yo.index)],
-                                tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                                ((0, 0), (0, 1), (4, 2), (4, 3)),
-                                tuple((0, 0) for k in range(4)),
-                                zero_init=cutlass.Boolean(tp == 0))
-                            if const_expr(not (self.kn == "yw" and self.unsafe)):
-                                yo.release()                       # Ya stage free once out(t-1) (and S(t-1) before it) completed
-                            ya_o.advance()
-                            cf.release()
-                    if const_expr(not self.q3 and not self.yr):
+                            if t < total:
+                                # out(t-1): codes stage / SF set (t-1) & 1
+                                if const_expr(self.kn in ("cd", "fin")):
+                                    spin(self.DLY)
+                                tp = t - 1
+                                s = tp & 1
+                                if const_expr(self.kn == "cd" and self.unsafe):
+                                    s = tp * 0
+                                tf = t_c.wait_and_advance()
+                                cf = cd_c.wait_and_advance()
+                                tc_fence_after()
+                                dm_utils.gemm_ptx_bs(
+                                    mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                    sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                    tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                    ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                    tuple((0, 0) for k in range(4)),
+                                    zero_init=cutlass.Boolean(tp == 0), k_range=(0, 1))
+                                yg = yb_c.wait_and_advance()
+                                de = sc_p.acquire_and_advance()        # compute read S(t)
+                                if const_expr(self.ordf):
+                                    tc_fence_after()                   # BW2
+                                if const_expr(self.kn == "s3"):
+                                    spin(self.DLY)                     # control s3: dP(t) producer late
+                                mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                                for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                                    cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                                    mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                                de.commit()
+                                yg.release()
+                                dm_utils.gemm_ptx_bs(
+                                    mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                    sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                    tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                    ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                    tuple((0, 0) for k in range(4)),
+                                    zero_init=False, k_range=(2, 3))
+                                tf.release()
+                                cf.release()
+                            else:
+                                # out(t-1): codes stage / SF set (t-1) & 1
+                                if const_expr(self.kn in ("cd", "fin")):
+                                    spin(self.DLY)
+                                tp = t - 1
+                                s = tp & 1
+                                if const_expr(self.kn == "cd" and self.unsafe):
+                                    s = tp * 0
+                                tf = t_c.wait_and_advance()
+                                cf = cd_c.wait_and_advance()
+                                tc_fence_after()
+                                dm_utils.gemm_ptx_bs(
+                                    mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                    sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                    tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                    ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                    tuple((0, 0) for k in range(4)),
+                                    zero_init=cutlass.Boolean(tp == 0))
+                                tf.release()
+                                cf.release()
+                        else:
+                            yg = yb_c.wait_and_advance()
+                            de = sc_p.acquire_and_advance()        # compute read S(t)
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW2
+                            if const_expr(self.kn == "s3"):
+                                spin(self.DLY)                     # control s3: dP(t) producer late
+                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                            for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                                cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                            de.commit()
+                            yg.release()
+                    else:
+                        if const_expr(self.yr):
+                            if t > 0:
+                                # out(t-1): codes stage / SF set (t-1) & 1; B = K(t-1) from its Ya stage (ya_o cursor)
+                                if const_expr(self.kn in ("cd", "fin", "yw")):
+                                    spin(self.DLY)
+                                tp = t - 1
+                                s = tp & 1
+                                if const_expr(self.pers):
+                                    s = (U + tp) & 1               # pers: the cd stage / SF set of this CTA's global tile count
+                                if const_expr(self.kn == "cd" and self.unsafe):
+                                    s = tp * 0
+                                yo = ya_o.current_handle()
+                                cf = cd_c.wait_and_advance()
+                                tc_fence_after()
+                                if const_expr(self.pers):
+                                    if tp == 0:
+                                        # pers: out accumulator free = the previous item's epilogue read it (fin empty; acquired
+                                        # again, without waiting, by the item's fin commit below).  Control ep: unsafe skips this
+                                        # wait and zero-inits before the previous epilogue (delayed) read the accumulator.
+                                        if const_expr(not (self.kn == "ep" and self.unsafe)):
+                                            fin_p.acquire()
+                                            if const_expr(self.ordf):
+                                                tc_fence_after()
+                                dm_utils.gemm_ptx_bs(
+                                    mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                    sC[(None, None, None, s)], sT[(None, None, None, yo.index)],
+                                    tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                    ((0, 0), (0, 1), (4, 2), (4, 3)),
+                                    tuple((0, 0) for k in range(4)),
+                                    zero_init=cutlass.Boolean(tp == 0))
+                                if const_expr(not (self.kn == "yw" and self.unsafe)):
+                                    yo.release()                       # Ya stage free once out(t-1) (and S(t-1) before it) completed
+                                ya_o.advance()
+                                cf.release()
+                        if const_expr(not self.q3 and not self.yr):
+                            if t > 0:
+                                # out(t-1): codes stage / SF set (t-1) & 1
+                                if const_expr(self.kn in ("cd", "fin")):
+                                    spin(self.DLY)
+                                tp = t - 1
+                                s = tp & 1
+                                if const_expr(self.kn == "cd" and self.unsafe):
+                                    s = tp * 0
+                                tf = t_c.wait_and_advance()
+                                cf = cd_c.wait_and_advance()
+                                tc_fence_after()
+                                dm_utils.gemm_ptx_bs(
+                                    mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
+                                    sC[(None, None, None, s)], sT[(None, None, None, 0)],
+                                    tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
+                                    ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
+                                    tuple((0, 0) for k in range(4)),
+                                    zero_init=cutlass.Boolean(tp == 0))
+                                tf.release()
+                                cf.release()
+                        if const_expr(self.has_dp):
+                            if t < total:
+                                yg = yb_c.wait_and_advance()
+                                de = sc_p.acquire_and_advance()        # compute read S(t)
+                                if const_expr(self.ordf):
+                                    tc_fence_after()                   # BW2
+                                if const_expr(self.kn == "s3"):
+                                    spin(self.DLY)                     # control s3: dP(t) producer late
+                                mma_s.set(tcgen05.Field.ACCUMULATE, False)
+                                for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
+                                    cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
+                                    mma_s.set(tcgen05.Field.ACCUMULATE, True)
+                                de.commit()
+                                yg.release()
+                                if const_expr(self.pers):
+                                    # pers: X (Q / dO tile) free once the item's last dP completed (UMMA commit arrive); control
+                                    # xw: unsafe releases after the second-to-last dP instead (then delays the last dP below)
+                                    if const_expr(self.kn == "xw" and self.unsafe):
+                                        if t + 2 == total:
+                                            xf.release()
+                                        if total == 1:
+                                            xf.release()
+                                    else:
+                                        if t + 1 == total:
+                                            xf.release()
+                    if const_expr(self.q3):     # q3: out(t-1) after dP(t)
                         if t > 0:
                             # out(t-1): codes stage / SF set (t-1) & 1
                             if const_expr(self.kn in ("cd", "fin")):
@@ -468,43 +574,10 @@ class DmHd256Mx2:
                                 zero_init=cutlass.Boolean(tp == 0))
                             tf.release()
                             cf.release()
-                    if const_expr(self.has_dp):
-                        if t < total:
-                            yg = yb_c.wait_and_advance()
-                            de = sc_p.acquire_and_advance()        # compute read S(t)
-                            if const_expr(self.ordf):
-                                tc_fence_after()                   # BW2
-                            if const_expr(self.kn == "s3"):
-                                spin(self.DLY)                     # control s3: dP(t) producer late
-                            mma_s.set(tcgen05.Field.ACCUMULATE, False)
-                            for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
-                                cute.gemm(mma_s, accS, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accS)
-                                mma_s.set(tcgen05.Field.ACCUMULATE, True)
-                            de.commit()
-                            yg.release()
-                if const_expr(self.q3):     # q3: out(t-1) after dP(t)
-                    if t > 0:
-                        # out(t-1): codes stage / SF set (t-1) & 1
-                        if const_expr(self.kn in ("cd", "fin")):
-                            spin(self.DLY)
-                        tp = t - 1
-                        s = tp & 1
-                        if const_expr(self.kn == "cd" and self.unsafe):
-                            s = tp * 0
-                        tf = t_c.wait_and_advance()
-                        cf = cd_c.wait_and_advance()
-                        tc_fence_after()
-                        dm_utils.gemm_ptx_bs(
-                            mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
-                            sC[(None, None, None, s)], sT[(None, None, None, 0)],
-                            tmem_base + self.COL_SF + self.SF_STRIDE * s, tmem_base + self.COL_SF + self.SF_STRIDE * s + self.SFB_OFF,
-                            ((0, 0), (0, 1), (4, 2), (4, 3)) if self.dqopt else tuple((0, k) for k in range(4)),
-                            tuple((0, 0) for k in range(4)),
-                            zero_init=cutlass.Boolean(tp == 0))
-                        tf.release()
-                        cf.release()
-            fe = fin_p.acquire_and_advance()
-            fe.commit()
+                fe = fin_p.acquire_and_advance()
+                fe.commit()
+                if const_expr(self.pers):
+                    U = U + total
             sc_p.tail()
             fin_p.tail()
 
@@ -583,228 +656,180 @@ class DmHd256Mx2:
                     tc_fence_after()
                 sx0 = tmem_ld32(tb + col0)
                 cute.arch.fence_view_async_tmem_load()
-            for t in cutlass.range(total, unroll=1):
-                hi = t // ncs
-                ct = c_lo + t - hi * ncs
-                h = hx
-                if const_expr(self.rows_are_keys):
-                    h = hx * rep + hi
-                l = b * H + h
-                par = t & 1
-                stg = t & 1
-                if const_expr(self.kn == "cd" and self.unsafe):
-                    stg = t * 0
-                ctok0 = ct * 128
-                # per-chunk scales of this thread's two chunks j = 2 hf + jj, and the other operand's sb of all 4 chunks
-                cs = [Float32(0.0)] * 2
-                ca = [Float32(0.0)] * 2
-                osb = [Int32(0)] * 4
-                osbo = [Int32(0)] * 2         # dqopt: the other operand's sb of this thread's two chunks
-                if const_expr(self.dqopt):
-                    kc = [nk0, nk1]
-                    vc = [nv0, nv1]
-                    ctq = cutlass.min(ct + 1, c_hi - 1)          # Q1: issue tile t+1's loads now (clamped; last tile reloads itself)
-                    nk0 = Float32(mKs[b, hk_row, ctq * 4 + 2 * hf])
-                    nk1 = Float32(mKs[b, hk_row, ctq * 4 + 2 * hf + 1])
-                    nv0 = Float32(mVs[b, hk_row, ctq * 4 + 2 * hf])
-                    nv1 = Float32(mVs[b, hk_row, ctq * 4 + 2 * hf + 1])
-                    for jj in cutlass.range_constexpr(2):
-                        cs[jj] = dmh.dm_mx256_c(kc[jj], row_s)
-                        ca[jj] = dmh.dm_mx256_dp_scale(vc[jj], row_a)
-                        osbo[jj] = sb_of(kc[jj])
-                for jj in cutlass.range_constexpr(0 if self.dqopt else 2):
-                    cj = ct * 4 + 2 * hf + jj
+            U = Int32(0)                      # pers: tiles of the finished items (global code / SF / exchange parity)
+            if const_expr(self.kn == "ep"):
+                ob_p = Int64(0)               # control ep: the deferred epilogue's row address / pending flag
+                has_p = Int32(0)
+            for it in cutlass.range(nit, unroll=1):
+                if const_expr(self.pers):
+                    rt, hx, b, c_hi, ncs, total = self._pitem(it, cta, G, nbz, n_t, H)
+                    rtok = rt * 128 + r
+                    hk_row = hx // rep
+                    row_s = Float32(mQs[b, hx, rtok // 32])
+                    row_a = Float32(mdOs[b, hx, rtok // 32])
+                    l2r = dmh.dm_mx256_l2(Float32(mLse[b, hx, rtok]))
+                    dlr = Float32(mDelta[b, hx, rtok])
+                    idn = Float64(0.0)
+                    idd = Float64(0.0)
+                    idp = Float64(0.0)
+                    lk_p = Int64(0)
+                    lk_s = Int64(0)
+                    lk_c = Int64(0)
+                    lk_r = Float64(0.0)
+                    nk0 = Float32(mKs[b, hk_row, 2 * hf])
+                    nk1 = Float32(mKs[b, hk_row, 2 * hf + 1])
+                    nv0 = Float32(mVs[b, hk_row, 2 * hf])
+                    nv1 = Float32(mVs[b, hk_row, 2 * hf + 1])
+                for t in cutlass.range(total, unroll=1):
+                    hi = t // ncs
+                    ct = c_lo + t - hi * ncs
+                    h = hx
                     if const_expr(self.rows_are_keys):
-                        qsj = Float32(mQs[b, h, cj])
-                        dosj = Float32(mdOs[b, h, cj])
-                        cs[jj] = dmh.dm_mx256_c(row_s, qsj)
-                        ca[jj] = dmh.dm_mx256_dp_scale(row_a, dosj)
-                    else:
-                        ksj = Float32(mKs[b, hk_row, cj])
-                        vsj = Float32(mVs[b, hk_row, cj])
-                        cs[jj] = dmh.dm_mx256_c(ksj, row_s)
-                        ca[jj] = dmh.dm_mx256_dp_scale(vsj, row_a)
-                for j in cutlass.range_constexpr(0 if self.dqopt else 4):
-                    if const_expr(self.mode == "dv"):
-                        osb[j] = sb_of(Float32(mdOs[b, h, ct * 4 + j]))
-                    elif const_expr(self.mode == "dk"):
-                        osb[j] = sb_of(Float32(mQs[b, h, ct * 4 + j]))
-                    else:
-                        osb[j] = sb_of(Float32(mKs[b, hk_row, ct * 4 + j]))
-                ldb = sLD_addr + par * 1024
-                ldn = sLD_addr + (1 - par) * 1024
-                if const_expr(self.kn == "ld" and self.unsafe):
-                    ldb = sLD_addr
-                    ldn = sLD_addr
-                xb = xch_addr + par * 1024
-                # ---- S(t) -> registers, release the score region ----
-                if const_expr(self.kn == "s1" and self.unsafe):
-                    # control s1 (unsafe): read the score region BEFORE S(t)'s full wait
-                    sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
-                    cute.arch.fence_view_async_tmem_load()
-                    sf = sc_c.wait_and_advance()
-                    if const_expr(self.ordf):
-                        tc_fence_after()
-                elif const_expr(self.x2):
-                    sf = sc_c.wait_and_advance()
-                    if const_expr(self.ordf):
-                        tc_fence_after()                       # BW1
-                    sv = [sx0, tmem_ld32(tb + col0 + 32)]      # chunk 0 read early (previous tile's exchange / prologue)
-                    cute.arch.fence_view_async_tmem_load()
-                else:
-                    sf = sc_c.wait_and_advance()
-                    if const_expr(self.ordf):
-                        tc_fence_after()                       # BW1
-                    if const_expr(self.kn == "sc"):
-                        if const_expr(self.unsafe):
-                            sf.release()
-                        spin(self.DLY)
-                    sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
-                    cute.arch.fence_view_async_tmem_load()
-                if const_expr(not (self.kn == "sc" and self.unsafe)):
-                    if const_expr(self.ordf):
-                        tc_fence_before()                      # BW2
-                    sf.release()
-                if const_expr(self.q3 and self.kn in ("sf0", "sf1", "cw0", "cw1")):
-                    # q3: out(t-1) runs only after dP(t), i.e. after this release: the window for tile t-1's late stores
-                    if t > 0:
-                        if hf == int(self.kn[2]):
-                            spin(self.DLY)
-                            if const_expr(self.unsafe):
-                                if const_expr(self.kn[:2] == "cw"):
-                                    for pa_ in pend_c:
-                                        st_shared_v4(*pa_)
-                                else:
-                                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * ((t - 1) & 1) + 4 * hf + qd, sfw_c)
-                                    cute.arch.fence_view_async_tmem_store()
-                if const_expr(self.q3 and self.kn in ("sfb0", "sfb1")):
-                    if t == int(self.kn[3]) + 1:
-                        if hf == 0:
-                            spin(self.DLY)
-                            if const_expr(self.unsafe):
-                                one_ = Int32(0x7F7F7F7F)
-                                sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
-                                dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
-                                dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
-                                cute.arch.fence_view_async_tmem_store()
-                if const_expr(self.kn == "ld"):
-                    if warp == 3:
-                        spin(self.DLY)
-                vals = [[Float32(0.0)] * 32, [Float32(0.0)] * 32]       # P (then dS) of chunk jj
-                for jj in cutlass.range_constexpr(2):
-                    cb = col0 + 32 * jj                                  # first score column of this chunk
-                    for i in cutlass.range_constexpr(0, 32, 4):
-                        l2v = [l2r] * 4
+                        h = hx * rep + hi
+                    l = b * H + h
+                    par = t & 1
+                    stg = t & 1
+                    if const_expr(self.pers):
+                        par = (U + t) & 1               # pers: the CTA's global tile count (matches the cd pipeline stage)
+                        stg = (U + t) & 1
+                    if const_expr(self.kn == "cd" and self.unsafe):
+                        stg = t * 0
+                    ctok0 = ct * 128
+                    # per-chunk scales of this thread's two chunks j = 2 hf + jj, and the other operand's sb of all 4 chunks
+                    cs = [Float32(0.0)] * 2
+                    ca = [Float32(0.0)] * 2
+                    osb = [Int32(0)] * 4
+                    osbo = [Int32(0)] * 2         # dqopt: the other operand's sb of this thread's two chunks
+                    if const_expr(self.dqopt):
+                        kc = [nk0, nk1]
+                        vc = [nv0, nv1]
+                        ctq = cutlass.min(ct + 1, c_hi - 1)          # Q1: issue tile t+1's loads now (clamped; last tile reloads itself)
+                        nk0 = Float32(mKs[b, hk_row, ctq * 4 + 2 * hf])
+                        nk1 = Float32(mKs[b, hk_row, ctq * 4 + 2 * hf + 1])
+                        nv0 = Float32(mVs[b, hk_row, ctq * 4 + 2 * hf])
+                        nv1 = Float32(mVs[b, hk_row, ctq * 4 + 2 * hf + 1])
+                        for jj in cutlass.range_constexpr(2):
+                            cs[jj] = dmh.dm_mx256_c(kc[jj], row_s)
+                            ca[jj] = dmh.dm_mx256_dp_scale(vc[jj], row_a)
+                            osbo[jj] = sb_of(kc[jj])
+                    for jj in cutlass.range_constexpr(0 if self.dqopt else 2):
+                        cj = ct * 4 + 2 * hf + jj
                         if const_expr(self.rows_are_keys):
-                            l2v = ld_shared_v4f(ldb + (cb + i) * 4)
-                        for q2 in cutlass.range_constexpr(0, 4, 2):
-                            s0 = sv[jj][i + q2]
-                            s1 = sv[jj][i + q2 + 1]
-                            if const_expr(self.causal):
-                                c0 = ctok0 + cb + i + q2
-                                if const_expr(self.rows_are_keys):
-                                    s0 = -Float32.inf if rtok > c0 else s0
-                                    s1 = -Float32.inf if rtok > c0 + 1 else s1
-                                else:
-                                    s0 = -Float32.inf if c0 > rtok else s0
-                                    s1 = -Float32.inf if c0 + 1 > rtok else s1
-                            if const_expr(self.rows_are_keys):
-                                p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs[jj], l2v[q2], l2v[q2 + 1])
-                            else:
-                                p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[jj], l2r)
-                            vals[jj][i + q2] = p0
-                            vals[jj][i + q2 + 1] = p1
-                if const_expr((self.dbg & 8) and self.mode != "dk"):
-                    for jj in cutlass.range_constexpr(2):
-                        cb = col0 + 32 * jj
-                        hpl = [Int32(0)] * 32
-                        for i in cutlass.range_constexpr(32):
-                            if const_expr(self.rows_are_keys):
-                                hpl[i] = hmix(f2i(vals[jj][i]), hidx(ctok0 + cb + i, rtok))
-                            else:
-                                hpl[i] = hmix(f2i(vals[jj][i]), hidx(rtok, ctok0 + cb + i))
-                        if const_expr(self.rows_are_keys):
-                            lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + ctok0 + cb) * 32)
+                            qsj = Float32(mQs[b, h, cj])
+                            dosj = Float32(mdOs[b, h, cj])
+                            cs[jj] = dmh.dm_mx256_c(row_s, qsj)
+                            ca[jj] = dmh.dm_mx256_dp_scale(row_a, dosj)
                         else:
-                            hs_ = Int32(0)
-                            for i in cutlass.range_constexpr(32):
-                                hs_ = hs_ + hpl[i]
-                            lk_p = lk_p + zext64(hs_)
-                if const_expr(self.dbg & 2):
-                    for jj in cutlass.range_constexpr(2):
-                        cb = col0 + 32 * jj
-                        dstp = Int64(16)
-                        dpa = _gaddr(mDump) + ((Int64(l) * N + rtok) * N + ctok0 + cb) * 16
-                        if const_expr(self.rows_are_keys):
-                            dstp = Int64(N) * 16
-                            dpa = _gaddr(mDump) + ((Int64(l) * N + ctok0 + cb) * N + rtok) * 16
-                        for i in cutlass.range_constexpr(32):
-                            st_global_f32(dpa, sv[jj][i])
-                            if const_expr(self.mode != "dk"):
-                                st_global_f32(dpa + 8, vals[jj][i])
-                            dpa = dpa + dstp
-                sbs = [Int32(0)] * 2         # this thread's two chunks
-                ce = None
-                if const_expr(self.has_dp):
-                    # ---- dP(t) -> registers, release; dS = P * fma(dP, a, -delta) ----
-                    if const_expr(self.kn == "s3" and self.unsafe):
-                        # control s3 (unsafe): read dP BEFORE dP(t)'s full wait
-                        dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                            ksj = Float32(mKs[b, hk_row, cj])
+                            vsj = Float32(mVs[b, hk_row, cj])
+                            cs[jj] = dmh.dm_mx256_c(ksj, row_s)
+                            ca[jj] = dmh.dm_mx256_dp_scale(vsj, row_a)
+                    for j in cutlass.range_constexpr(0 if self.dqopt else 4):
+                        if const_expr(self.mode == "dv"):
+                            osb[j] = sb_of(Float32(mdOs[b, h, ct * 4 + j]))
+                        elif const_expr(self.mode == "dk"):
+                            osb[j] = sb_of(Float32(mQs[b, h, ct * 4 + j]))
+                        else:
+                            osb[j] = sb_of(Float32(mKs[b, hk_row, ct * 4 + j]))
+                    ldb = sLD_addr + par * 1024
+                    ldn = sLD_addr + (1 - par) * 1024
+                    if const_expr(self.kn == "ld" and self.unsafe):
+                        ldb = sLD_addr
+                        ldn = sLD_addr
+                    xb = xch_addr + par * 1024
+                    # ---- S(t) -> registers, release the score region ----
+                    if const_expr(self.kn == "s1" and self.unsafe):
+                        # control s1 (unsafe): read the score region BEFORE S(t)'s full wait
+                        sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
                         cute.arch.fence_view_async_tmem_load()
-                        df = sc_c.wait_and_advance()
+                        sf = sc_c.wait_and_advance()
                         if const_expr(self.ordf):
                             tc_fence_after()
+                    elif const_expr(self.x2):
+                        sf = sc_c.wait_and_advance()
                         if const_expr(self.ordf):
-                            tc_fence_before()
-                        df.release()
-                    elif const_expr(self.kn == "s4" and self.unsafe):
-                        # control s4 (unsafe): release the score region BEFORE reading dP(t), then delay the read
-                        df = sc_c.wait_and_advance()
-                        if const_expr(self.ordf):
-                            tc_fence_after()
-                        df.release()
-                        spin(self.DLY)
-                        dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                            tc_fence_after()                       # BW1
+                        sv = [sx0, tmem_ld32(tb + col0 + 32)]      # chunk 0 read early (previous tile's exchange / prologue)
                         cute.arch.fence_view_async_tmem_load()
                     else:
-                        df = sc_c.wait_and_advance()
+                        sf = sc_c.wait_and_advance()
                         if const_expr(self.ordf):
-                            tc_fence_after()                   # BW1
-                        if const_expr(self.kn == "s4"):
+                            tc_fence_after()                       # BW1
+                        if const_expr(self.kn == "sc"):
+                            if const_expr(self.unsafe):
+                                sf.release()
                             spin(self.DLY)
-                        dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                        sv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
                         cute.arch.fence_view_async_tmem_load()
+                    if const_expr(not (self.kn == "sc" and self.unsafe)):
                         if const_expr(self.ordf):
-                            tc_fence_before()                  # BW2
-                        df.release()
-                    am2 = [Float32(0.0)] * 2
-                    idc = [[Float32(0.0)] * 3, [Float32(0.0)] * 3]
+                            tc_fence_before()                      # BW2
+                        sf.release()
+                    if const_expr(self.q3 and self.kn in ("sf0", "sf1", "cw0", "cw1")):
+                        # q3: out(t-1) runs only after dP(t), i.e. after this release: the window for tile t-1's late stores
+                        if t > 0:
+                            if hf == int(self.kn[2]):
+                                spin(self.DLY)
+                                if const_expr(self.unsafe):
+                                    if const_expr(self.kn[:2] == "cw"):
+                                        for pa_ in pend_c:
+                                            st_shared_v4(*pa_)
+                                    else:
+                                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * ((t - 1) & 1) + 4 * hf + qd, sfw_c)
+                                        cute.arch.fence_view_async_tmem_store()
+                    if const_expr(self.q3 and self.kn in ("sfb0", "sfb1")):
+                        if t == int(self.kn[3]) + 1:
+                            if hf == 0:
+                                spin(self.DLY)
+                                if const_expr(self.unsafe):
+                                    one_ = Int32(0x7F7F7F7F)
+                                    sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
+                                    dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
+                                    dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
+                                    cute.arch.fence_view_async_tmem_store()
+                    if const_expr(self.kn == "ld"):
+                        if warp == 3:
+                            spin(self.DLY)
+                    vals = [[Float32(0.0)] * 32, [Float32(0.0)] * 32]       # P (then dS) of chunk jj
                     for jj in cutlass.range_constexpr(2):
-                        cb = col0 + 32 * jj
-                        id1 = Float32(0.0)
-                        id2 = Float32(0.0)
-                        id3 = Float32(0.0)
+                        cb = col0 + 32 * jj                                  # first score column of this chunk
                         for i in cutlass.range_constexpr(0, 32, 4):
-                            dlv = [dlr] * 4
+                            l2v = [l2r] * 4
                             if const_expr(self.rows_are_keys):
-                                dlv = ld_shared_v4f(ldb + 512 + (cb + i) * 4)
-                            pv = [vals[jj][i + q] for q in range(4)]
+                                l2v = ld_shared_v4f(ldb + (cb + i) * 4)
                             for q2 in cutlass.range_constexpr(0, 4, 2):
-                                x0, x1 = cute.arch.fma_packed_f32x2((dvv[jj][i + q2], dvv[jj][i + q2 + 1]),
-                                                                    (ca[jj], ca[jj]), (-dlv[q2], -dlv[q2 + 1]))
-                                x0, x1 = cute.arch.mul_packed_f32x2((pv[q2], pv[q2 + 1]), (x0, x1))
-                                vals[jj][i + q2] = x0
-                                vals[jj][i + q2 + 1] = x1
-                            if const_expr((self.dbg & 1) and self.mode == "dq"):
-                                for q in cutlass.range_constexpr(4):
-                                    id1 = add_f32(id1, vals[jj][i + q])
-                                    id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dvv[jj][i + q], ca[jj]))))
-                                    id3 = add_f32(id3, pv[q])
-                        idc[jj] = [id1, id2, id3]
-                        am = Float32(0.0)
-                        for i in cutlass.range_constexpr(32):
-                            am = cute.arch.fmax(am, abs_f32(vals[jj][i]))
-                        am2[jj] = am
+                                s0 = sv[jj][i + q2]
+                                s1 = sv[jj][i + q2 + 1]
+                                if const_expr(self.causal):
+                                    c0 = ctok0 + cb + i + q2
+                                    if const_expr(self.rows_are_keys):
+                                        s0 = -Float32.inf if rtok > c0 else s0
+                                        s1 = -Float32.inf if rtok > c0 + 1 else s1
+                                    else:
+                                        s0 = -Float32.inf if c0 > rtok else s0
+                                        s1 = -Float32.inf if c0 + 1 > rtok else s1
+                                if const_expr(self.rows_are_keys):
+                                    p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs[jj], l2v[q2], l2v[q2 + 1])
+                                else:
+                                    p0, p1 = dmh.dm_mx256_p_pair(s0, s1, cs[jj], l2r)
+                                vals[jj][i + q2] = p0
+                                vals[jj][i + q2 + 1] = p1
+                    if const_expr((self.dbg & 8) and self.mode != "dk"):
+                        for jj in cutlass.range_constexpr(2):
+                            cb = col0 + 32 * jj
+                            hpl = [Int32(0)] * 32
+                            for i in cutlass.range_constexpr(32):
+                                if const_expr(self.rows_are_keys):
+                                    hpl[i] = hmix(f2i(vals[jj][i]), hidx(ctok0 + cb + i, rtok))
+                                else:
+                                    hpl[i] = hmix(f2i(vals[jj][i]), hidx(rtok, ctok0 + cb + i))
+                            if const_expr(self.rows_are_keys):
+                                lk_cols_u32(hpl, lane, _gaddr(mHash) + (Int64(l) * N + ctok0 + cb) * 32)
+                            else:
+                                hs_ = Int32(0)
+                                for i in cutlass.range_constexpr(32):
+                                    hs_ = hs_ + hpl[i]
+                                lk_p = lk_p + zext64(hs_)
                     if const_expr(self.dbg & 2):
                         for jj in cutlass.range_constexpr(2):
                             cb = col0 + 32 * jj
@@ -814,274 +839,378 @@ class DmHd256Mx2:
                                 dstp = Int64(N) * 16
                                 dpa = _gaddr(mDump) + ((Int64(l) * N + ctok0 + cb) * N + rtok) * 16
                             for i in cutlass.range_constexpr(32):
-                                st_global_f32(dpa + 4, dvv[jj][i])
-                                st_global_f32(dpa + 12, vals[jj][i])
+                                st_global_f32(dpa, sv[jj][i])
+                                if const_expr(self.mode != "dk"):
+                                    st_global_f32(dpa + 8, vals[jj][i])
                                 dpa = dpa + dstp
-                    # ---- stage l2 / delta of tile t+1 (before this tile's barrier) ----
-                    if const_expr(self.rows_are_keys):
-                        if t + 1 < total:
-                            hn = hx * rep + (t + 1) // ncs
-                            ctn = c_lo + (t + 1) - ((t + 1) // ncs) * ncs
-                            if ctid < 128:
-                                st_shared_f32(ldn + ctid * 4, dmh.dm_mx256_l2(Float32(mLse[b, hn, ctn * 128 + ctid])))
-                            else:
-                                st_shared_f32(ldn + ctid * 4, Float32(mDelta[b, hn, ctn * 128 + ctid - 128]))
-                    # ---- block max exchange ----
-                    if const_expr(self.mode == "dk"):
-                        # row max over this half -> slot [hf][r]; partner half's max after the barrier
-                        st_shared_f32(xb + (hf * 128 + r) * 4, cute.arch.fmax(am2[0], am2[1]))
-                    else:
-                        if const_expr(self.kn in ("xh0", "xh1")):
-                            if warp == 4 * int(self.kn[2]):
-                                spin(self.DLY)                 # control xh<h>: warp 0 / 4 late BEFORE its slot stores
-                        for jj in cutlass.range_constexpr(2):
-                            a_ = dm_utils.redux_max_abs_f32(am2[jj])
-                            if lane == 0:
-                                st_shared_f32(xb + ((2 * hf + jj) * 4 + qd) * 4, a_)
-                    if const_expr((self.dbg & 1) and self.mode == "dq"):
-                        if hf == 1:
-                            if const_expr(self.kn == "xi"):
-                                spin(self.DLY)                 # control xi: upper half late before its identity stores
-                            for jj in cutlass.range_constexpr(2):
-                                for u in cutlass.range_constexpr(3):
-                                    st_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj + u) * 4, idc[jj][u])
-                    if const_expr(self.kn == "xc"):
-                        if warp == 0:
-                            spin(self.DLY)
-                    if const_expr(not (self.kn == "xc" and self.unsafe)):
-                        if const_expr(self.dqopt):
-                            # Q2: chunks 2 hf, 2 hf + 1 are reduced over the 4 lane quadrants of THIS half only
-                            if hf == 0:
-                                if const_expr(not (self.kn == "xh0" and self.unsafe)):
-                                    cute.arch.barrier(barrier_id=5, number_of_threads=128)
-                            else:
-                                if const_expr(not (self.kn == "xh1" and self.unsafe)):
-                                    cute.arch.barrier(barrier_id=6, number_of_threads=128)
-                            if const_expr((self.dbg & 1) and not (self.kn == "xi" and self.unsafe)):
-                                cute.arch.barrier(barrier_id=2, number_of_threads=256)    # identity exchange (dbg only)
-                        else:
-                            cute.arch.barrier(barrier_id=2, number_of_threads=256)
-                    if const_expr((self.dbg & 1) and self.mode == "dq"):
-                        if hf == 0:
-                            # original order: chunks 0, 1 (own) then 2, 3 (upper half), fp64 over ascending tiles
-                            for jj in cutlass.range_constexpr(2):
-                                idn = idn + Float64(idc[jj][0])
-                                idd = idd + Float64(idc[jj][1])
-                                idp = idp + Float64(idc[jj][2])
-                            for jj in cutlass.range_constexpr(2):
-                                idn = idn + Float64(ld_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj) * 4))
-                                idd = idd + Float64(ld_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj + 1) * 4))
-                                idp = idp + Float64(ld_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj + 2) * 4))
-                    if const_expr(self.mode == "dk"):
-                        mo = ld_shared_f32(xb + ((1 - hf) * 128 + r) * 4)
-                        sb = dm_utils.pow2_sb(dm_utils.redux_max_abs_f32(cute.arch.fmax(cute.arch.fmax(am2[0], am2[1]), mo)))
-                        sbs = [sb, sb]
-                        sball = [sb] * 4
-                    elif const_expr(self.dqopt and self.xs):
-                        sball = [Int32(0)] * 4
-                        xv = ld_shared_f32(xb + (8 * hf + (lane & 7)) * 4)       # lanes 4c..4c+3: chunk 2 hf + c, quadrants 0..3
-                        xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=1))   # lane 4c: max(m0, m1); 4c+2: max(m2, m3)
-                        xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=2))   # lane 4c: max(max(m0, m1), max(m2, m3))
-                        sbs[0] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=0))
-                        sbs[1] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=4))
-                    elif const_expr(self.dqopt and self.x2):
-                        sball = [Int32(0)] * 4
-                        m4s = [ld_shared_v4f(xb + (2 * hf + jj) * 16) for jj in range(2)]
-                        if t + 1 < total:
-                            # x2: S(t+1) chunk 0 while the exchange loads are in flight (S(t+1) issued at dP(t)'s release)
-                            sc_c.wait()
-                            if const_expr(self.ordf):
-                                tc_fence_after()               # BW1
-                            sx0 = tmem_ld32(tb + col0)
+                    sbs = [Int32(0)] * 2         # this thread's two chunks
+                    ce = None
+                    if const_expr(self.has_dp):
+                        # ---- dP(t) -> registers, release; dS = P * fma(dP, a, -delta) ----
+                        if const_expr(self.kn == "s3" and self.unsafe):
+                            # control s3 (unsafe): read dP BEFORE dP(t)'s full wait
+                            dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
                             cute.arch.fence_view_async_tmem_load()
-                        for jj in cutlass.range_constexpr(2):
-                            m4 = m4s[jj]
-                            sbs[jj] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
-                    elif const_expr(self.dqopt):
-                        sball = [Int32(0)] * 4
-                        for jj in cutlass.range_constexpr(2):
-                            m4 = ld_shared_v4f(xb + (2 * hf + jj) * 16)
-                            sbs[jj] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
-                    else:
-                        sball = [Int32(0)] * 4
-                        for j in cutlass.range_constexpr(4):
-                            m4 = ld_shared_v4f(xb + j * 16)
-                            sball[j] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
-                        sbs = [sel_eq_i32(hf, Int32(0), sball[0], sball[2]), sel_eq_i32(hf, Int32(0), sball[1], sball[3])]
-                    if const_expr(self.kn == "cd" and self.unsafe):
-                        pass
-                    else:
-                        ce = cd_p.acquire_and_advance()
-                        if const_expr(self.ordf):
-                            tc_fence_after()                   # BW3
-                else:
-                    # dv: P^T codes per (key, 32 queries), own chunks
-                    for jj in cutlass.range_constexpr(2):
-                        am = Float32(0.0)
-                        for i in cutlass.range_constexpr(32):
-                            am = cute.arch.fmax(am, vals[jj][i])
-                        sbs[jj] = dm_utils.pow2_sb(am)
-                    if const_expr(self.rows_are_keys):
-                        if t + 1 < total:
-                            hn = hx * rep + (t + 1) // ncs
-                            ctn = c_lo + (t + 1) - ((t + 1) // ncs) * ncs
-                            if ctid < 128:
-                                st_shared_f32(ldn + ctid * 4, dmh.dm_mx256_l2(Float32(mLse[b, hn, ctn * 128 + ctid])))
-                            else:
-                                st_shared_f32(ldn + ctid * 4, Float32(mDelta[b, hn, ctn * 128 + ctid - 128]))
-                    if hf == 1:
-                        st_shared_f32(xb + r * 4, Float32(0.0) + Float32(sbs[0] + 256 * sbs[1]))
-                    if const_expr(self.kn == "xc"):
-                        if warp == 0:
+                            df = sc_c.wait_and_advance()
+                            if const_expr(self.ordf):
+                                tc_fence_after()
+                            if const_expr(self.ordf):
+                                tc_fence_before()
+                            df.release()
+                        elif const_expr(self.kn == "s4" and self.unsafe):
+                            # control s4 (unsafe): release the score region BEFORE reading dP(t), then delay the read
+                            df = sc_c.wait_and_advance()
+                            if const_expr(self.ordf):
+                                tc_fence_after()
+                            df.release()
                             spin(self.DLY)
-                    if const_expr(not (self.kn == "xc" and self.unsafe)):
-                        cute.arch.barrier(barrier_id=2, number_of_threads=256)
-                    hv_ = Int32(ld_shared_f32(xb + r * 4))      # upper half's packed sbs (only the hf == 0 owner uses it)
-                    sball = [sbs[0], sbs[1], hv_ % 256, hv_ // 256]
-                    if const_expr(not (self.kn == "cd" and self.unsafe)):
-                        ce = cd_p.acquire_and_advance()
-                        if const_expr(self.ordf):
-                            tc_fence_after()                   # BW3
-                if const_expr(self.esf and self.kn not in ("cw0", "cw1", "sf0", "sf1")):
-                    # esf: this thread's SFA word first (after the cd acquire + BW3 fence above), completed with the codes below
-                    v0e = dm_utils.add_sb_clamp(sbs[0], osbo[0])
-                    v1e = dm_utils.add_sb_clamp(sbs[1], osbo[1])
-                    ze = Int32(0)
-                    sfe = sel_eq_i32(hf, Int32(0), pack4(v0e, v1e, ze, ze), pack4(ze, ze, v0e, v1e))
-                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfe)
-                # ---- codes -> smem stage stg (own two chunks) ----
-                cbase = crow + stg * self.bytes_c
-                pend = []                    # control cw<h>: code stores deferred (emitted below), else stored here
-                for jj in cutlass.range_constexpr(2):
-                    j2 = 2 * hf + jj
-                    hsl = [Int32(0)] * 32
-                    hcl = [Int32(0)] * 32
-                    inv = dm_utils.inv_pow2_from_sb(sbs[jj])
-                    for hv in cutlass.range_constexpr(2):
-                        w = [None] * 4
-                        for u in cutlass.range_constexpr(4):
-                            i0 = 16 * hv + 4 * u
-                            y0, y1 = cute.arch.mul_packed_f32x2((vals[jj][i0], vals[jj][i0 + 1]), (inv, inv))
-                            y2, y3 = cute.arch.mul_packed_f32x2((vals[jj][i0 + 2], vals[jj][i0 + 3]), (inv, inv))
-                            w[u] = e4m3x4(y0, y1, y2, y3)
-                        if const_expr(self.kn in ("cw0", "cw1")):
-                            pend.append((cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3]))
+                            dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                            cute.arch.fence_view_async_tmem_load()
                         else:
-                            st_shared_v4(cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                            df = sc_c.wait_and_advance()
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW1
+                            if const_expr(self.kn == "s4"):
+                                spin(self.DLY)
+                            dvv = [tmem_ld32(tb + col0), tmem_ld32(tb + col0 + 32)]
+                            cute.arch.fence_view_async_tmem_load()
+                            if const_expr(self.ordf):
+                                tc_fence_before()                  # BW2
+                            df.release()
+                        am2 = [Float32(0.0)] * 2
+                        idc = [[Float32(0.0)] * 3, [Float32(0.0)] * 3]
+                        for jj in cutlass.range_constexpr(2):
+                            cb = col0 + 32 * jj
+                            id1 = Float32(0.0)
+                            id2 = Float32(0.0)
+                            id3 = Float32(0.0)
+                            for i in cutlass.range_constexpr(0, 32, 4):
+                                dlv = [dlr] * 4
+                                if const_expr(self.rows_are_keys):
+                                    dlv = ld_shared_v4f(ldb + 512 + (cb + i) * 4)
+                                pv = [vals[jj][i + q] for q in range(4)]
+                                for q2 in cutlass.range_constexpr(0, 4, 2):
+                                    x0, x1 = cute.arch.fma_packed_f32x2((dvv[jj][i + q2], dvv[jj][i + q2 + 1]),
+                                                                        (ca[jj], ca[jj]), (-dlv[q2], -dlv[q2 + 1]))
+                                    x0, x1 = cute.arch.mul_packed_f32x2((pv[q2], pv[q2 + 1]), (x0, x1))
+                                    vals[jj][i + q2] = x0
+                                    vals[jj][i + q2 + 1] = x1
+                                if const_expr((self.dbg & 1) and self.mode == "dq"):
+                                    for q in cutlass.range_constexpr(4):
+                                        id1 = add_f32(id1, vals[jj][i + q])
+                                        id2 = add_f32(id2, abs_f32(mul_f32(pv[q], mul_f32(dvv[jj][i + q], ca[jj]))))
+                                        id3 = add_f32(id3, pv[q])
+                            idc[jj] = [id1, id2, id3]
+                            am = Float32(0.0)
+                            for i in cutlass.range_constexpr(32):
+                                am = cute.arch.fmax(am, abs_f32(vals[jj][i]))
+                            am2[jj] = am
+                        if const_expr(self.dbg & 2):
+                            for jj in cutlass.range_constexpr(2):
+                                cb = col0 + 32 * jj
+                                dstp = Int64(16)
+                                dpa = _gaddr(mDump) + ((Int64(l) * N + rtok) * N + ctok0 + cb) * 16
+                                if const_expr(self.rows_are_keys):
+                                    dstp = Int64(N) * 16
+                                    dpa = _gaddr(mDump) + ((Int64(l) * N + ctok0 + cb) * N + rtok) * 16
+                                for i in cutlass.range_constexpr(32):
+                                    st_global_f32(dpa + 4, dvv[jj][i])
+                                    st_global_f32(dpa + 12, vals[jj][i])
+                                    dpa = dpa + dstp
+                        # ---- stage l2 / delta of tile t+1 (before this tile's barrier) ----
+                        if const_expr(self.rows_are_keys):
+                            if t + 1 < total:
+                                hn = hx * rep + (t + 1) // ncs
+                                ctn = c_lo + (t + 1) - ((t + 1) // ncs) * ncs
+                                if ctid < 128:
+                                    st_shared_f32(ldn + ctid * 4, dmh.dm_mx256_l2(Float32(mLse[b, hn, ctn * 128 + ctid])))
+                                else:
+                                    st_shared_f32(ldn + ctid * 4, Float32(mDelta[b, hn, ctn * 128 + ctid - 128]))
+                        # ---- block max exchange ----
+                        if const_expr(self.mode == "dk"):
+                            # row max over this half -> slot [hf][r]; partner half's max after the barrier
+                            st_shared_f32(xb + (hf * 128 + r) * 4, cute.arch.fmax(am2[0], am2[1]))
+                        else:
+                            if const_expr(self.kn in ("xh0", "xh1")):
+                                if warp == 4 * int(self.kn[2]):
+                                    spin(self.DLY)                 # control xh<h>: warp 0 / 4 late BEFORE its slot stores
+                            for jj in cutlass.range_constexpr(2):
+                                a_ = dm_utils.redux_max_abs_f32(am2[jj])
+                                if lane == 0:
+                                    st_shared_f32(xb + ((2 * hf + jj) * 4 + qd) * 4, a_)
+                        if const_expr((self.dbg & 1) and self.mode == "dq"):
+                            if hf == 1:
+                                if const_expr(self.kn == "xi"):
+                                    spin(self.DLY)                 # control xi: upper half late before its identity stores
+                                for jj in cutlass.range_constexpr(2):
+                                    for u in cutlass.range_constexpr(3):
+                                        st_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj + u) * 4, idc[jj][u])
+                        if const_expr(self.kn == "xc"):
+                            if warp == 0:
+                                spin(self.DLY)
+                        if const_expr(not (self.kn == "xc" and self.unsafe)):
+                            if const_expr(self.dqopt):
+                                # Q2: chunks 2 hf, 2 hf + 1 are reduced over the 4 lane quadrants of THIS half only
+                                if hf == 0:
+                                    if const_expr(not (self.kn == "xh0" and self.unsafe)):
+                                        cute.arch.barrier(barrier_id=5, number_of_threads=128)
+                                else:
+                                    if const_expr(not (self.kn == "xh1" and self.unsafe)):
+                                        cute.arch.barrier(barrier_id=6, number_of_threads=128)
+                                if const_expr((self.dbg & 1) and not (self.kn == "xi" and self.unsafe)):
+                                    cute.arch.barrier(barrier_id=2, number_of_threads=256)    # identity exchange (dbg only)
+                            else:
+                                cute.arch.barrier(barrier_id=2, number_of_threads=256)
+                        if const_expr((self.dbg & 1) and self.mode == "dq"):
+                            if hf == 0:
+                                # original order: chunks 0, 1 (own) then 2, 3 (upper half), fp64 over ascending tiles
+                                for jj in cutlass.range_constexpr(2):
+                                    idn = idn + Float64(idc[jj][0])
+                                    idd = idd + Float64(idc[jj][1])
+                                    idp = idp + Float64(idc[jj][2])
+                                for jj in cutlass.range_constexpr(2):
+                                    idn = idn + Float64(ld_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj) * 4))
+                                    idd = idd + Float64(ld_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj + 1) * 4))
+                                    idp = idp + Float64(ld_shared_f32(sId_addr + ((par * 128 + r) * 8 + 4 * jj + 2) * 4))
+                        if const_expr(self.mode == "dk"):
+                            mo = ld_shared_f32(xb + ((1 - hf) * 128 + r) * 4)
+                            sb = dm_utils.pow2_sb(dm_utils.redux_max_abs_f32(cute.arch.fmax(cute.arch.fmax(am2[0], am2[1]), mo)))
+                            sbs = [sb, sb]
+                            sball = [sb] * 4
+                        elif const_expr(self.dqopt and self.xs):
+                            sball = [Int32(0)] * 4
+                            xv = ld_shared_f32(xb + (8 * hf + (lane & 7)) * 4)       # lanes 4c..4c+3: chunk 2 hf + c, quadrants 0..3
+                            xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=1))   # lane 4c: max(m0, m1); 4c+2: max(m2, m3)
+                            xv = max_f32(xv, cute.arch.shuffle_sync_bfly(xv, offset=2))   # lane 4c: max(max(m0, m1), max(m2, m3))
+                            sbs[0] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=0))
+                            sbs[1] = dm_utils.pow2_sb(cute.arch.shuffle_sync(xv, offset=4))
+                        elif const_expr(self.dqopt and self.x2):
+                            sball = [Int32(0)] * 4
+                            m4s = [ld_shared_v4f(xb + (2 * hf + jj) * 16) for jj in range(2)]
+                            if t + 1 < total:
+                                # x2: S(t+1) chunk 0 while the exchange loads are in flight (S(t+1) issued at dP(t)'s release)
+                                sc_c.wait()
+                                if const_expr(self.ordf):
+                                    tc_fence_after()               # BW1
+                                sx0 = tmem_ld32(tb + col0)
+                                cute.arch.fence_view_async_tmem_load()
+                            for jj in cutlass.range_constexpr(2):
+                                m4 = m4s[jj]
+                                sbs[jj] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
+                        elif const_expr(self.dqopt):
+                            sball = [Int32(0)] * 4
+                            for jj in cutlass.range_constexpr(2):
+                                m4 = ld_shared_v4f(xb + (2 * hf + jj) * 16)
+                                sbs[jj] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
+                        else:
+                            sball = [Int32(0)] * 4
+                            for j in cutlass.range_constexpr(4):
+                                m4 = ld_shared_v4f(xb + j * 16)
+                                sball[j] = dm_utils.pow2_sb(max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3])))
+                            sbs = [sel_eq_i32(hf, Int32(0), sball[0], sball[2]), sel_eq_i32(hf, Int32(0), sball[1], sball[3])]
+                        if const_expr(self.kn == "cd" and self.unsafe):
+                            pass
+                        else:
+                            ce = cd_p.acquire_and_advance()
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW3
+                    else:
+                        # dv: P^T codes per (key, 32 queries), own chunks
+                        for jj in cutlass.range_constexpr(2):
+                            am = Float32(0.0)
+                            for i in cutlass.range_constexpr(32):
+                                am = cute.arch.fmax(am, vals[jj][i])
+                            sbs[jj] = dm_utils.pow2_sb(am)
+                        if const_expr(self.rows_are_keys):
+                            if t + 1 < total:
+                                hn = hx * rep + (t + 1) // ncs
+                                ctn = c_lo + (t + 1) - ((t + 1) // ncs) * ncs
+                                if ctid < 128:
+                                    st_shared_f32(ldn + ctid * 4, dmh.dm_mx256_l2(Float32(mLse[b, hn, ctn * 128 + ctid])))
+                                else:
+                                    st_shared_f32(ldn + ctid * 4, Float32(mDelta[b, hn, ctn * 128 + ctid - 128]))
+                        if hf == 1:
+                            st_shared_f32(xb + r * 4, Float32(0.0) + Float32(sbs[0] + 256 * sbs[1]))
+                        if const_expr(self.kn == "xc"):
+                            if warp == 0:
+                                spin(self.DLY)
+                        if const_expr(not (self.kn == "xc" and self.unsafe)):
+                            cute.arch.barrier(barrier_id=2, number_of_threads=256)
+                        hv_ = Int32(ld_shared_f32(xb + r * 4))      # upper half's packed sbs (only the hf == 0 owner uses it)
+                        sball = [sbs[0], sbs[1], hv_ % 256, hv_ // 256]
+                        if const_expr(not (self.kn == "cd" and self.unsafe)):
+                            ce = cd_p.acquire_and_advance()
+                            if const_expr(self.ordf):
+                                tc_fence_after()                   # BW3
+                    if const_expr(self.esf and self.kn not in ("cw0", "cw1", "sf0", "sf1")):
+                        # esf: this thread's SFA word first (after the cd acquire + BW3 fence above), completed with the codes below
+                        v0e = dm_utils.add_sb_clamp(sbs[0], osbo[0])
+                        v1e = dm_utils.add_sb_clamp(sbs[1], osbo[1])
+                        ze = Int32(0)
+                        sfe = sel_eq_i32(hf, Int32(0), pack4(v0e, v1e, ze, ze), pack4(ze, ze, v0e, v1e))
+                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfe)
+                    # ---- codes -> smem stage stg (own two chunks) ----
+                    cbase = crow + stg * self.bytes_c
+                    pend = []                    # control cw<h>: code stores deferred (emitted below), else stored here
+                    for jj in cutlass.range_constexpr(2):
+                        j2 = 2 * hf + jj
+                        hsl = [Int32(0)] * 32
+                        hcl = [Int32(0)] * 32
+                        inv = dm_utils.inv_pow2_from_sb(sbs[jj])
+                        for hv in cutlass.range_constexpr(2):
+                            w = [None] * 4
+                            for u in cutlass.range_constexpr(4):
+                                i0 = 16 * hv + 4 * u
+                                y0, y1 = cute.arch.mul_packed_f32x2((vals[jj][i0], vals[jj][i0 + 1]), (inv, inv))
+                                y2, y3 = cute.arch.mul_packed_f32x2((vals[jj][i0 + 2], vals[jj][i0 + 3]), (inv, inv))
+                                w[u] = e4m3x4(y0, y1, y2, y3)
+                            if const_expr(self.kn in ("cw0", "cw1")):
+                                pend.append((cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3]))
+                            else:
+                                st_shared_v4(cbase + (((2 * j2 + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+                            if const_expr((self.dbg & 8) and self.has_dp):
+                                for u in cutlass.range_constexpr(4):
+                                    for q in cutlass.range_constexpr(4):
+                                        e_ = 16 * hv + 4 * u + q
+                                        ce_ = ctok0 + 32 * j2 + e_
+                                        ix = hidx(rtok, ce_)
+                                        if const_expr(self.rows_are_keys):
+                                            ix = hidx(ce_, rtok)
+                                        hsl[e_] = hmix(f2i(vals[jj][e_]), ix)
+                                        hcl[e_] = hmix(((w[u] >> (8 * q)) & 255) | (sbs[jj] << 8), ix)
                         if const_expr((self.dbg & 8) and self.has_dp):
+                            if const_expr(self.rows_are_keys):
+                                a0_ = _gaddr(mHash) + (Int64(l) * N + ctok0 + 32 * j2) * 32
+                                lk_cols_u32(hsl, lane, a0_ + 8)
+                                lk_cols_u32(hcl, lane, a0_ + 16)
+                                lk_cols_f64(vals[jj], lane, a0_ + 24)
+                            else:
+                                hs_ = Int32(0)
+                                hc_ = Int32(0)
+                                rs_ = Float64(0.0)
+                                for i in cutlass.range_constexpr(32):
+                                    hs_ = hs_ + hsl[i]
+                                    hc_ = hc_ + hcl[i]
+                                    rs_ = rs_ + Float64(vals[jj][i])
+                                lk_s = lk_s + zext64(hs_)
+                                lk_c = lk_c + zext64(hc_)
+                                lk_r = lk_r + rs_
+                        if const_expr(self.dbg & 2):
+                            mSB[l, rtok, ct * 4 + j2] = sbs[jj]
+                    if const_expr(self.dbg & 2):
+                        stc = Int64(1)
+                        ca0 = _gaddr(mCodes) + (Int64(l) * N + rtok) * N + ctok0
+                        if const_expr(self.rows_are_keys):
+                            stc = Int64(N)
+                            ca0 = _gaddr(mCodes) + (Int64(l) * N + ctok0) * N + rtok
+                        for vv in cutlass.range(4, unroll=1):
+                            v = 4 * hf + vv
+                            x4 = ld_shared_v4i(cbase + ((v ^ rsw) * 16))
+                            cp = ca0 + Int64(16 * v) * stc
                             for u in cutlass.range_constexpr(4):
                                 for q in cutlass.range_constexpr(4):
-                                    e_ = 16 * hv + 4 * u + q
-                                    ce_ = ctok0 + 32 * j2 + e_
-                                    ix = hidx(rtok, ce_)
-                                    if const_expr(self.rows_are_keys):
-                                        ix = hidx(ce_, rtok)
-                                    hsl[e_] = hmix(f2i(vals[jj][e_]), ix)
-                                    hcl[e_] = hmix(((w[u] >> (8 * q)) & 255) | (sbs[jj] << 8), ix)
-                    if const_expr((self.dbg & 8) and self.has_dp):
-                        if const_expr(self.rows_are_keys):
-                            a0_ = _gaddr(mHash) + (Int64(l) * N + ctok0 + 32 * j2) * 32
-                            lk_cols_u32(hsl, lane, a0_ + 8)
-                            lk_cols_u32(hcl, lane, a0_ + 16)
-                            lk_cols_f64(vals[jj], lane, a0_ + 24)
-                        else:
-                            hs_ = Int32(0)
-                            hc_ = Int32(0)
-                            rs_ = Float64(0.0)
-                            for i in cutlass.range_constexpr(32):
-                                hs_ = hs_ + hsl[i]
-                                hc_ = hc_ + hcl[i]
-                                rs_ = rs_ + Float64(vals[jj][i])
-                            lk_s = lk_s + zext64(hs_)
-                            lk_c = lk_c + zext64(hc_)
-                            lk_r = lk_r + rs_
-                    if const_expr(self.dbg & 2):
-                        mSB[l, rtok, ct * 4 + j2] = sbs[jj]
-                if const_expr(self.dbg & 2):
-                    stc = Int64(1)
-                    ca0 = _gaddr(mCodes) + (Int64(l) * N + rtok) * N + ctok0
-                    if const_expr(self.rows_are_keys):
-                        stc = Int64(N)
-                        ca0 = _gaddr(mCodes) + (Int64(l) * N + ctok0) * N + rtok
-                    for vv in cutlass.range(4, unroll=1):
-                        v = 4 * hf + vv
-                        x4 = ld_shared_v4i(cbase + ((v ^ rsw) * 16))
-                        cp = ca0 + Int64(16 * v) * stc
-                        for u in cutlass.range_constexpr(4):
-                            for q in cutlass.range_constexpr(4):
-                                st_global_u8(cp, x4[u] >> (8 * q))
-                                cp = cp + stc
-                sfw = Int32(0)
-                if const_expr(self.dqopt):
-                    v0_ = dm_utils.add_sb_clamp(sbs[0], osbo[0])
-                    v1_ = dm_utils.add_sb_clamp(sbs[1], osbo[1])
-                    z_ = Int32(0)
-                    sfw = sel_eq_i32(hf, Int32(0), pack4(v0_, v1_, z_, z_), pack4(z_, z_, v0_, v1_))
-                if const_expr(self.kn in ("cw0", "cw1", "sf0", "sf1")):
-                    # controls (dqopt only): half h = knob digit publishes early (unsafe) / late but in order (safe)
-                    hk_ = int(self.kn[2])
-                    late_cw = self.kn[:2] == "cw"
-                    if const_expr(not self.unsafe):
-                        if hf == hk_:
-                            if const_expr(self.q3):
-                                if t + 1 == total:      # q3 interior tiles: delayed after the next S release (above)
+                                    st_global_u8(cp, x4[u] >> (8 * q))
+                                    cp = cp + stc
+                    sfw = Int32(0)
+                    if const_expr(self.dqopt):
+                        v0_ = dm_utils.add_sb_clamp(sbs[0], osbo[0])
+                        v1_ = dm_utils.add_sb_clamp(sbs[1], osbo[1])
+                        z_ = Int32(0)
+                        sfw = sel_eq_i32(hf, Int32(0), pack4(v0_, v1_, z_, z_), pack4(z_, z_, v0_, v1_))
+                    if const_expr(self.kn in ("cw0", "cw1", "sf0", "sf1")):
+                        # controls (dqopt only): half h = knob digit publishes early (unsafe) / late but in order (safe)
+                        hk_ = int(self.kn[2])
+                        late_cw = self.kn[:2] == "cw"
+                        if const_expr(not self.unsafe):
+                            if hf == hk_:
+                                if const_expr(self.q3):
+                                    if t + 1 == total:      # q3 interior tiles: delayed after the next S release (above)
+                                        spin(self.DLY)
+                                else:
                                     spin(self.DLY)
-                            else:
-                                spin(self.DLY)
-                    if const_expr(late_cw):
-                        if const_expr(self.unsafe):
-                            if hf != hk_:
-                                for pa_ in pend:
-                                    st_shared_v4(*pa_)
-                        else:
-                            for pa_ in pend:
-                                st_shared_v4(*pa_)
-                    if const_expr(self.unsafe and not late_cw):
-                        if hf != hk_:
-                            dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
-                    else:
-                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
-                    cute.arch.fence_view_async_tmem_store()
-                    cute.arch.fence_view_async_shared()
-                    tc_fence_before()
-                    ce.commit()
-                    if const_expr(self.unsafe):
-                        if hf == hk_:
-                            lastq = t + 1 == total
-                            if const_expr(not self.q3):
-                                lastq = t >= 0
-                            if lastq:                   # q3: only the last tile repairs here; interior ones after S(t+1) release
-                                spin(self.DLY)
-                                if const_expr(late_cw):
+                        if const_expr(late_cw):
+                            if const_expr(self.unsafe):
+                                if hf != hk_:
                                     for pa_ in pend:
                                         st_shared_v4(*pa_)
-                                else:
-                                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
-                                    cute.arch.fence_view_async_tmem_store()
-                    if const_expr(self.q3):
-                        if const_expr(late_cw):
-                            pend_c = [tuple(x) for x in pend]
+                            else:
+                                for pa_ in pend:
+                                    st_shared_v4(*pa_)
+                        if const_expr(self.unsafe and not late_cw):
+                            if hf != hk_:
+                                dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
                         else:
-                            sfw_c = sfw
-                else:
-                    if const_expr(self.dqopt):
-                        if const_expr(not self.esf):          # esf: stored before the quantization (above)
                             dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
-                    elif hf == 0:
-                        sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),
-                                    dm_utils.add_sb_clamp(sball[2], osb[2]), dm_utils.add_sb_clamp(sball[3], osb[3]))
-                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + qd, sfa)
-                    cute.arch.fence_view_async_tmem_store()
-                    cute.arch.fence_view_async_shared()
-                    tc_fence_before()
-                    if const_expr(self.kn == "cd" and self.unsafe):
-                        ce = cd_p.acquire_and_advance()
-                    ce.commit()
-                if const_expr(self.kn in ("sfb0", "sfb1")):
-                    # control sfb<s>: after SF set s's FIRST publication (t == s): delay; unsafe writes the real SFB only now
-                    if t == int(self.kn[3]):
+                        cute.arch.fence_view_async_tmem_store()
+                        cute.arch.fence_view_async_shared()
+                        tc_fence_before()
+                        ce.commit()
+                        if const_expr(self.unsafe):
+                            if hf == hk_:
+                                lastq = t + 1 == total
+                                if const_expr(not self.q3):
+                                    lastq = t >= 0
+                                if lastq:                   # q3: only the last tile repairs here; interior ones after S(t+1) release
+                                    spin(self.DLY)
+                                    if const_expr(late_cw):
+                                        for pa_ in pend:
+                                            st_shared_v4(*pa_)
+                                    else:
+                                        dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                                        cute.arch.fence_view_async_tmem_store()
                         if const_expr(self.q3):
-                            if t + 1 == total:      # q3 interior tiles: repaired after S(s+1)'s release (above)
+                            if const_expr(late_cw):
+                                pend_c = [tuple(x) for x in pend]
+                            else:
+                                sfw_c = sfw
+                    else:
+                        if const_expr(self.dqopt):
+                            if const_expr(not self.esf):          # esf: stored before the quantization (above)
+                                dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                        elif hf == 0:
+                            sfa = pack4(dm_utils.add_sb_clamp(sball[0], osb[0]), dm_utils.add_sb_clamp(sball[1], osb[1]),
+                                        dm_utils.add_sb_clamp(sball[2], osb[2]), dm_utils.add_sb_clamp(sball[3], osb[3]))
+                            dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + qd, sfa)
+                        cute.arch.fence_view_async_tmem_store()
+                        cute.arch.fence_view_async_shared()
+                        tc_fence_before()
+                        if const_expr(self.kn == "cd" and self.unsafe):
+                            ce = cd_p.acquire_and_advance()
+                        ce.commit()
+                    if const_expr(self.kn == "ep"):
+                        # control ep: the previous item's epilogue, deferred to after this item's first codes commit, delayed
+                        if t == 0:
+                            if has_p != 0:
+                                spin(self.DLY)
+                                fwp = fin_c.wait_and_advance()
+                                tc_fence_after()
+                                for cq in cutlass.range_constexpr(4):
+                                    cblk = 4 * hf + cq
+                                    ov = tmem_ld32(tb + self.COL_OUT + 32 * cblk)
+                                    cute.arch.fence_view_async_tmem_load()
+                                    for i in cutlass.range_constexpr(0, 32, 8):
+                                        w = [None] * 4
+                                        for q in cutlass.range_constexpr(4):
+                                            w[q] = bf16x2(mul_f32(ov[i + 2 * q], Float32(SM)), mul_f32(ov[i + 2 * q + 1], Float32(SM)))
+                                        st_global_v4(ob_p + (32 * cblk + i) * 2, w[0], w[1], w[2], w[3])
+                                if const_expr(self.ordf):
+                                    tc_fence_before()
+                                fwp.release()
+                                has_p = Int32(0)
+                    if const_expr(self.kn in ("sfb0", "sfb1")):
+                        # control sfb<s>: after SF set s's FIRST publication (t == s): delay; unsafe writes the real SFB only now
+                        if t == int(self.kn[3]):
+                            if const_expr(self.q3):
+                                if t + 1 == total:      # q3 interior tiles: repaired after S(s+1)'s release (above)
+                                    if hf == 0:
+                                        spin(self.DLY)
+                                        if const_expr(self.unsafe):
+                                            one_ = Int32(0x7F7F7F7F)
+                                            sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
+                                            dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
+                                            dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
+                                            cute.arch.fence_view_async_tmem_store()
+                            else:
                                 if hf == 0:
                                     spin(self.DLY)
                                     if const_expr(self.unsafe):
@@ -1090,54 +1219,69 @@ class DmHd256Mx2:
                                         dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
                                         dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
                                         cute.arch.fence_view_async_tmem_store()
-                        else:
-                            if hf == 0:
-                                spin(self.DLY)
-                                if const_expr(self.unsafe):
-                                    one_ = Int32(0x7F7F7F7F)
-                                    sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
-                                    dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
-                                    dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
-                                    cute.arch.fence_view_async_tmem_store()
-            if const_expr((self.dbg & 1) and self.mode == "dq"):
-                if hf == 0:
-                    ia = _gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 32
-                    st_global_f64x2(ia, idn, idd)
-                    st_global_f64x2(ia + 16, idp, Float64(0.0))
-            if const_expr((self.dbg & 8) and self.mode == "dq"):
-                ha = _gaddr(mHash) + (Int64(b * H + hx) * N + rtok) * 32
-                red_add_u64(ha, lk_p)
-                red_add_u64(ha + 8, lk_s)
-                red_add_u64(ha + 16, lk_c)
-                red_add_f64(ha + 24, lk_r)
-            # ---- epilogue: out row (256 fp32 in TMEM) -> bf16; this half's 128 columns ----
-            fw = None
-            if const_expr(not (self.kn == "fin" and self.unsafe)):
-                fw = fin_c.wait_and_advance()
-            tc_fence_after()
-            nho = H
-            if const_expr(self.rows_are_keys):
-                nho = Hk
-            ob = _gaddr(mOut) + (((Int64(b) * N + rtok) * nho + hx) * D) * 2
-            for cq in cutlass.range_constexpr(4):
-                cblk = 4 * hf + cq
-                ov = tmem_ld32(tb + self.COL_OUT + 32 * cblk)
-                cute.arch.fence_view_async_tmem_load()
-                for i in cutlass.range_constexpr(0, 32, 8):
-                    w = [None] * 4
-                    for q in cutlass.range_constexpr(4):
-                        x0 = ov[i + 2 * q]
-                        x1 = ov[i + 2 * q + 1]
-                        if const_expr(self.mode == "dq"):
-                            x0 = mul_f32(x0, Float32(SM))
-                            x1 = mul_f32(x1, Float32(SM))
-                        w[q] = bf16x2(x0, x1)
-                    st_global_v4(ob + (32 * cblk + i) * 2, w[0], w[1], w[2], w[3])
-            if const_expr(self.kn == "fin" and self.unsafe):
-                fw = fin_c.wait_and_advance()
-            if const_expr(self.ordf):
-                tc_fence_before()
-            fw.release()
+                if const_expr((self.dbg & 1) and self.mode == "dq"):
+                    if hf == 0:
+                        ia = _gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 32
+                        st_global_f64x2(ia, idn, idd)
+                        st_global_f64x2(ia + 16, idp, Float64(0.0))
+                if const_expr((self.dbg & 8) and self.mode == "dq"):
+                    ha = _gaddr(mHash) + (Int64(b * H + hx) * N + rtok) * 32
+                    red_add_u64(ha, lk_p)
+                    red_add_u64(ha + 8, lk_s)
+                    red_add_u64(ha + 16, lk_c)
+                    red_add_f64(ha + 24, lk_r)
+                # ---- epilogue: out row (256 fp32 in TMEM) -> bf16; this half's 128 columns ----
+                if const_expr(self.kn == "ep"):
+                    ob_p = _gaddr(mOut) + (((Int64(b) * N + rtok) * H + hx) * D) * 2
+                    has_p = Int32(1)
+                fw = None
+                if const_expr(self.kn == "ep"):
+                    pass
+                elif const_expr(not (self.kn == "fin" and self.unsafe)):
+                    fw = fin_c.wait_and_advance()
+                if const_expr(self.kn != "ep"):
+                    tc_fence_after()
+                    nho = H
+                    if const_expr(self.rows_are_keys):
+                        nho = Hk
+                    ob = _gaddr(mOut) + (((Int64(b) * N + rtok) * nho + hx) * D) * 2
+                    for cq in cutlass.range_constexpr(4):
+                        cblk = 4 * hf + cq
+                        ov = tmem_ld32(tb + self.COL_OUT + 32 * cblk)
+                        cute.arch.fence_view_async_tmem_load()
+                        for i in cutlass.range_constexpr(0, 32, 8):
+                            w = [None] * 4
+                            for q in cutlass.range_constexpr(4):
+                                x0 = ov[i + 2 * q]
+                                x1 = ov[i + 2 * q + 1]
+                                if const_expr(self.mode == "dq"):
+                                    x0 = mul_f32(x0, Float32(SM))
+                                    x1 = mul_f32(x1, Float32(SM))
+                                w[q] = bf16x2(x0, x1)
+                            st_global_v4(ob + (32 * cblk + i) * 2, w[0], w[1], w[2], w[3])
+                    if const_expr(self.kn == "fin" and self.unsafe):
+                        fw = fin_c.wait_and_advance()
+                    if const_expr(self.ordf):
+                        tc_fence_before()
+                    fw.release()
+                if const_expr(self.pers):
+                    U = U + total
+            if const_expr(self.kn == "ep"):
+                if has_p != 0:
+                    fwp = fin_c.wait_and_advance()
+                    tc_fence_after()
+                    for cq in cutlass.range_constexpr(4):
+                        cblk = 4 * hf + cq
+                        ov = tmem_ld32(tb + self.COL_OUT + 32 * cblk)
+                        cute.arch.fence_view_async_tmem_load()
+                        for i in cutlass.range_constexpr(0, 32, 8):
+                            w = [None] * 4
+                            for q in cutlass.range_constexpr(4):
+                                w[q] = bf16x2(mul_f32(ov[i + 2 * q], Float32(SM)), mul_f32(ov[i + 2 * q + 1], Float32(SM)))
+                            st_global_v4(ob_p + (32 * cblk + i) * 2, w[0], w[1], w[2], w[3])
+                    if const_expr(self.ordf):
+                        tc_fence_before()
+                    fwp.release()
 
         tmem.relinquish_alloc_permit()
         if const_expr(self.ordf):

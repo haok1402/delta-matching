@@ -180,7 +180,13 @@ class DMFwdHd256MxSm100:
     Out: O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
-                 sf_wait: bool = True):
+                 sf_wait: bool = True, pc_inj: int = 0):
+        # DEBUG positive control for the SF hand-off (default 0 = compiled out, bitwise-neutral):
+        #  1: right after issuing PV(i), the MMA warp overwrites SFA(i) of lanes 0-31 (tcgen05.st, byte 0x80 = 2^1) WITHOUT
+        #     waiting for PV(i) -> the unsafe class "tcgen05 write of PV's SF after PV issue, before PV completion" (what
+        #     QK(i+2) does with SFWAIT=0); must corrupt rows 0-31 of some tiles if the window is real and the stress sees it.
+        #  2: the same write AFTER waiting O_full(PV(i)) + fence::after (the C0 protocol) -> must stay bitwise clean.
+        self.pc_inj = pc_inj
         self.sf_wait = sf_wait   # False = DEBUG/A-B only: the pre-C0 schedule without the PV(j-2) -> QK(j) completion wait
         self.is_causal = is_causal
         self.qhead_per_kvhead = qhead_per_kvhead
@@ -448,6 +454,14 @@ class DMFwdHd256MxSm100:
             tuple((0, k) for k in range(4)), tuple((0, k) for k in range(4)), zero_init=(i == 0))
         with cute.arch.elect_one():
             dm_utils.tc_commit(mbar + 32)                                   # O_full(i)
+        if const_expr(self.pc_inj > 0):
+            if const_expr(self.pc_inj == 2):
+                dm_utils.mbar_wait_parity(mbar + 32, i & 1)
+                dm_utils.tc_fence_after()
+            lane0 = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+            for r in cutlass.range_constexpr(4):
+                tmem_st1((lane0 << 16) + sf + self.sfa_col + r, Int32(-2139062144))     # 0x80808080
+            tmem_wait_st()
         pipeline_kv.consumer_release(kv_state)
 
     # -----------------------------------------------------------------------------------------------------------------

@@ -5810,6 +5810,11 @@ class DMBackwardSm100:
                 if dm_tid == 0:
                     dm_utils.red_add_u64(dm_tr.iterator.toint() + 8 * (64 + 8 * cute.arch.block_idx()[0] + 5),
                                          dm_utils.globaltimer())
+            if const_expr(self.dm_tcpush and self.deterministic):
+                if process_tile:
+                    self._tcq_push_tile(aux_data.tensors[4], cute.ceil_div(seqlen.seqlen_q, self.tile_m),
+                                        cute.size(aux_data.tensors[0], mode=[1]), cute.size(aux_data.tensors[0], mode=[0]),
+                                        m_block_min, m_block_max, work_n, head_idx, batch_idx, seqlen, block_info, dm_tid)
             if const_expr(self.dm_pers > 0 and not self.dm_dkvdir):
                 # DM pers: every compute thread's bulk stores have finished READING sdK/sdV (= sK/sV), then one
                 # arrival per tile lets the load warp bring in the next tile's K/V
@@ -6167,18 +6172,17 @@ class DMBackwardSm100:
             work_tile = tile_scheduler.get_current_work()
 
     @cute.jit
-    def _tcq_push_tile(self, dm_tcq, mdQ_semaphore, m_block_min, m_block_max, work_n, head_idx, batch_idx, seqlen,
+    def _tcq_push_tile(self, dm_tcq, mt, nh, nb, m_block_min, m_block_max, work_n, head_idx, batch_idx, seqlen,
                        block_info, tidx):
         """rw8k tconv readiness queue (a scheduling hint for the PDL tail converter; correctness rests on the converter's
-        own ld.acquire of the det counters). At the end of its work tile (after its last dQ release), each CTA counts the
+        own ld.acquire of the det counters). At the end of its work tile (compute warps, after the dK/dV epilogue; the reduce
+        warps' dQ releases of this tile may still be in flight, the converter's counter poll covers that), each CTA counts the
         dQ tiles it was the LAST writer of in the det order (lock value == writers - 1); the second CTA of the 2-CTA pair
         (pair count per work tile) appends them in m order: pos = atom.add(tail, count), entry[pos + i] = tile + 1.
         Two relaxed atomics per CTA, outside the m loop. Layout (int32, zeroed per call on the prestage side stream):
         [0] tail, [1, 1 + T) entries, [1 + T, 1 + 2T) pair counts per (b, h, n) work tile."""
         if tidx == 0:
-            mt = cute.size(mdQ_semaphore, mode=[0])     # (Mt, rank, H, B) view (semaphore_transpose)
-            nh = cute.size(mdQ_semaphore, mode=[2])
-            nt = cute.size(mdQ_semaphore, mode=[3]) * nh * mt
+            nt = nb * nh * mt
             base = dm_tcq.iterator.toint()
             cnt = Int32(0)
             if const_expr(self.spt):
@@ -6666,10 +6670,6 @@ class DMBackwardSm100:
                                 1,
                             )
 
-                if const_expr(dm_tcq is not None and self.dm_tcpush):
-                    if process_tile:
-                        self._tcq_push_tile(dm_tcq, mdQ_semaphore, m_block_min, m_block_max, work_n, head_idx, batch_idx,
-                                            seqlen, block_info, tidx)
                 if const_expr(
                     self.deterministic
                     and not self.spt

@@ -240,6 +240,10 @@ def _patched_source():
         ("fa_bwd_obj = FlashAttentionBackwardSm100(", "fa_bwd_obj = _DMBackwardSm100("),
         ("_flash_attn_bwd.compile_cache", "_dm_bwd_cache()"),
         ("dk_accum, dk, softmax_scale,", "dk_accum, dk, 1.0,"),
+        # DM cwg4: one deterministic dK/dV semaphore slot per compute warpgroup (the kernel indexes them by wg_idx; FA4
+        # allocates 2 -> with 4 WGs, wg 2/3 read past the slot array and the GQA det path hangs).
+        ("seqlen_k_rounded // tile_n, 2, dtype=torch.int32, device=device)",
+         "seqlen_k_rounded // tile_n, _dm_nwg(), dtype=torch.int32, device=device)"),
         ("dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa",
          "dKV_postprocess = qhead_per_kvhead > 1 and not use_dedicated_hd256_kernel and not bwd_pack_gqa and not _dm_gloop()"),
         ("            q.detach(),\n            k.detach(),\n            v.detach(),\n            dout,\n",
@@ -294,7 +298,12 @@ def _dm_gloop():
     return "gloop" in _env("DM_BWD_OPTS", "").split(",")
 
 
-_ns.update(_dm_gloop=_dm_gloop)
+def _dm_nwg():
+    """Number of compute warpgroups (DM cwg4: 4, else 2) = deterministic dK/dV semaphore slots per KV tile."""
+    return 4 if "cwg4" in _env("DM_BWD_OPTS", "").split(",") else 2
+
+
+_ns.update(_dm_gloop=_dm_gloop, _dm_nwg=_dm_nwg)
 _ns.update(_dm_zeros=_dm_zeros, _dm_empty=_dm_empty, _DMBackwardSm100=DMBackwardSm100, _dm_bwd_preprocess=_dm_bwd_preprocess, _dm_bwd_cache=_dm_bwd_cache, _dm_cfg=_dm_cfg)
 exec(compile(_patched_source(), fi.__file__ + ":dm_patched_bwd", "exec"), _ns)
 _dm_flash_attn_bwd = _ns["_dm_flash_attn_bwd"]

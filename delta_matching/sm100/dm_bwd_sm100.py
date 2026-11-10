@@ -744,6 +744,19 @@ class DMBackwardSm100:
         if self.dm_xs_relay:
             self.dm_xs_arrive, self.dm_xs_wait = 2, 2
         self.dm_xrp = int(next((x[4:] for x in self.dm_opts if x.startswith("xrp:")), "-1"))
+        # kda-sm100-xexempt (kda/docs/xexempt-design.md, opt-in, DEBUG/measurement): xs:rasy = CTA-1 signals on the leader's
+        # barriers as red.async.relaxed.cluster complete_tx (no MEMBAR), CTA-0 arrives fence.acq_rel.cta + relaxed.cluster (count 2,
+        # +4 tx), MMA-warp waits acquire.cluster; xs:rasyagg = the same with one red.async per (site, warpgroup) after a CTA-local
+        # acq_rel counter. The relay (X10) uses the per-site form in both; the dealloc handshake (X11, symmetric) keeps pwq.
+        # Planted controls (DEBUG): xd:<roles c d q r> drop CTA 1's 6th signal of that role (bounded leader wait -> trap);
+        # xp:d4 / xp:d5 / xp:r = CTA 1 publishes zero dS codes (TMEM, dP empty) / zero own sdS half (dS full) / forwards the relay
+        # BEFORE its copy landed, then writes the real data ~2 us after the signal.
+        self.dm_rasy = (6 if "rasyagg" in _xm else 5) if (self.dm_xscope and "rasy" in _xm) else 0
+        self.dm_xd = next((x[3:] for x in self.dm_opts if x.startswith("xd:")), "") if self.dm_rasy else ""
+        self.dm_xp = next((x[3:] for x in self.dm_opts if x.startswith("xp:")), "") if self.dm_rasy else ""
+        self.dm_rasy_slots = (0 if not self.dm_rasy else 1 if self.dm_rasy == 5 else 68)
+        if self.dm_rasy:
+            self.dm_xs_arrive, self.dm_xs_wait = self.dm_rasy, (3 if self.dm_xd else 2)
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)
         self.dm_xs_roles = next((x[4:] for x in self.dm_opts if x.startswith("xsr:")), "rmcdq")
         self.dm_ordpc = 1 if "ordpc1" in self.dm_opts else (3 if "ordpc3" in self.dm_opts else (2 if "ordpc2" in self.dm_opts else 0))
@@ -1556,7 +1569,7 @@ class DMBackwardSm100:
                 dS_cluster_empty_mbar_ptr: cutlass.Int64
                 dS_cluster_full_mbar_ptr: cutlass.Int64
                 dS_cluster_leader_mbar_ptr: cutlass.Int64
-                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 11 + (2 if (self.dm_ordw_v or self.dm_ordw_k) else 0)]
+                dm_xchg_mbar: cute.struct.MemRange[cutlass.Int64, 11 + (2 if (self.dm_ordw_v or self.dm_ordw_k) else 0) + self.dm_rasy_slots]
                 dQaccum_empty_mbar_ptr: cutlass.Int64
 
                 sQ: cute.struct.Align[
@@ -1930,6 +1943,11 @@ class DMBackwardSm100:
                         dQaccum_empty_mbar_ptr,
                         len(self.reduce_warp_ids),
                     )
+            if const_expr(self.dm_rasy):
+                dm_utils.XS_DUMMY[0] = Int32((storage.dm_xchg_mbar.data_ptr()
+                                              + (11 + (2 if (self.dm_ordw_v or self.dm_ordw_k) else 0))).toint())
+                if warp_idx == 5:
+                    dm_utils.rasy_zero(dm_utils.XS_DUMMY[0], 2 * self.dm_rasy_slots)
             if warp_idx == 4:
                 cute.arch.mbarrier_init(dS_cluster_full_mbar_ptr, 1)
                 cute.arch.mbarrier_init(dS_cluster_empty_mbar_ptr, 1)
@@ -2288,7 +2306,8 @@ class DMBackwardSm100:
                 self.num_regs_mma if self.use_2cta_instrs else self.num_regs_empty
             )
             if const_expr(self.use_2cta_instrs):
-                dm_utils.XS[0] = (self.dm_xs_arrive if "r" in self.dm_xs_roles else 0)
+                dm_utils.XS[0] = ((5 if self.dm_rasy else self.dm_xs_arrive) if "r" in self.dm_xs_roles else 0)
+                dm_utils.XS_DROP[0] = "r" in self.dm_xd
                 self.relay(
                     dS_cluster_full_mbar_ptr,
                     dS_cluster_empty_mbar_ptr,
@@ -2416,7 +2435,9 @@ class DMBackwardSm100:
             tmem.relinquish_alloc_permit()
             tmem_alloc_barrier.arrive_and_wait()
             dm_utils.XS[1] = int(self.dm_xs_wait)   # ordinv Part III: the 2-CTA dealloc handshake (peer arrive -> wait) too
-            dm_utils.XS[0] = (self.dm_xs_arrive if "m" in self.dm_xs_roles else 0)
+            dm_utils.XS[0] = ((2 if self.dm_rasy else self.dm_xs_arrive) if "m" in self.dm_xs_roles else 0)
+            dm_utils.XS[1] = (2 if self.dm_rasy else int(self.dm_xs_wait))
+            dm_utils.XS_DROP[0] = False
             tmem.free(tmem_ptr)
             dm_utils.XS[1] = 0
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
@@ -2430,6 +2451,7 @@ class DMBackwardSm100:
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
             dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "c" in self.dm_xs_roles else 0
+            dm_utils.XS_DROP[0] = "c" in self.dm_xd
             self.compute_loop(
                 thr_mma_S,
                 thr_mma_dP,
@@ -2491,6 +2513,7 @@ class DMBackwardSm100:
                 tmem.wait_for_alloc()
                 tmem_ptr = tmem.retrieve_ptr(Float32)
                 dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "d" in self.dm_xs_roles else 0
+                dm_utils.XS_DROP[0] = "d" in self.dm_xd
                 self.dsq_loop(
                     thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
                     sDm, storage.dm_xchg_mbar.data_ptr(), aux_data, block_info, SeqlenInfoCls, TileSchedulerCls,
@@ -2508,6 +2531,7 @@ class DMBackwardSm100:
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
             dm_utils.XS[0] = (4 if self.dm_xs_relay else self.dm_xs_arrive) if "q" in self.dm_xs_roles else 0
+            dm_utils.XS_DROP[0] = "q" in self.dm_xd
             self.dQacc_reduce(
                 mdQaccum,
                 sdQaccum,
@@ -2546,6 +2570,8 @@ class DMBackwardSm100:
         dm_utils.tcf_end()
         dm_utils.XS[0] = 0
         dm_utils.XS[1] = 0
+        dm_utils.XS_DROP[0] = False
+        dm_utils.XS_DUMMY[0] = None
         return
 
     @cute.jit
@@ -2586,12 +2612,18 @@ class DMBackwardSm100:
 
             if process_tile:
                 for _ in cutlass.range(num_iters, unroll=1):
-                    # Wait for dS_xchg from peer CTA
-                    cute.arch.mbarrier_wait(dS_cluster_full_mbar_ptr, phase=dS_cluster_phase)
+                    if const_expr(self.dm_xp == "r"):
+                        # xexempt planted control (DEBUG): forward to the leader BEFORE the peer's dS half landed here
+                        with cute.arch.elect_one():
+                            cute.arch.mbarrier_arrive(dS_cluster_leader_mbar_ptr, Int32(0))
+                        cute.arch.mbarrier_wait(dS_cluster_full_mbar_ptr, phase=dS_cluster_phase)
+                    else:
+                        # Wait for dS_xchg from peer CTA
+                        cute.arch.mbarrier_wait(dS_cluster_full_mbar_ptr, phase=dS_cluster_phase)
 
-                    # Arrive on MMA leader warp
-                    with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive(dS_cluster_leader_mbar_ptr, Int32(0))
+                        # Arrive on MMA leader warp
+                        with cute.arch.elect_one():
+                            cute.arch.mbarrier_arrive(dS_cluster_leader_mbar_ptr, Int32(0))
 
                     dS_cluster_phase ^= 1
 
@@ -6086,9 +6118,20 @@ class DMBackwardSm100:
         if const_expr(dm_tr is not None):
             self._tlev(dm_tr, dsq_j, 17, tidx == 0)
         # dK operand: dS codes (TS A operand) + dK SFA / constant SFB, then release dP -> dS to the MMA warp
-        for h in cutlass.range_constexpr(2):
-            for st in cutlass.range_constexpr(nst):
-                cute.copy(dsq[h][3], cute.recast_tensor(codes[h][st], Float32), dsq[h][4][None, st, 0, 0])
+        if const_expr(self.dm_xp == "d4"):
+            # xexempt planted control (DEBUG): CTA 1 publishes ZERO dS codes, signals dP-empty, real codes ~2 us later
+            for h in cutlass.range_constexpr(2):
+                for st in cutlass.range_constexpr(nst):
+                    zc = cute.make_fragment_like(codes[h][st], self.ds_dtype)
+                    zc.fill(0.0)
+                    if cta_rank == 1:
+                        cute.copy(dsq[h][3], cute.recast_tensor(zc, Float32), dsq[h][4][None, st, 0, 0])
+                    else:
+                        cute.copy(dsq[h][3], cute.recast_tensor(codes[h][st], Float32), dsq[h][4][None, st, 0, 0])
+        else:
+            for h in cutlass.range_constexpr(2):
+                for st in cutlass.range_constexpr(nst):
+                    cute.copy(dsq[h][3], cute.recast_tensor(codes[h][st], Float32), dsq[h][4][None, st, 0, 0])
         for h in cutlass.range_constexpr(2):
             for st in cutlass.range_constexpr(nst):
                 qoff = dm_idx[h][None, st, 0, 0][0][1] // 32
@@ -6103,6 +6146,14 @@ class DMBackwardSm100:
         cute.arch.sync_warp()
         with cute.arch.elect_one():
             pipeline_dP.consumer_release(dsq_dP_state)
+        if const_expr(self.dm_xp == "d4"):
+            if cta_rank == 1:
+                dm_utils.nanosleep_1us()
+                dm_utils.nanosleep_1us()
+                for h in cutlass.range_constexpr(2):
+                    for st in cutlass.range_constexpr(nst):
+                        cute.copy(dsq[h][3], cute.recast_tensor(codes[h][st], Float32), dsq[h][4][None, st, 0, 0])
+                cute.arch.fence_view_async_tmem_store()
         if const_expr(dm_tr is not None):
             self._tlev(dm_tr, dsq_j, 18, tidx == 0)
         # dQ operand: dS codes in SMEM (own query half) + the peer's half in the exchange buffer
@@ -6115,7 +6166,16 @@ class DMBackwardSm100:
                 if exchange_stage == st:
                     cute.autovec_copy(codes[h][st], dsq[h][6][None, 0])
                 else:
-                    cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
+                    if const_expr(self.dm_xp == "d5"):
+                        # xexempt planted control (DEBUG): CTA 1 publishes a ZERO own sdS half, real codes ~2 us after dS-full
+                        zc = cute.make_fragment_like(codes[h][st], self.ds_dtype)
+                        zc.fill(0.0)
+                        if cta_rank == 1:
+                            cute.autovec_copy(zc, dsq[h][5][None, st])
+                        else:
+                            cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
+                    else:
+                        cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
         cute.arch.fence_view_async_shared()
         if const_expr(self.dm_dsqw):
             self.dsq_sync_barrier.arrive_and_wait()
@@ -6151,6 +6211,15 @@ class DMBackwardSm100:
         cute.arch.sync_warp()
         with cute.arch.elect_one():
             pipeline_dS.producer_commit(dsq_dS_state)
+        if const_expr(self.dm_xp == "d5"):
+            if cta_rank == 1:
+                dm_utils.nanosleep_1us()
+                dm_utils.nanosleep_1us()
+                for h in cutlass.range_constexpr(2):
+                    for st in cutlass.range_constexpr(nst):
+                        if exchange_stage != st:
+                            cute.autovec_copy(codes[h][st], dsq[h][5][None, st])
+                cute.arch.fence_view_async_shared()
         if const_expr(dm_tr is not None):
             self._tlev(dm_tr, dsq_j, 22, tidx == 0)
 

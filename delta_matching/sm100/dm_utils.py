@@ -645,6 +645,17 @@ def mbar_wait_parity_cluster(mbar: Int32, phase: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def mbar_wait_parity_cluster_bounded(mbar: Int32, phase: Int32, *, loc=None, ip=None):
+    """xexempt drop control: try_wait.parity.acquire.cluster loop that executes `trap` after 2^20 failed rounds (10 us suspend hint each) (a dropped
+    red.async must surface as a detected TIMEOUT, never as a silent pass)."""
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(phase).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .pred P1, P2;\n\t.reg .b32 n;\n\tmov.u32 n, 0;\n\tDM_WAITB:\n\t"
+                    "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, 10000;\n\t"
+                    "@P1 bra DM_DONEB;\n\tadd.u32 n, n, 1;\n\tsetp.gt.u32 P2, n, 1048576;\n\t@P2 trap;\n\tbra DM_WAITB;\n\tDM_DONEB:\n\t}",
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
 def f32_to_f64_exact(x: Float32, *, loc=None, ip=None) -> Float64:
     """Exact fp32 -> fp64 conversion without F2F (which issues on the XU/MUFU pipe): integer bit assembly for normals,
     inf and NaN; an exact FP64-pipe path (2^52 magic subtraction, power-of-two scaling) for zero and subnormals.
@@ -1064,6 +1075,83 @@ def mbar_arrive_rank_cnt(mbar: Int32, rank: Int32, cnt: Int32, *, loc=None, ip=N
                     "r,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
+# ---- kda-sm100-xexempt (kda/docs/xexempt-design.md): XS[0] == 5 "rasy" / 6 "rasyagg" -------------------------------------------
+# A remote-capable arrive on the LEADER's barrier (peer rank given; target rank 0 in every rasy site) becomes:
+#   executing CTA != target (CTA 1):  red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 [dummy@target], 1,
+#                                     [mbar@target]   (complete-tx = .release.cluster, PTX 9.7.15.7; 4 tx bytes, no arrival)
+#   executing CTA == target (CTA 0):  fence.acq_rel.cta; mbarrier.expect_tx.relaxed.cluster [mbar], 4;
+#                                     mbarrier.arrive.relaxed.cluster [mbar], count 2   (its own arrival + its CTA-1 partner's)
+#   -> barrier init counts unchanged; per phase tx = +4 W - 4 W = 0; every mbarrier update cluster-scope strong (design §1.3).
+# 6 (rasyagg): per (site, warpgroup) aggregation. CTA 1: atom.acq_rel.cta.add on a per-(barrier, warpgroup) counter in its own smem;
+#   the warp that makes the 4th increment issues ONE red.async (cumulativity: the counter RMW chain + release.cluster complete-tx).
+#   CTA 0: arrive count 2 per warp as above; only the warpgroup's first warp (warp % 4 == 0) arms expect_tx(4).
+# XS_DUMMY[0]: Int32 CTA-local smem address of the rasy area (word 0 = red.async destination, words 4.. = agg counters).
+XS_DUMMY = [None]
+XS_DROP = [False]
+
+
+# drop control (planted, DEBUG): CTA 1 counts its signals of the role in a CTA-local word; the 6th is not issued
+DROPS = "@p atom.relaxed.cta.shared::cta.add.u32 dc, [dk], 1;\n\t@p setp.ne.u32 nd, dc, 5;\n\t"
+
+
+@dsl_user_op
+def mbar_arrive_rasy(mbar: Int32, rank: Int32, dummy: Int32, drop: bool = False, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(rank).ir_value(loc=loc, ip=ip),
+                           Int32(dummy).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .b32 rm, rd, me, dk, dc;\n\t.reg .pred p, p2, nd;\n\t"
+                    "mov.u32 me, %cluster_ctarank;\n\t"
+                    "setp.ne.u32 p, me, $1;\n\t"
+                    "@p mapa.shared::cluster.u32 rm, $0, $1;\n\t"
+                    "@p mapa.shared::cluster.u32 rd, $2, $1;\n\t"
+                    "add.u32 dk, $2, 4;\n\t"
+                    "setp.eq.u32 nd, me, me;\n\t" + (DROPS if drop else "") +
+                    "and.pred p2, p, nd;\n\t"
+                    "@p2 red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 [rd], 1, [rm];\n\t"
+                    "@!p fence.acq_rel.cta;\n\t"
+                    "@!p mbarrier.expect_tx.relaxed.cluster.shared::cta.b64 [$0], 4;\n\t"
+                    "@!p mbarrier.arrive.relaxed.cluster.shared::cta.b64 _, [$0], 2;\n\t}",
+                    "r,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def mbar_arrive_rasyagg(mbar: Int32, rank: Int32, dummy: Int32, drop: bool = False, *, loc=None, ip=None):
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(rank).ir_value(loc=loc, ip=ip),
+                           Int32(dummy).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .b32 rm, rd, me, wg, ctr, old, t, dk, dc;\n\t.reg .pred p, q, l, nd;\n\t"
+                    "mov.u32 me, %cluster_ctarank;\n\t"
+                    "setp.ne.u32 p, me, $1;\n\t"
+                    "mov.u32 t, %tid.x;\n\tshr.u32 wg, t, 7;\n\tand.b32 wg, wg, 3;\n\t"
+                    # counter = dummy + 16 + ((mbar >> 3) & 31) * 16 + wg * 4   (CTA-local)
+                    "shr.u32 ctr, $0, 3;\n\tand.b32 ctr, ctr, 31;\n\tshl.b32 ctr, ctr, 4;\n\t"
+                    "add.u32 ctr, ctr, $2;\n\tadd.u32 ctr, ctr, 16;\n\tshl.b32 t, wg, 2;\n\tadd.u32 ctr, ctr, t;\n\t"
+                    "setp.ne.u32 q, me, me;\n\t@p atom.acq_rel.cta.shared::cta.add.u32 old, [ctr], 1;\n\t"
+                    "@p and.b32 old, old, 3;\n\t"
+                    "@p setp.eq.u32 q, old, 3;\n\t"
+                    "@q mapa.shared::cluster.u32 rm, $0, $1;\n\t"
+                    "@q mapa.shared::cluster.u32 rd, $2, $1;\n\t"
+                    "add.u32 dk, $2, 4;\n\tsetp.eq.u32 nd, me, me;\n\t" + (DROPS.replace("@p ", "@q ") if drop else "") +
+                    "and.pred q, q, nd;\n\t"
+                    "@q red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32 [rd], 1, [rm];\n\t"
+                    "mov.u32 t, %tid.x;\n\tshr.u32 t, t, 5;\n\tand.b32 t, t, 3;\n\t"
+                    "setp.eq.and.u32 l, t, 0, !p;\n\t"
+                    "@!p fence.acq_rel.cta;\n\t"
+                    "@l mbarrier.expect_tx.relaxed.cluster.shared::cta.b64 [$0], 4;\n\t"
+                    "@!p mbarrier.arrive.relaxed.cluster.shared::cta.b64 _, [$0], 2;\n\t}",
+                    "r,r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def rasy_zero(base: Int32, nwords: int, *, loc=None, ip=None):
+    """every lane of the calling warp zeroes words lane, lane+32, ... < nwords at CTA-local smem `base` (agg counters)."""
+    llvm.inline_asm(None, [Int32(base).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .b32 l, a, n;\n\t.reg .pred p;\n\tmov.u32 l, %laneid;\n\t"
+                    "shl.b32 a, l, 2;\n\tadd.u32 a, a, $0;\n\tmov.u32 n, l;\n\t"
+                    "LZ%=:\n\tsetp.lt.u32 p, n, " + str(int(nwords)) + ";\n\t"
+                    "@!p bra LZE%=;\n\tst.shared.u32 [a], 0;\n\tadd.u32 a, a, 128;\n\tadd.u32 n, n, 32;\n\tbra LZ%=;\n\t"
+                    "LZE%=:\n\t}",
+                    "r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
 def _xs_install():
     import cutlass.cute.arch as _A
     from cutlass._mlir.dialects import nvvm as _nv
@@ -1082,6 +1170,11 @@ def _xs_install():
                 # cluster scope only when the target barrier lives in the OTHER CTA
                 return mbar_arrive_rank_xs(Int32(mbar_ptr.toint()), Int32(peer_cta_rank_in_cluster),
                                            loc=kw.get("loc"), ip=kw.get("ip"))
+            if (XS[0] in (5, 6) and peer_cta_rank_in_cluster is not None and kw.get("scope") is None and not a
+                    and kw.get("arrive_count", 1) == 1 and not kw.get("relaxed", False)):
+                fn = mbar_arrive_rasy if XS[0] == 5 else mbar_arrive_rasyagg
+                return fn(Int32(mbar_ptr.toint()), Int32(peer_cta_rank_in_cluster), XS_DUMMY[0], bool(XS_DROP[0]),
+                          loc=kw.get("loc"), ip=kw.get("ip"))
             if XS[0] and peer_cta_rank_in_cluster is not None and kw.get("scope") is None:
                 kw["scope"] = _nv.MemScopeKind.CLUSTER
             return f(mbar_ptr, peer_cta_rank_in_cluster, *a, **kw)
@@ -1096,6 +1189,10 @@ def _xs_install():
 
         def mk(g, n=n):
             def w(*a, **kw):
+                if XS[1] == 3 and n == "mbarrier_wait":   # xexempt drop control: bounded (trap) acquire.cluster wait
+                    ptr = a[0] if a else kw["mbar_ptr"]
+                    ph = a[1] if len(a) > 1 else kw["phase"]
+                    return mbar_wait_parity_cluster_bounded(Int32(ptr.toint()), Int32(ph))
                 if XS[1] == 2 and n == "mbarrier_wait":
                     # acquire at cluster scope on the wait itself (mbarrier.try_wait.parity.acquire.cluster loop)
                     ptr = a[0] if a else kw["mbar_ptr"]

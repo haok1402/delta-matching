@@ -485,6 +485,9 @@ class DMPass0Sm100:
 
         self.num_regs_softmax = config.registers.softmax
         self.num_regs_correction = config.registers.correction
+        # +u1/+u2 (Codex gap8k #reg): the shared call site gives the correction-id warps the softmax setmaxnreg value;
+        # a +r<s>_<c> override with s != c would silently change their allocation -> refuse
+        assert not self.dm_u1 or self.num_regs_softmax == self.num_regs_correction, "+u1/+u2 need softmax == correction regs"
         self.num_regs_other = config.registers.other
 
         self.buffer_align_bytes = 1024

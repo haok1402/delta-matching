@@ -284,6 +284,8 @@ def _dm_post_convert(acc, out, *a, **k):
     """FA4 postprocess wrapper: skipped for dQ when the kernel's last writer already wrote bf16 dQ (DM lwc)."""
     if _CTX.get("dq") is not None and out is _CTX["dq"]:
         return
+    if "gnopost" in _env("DM_BWD_OPTS", "").split(","):
+        return   # DIAGNOSTIC (kda-sm100-gap8k, Codex): skip every dQ/dK/dV postprocess launch; timing only, WRONG grads
     return _ORIG_POST(acc, out, *a, **k)
 
 

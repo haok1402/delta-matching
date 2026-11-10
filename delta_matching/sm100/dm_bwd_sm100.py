@@ -758,6 +758,8 @@ class DMBackwardSm100:
         # xd:f<k> (DEBUG) = the relay skips its 6th forward of site k (bounded leader wait -> trap).
         self.dm_xd = next((x[3:] for x in self.dm_opts if x.startswith("xd:")), "") if self.dm_rasy else ""
         self.dm_xp = next((x[3:] for x in self.dm_opts if x.startswith("xp:")), "") if self.dm_rasy else ""
+        # xw:<N> (DEBUG, rrasy): the relay stalls N x ~1 us before every forward (delay control: must stay bitwise clean)
+        self.dm_xw = int(next((x[3:] for x in self.dm_opts if x.startswith("xw:")), "0"))
         self.dm_rasy_slots = (0 if not self.dm_rasy else 68 if self.dm_rasy == 6 else 1)
         if self.dm_rasy == 8:
             self.dm_xs_relay = True
@@ -4383,6 +4385,8 @@ class DMBackwardSm100:
                             lim = cutlass.min(ob[k] + 1, tgt)   # DEBUG planted control: forward one phase EARLY
                         if dn[k] < lim:
                             if const_expr(self.dm_rasy == 8):
+                                for _w in cutlass.range_constexpr(self.dm_xw):
+                                    dm_utils.nanosleep_1us()
                                 if const_expr(self.dm_xd == "f" + str(k)):
                                     if dn[k] != 5:   # DEBUG drop control: the 6th forward of site k in a tile is skipped
                                         dm_utils.red_async_fwd(a, Int32(0), dm_utils.XS_DUMMY[0])

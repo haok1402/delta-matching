@@ -1275,18 +1275,15 @@ class DMFwdHd256MxSm100:
         for bb in cutlass.range_constexpr(2):
             for i in cutlass.range_constexpr(32):
                 s[32 * bb + i] = ex2_ftz(s[32 * bb + i])
-        if const_expr(h == 1 and self.pc_inj == 11):
-            cute.arch.fence_view_async_shared()                              # DEBUG PC 11: P_full before WG1's P stores
-            dm_utils.tc_fence_before()
-            dm_utils.mbar_arrive(mbar + 16 + 8 * slot)
-            for _d in cutlass.range_constexpr(20):
-                dm_utils.nanosleep_1us()
+        pst = []                                                             # (address, 4 code words) per 16 B chunk
         for bb in cutlass.range_constexpr(2):
             for q in cutlass.range_constexpr(2):
                 k = 32 * bb + 16 * q
                 w = [e4m3x4(s[k + 4 * t], s[k + 4 * t + 1], s[k + 4 * t + 2], s[k + 4 * t + 3]) for t in range(4)]
                 chunk = Int32(2 * (2 * h + bb) + q)
-                dm_utils.st_shared_v4_b32(prow + ((chunk ^ (tidx & 7)) << 4), w[0], w[1], w[2], w[3])
+                pst.append((prow + ((chunk ^ (tidx & 7)) << 4), w))
+                if const_expr(not (h == 1 and self.pc_inj == 11)):
+                    dm_utils.st_shared_v4_b32(pst[-1][0], w[0], w[1], w[2], w[3])
         dm_bs = [None] * 2
         for bb in cutlass.range_constexpr(2):
             ps = (s[32 * bb], s[32 * bb + 1])
@@ -1315,6 +1312,15 @@ class DMFwdHd256MxSm100:
                 cute.arch.fence_view_async_shared()
                 dm_utils.tc_fence_before()
                 dm_utils.mbar_arrive(mbar + 16 + 8 * slot)                   # P_full[slot] (our P codes)
+            else:
+                # DEBUG PC 11: P_full arrives BEFORE WG1's P stores (stores ~20 us later, then the proxy fence) -> must corrupt
+                dm_utils.tc_fence_before()
+                dm_utils.mbar_arrive(mbar + 16 + 8 * slot)
+                for _d in cutlass.range_constexpr(20):
+                    dm_utils.nanosleep_1us()
+                for (a, w) in pst:
+                    dm_utils.st_shared_v4_b32(a, w[0], w[1], w[2], w[3])
+                cute.arch.fence_view_async_shared()
             self.tr(j, 22, None, tr_w == 0)
         else:
             # ---- ordered tail (WG0): exactly the C6 tail over the 4 blocks ----

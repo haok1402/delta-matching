@@ -129,9 +129,10 @@ def plan(B, H, Hk, N, causal):
     """Chunk plan (list of dicts b0 b1 g0 g1 h0 h1 q0 q1: batch range x KV-group range x q-head-in-group range x q-tile band), ascending,
     whose workspace (+ head-split temporaries + carry) fits the cap, or None (-> the kv2 fallback).  Order of preference (sm90 split.py
     convention, kda-hd256 16:5x): whole call, balanced batch chunks, KV-head-group chunks (no carry), then exact-carry chunks (q heads
-    of a group / causal q bands).  DM_H256_DQR_CARRY: "heads" (DEFAULT) = carry only over q-head ranges with ALL KV groups in each
-    chunk (no bands; the only carry class measured >= 2% faster than the kv2 path at 2 GiB: 32k 8/2 x1.08, while band plans lost 1-6%,
-    runs/hd256-dqr2/sweep_7052303), "1" = every carry class (bands, group subsets), "0" = none (kv2 fallback above the KV-group split).  Every reduction keeps its unchunked order -> bitwise."""
+    of a group / causal q bands).  DM_H256_DQR_CARRY: "0" (DEFAULT) = no carry chunks (kv2 fallback above the KV-group split): at
+    the 2 GiB cap no carry plan beat the kv2 path by >= 2% (32k 8/2 q-head carry x1.079 / 0.970 / 1.004 in three sweeps, fwd+bwd +0.6%;
+    band plans 0.94-0.98; runs/hd256-dqr2/sweep_*); "heads" = carry only over q-head ranges with ALL KV groups per chunk (no bands; e.g.
+    64k 8/2 at 8 GiB x1.05); "1" = every carry class (bands, group subsets).  All three are bitwise (gate classes / dqc / wlock).  Every reduction keeps its unchunked order -> bitwise."""
     from .fastpath import env as _env
     cap = _cfg()[0] * (1 << 30)
     r, nt = H // Hk, N // 128
@@ -150,7 +151,7 @@ def plan(B, H, Hk, N, causal):
     for n in range(Hk - 1, 0, -1):                     # largest KV-group count per chunk that fits
         if _ws_bytes(1, n * r, N, causal) + _tmp_bytes(1, N, n * r, n, False) <= cap:
             return [full(b, b + 1, g0, g1) for b in range(B) for g0, g1 in _balanced(Hk, n)]
-    cm = _env("DM_H256_DQR_CARRY", "heads")
+    cm = _env("DM_H256_DQR_CARRY", "0")
     assert cm in ("0", "1", "heads"), cm
     if cm == "0":
         return None

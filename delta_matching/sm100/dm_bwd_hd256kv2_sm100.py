@@ -69,10 +69,14 @@ class DmHd256Kv2:
     #   q: Q/dO smem released before the S/dP MMAs; d: Qd/dOd released before dV/dK; s: S/dP TMEM released before the
     #   compute loads; cd: codes/SFA published before they are written; ex: exchange barrier dropped; ld: l2/delta single
     #   buffer; fin: epilogue reads dK/dV before the final commit.
-    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin")
+    KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta")
     DLY = 1 << 15
 
-    OPTS = ("qb2", "xpt")   # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e)
+    # qb2: Q/dO/Qd/dOd 2 TMA stages (C1a); xpt: p_sb exchange [block][row] (C1e); meta: warp 10 stages l2/delta/qs/dos per
+    # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
+    OPTS = ("qb2", "xpt", "meta", "xsv")
+    META_WARP = 10
+    META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
     DEFAULT_OPTS = ""
 
     def __init__(self, causal: bool, dbg: int = 0, knob: str = "", opts=None):
@@ -127,6 +131,7 @@ class DmHd256Kv2:
             sLD: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 2 * 128], 16]     # [par][l2 | delta][q]
             sXP: cute.struct.Align[cute.struct.MemRange[Int32, 2 * 64 * 4], 16]        # [par][row][q-block] p_sb
             sXS: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 8], 16]           # [par][warp] |dS| warp max
+            sMeta: cute.struct.Align[cute.struct.MemRange[Float32, 2 * self.META_STAGE // 4], 16]
             sK: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(a_l)], 1024]
             sV: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(a_l)], 1024]
             sQ: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(b_l)], 1024]
@@ -182,6 +187,7 @@ class DmHd256Kv2:
         sLD_addr = Int32(st.sLD.data_ptr().toint())
         sXP_addr = Int32(st.sXP.data_ptr().toint())
         sXS_addr = Int32(st.sXS.data_ptr().toint())
+        sMeta_addr = Int32(st.sMeta.data_ptr().toint())
         bars = st.bars.data_ptr()
 
         if warp == self.LOAD_WARP:
@@ -209,6 +215,8 @@ class DmHd256Kv2:
         f_p, f_c = pipeline.PipelineUmmaAsync.create(num_stages=1, producer_group=one, consumer_group=comp2,
                                                      barrier_storage=bars + 16, cta_layout_vmnk=vmnk,
                                                      defer_sync=True).make_participants()
+        m_p, m_c = pipeline.PipelineAsync.create(num_stages=2, producer_group=_coop(32), consumer_group=comp1,
+                                                 barrier_storage=bars + 18, defer_sync=True).make_participants()
         cute.arch.mbarrier_init_fence()
 
         tmem = utils.TmemAllocator(st.tmem_hold.ptr,
@@ -270,6 +278,25 @@ class DmHd256Kv2:
             kv_p.tail()
             q_p.tail()
             d_p.tail()
+
+        # ------------------------------------------------------------------ metadata warp (both CTAs, opt meta)
+        if const_expr("meta" in self.opts):
+            if warp == self.META_WARP:
+                for t in cutlass.range(total, unroll=1):
+                    hi = t // ncs
+                    ct = c_lo + t - hi * ncs
+                    h = hx * rep + hi
+                    me = m_p.acquire_and_advance()
+                    mb = sMeta_addr + me.index * self.META_STAGE
+                    for i in cutlass.range_constexpr(4):
+                        qq = lane + 32 * i
+                        st_shared_f32(mb + qq * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ct * 128 + qq])))
+                        st_shared_f32(mb + 512 + qq * 4, Float32(mDelta[b, h, ct * 128 + qq]))
+                    if lane < 4:
+                        st_shared_f32(mb + 1024 + lane * 4, Float32(mQs[b, h, ct * 4 + lane]))
+                        st_shared_f32(mb + 1040 + lane * 4, Float32(mdOs[b, h, ct * 4 + lane]))
+                    me.commit()
+                m_p.tail()
 
         # ------------------------------------------------------------------ MMA warp (leader CTA issues)
         if warp == self.MMA_WARP:
@@ -378,21 +405,34 @@ class DmHd256Kv2:
                 par = t & 1
                 ctok0 = ct * 128
                 q0 = ctok0 + 32 * jb                      # first query of this thread's block
-                qsj = Float32(mQs[b, h, ct * 4 + jb])
-                dosj = Float32(mdOs[b, h, ct * 4 + jb])
+                ldb = sLD_addr + par * 1024
+                mf = None
+                qsj = Float32(0.0)
+                dosj = Float32(0.0)
+                if const_expr("meta" in self.opts):
+                    mf = m_c.wait_and_advance()
+                    ldb = sMeta_addr + mf.index * self.META_STAGE
+                    if const_expr(self.kn == "meta"):
+                        if const_expr(self.unsafe):
+                            mf.release()                  # UNSAFE: stage released before it is read
+                        spin(self.DLY)
+                    qsj = ld_shared_f32(ldb + 1024 + jb * 4)
+                    dosj = ld_shared_f32(ldb + 1040 + jb * 4)
+                else:
+                    qsj = Float32(mQs[b, h, ct * 4 + jb])
+                    dosj = Float32(mdOs[b, h, ct * 4 + jb])
+                    if const_expr(self.kn == "ld" and self.unsafe):
+                        ldb = sLD_addr
+                    if tidx < 128:
+                        st_shared_f32(ldb + tidx * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
+                    else:
+                        st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
+                    cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
+                    if const_expr(self.kn == "ld"):
+                        if warp == 3:
+                            spin(self.DLY)
                 cs = dmh.dm_mx256_c(ks_r, qsj)
                 ca = dmh.dm_mx256_dp_scale(vs_r, dosj)
-                ldb = sLD_addr + par * 1024
-                if const_expr(self.kn == "ld" and self.unsafe):
-                    ldb = sLD_addr
-                if tidx < 128:
-                    st_shared_f32(ldb + tidx * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
-                else:
-                    st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
-                cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
-                if const_expr(self.kn == "ld"):
-                    if warp == 3:
-                        spin(self.DLY)
                 ce = cd_p.acquire_and_advance()           # code / SFA stage free (commit after dK(t-2))
                 stg = ce.index
                 if const_expr(self.kn == "cd" and self.unsafe):
@@ -480,14 +520,22 @@ class DmHd256Kv2:
                     amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
                 wm = dm_utils.redux_max_abs_f32(amd)
                 if lane == 0:
-                    st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
+                    if const_expr("xsv" in self.opts):
+                        st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
+                    else:
+                        st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
                 cute.arch.fence_view_async_shared()
                 if const_expr(not (self.kn == "ex" and self.unsafe)):
                     cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
                 g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
                 xs = sXS_addr + par * 32
-                m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
-                             max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
+                m4 = Float32(0.0)
+                if const_expr("xsv" in self.opts):
+                    x4 = ld_shared_v4f(xs + g * 16)
+                    m4 = max_f32(max_f32(x4[0], x4[1]), max_f32(x4[2], x4[3]))
+                else:
+                    m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
+                                 max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
                 dsb = dm_utils.pow2_sb(m4)
                 invs = dm_utils.inv_pow2_from_sb(dsb)
                 srow = sCS_addr + stg * cstage_bytes + crow_off
@@ -534,11 +582,21 @@ class DmHd256Kv2:
                             psj = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
                         else:
                             psj = dm_utils.ld_shared_b32(xp + (r * 4 + j) * 4)
-                        bp[j] = dm_utils.add_sb_clamp(psj, sb_of(Float32(mdOs[b, h, ct * 4 + j])))
-                        bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(Float32(mQs[b, h, ct * 4 + j])))
+                        dsc_ = Float32(0.0)
+                        qsc_ = Float32(0.0)
+                        if const_expr("meta" in self.opts):
+                            dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
+                            qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
+                        else:
+                            dsc_ = Float32(mdOs[b, h, ct * 4 + j])
+                            qsc_ = Float32(mQs[b, h, ct * 4 + j])
+                        bp[j] = dm_utils.add_sb_clamp(psj, sb_of(dsc_))
+                        bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(qsc_))
                     dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
                     dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
                     cute.arch.fence_view_async_tmem_store()
+                if const_expr("meta" in self.opts and not (self.kn == "meta" and self.unsafe)):
+                    mf.release()
                 cute.arch.fence_view_async_shared()
                 tc_fence_before()
                 if const_expr(self.kn == "cd"):

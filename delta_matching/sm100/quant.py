@@ -230,6 +230,7 @@ def quant_qkv(q, k, v, sm: float, mean: torch.Tensor | None = None):
 
 PRODA_NW = {256: 4}      # D=256: warp-pair ProdA (one tile / one K-mean chunk stream per pair); D=128: chunked ProdAC
 _CNT = {}
+_CNT_KEEP = []
 
 
 def _prod_fn(q, k, v):
@@ -252,7 +253,9 @@ def _counters(q, st, n):
     ck = (q.get_device(), st)
     e = _CNT.get(ck)
     if e is None or e[0].numel() < n:
-        e = _CNT[ck] = [torch.zeros(max(n, 1024), device=q.device, dtype=torch.int64), 0]
+        if e is not None:
+            _CNT_KEEP.append(e[0])      # never freed: a captured CUDA graph may still point at the old words
+        e = _CNT[ck] = [torch.zeros(max(n, 1024), device=q.device, dtype=torch.int64), e[1] if e is not None else 0]
     e[1] = e[1] % 0x7FFFFFFE + 1           # 1 .. 2^31-2, never 0 (the zero word)
     return e[0], e[1]
 

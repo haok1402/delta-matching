@@ -6189,16 +6189,19 @@ class DMBackwardSm100:
                 ns = cute.size(mdQ_semaphore, mode=[1])
                 base = dm_tcq.iterator.toint()
                 if process_tile:
-                    for m in cutlass.range(m_block_min, m_block_max, unroll=1):
-                        nmax = block_info.get_n_block_max_for_m_block(seqlen, m)
-                        lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info,
-                                                             seqlen, m, work_n)
-                        if lock == nmax - 1:
-                            srow = mdQ_semaphore.iterator.toint() + Int64(4) * Int64(((batch_idx * nh + head_idx) * mt + m) * ns)
-                            for r in cutlass.range_constexpr(2):
-                                dm_utils.poll_acquire_ge_or_trap(srow + Int64(4 * r), nmax, Int32(1 << 26))
-                            pos = dm_utils.atom_add_relaxed_gpu_s32(base, Int32(1))
-                            dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + pos), (batch_idx * nh + head_idx) * mt + m + 1)
+                    # DM gloop: one CTA serves the dm_G query heads of its KV group (same order as the reduce warps)
+                    for dm_g in cutlass.range(self.dm_G, unroll=1):
+                        hq = head_idx + dm_g
+                        for m in cutlass.range(m_block_min, m_block_max, unroll=1):
+                            nmax = block_info.get_n_block_max_for_m_block(seqlen, m)
+                            lock = self._dq_semaphore_lock_value(m - m_block_min, Int32(0), None, None, None, block_info,
+                                                                 seqlen, m, work_n)
+                            if lock == nmax - 1:
+                                srow = mdQ_semaphore.iterator.toint() + Int64(4) * Int64(((batch_idx * nh + hq) * mt + m) * ns)
+                                for r in cutlass.range_constexpr(2):
+                                    dm_utils.poll_acquire_ge_or_trap(srow + Int64(4 * r), nmax, Int32(1 << 26))
+                                pos = dm_utils.atom_add_relaxed_gpu_s32(base, Int32(1))
+                                dm_utils.st_relaxed_gpu_s32(base + Int64(4) * Int64(1 + pos), (batch_idx * nh + hq) * mt + m + 1)
                 tile_scheduler.advance_to_next_work()
                 work_tile = tile_scheduler.get_current_work()
 

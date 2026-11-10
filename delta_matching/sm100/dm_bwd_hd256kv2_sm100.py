@@ -146,9 +146,10 @@ class DmHd256Kv2:
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
     OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "dmk")
     # dmk (fork hd256-kv3, causal only; no-op if not causal): tile-class specialization of the compute warps.  The compute loop
-    # becomes a nest (q head hi asc; q tile ct asc), the FIRST q tile of every head (ct = c_lo = kt: the diagonal tile) peeled.
-    # Only the peeled iteration applies the causal select s = -inf where key > query; on every other tile key <= kt*128+127 <
-    # ct*128 <= query, so the select never fires there and the unmasked copy runs the identical FFMA / MUFU / FMUL sequence on
+    # becomes a nest (q head hi asc; q tile ct asc), the FIRST q tile of every head (ct = c_lo = max(kt, cq0 if dqc): the diagonal
+    # tile kt, or a tile above it in a dqc band with cq0 > kt) peeled.  Only the peeled iteration applies the causal select
+    # s = -inf where key > query; on every other tile ct >= c_lo + 1 >= kt + 1, so key <= kt*128+127 < ct*128 <= query and the
+    # select never fires there and the unmasked copy runs the identical FFMA / MUFU / FMUL sequence on
     # identical inputs -> bitwise the same P, dS, codes, SFs.  Iteration order, t numbering, every wait / arrive / fence and every
     # hand-off are those of the default loop (the body is _citer = the default body verbatim); no new hand-off.
     # dqc (fork hd256-dqr2, requires dqt): EXACT-CARRY chunk of the (q head, q tile) reduction of every key tile.  The launch covers
@@ -914,7 +915,7 @@ class DmHd256Kv2:
                 if const_expr(not (self.kn == "cr" and self.unsafe)):
                     self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
             if const_expr(self.causal and "dmk" in self.opts):
-                # opt dmk: peeled loop nest (q head hi; diagonal tile ct = c_lo first, masked; then the off-diagonal tiles, unmasked)
+                # opt dmk: peeled loop nest (q head hi; first tile ct = c_lo (the diagonal tile, or above it in a dqc band) masked; the rest unmasked)
                 cx = SimpleNamespace(E_S=E_S, F_S=F_S, H=H, Hk=Hk, N=N, b=b, c_lo=c_lo, crank=crank, crow_off=crow_off, cstage_bytes=cstage_bytes, hf=hf, hx=hx, jb=jb, kbar=kbar, key=key, ks_r=ks_r, kt=kt, lane=lane, mCodesP=mCodesP, mCodesS=mCodesS, mDelta=mDelta, mDump=mDump, mHash=mHash, mLse=mLse, mQs=mQs, mSBP=mSBP, mSBS=mSBS, mdOs=mdOs, n_t=n_t, ncs=ncs, qd=qd, r=r, rep=rep, rsw=rsw, sCP_addr=sCP_addr, sCS_addr=sCS_addr, sLD_addr=sLD_addr, sMeta_addr=sMeta_addr, sXP_addr=sXP_addr, sXS_addr=sXS_addr, tb=tb, tidx=tidx, vs_r=vs_r, warp=warp)
                 if const_expr(self.dqc):
                     cx.cq0, cx.nfirst, cx.nfull, cx.tilesb = cq0, nfirst, nfull, tilesb

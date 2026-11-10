@@ -42,7 +42,10 @@ IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(d
               # "34" = 30 + bes + omsk; "35" = 34 with 7 CTAs (test stress)
               "32": dict(dqopt=True, lpt="g", yr=True, pers=-1, bes=True), "33": dict(dqopt=True, lpt="g", yr=True, pers=-1, omsk=True),
               "34": dict(dqopt=True, lpt="g", yr=True, pers=-1, bes=True, omsk=True),
-              "35": dict(dqopt=True, lpt="g", yr=True, pers=7, bes=True, omsk=True)}
+              "35": dict(dqopt=True, lpt="g", yr=True, pers=7, bes=True, omsk=True),
+              # "36" = 13 + omsk (non-persistent): impl 30's ncu (kda/profile/hd256-dqb-r1) shows a predicate spill of the dP try_wait
+              # probe inside the exp phase; the mask skip frees the per-element mask predicates on off-diagonal tiles
+              "36": dict(dqopt=True, lpt="g", yr=True, omsk=True)}
 IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "13"}  # Q12 + causal global LPT + Ya reuse (HD256-DQ-YR) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}

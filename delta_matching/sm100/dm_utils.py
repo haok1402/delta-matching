@@ -1015,12 +1015,31 @@ def fence_acq_rel_cluster(*, loc=None, ip=None):
                     asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
+@dsl_user_op
+def mbar_arrive_rank_xs(mbar: Int32, rank: Int32, *, loc=None, ip=None):
+    """Remote-capable mbarrier arrive on CTA `rank`'s copy of `mbar`: .release.cluster when the target is another CTA,
+    .release.cta when it is the executing CTA (producer and consumer then share the CTA scope)."""
+    llvm.inline_asm(None, [Int32(mbar).ir_value(loc=loc, ip=ip), Int32(rank).ir_value(loc=loc, ip=ip)],
+                    "{\n\t.reg .b32 rm, me;\n\t.reg .pred p;\n\t"
+                    "mapa.shared::cluster.u32 rm, $0, $1;\n\t"
+                    "mov.u32 me, %cluster_ctarank;\n\t"
+                    "setp.ne.u32 p, me, $1;\n\t"
+                    "@p mbarrier.arrive.release.cluster.shared::cluster.b64 _, [rm];\n\t"
+                    "@!p mbarrier.arrive.release.cta.shared::cluster.b64 _, [rm];\n\t}",
+                    "r,r", has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
 def _xs_install():
     import cutlass.cute.arch as _A
     from cutlass._mlir.dialects import nvvm as _nv
     f = _A.mbarrier_arrive
     if not getattr(f, "_dm_xs", False):
         def mbarrier_arrive(mbar_ptr, peer_cta_rank_in_cluster=None, *a, **kw):
+            if (XS[0] == 2 and peer_cta_rank_in_cluster is not None and kw.get("scope") is None and not a
+                    and kw.get("arrive_count", 1) == 1 and not kw.get("relaxed", False)):
+                # cluster scope only when the target barrier lives in the OTHER CTA
+                return mbar_arrive_rank_xs(Int32(mbar_ptr.toint()), Int32(peer_cta_rank_in_cluster),
+                                           loc=kw.get("loc"), ip=kw.get("ip"))
             if XS[0] and peer_cta_rank_in_cluster is not None and kw.get("scope") is None:
                 kw["scope"] = _nv.MemScopeKind.CLUSTER
             return f(mbar_ptr, peer_cta_rank_in_cluster, *a, **kw)

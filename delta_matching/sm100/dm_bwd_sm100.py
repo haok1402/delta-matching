@@ -728,7 +728,7 @@ class DMBackwardSm100:
         # cost bisect (DEBUG): xs:a = remote arrives only, xs:wf = MMA-warp wait fences only, xs:wq = waits as
         # try_wait.acquire.cluster only, xs:awq = arrives + acquire.cluster waits (default = arrives + fences)
         _xm = next((x[3:] for x in self.dm_opts if x.startswith("xs:")), "awf")
-        self.dm_xs_arrive = self.dm_xscope and "a" in _xm
+        self.dm_xs_arrive = (2 if "p" in _xm else 1) if (self.dm_xscope and ("a" in _xm or "p" in _xm)) else 0   # xs:p.. = peer-only cluster scope
         self.dm_xs_wait = (0 if not self.dm_xscope else 2 if "wq" in _xm else 1 if "wf" in _xm else 0)
         # per-role bisect (DEBUG) of the cluster-scope arrives: xsr:<r relay, m dealloc, c compute, d dsqw, q reduce> (default all)
         self.dm_xs_roles = next((x[4:] for x in self.dm_opts if x.startswith("xsr:")), "rmcdq")
@@ -2274,7 +2274,7 @@ class DMBackwardSm100:
                 self.num_regs_mma if self.use_2cta_instrs else self.num_regs_empty
             )
             if const_expr(self.use_2cta_instrs):
-                dm_utils.XS[0] = int(self.dm_xs_arrive and "r" in self.dm_xs_roles)
+                dm_utils.XS[0] = (self.dm_xs_arrive if "r" in self.dm_xs_roles else 0)
                 self.relay(
                     dS_cluster_full_mbar_ptr,
                     dS_cluster_empty_mbar_ptr,
@@ -2398,7 +2398,7 @@ class DMBackwardSm100:
             tmem.relinquish_alloc_permit()
             tmem_alloc_barrier.arrive_and_wait()
             dm_utils.XS[1] = int(self.dm_xs_wait)   # ordinv Part III: the 2-CTA dealloc handshake (peer arrive -> wait) too
-            dm_utils.XS[0] = int(self.dm_xs_arrive and "m" in self.dm_xs_roles)
+            dm_utils.XS[0] = (self.dm_xs_arrive if "m" in self.dm_xs_roles else 0)
             tmem.free(tmem_ptr)
             dm_utils.XS[1] = 0
             if const_expr("tl4" in self.dm_opts and aux_data.tensors is not None and len(aux_data.tensors) > 4):
@@ -2411,7 +2411,7 @@ class DMBackwardSm100:
             self._dm_setmaxreg_inc(self.num_regs_compute)  # 8 warps
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            dm_utils.XS[0] = int(self.dm_xs_arrive and "c" in self.dm_xs_roles)
+            dm_utils.XS[0] = (self.dm_xs_arrive if "c" in self.dm_xs_roles else 0)
             self.compute_loop(
                 thr_mma_S,
                 thr_mma_dP,
@@ -2472,7 +2472,7 @@ class DMBackwardSm100:
                     self._dm_setmaxreg_inc(self.num_regs_dsq)
                 tmem.wait_for_alloc()
                 tmem_ptr = tmem.retrieve_ptr(Float32)
-                dm_utils.XS[0] = int(self.dm_xs_arrive and "d" in self.dm_xs_roles)
+                dm_utils.XS[0] = (self.dm_xs_arrive if "d" in self.dm_xs_roles else 0)
                 self.dsq_loop(
                     thr_mma_S, tdPtdP, sdS, sdS_xchg, sdS_dK, pipeline_dP, pipeline_dS, dS_cluster_full_mbar_ptr,
                     sDm, storage.dm_xchg_mbar.data_ptr(), aux_data, block_info, SeqlenInfoCls, TileSchedulerCls,
@@ -2489,7 +2489,7 @@ class DMBackwardSm100:
                 self._dm_setmaxreg_inc(self.num_regs_reduce)
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(Float32)
-            dm_utils.XS[0] = int(self.dm_xs_arrive and "q" in self.dm_xs_roles)
+            dm_utils.XS[0] = (self.dm_xs_arrive if "q" in self.dm_xs_roles else 0)
             self.dQacc_reduce(
                 mdQaccum,
                 sdQaccum,

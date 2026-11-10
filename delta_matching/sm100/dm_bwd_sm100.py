@@ -6083,8 +6083,13 @@ class DMBackwardSm100:
             self.dsq_sync_barrier.arrive_and_wait()
             if tidx == 0:
                 ws_bytes = const_expr(self.tma_copy_bytes["dS"])
-                t_lin = (((batch_idx * Int32(4096) + head_idx) * Int32(4096) + m_block) * Int32(2048) + work_n) * Int32(2) + cta_rank
-                ws_off = Int64(t_lin & Int32((1 << 31) // ws_bytes - 1)) * Int64(ws_bytes)
+                # ring slot = (linear CTA id * 1024 + this CTA's tile counter) mod #slots, in Int64 (no overflow): every
+                # CTA streams through its own contiguous slot range, so the whole 2 GiB ring is written (Codex dqr128-01 s1)
+                bx, by, bz = cute.arch.block_idx()
+                gx, gy, _ = cute.arch.grid_dim()
+                cta_lin = Int64(bx) + Int64(gx) * (Int64(by) + Int64(gy) * Int64(bz))
+                t_lin = cta_lin * Int64(1024) + Int64(dsq_j)
+                ws_off = (t_lin % Int64((1 << 31) // ws_bytes)) * Int64(ws_bytes)
                 dm_utils.cpasync_bulk_store_s2g_addr(sdS.iterator, aux_data.tensors[4].iterator.toint() + ws_off, ws_bytes)
                 cute.arch.cp_async_bulk_commit_group()
             return   # trace-time (const_expr) early exit: the dqr0 build has no dQ operand / exchange / dQ SF

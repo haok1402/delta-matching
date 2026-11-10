@@ -286,7 +286,7 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
         if num_groups == Hk and num_heads == heads_per_group and q0 == 0 and q1 == num_q_tiles:     # batch chunk: slices, no copies
             def batch_slice(x):
                 return x[b0:b1]
-            extra = bwd_hd256kv2.kv2_launch(*[batch_slice(x) for x in (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)], causal, dbg=debug_bits, knob="",
+            extra = bwd_hd256kv2.kv2_launch(*[batch_slice(x) for x in (q8, qs, k8, ks, v8, vs, do8, dos, lse, delta)], causal, dbg=debug_bits,
                                             opts=opts, dqw=workspace, out=(batch_slice(dk), batch_slice(dv)))[2]
             if identity:
                 ident[b0 * H:b1 * H].copy_(extra["hash"])
@@ -306,12 +306,12 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
                         take_tokens(do8), take_heads(dos), take_heads(lse), take_heads(delta))
         is_last = h1 == heads_per_group and q1 == num_q_tiles
         if num_heads == heads_per_group and q0 == 0 and q1 == num_q_tiles:      # KV-group chunk: no carry
-            dk_chunk, dv_chunk, extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, knob="", opts=opts, dqw=workspace)
+            dk_chunk, dv_chunk, extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, opts=opts, dqw=workspace)
         else:
             assert num_batch == 1
             size = N * num_groups * D
             carry_views = (carry[0].view(-1)[:size].view(1, N, num_groups, D), carry[1].view(-1)[:size].view(1, N, num_groups, D))
-            dk_chunk, dv_chunk, extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, knob="", opts=opts + " dqc", dqw=workspace,
+            dk_chunk, dv_chunk, extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, opts=opts + " dqc", dqw=workspace,
                                                                 dqc=(descriptors[carry_idx], carry_views[0], carry_views[1], q1))
             carry_idx += 1
         band = None if (q0 == 0 and q1 == num_q_tiles) else (q0, q1)

@@ -381,11 +381,11 @@ class DmHd256Mx2:
                 if const_expr(self.dqopt):
                     kc = [nk0, nk1]
                     vc = [nv0, nv1]
-                    ctn = cutlass.min(ct + 1, c_hi - 1)          # Q1: issue tile t+1's loads now (clamped; last tile reloads itself)
-                    nk0 = Float32(mKs[b, hk_row, ctn * 4 + 2 * hf])
-                    nk1 = Float32(mKs[b, hk_row, ctn * 4 + 2 * hf + 1])
-                    nv0 = Float32(mVs[b, hk_row, ctn * 4 + 2 * hf])
-                    nv1 = Float32(mVs[b, hk_row, ctn * 4 + 2 * hf + 1])
+                    ctq = cutlass.min(ct + 1, c_hi - 1)          # Q1: issue tile t+1's loads now (clamped; last tile reloads itself)
+                    nk0 = Float32(mKs[b, hk_row, ctq * 4 + 2 * hf])
+                    nk1 = Float32(mKs[b, hk_row, ctq * 4 + 2 * hf + 1])
+                    nv0 = Float32(mVs[b, hk_row, ctq * 4 + 2 * hf])
+                    nv1 = Float32(mVs[b, hk_row, ctq * 4 + 2 * hf + 1])
                     for jj in cutlass.range_constexpr(2):
                         cs[jj] = dmh.dm_mx256_c(kc[jj], row_s)
                         ca[jj] = dmh.dm_mx256_dp_scale(vc[jj], row_a)

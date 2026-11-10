@@ -84,6 +84,12 @@ def warp_arrive_local(mbar: Int32, *, loc=None, ip=None):
          "setp.eq.u32 p, l, 0;\n\t@p mbarrier.arrive.release.cta.shared::cta.b64 _, [$0];\n\t}", "r", True, loc, ip)
 
 
+@dsl_user_op
+def bar_sync_n(bid: Int32, n: int, *, loc=None, ip=None):
+    """barrier.cta.sync bid, n  (named barrier with a register id; used per key group, opt gbar)."""
+    _asm(None, [Int32(bid).ir_value(loc=loc, ip=ip)], f"barrier.cta.sync $0, {int(n)};", "r", True, loc, ip)
+
+
 def _coop(n):
     return pipeline.CooperativeGroup(pipeline.Agent.Thread, n)
 
@@ -106,7 +112,10 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly")
+    # gbar (SF1): the dS-max / P-sb exchange barrier per key group (128 threads: warps g, g+2, g+4, g+6; ids 3 / 5) instead of all 256
+    # esf (SF2'): P scale bytes folded with the dO sb at the exchange store; both SFA words stored right after dsb, before the dS code
+    #   conversion, with ONE tcgen05.wait::st before publication (kda/hd256/kv2-sfchain-draft.md, codex/kv2-07-sfchain.md)
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "gbar", "esf")
     RELAY_WARP = 11   # relcl/acqcl: DEBUG: only release / only acquire at cluster   # ctasc: DEBUG ONLY (cost attribution): cross-CTA arrive/wait at .cta scope
     META_WARP = 10
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
@@ -593,7 +602,9 @@ class DmHd256Kv2:
                 if const_expr(self.kn == "ex"):
                     if warp == 6:
                         spin(self.DLY)
-                if const_expr("xpt" in self.opts):
+                if const_expr("esf" in self.opts):
+                    dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, dm_utils.add_sb_clamp(psb, sb_of(dosj)))   # folded P byte
+                elif const_expr("xpt" in self.opts):
                     dm_utils.st_shared_b32(xp + (jb * 64 + r) * 4, psb)
                 else:
                     dm_utils.st_shared_b32(xp + (r * 4 + jb) * 4, psb)
@@ -607,9 +618,15 @@ class DmHd256Kv2:
                     else:
                         st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
                 cute.arch.fence_view_async_shared()
-                if const_expr(not (self.kn == "ex" and self.unsafe)):
-                    cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
                 g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
+                if const_expr("gbar" in self.opts):
+                    if const_expr(self.kn == "ex" and self.unsafe):
+                        if g == 1:                         # UNSAFE: group 0 (warps 0,2,4,6; warp 6 delayed) drops its barrier
+                            bar_sync_n(Int32(5), 128)
+                    else:
+                        bar_sync_n(3 + 2 * g, 128)
+                elif const_expr(not (self.kn == "ex" and self.unsafe)):
+                    cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
                 xs = sXS_addr + par * 32
                 m4 = Float32(0.0)
                 if const_expr("xsv" in self.opts):
@@ -620,6 +637,15 @@ class DmHd256Kv2:
                                  max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
                 dsb = dm_utils.pow2_sb(m4)
                 invs = dm_utils.inv_pow2_from_sb(dsb)
+                if const_expr("esf" in self.opts):
+                    if warp < 4:                           # SFA words now; completion waited once before publication
+                        bp = [Int32(0)] * 4
+                        bs = [Int32(0)] * 4
+                        for j in cutlass.range_constexpr(4):
+                            bp[j] = dm_utils.ld_shared_b32(xp + (j * 64 + r) * 4)
+                            bs[j] = dm_utils.add_sb_clamp(dsb, sb_of(ld_shared_f32(ldb + 1024 + j * 4)))
+                        dm_utils.tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
+                        dm_utils.tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
                 srow = sCS_addr + stg * cstage_bytes + crow_off
                 hsl = [Int32(0)] * 32
                 hcl = [Int32(0)] * 32
@@ -655,7 +681,10 @@ class DmHd256Kv2:
                     lk_cols_u32(hcl, lane, a0_ + 16)
                     lk_cols_f64(dsv, lane, a0_ + 24)
                 # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
-                if warp < 4:
+                if const_expr("esf" in self.opts):
+                    if warp < 4:
+                        cute.arch.fence_view_async_tmem_store()           # tcgen05.wait::st of the early SFA stores
+                elif warp < 4:
                     bp = [Int32(0)] * 4
                     bs = [Int32(0)] * 4
                     for j in cutlass.range_constexpr(4):

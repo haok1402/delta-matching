@@ -140,12 +140,39 @@ def tmem_wait_st(*, loc=None, ip=None):
                     asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
 
 
+@dsl_user_op
+def tmem_ld32(addr: Int32, *, loc=None, ip=None):
+    """tcgen05.ld.32x32b.x32 (thread t of the warp -> lane base + t, 32 consecutive columns); NO wait::ld."""
+    regs = ",".join(f"${i}" for i in range(32))
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 32), [Int32(addr).ir_value(loc=loc, ip=ip)],
+        "tcgen05.ld.sync.aligned.32x32b.x32.b32 {" + regs + "}, [$32];",
+        ",".join(["=f"] * 32) + ",r", has_side_effects=True, is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+    return [Float32(llvm.extractvalue(T.f32(), res, [i], loc=loc, ip=ip)) for i in range(32)]
+
+
+@dsl_user_op
+def tmem_st32(addr: Int32, vals, *, loc=None, ip=None):
+    regs = ",".join(f"${i + 1}" for i in range(32))
+    llvm.inline_asm(None, [Int32(addr).ir_value(loc=loc, ip=ip)] + [Float32(v).ir_value(loc=loc, ip=ip) for v in vals],
+                    "tcgen05.st.sync.aligned.32x32b.x32.b32 [$0], {" + regs + "};", "r" + ",f" * 32,
+                    has_side_effects=True, is_align_stack=False, asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def tmem_wait_ld(*, loc=None, ip=None):
+    llvm.inline_asm(None, [], "tcgen05.wait::ld.sync.aligned;", "", has_side_effects=True, is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT, loc=loc, ip=ip)
+
+
 class DMFwdHd256Sm100:
     """See module docstring. Inputs (all contiguous):
     q8 (B,N,H,256) e4m3 (sm baked), k8/v8 (B,N,Hk,256) e4m3; qs (B,H,N/64), ks/vs (B,Hk,N/32) fp32 (non-dyadic);
     O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
 
-    def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, numerics: str = "a", t_n: int = 64):
+    def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, numerics: str = "a", t_n: int = 64,
+                 fold: str = "raw"):
         assert numerics == "a", f"DM_HD256_NUMERICS={numerics}: only scheme 'a' (exact sm90 [64,32] floor) exists"
         self.is_causal = is_causal
         self.qhead_per_kvhead = qhead_per_kvhead
@@ -160,6 +187,11 @@ class DMFwdHd256Sm100:
         self.t_n = t_n
         self.t_nbuf = 128 // t_n
         self.t_nslab = 256 // t_n
+        # fold implementation: "cute" = per-chunk cute.copy (ld T, wait, ld O, wait, st); "raw" = all T and O chunks of
+        # a fold issued as raw tcgen05.ld, ONE wait::ld, T_empty released right after it, then FMAs and tcgen05.st
+        # (same values); "nofold" = DEBUG ONLY timing bound (no O update: wrong output)
+        assert fold in ("cute", "raw", "nofold")
+        self.fold = fold
         self.mma_tiler_qk = (128, 128, 256)
         self.mma_tiler_pv = (128, 256, 128)      # smem / TMA tile of V; the MMAs use N=128 d-slabs
         self.softmax_warp_ids = (0, 1, 2, 3)
@@ -581,6 +613,7 @@ class DMFwdHd256Sm100:
             self.correction_tile(i + 1, False, thr_ld, thr_st, tX_ld, tX_st, frag_shape, mbar, stats, tidx)
         # epilogue: O * inv -> bf16, row-contiguous 16-B global stores
         dm_utils.mbar_wait_parity(mbar + 64, Int32(0))
+        tmem_wait_st()
         inv = ld_shared_f32(stats + 4 * (2 * 5 * 128 + tidx))
         N = mO.shape[1]
         H = mO.shape[2]
@@ -606,23 +639,56 @@ class DMFwdHd256Sm100:
             s, g, b = f // 4, f % 4, f % nb
             dm_utils.mbar_wait_parity(mbar + 32 + 8 * b, Int32((f // nb) & 1))     # T_full[b] (8 uses per tile)
             dm_utils.tc_fence_after()
-            for c in cutlass.range_constexpr(self.t_n // 32):
-                t = cute.make_rmem_tensor(frag_shape, Float32)
-                cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + slot * 128 + self.t_n * b + 32 * c, tX_ld.layout), t)
-                o = cute.make_rmem_tensor(frag_shape, Float32)
-                o_off = self.tmem_o + self.t_n * s + 32 * c
-                if const_expr(is_first and g == 0):
-                    for k in cutlass.range_constexpr(0, 32, 2):
-                        o[k], o[k + 1] = cute.arch.mul_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]))
-                else:
-                    cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + o_off, tX_ld.layout), o)
-                    if const_expr(g == 0):
+            if const_expr(self.fold == "cute"):
+                for c in cutlass.range_constexpr(self.t_n // 32):
+                    t = cute.make_rmem_tensor(frag_shape, Float32)
+                    cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + slot * 128 + self.t_n * b + 32 * c, tX_ld.layout), t)
+                    o = cute.make_rmem_tensor(frag_shape, Float32)
+                    o_off = self.tmem_o + self.t_n * s + 32 * c
+                    if const_expr(is_first and g == 0):
                         for k in cutlass.range_constexpr(0, 32, 2):
-                            o[k], o[k + 1] = cute.arch.mul_packed_f32x2((o[k], o[k + 1]), (alpha, alpha))
-                    for k in cutlass.range_constexpr(0, 32, 2):
-                        o[k], o[k + 1] = cute.arch.fma_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]),
-                                                                   (o[k], o[k + 1]))
-                cute.copy(thr_st, o, cute.make_tensor(tX_st.iterator + o_off, tX_st.layout))
-            tmem_wait_st()
-            dm_utils.tc_fence_before()
-            dm_utils.mbar_arrive(mbar + 72 + 8 * b)                                # T_empty[b]
+                            o[k], o[k + 1] = cute.arch.mul_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]))
+                    else:
+                        cute.copy(thr_ld, cute.make_tensor(tX_ld.iterator + o_off, tX_ld.layout), o)
+                        if const_expr(g == 0):
+                            for k in cutlass.range_constexpr(0, 32, 2):
+                                o[k], o[k + 1] = cute.arch.mul_packed_f32x2((o[k], o[k + 1]), (alpha, alpha))
+                        for k in cutlass.range_constexpr(0, 32, 2):
+                            o[k], o[k + 1] = cute.arch.fma_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]),
+                                                                       (o[k], o[k + 1]))
+                    cute.copy(thr_st, o, cute.make_tensor(tX_st.iterator + o_off, tX_st.layout))
+                tmem_wait_st()
+                dm_utils.tc_fence_before()
+                dm_utils.mbar_arrive(mbar + 72 + 8 * b)                                # T_empty[b]
+
+            elif const_expr(self.fold == "nofold"):
+                dm_utils.tc_fence_before()
+                dm_utils.mbar_arrive(mbar + 72 + 8 * b)
+            else:
+                lane = (cute.arch.make_warp_uniform(cute.arch.warp_idx()) % 4) * 32
+                tbase = (lane << 16) + slot * 128 + self.t_n * b
+                obase = (lane << 16) + self.tmem_o + self.t_n * s
+                nch = self.t_n // 32
+                tmem_wait_st()      # previous fold's O stores (same thread) complete before re-reading O
+                ts = [tmem_ld32(tbase + 32 * c) for c in range(nch)]
+                os_ = [None] * nch
+                if const_expr(not (is_first and g == 0)):
+                    os_ = [tmem_ld32(obase + 32 * c) for c in range(nch)]
+                tmem_wait_ld()
+                dm_utils.tc_fence_before()
+                dm_utils.mbar_arrive(mbar + 72 + 8 * b)                            # T_empty[b]: T read
+                for c in cutlass.range_constexpr(nch):
+                    t = ts[c]
+                    o = [None] * 32
+                    if const_expr(is_first and g == 0):
+                        for k in cutlass.range_constexpr(0, 32, 2):
+                            o[k], o[k + 1] = cute.arch.mul_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]))
+                    else:
+                        o = list(os_[c])
+                        if const_expr(g == 0):
+                            for k in cutlass.range_constexpr(0, 32, 2):
+                                o[k], o[k + 1] = cute.arch.mul_packed_f32x2((o[k], o[k + 1]), (alpha, alpha))
+                        for k in cutlass.range_constexpr(0, 32, 2):
+                            o[k], o[k + 1] = cute.arch.fma_packed_f32x2((t[k], t[k + 1]), (w[g], w[g]),
+                                                                       (o[k], o[k + 1]))
+                    tmem_st32(obase + 32 * c, o)

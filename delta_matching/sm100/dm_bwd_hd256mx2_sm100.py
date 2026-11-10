@@ -430,6 +430,9 @@ class DmHd256Mx2:
                 nk1 = Float32(mKs[b, hk_row, 2 * hf + 1])
                 nv0 = Float32(mVs[b, hk_row, 2 * hf])
                 nv1 = Float32(mVs[b, hk_row, 2 * hf + 1])
+            # q3 interior controls (codex/hd256-dqopt-03-combo.md): tile t-1's delayed code / SFA stores carried into tile t
+            pend_c = [(Int32(0), Int32(0), Int32(0), Int32(0), Int32(0)) for _ in range(4)]
+            sfw_c = Int32(0)
             for t in cutlass.range(total, unroll=1):
                 hi = t // ncs
                 ct = c_lo + t - hi * ncs
@@ -506,6 +509,28 @@ class DmHd256Mx2:
                     if const_expr(self.ordf):
                         tc_fence_before()                      # BW2
                     sf.release()
+                if const_expr(self.q3 and self.kn in ("sf0", "sf1", "cw0", "cw1")):
+                    # q3: out(t-1) runs only after dP(t), i.e. after this release: the window for tile t-1's late stores
+                    if t > 0:
+                        if hf == int(self.kn[2]):
+                            spin(self.DLY)
+                            if const_expr(self.unsafe):
+                                if const_expr(self.kn[:2] == "cw"):
+                                    for pa_ in pend_c:
+                                        st_shared_v4(*pa_)
+                                else:
+                                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * ((t - 1) & 1) + 4 * hf + qd, sfw_c)
+                                    cute.arch.fence_view_async_tmem_store()
+                if const_expr(self.q3 and self.kn in ("sfb0", "sfb1")):
+                    if t == int(self.kn[3]) + 1:
+                        if hf == 0:
+                            spin(self.DLY)
+                            if const_expr(self.unsafe):
+                                one_ = Int32(0x7F7F7F7F)
+                                sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
+                                dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
+                                dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
+                                cute.arch.fence_view_async_tmem_store()
                 if const_expr(self.kn == "ld"):
                     if warp == 3:
                         spin(self.DLY)
@@ -815,7 +840,11 @@ class DmHd256Mx2:
                     late_cw = self.kn[:2] == "cw"
                     if const_expr(not self.unsafe):
                         if hf == hk_:
-                            spin(self.DLY)
+                            if const_expr(self.q3):
+                                if t + 1 == total:      # q3 interior tiles: delayed after the next S release (above)
+                                    spin(self.DLY)
+                            else:
+                                spin(self.DLY)
                     if const_expr(late_cw):
                         if const_expr(self.unsafe):
                             if hf != hk_:
@@ -835,13 +864,22 @@ class DmHd256Mx2:
                     ce.commit()
                     if const_expr(self.unsafe):
                         if hf == hk_:
-                            spin(self.DLY)
-                            if const_expr(late_cw):
-                                for pa_ in pend:
-                                    st_shared_v4(*pa_)
-                            else:
-                                dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
-                                cute.arch.fence_view_async_tmem_store()
+                            lastq = t + 1 == total
+                            if const_expr(not self.q3):
+                                lastq = t >= 0
+                            if lastq:                   # q3: only the last tile repairs here; interior ones after S(t+1) release
+                                spin(self.DLY)
+                                if const_expr(late_cw):
+                                    for pa_ in pend:
+                                        st_shared_v4(*pa_)
+                                else:
+                                    dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
+                                    cute.arch.fence_view_async_tmem_store()
+                    if const_expr(self.q3):
+                        if const_expr(late_cw):
+                            pend_c = [tuple(x) for x in pend]
+                        else:
+                            sfw_c = sfw
                 else:
                     if const_expr(self.dqopt):
                         dm_utils.tmem_st_x1(tb + self.COL_SF + self.SF_STRIDE * stg + 4 * hf + qd, sfw)
@@ -858,14 +896,25 @@ class DmHd256Mx2:
                 if const_expr(self.kn in ("sfb0", "sfb1")):
                     # control sfb<s>: after SF set s's FIRST publication (t == s): delay; unsafe writes the real SFB only now
                     if t == int(self.kn[3]):
-                        if hf == 0:
-                            spin(self.DLY)
-                            if const_expr(self.unsafe):
-                                one_ = Int32(0x7F7F7F7F)
-                                sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
-                                dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
-                                dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
-                                cute.arch.fence_view_async_tmem_store()
+                        if const_expr(self.q3):
+                            if t + 1 == total:      # q3 interior tiles: repaired after S(s+1)'s release (above)
+                                if hf == 0:
+                                    spin(self.DLY)
+                                    if const_expr(self.unsafe):
+                                        one_ = Int32(0x7F7F7F7F)
+                                        sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
+                                        dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
+                                        dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
+                                        cute.arch.fence_view_async_tmem_store()
+                        else:
+                            if hf == 0:
+                                spin(self.DLY)
+                                if const_expr(self.unsafe):
+                                    one_ = Int32(0x7F7F7F7F)
+                                    sfo = self.COL_SF + self.SF_STRIDE * int(self.kn[3]) + self.SFB_OFF
+                                    dm_utils.tmem_st_x4(tb + sfo, one_, one_, one_, one_)
+                                    dm_utils.tmem_st_x4(tb + sfo + 4, one_, one_, one_, one_)
+                                    cute.arch.fence_view_async_tmem_store()
             if const_expr((self.dbg & 1) and self.mode == "dq"):
                 if hf == 0:
                     ia = _gaddr(mIdent) + (Int64(b * H + hx) * N + rtok) * 32

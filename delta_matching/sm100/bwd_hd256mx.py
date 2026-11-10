@@ -24,8 +24,9 @@ D = 256
 NUMERICS = "sm100-mx-d256"
 DETERMINISTIC = True
 # DmHd256Mx2 impls beyond "2": "3" = dqopt (Q1+Q2, the dq default); "4" = + q3 MMA/TMA order; "5" = + causal global LPT order;
-# "6" = + per-head LPT order (fork hd256-dqopt candidates, codex/hd256-dqopt-02-q3lpt.md)
-IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(dqopt=True, lpt="g"), "6": dict(dqopt=True, lpt="1")}
+# "6" = + per-head LPT order; "7" = + q3 + global LPT (fork hd256-dqopt candidates, codex/hd256-dqopt-02-q3lpt.md)
+IMPL_EXTRA = {"3": dict(dqopt=True), "4": dict(dqopt=True, q3=True), "5": dict(dqopt=True, lpt="g"), "6": dict(dqopt=True, lpt="1"),
+              "7": dict(dqopt=True, q3=True, lpt="g")}
 IMPL_DEFAULT = {"dv": "1", "dk": "1", "dq": "3"}   # O3-Q12 (DmHd256Mx2 dqopt) for dq only; dv / dk -> KV2 (kda-sm100) in bundle 3
 _LOCK = threading.Lock()
 _CACHE = {}

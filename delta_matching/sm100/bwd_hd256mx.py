@@ -74,7 +74,8 @@ def twins(q8, do8, k8):
     return tw(q8), tw(do8), tw(k8)
 
 
-def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, modes=("dv", "dk", "dq"), tw=None):
+def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, modes=("dv", "dk", "dq"), tw=None,
+                   knob=""):
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     assert Dq == D and N % 128 == 0 and H % Hk == 0
@@ -107,7 +108,8 @@ def dm_bwd_hd256mx(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=
         ten = [p(X), p(Xb), p(Y), p(Yb), tt(Tw), qs, ks, vs, dos, lse, delta, out, ident, dump, codes, sb]
         lds = [1, 1, 1, 1, 1] + lds_tail
         kd = dbg & 3 if mode == "dq" else dbg & 2
-        _run((mode, causal, kd), lambda: DmHd256Mx(mode, causal, kd), ten, lds, [n_t, H, Hk])
+        key = (mode, causal, kd) if not knob else (mode, causal, kd, knob)
+        _run(key, lambda: DmHd256Mx(mode, causal, kd, knob), ten, lds, [n_t, H, Hk])
         if big:
             dumps[mode] = dict(dump=dump, codes=codes, sb=sb)
     if dbg:

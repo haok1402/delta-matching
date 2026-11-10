@@ -68,6 +68,14 @@ def ld_shared_v4f(addr: Int32, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def spin(cycles: int, *, loc=None, ip=None):
+    """Busy-wait ~cycles SM clocks (positive-control delay knobs only; never in the default build)."""
+    _asm(None, [], "{\n\t.reg .u64 t0, t1;\n\t.reg .pred p;\n\tmov.u64 t0, %clock64;\n\tLSPIN:\n\t"
+         "mov.u64 t1, %clock64;\n\tsub.u64 t1, t1, t0;\n\tsetp.lt.u64 p, t1, " + str(int(cycles)) + ";\n\t"
+         "@p bra LSPIN;\n\t}", "", True, loc, ip)
+
+
+@dsl_user_op
 def tmem_st32(addr: Int32, v, *, loc=None, ip=None):
     """tcgen05.st.32x32b.x32: this thread's lane, 32 fp32 columns at addr."""
     regs = ",".join(f"${i + 1}" for i in range(32))
@@ -117,8 +125,17 @@ class DmHd256Mx:
     TM, TN, D = 128, 128, 256
     COL_DP, COL_SFA, COL_SFB, COL_OUT = 128, 128, 132, 256
 
-    def __init__(self, mode: str, causal: bool, dbg: int = 0):
+    KNOBS = ("acc", "cd", "od", "tw", "fin", "ld", "am")
+    DLY = 1 << 15
+
+    def __init__(self, mode: str, causal: bool, dbg: int = 0, knob: str = ""):
+        """knob (positive controls of every TMEM / SMEM hand-off, bwd-plan.md ordering table; "" = shipped build):
+        "<h>" = UNSAFE order for hand-off h + its delay, "<h>_safe" = shipped order + the same delay (must be bitwise
+        the default build)."""
         assert mode in ("dv", "dk", "dq")
+        self.kn = knob.replace("_safe", "")
+        self.unsafe = bool(knob) and not knob.endswith("_safe")
+        assert self.kn in ("",) + self.KNOBS, knob
         self.mode = mode
         self.causal = bool(causal)
         self.dbg = int(dbg)
@@ -344,22 +361,30 @@ class DmHd256Mx:
                             cute.gemm(mma_s, accP, tCrXb[(None, None, kb, 0)], tCrYb[(None, None, kb, 0)], accP)
                             mma_s.set(tcgen05.Field.ACCUMULATE, True)
                     if const_expr(not self.delta_only):
+                        if const_expr(self.kn in ("cd", "fin", "od")):
+                            spin(self.DLY)
                         tf = t_c.wait_and_advance()
                         cf = cd_c.wait_and_advance()
                         tc_fence_after()
+                        if const_expr(self.kn == "tw"):
+                            if const_expr(self.unsafe):
+                                tf.release()
+                            spin(self.DLY)
                         dm_utils.gemm_ptx_bs(
                             mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
                             sC[(None, None, None, 0)], sT[(None, None, None, 0)],
                             tmem_base + self.COL_SFA, tmem_base + self.COL_SFB,
                             tuple((0, k) for k in range(4)), tuple((0, 0) for k in range(4)),
                             zero_init=cutlass.Boolean(t == 0))
-                        tf.release()
+                        if const_expr(not (self.kn == "tw" and self.unsafe)):
+                            tf.release()
                         cf.release()
                     if const_expr(self.has_dp and not self.delta_only):
                         # dP(t+1) overwrites the SF words of out(t): wait until out(t) has completed
                         with cute.arch.elect_one():
                             tcgen05.commit(od_bar)
-                        cute.arch.mbarrier_wait(od_bar, t & 1)
+                        if const_expr(not (self.kn == "od" and self.unsafe)):
+                            cute.arch.mbarrier_wait(od_bar, t & 1)
                         tc_fence_after()
                         mma_s.set(tcgen05.Field.ACCUMULATE, False)
                         for kb in cutlass.range_constexpr(cute.size(tCrXb, mode=[2])):
@@ -369,16 +394,23 @@ class DmHd256Mx:
                     an.commit()
                 else:
                     if const_expr(not self.delta_only):
+                        if const_expr(self.kn in ("cd", "fin", "od")):
+                            spin(self.DLY)
                         tf = t_c.wait_and_advance()
                         cf = cd_c.wait_and_advance()
                         tc_fence_after()
+                        if const_expr(self.kn == "tw"):
+                            if const_expr(self.unsafe):
+                                tf.release()
+                            spin(self.DLY)
                         dm_utils.gemm_ptx_bs(
                             mma_op, tmem_base + self.COL_OUT, tCrC[(None, None, None, 0)], tCrT[(None, None, None, 0)],
                             sC[(None, None, None, 0)], sT[(None, None, None, 0)],
                             tmem_base + self.COL_SFA, tmem_base + self.COL_SFB,
                             tuple((0, k) for k in range(4)), tuple((0, 0) for k in range(4)),
                             zero_init=cutlass.Boolean(t == 0))
-                        tf.release()
+                        if const_expr(not (self.kn == "tw" and self.unsafe)):
+                            tf.release()
                         cf.release()
             fe = fin_p.acquire_and_advance()
             fe.commit()
@@ -445,16 +477,25 @@ class DmHd256Mx:
                         ca[j] = dmh.dm_mx256_dp_scale(vsj, row_a)
                         osb[j] = sb_of(ksj)
                 ldb = sLD_addr + par * 1024
+                if const_expr(self.kn == "ld" and self.unsafe):
+                    ldb = sLD_addr
                 if const_expr(self.rows_are_keys):
                     # stage l2 / delta of the 128 queries of this tile (parity buffers; one barrier per tile)
                     st_shared_f32(ldb + r * 4, dmh.dm_mx256_l2(Float32(mLse[b, h, ctok0 + r])))
                     st_shared_f32(ldb + 512 + r * 4, Float32(mDelta[b, h, ctok0 + r]))
                     cute.arch.barrier(barrier_id=2, number_of_threads=128)
+                    if const_expr(self.kn == "ld"):
+                        if warp == 3:
+                            spin(self.DLY)
                 sbs = [Int32(0)] * 4
                 ce = None
-                if const_expr(self.mode == "dv"):
+                if const_expr(self.mode == "dv" and not (self.kn == "cd" and self.unsafe)):
                     ce = cd_p.acquire_and_advance()
                 af = acc_c.wait_and_advance()
+                if const_expr(self.kn == "acc"):
+                    if const_expr(self.unsafe):
+                        af.release()
+                    spin(self.DLY)
                 stash = tb + self.COL_DP           # fp32 dS of chunk j -> cols 128 + 32 j (its dP already read)
                 amk = Float32(0.0)                 # dk: running |dS| max of this row
                 amq = [Float32(0.0)] * 4           # dq: per-chunk |dS| max of this row
@@ -464,7 +505,7 @@ class DmHd256Mx:
                     if const_expr(self.has_dp):
                         dv_ = tmem_ld32(tb + self.COL_DP + 32 * j)
                     cute.arch.fence_view_async_tmem_load()
-                    if const_expr(j == 3 and not (self.dbg & 2)):
+                    if const_expr(j == 3 and not (self.dbg & 2) and not (self.kn == "acc" and self.unsafe)):
                         af.release()
                     vals = cute.make_rmem_tensor(cute.make_layout(32), Float32)   # P (dv) or dS (dk / dq) of chunk j
                     id1 = Float32(0.0)
@@ -603,17 +644,22 @@ class DmHd256Mx:
                         sbs = [sb] * 4
                     elif const_expr(self.mode == "dq"):
                         slot = amax_addr + par * 64
+                        if const_expr(self.kn == "am" and self.unsafe):
+                            slot = amax_addr
                         for j in cutlass.range_constexpr(4):
                             am = dm_utils.redux_max_abs_f32(amq[j])
                             if lane == 0:
                                 st_shared_f32(slot + (j * 4 + warp) * 4, am)
                         cute.arch.barrier(barrier_id=2, number_of_threads=128)
+                        if const_expr(self.kn == "am"):
+                            if warp == 3:
+                                spin(self.DLY)
                         for j in cutlass.range_constexpr(4):
                             m4 = ld_shared_v4f(slot + j * 16)
                             am = max_f32(max_f32(m4[0], m4[1]), max_f32(m4[2], m4[3]))
                             sbs[j] = dm_utils.pow2_sb(am)
                     # ---- codes -> smem (after out(t-1) consumed the previous codes / SFs) ----
-                    if const_expr(self.mode != "dv"):
+                    if const_expr(self.mode != "dv" and not (self.kn == "cd" and self.unsafe)):
                         ce = cd_p.acquire_and_advance()
                     for j in cutlass.range_constexpr(4):
                         if const_expr(self.mode != "dv"):
@@ -654,6 +700,8 @@ class DmHd256Mx:
                     cute.arch.fence_view_async_tmem_store()
                     cute.arch.fence_view_async_shared()
                     tc_fence_before()
+                    if const_expr(self.kn == "cd" and self.unsafe):
+                        ce = cd_p.acquire_and_advance()     # UNSAFE: codes / SFs were written before the slot was free
                     ce.commit()
             if const_expr(self.delta_only):
                 fw = fin_c.wait_and_advance()
@@ -665,7 +713,9 @@ class DmHd256Mx:
                     st_global_f64x2(ia, idn, idd)
                     st_global_f64x2(ia + 16, idp, Float64(0.0))
                 # ---- epilogue: out row (256 fp32 in TMEM) -> bf16 ----
-                fw = fin_c.wait_and_advance()
+                fw = None
+                if const_expr(not (self.kn == "fin" and self.unsafe)):
+                    fw = fin_c.wait_and_advance()
                 tc_fence_after()
                 hout = hx
                 nho = H
@@ -685,6 +735,8 @@ class DmHd256Mx:
                                 x1 = mul_f32(x1, Float32(SM))
                             w[q] = bf16x2(x0, x1)
                         st_global_v4(ob + (32 * cblk + i) * 2, w[0], w[1], w[2], w[3])
+                if const_expr(self.kn == "fin" and self.unsafe):
+                    fw = fin_c.wait_and_advance()           # UNSAFE: out was read before the final MMA completed
                 fw.release()
 
         tmem.relinquish_alloc_permit()

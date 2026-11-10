@@ -300,8 +300,8 @@ class DMFwdHd256MxSm100:
         # read by PV(j-2), complete before QK(j+1) was issued -> S_full(j+1) -> WG1 -> W1L).  MMA: QK(j+2) after S_empty(j) +
         # O_full(PV(j-1)) (SF(j-1) WAR), issued BEFORE PV(j).  Because S_full(j+2) no longer follows PV(j)'s completion, every
         # per-tile softmax resource is a 3-deep ring b = j % 3 (phase (j // 3) & 1): sP[b] (3 x 16 KiB), part[b], stats[b], and the
-        # barriers P_full[b] (256), partial_full[b], stats_full[b]; reuse at j+3 follows S_full(j+3) <- O_full(PV(j+1)) <- PV(j+1)
-        # issued after P_full(j+1) and O_ready(j+1), i.e. after everything tile j handed off.  Values bitwise == C8.
+        # barriers P_full[b] (256), partial_full[b], stats_full[b]; reuse at j+3 follows S_full(j+3) <- QK(j+3) issued after the
+        # MMA waited O_full(PV(j)), i.e. after PV(j) (and P_full(j), O_ready(j)) consumed everything tile j handed off.  Values bitwise == C8.
         # DEBUG PCs (C10): 6 MMA skips S_empty + WG1 sleeps 20 us before each S load; 7 both WGs arrive S_empty before their S load
         # (+WG1 sleep); 8 MMA skips O_full(PV(j-1)) before QK(j+2) (informational); 14 WG0 skips the W1L wait (+WG1 sleep) -> must
         # corrupt; 1 / 2 poison SFA(i) at its C10 address after PV(i) issue / completion.
@@ -1955,6 +1955,8 @@ class DMFwdHd256MxSm100:
         lse = (m_last * Float32(1.0) + (cute.math.log2(row_sum, fastmath=True) - Float32(0.0))) * LN2_ \
             if not zero_or_nan else -Float32.inf
         mLSE[batch_idx, head_idx, row] = lse
+        if const_expr(self.epi == 10):
+            dm_utils.mbar_arrive(mbar + 64)          # DEBUG PC epi 10 only: the load warp's poison trigger (final_full, unused by C11)
         self.epilogue(mbar, mO, m_block, head_idx, batch_idx, cnt, sk_base, tidx, obase, scale)
 
     # -----------------------------------------------------------------------------------------------------------------

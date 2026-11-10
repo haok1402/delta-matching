@@ -72,9 +72,13 @@ def dm_fwd_hd256(q8, qs, k8, ks, v8, vs, causal: bool, kv_stage: int = 4):
 # ---------------------------------------------------------------------------------------------------------------------
 # sm100-mx (USER DECISION 2026-11-10: the sm100 spec at both head dims; validator preset sm100-mx-d256). The [64,32]
 # option-(a) path above (dm_fwd_hd256) is retired history, opt-in only.
-def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4):
-    """q8 (B,N,H,256) e4m3 (sm baked), k8 / v8 (B,N,Hk,256) e4m3; qs (B,H,N/32) fp32 pow2; kvw (B,Hk,N/64) int32 packed
-    UE8M0 K/V words (quant_hd256.quant_qkv_mx_hd256). Returns O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
+def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=None):
+    """q8 (B,N,H,256) e4m3 (sm baked), k8 / v8 (B,N,Hk,256) e4m3; qs (B,H,N/32) fp32 pow2 (quant_hd256.quant_qkv_mx256).
+    kvw: (B,Hk,N/64) int32 packed UE8M0 K/V words (fwd.pack_kv_scales), or the K scales ks (B,Hk,N/32) fp32 together
+    with vs= (packed here, same words). Returns O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
+    if kvw.dtype != torch.int32:
+        from .fwd import pack_kv_scales
+        kvw = pack_kv_scales(kvw, vs)
     B, N, H, D = q8.shape
     Hk = k8.shape[2]
     assert D == 256 and N % 128 == 0 and H % Hk == 0

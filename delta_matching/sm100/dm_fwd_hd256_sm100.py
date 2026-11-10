@@ -327,7 +327,7 @@ class DMFwdHd256Sm100:
                       tma_bar_ptr=pipeline_kv.producer_get_barrier(kv_state))
             kv_state.advance()
             pipeline_q.producer_acquire(q_state)
-            cute.copy(tma_atom_Q, tQgQ[None, 0], tQsQ[None, 0], tma_bar_ptr=pipeline_q.producer_get_barrier(q_state))
+            cute.copy(tma_atom_Q, tQgQ, tQsQ[None, 0], tma_bar_ptr=pipeline_q.producer_get_barrier(q_state))
             for i in cutlass.range(cnt - 1, unroll=1):
                 pipeline_kv.producer_acquire(kv_state)
                 cute.copy(tma_atom_K, tKgK[None, n_block_max - 2 - i], tKsK[None, kv_state.index],
@@ -436,7 +436,7 @@ class DMFwdHd256Sm100:
                     if i >= 1:
                         dm_utils.mbar_wait_parity(mbar + 40, Int32(1))
                         dm_utils.tc_fence_after()
-                cute.gemm(atom_pv, tT, tOrP[None, None, g, slot], tOrV[None, s, g, kv_state.index], tT)
+                cute.gemm(atom_pv, tT[None, 0, 0], tOrP[None, 0, g, slot], tOrV[None, s, g, kv_state.index], tT[None, 0, 0])
                 with cute.arch.elect_one():
                     dm_utils.tc_commit(mbar + 32)
         pipeline_kv.consumer_release(kv_state)

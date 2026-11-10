@@ -4778,6 +4778,11 @@ class DMBackwardSm100:
                       #### TMEM->RMEM (Load S from TMEM)
                       tSrS_t2r = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
                       cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
+                      if const_expr("sld2" in self.dm_opts):
+                          # DM sld2: one tcgen05.wait::ld right after the S copy, so both S stage loads (LDTM.x32 x2) are
+                          # issued back to back before any consumer (same values -> bitwise; default lets ptxas consume
+                          # stage 0 before issuing stage 1's load)
+                          cute.arch.fence_view_async_tmem_load()
                   if const_expr(dm_tr is not None):
                       dm_now = dm_utils.clock32()
                       dm_s3 = dm_s3 + (dm_now - dm_tprev)

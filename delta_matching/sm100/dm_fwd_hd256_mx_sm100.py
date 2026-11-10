@@ -342,7 +342,8 @@ class DMFwdHd256MxSm100:
             self.num_regs_softmax_c11 = 184
             self.num_regs_correction_c11 = 96
         self.n_mbar_dm = 26 if c10 else 14
-        self.n_stats = 2 * 128 + 2 * 128 + 4 * 128 + ((12 if c10 else 8) * 128 if c8 else 0)
+        self.n_stats = 2 * 128 + 2 * 128 + 4 * 128 + ((24 if c11 else 12 if c10 else 8) * 128 if c8 else 0)
+        self.part_stride = 1024 if c11 else 512      # floats per part[] buffer (C11: 8 x 128)
         # g1 (fork hd256-fwd3, DM_HD256_FWD_G1 bitmask; profile/hd256-fwd3-tl/REPORT.md): critical-path trims of C6, values bitwise
         # (same ops, same tensor-pipe MMAs; only program order / issue form).  1 = G1a: the softmax publishes acc_scale
         # (stats_full) right after the ordered m rule, before the SF stores / P_full (O_ready no longer trails P_full).
@@ -1435,7 +1436,7 @@ class DMFwdHd256MxSm100:
         if const_expr(self.c10):
             b3 = j % 3
             ph3 = (j // 3) & 1
-            part = stats + 4 * (1024 + b3 * 512)
+            part = stats + 4 * (1024 + b3 * self.part_stride)
             pfull = mbar + 128 + 8 * b3
             partf = mbar + 176 + 8 * b3
         dm_kw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block])
@@ -1635,7 +1636,7 @@ class DMFwdHd256MxSm100:
                  m_old, row_sum):
         """C11: the C8 WG0 ordered tail for tile j, run by the correction WG, then the lazy O rescale (C6 correction body)."""
         b3 = j % 3
-        part = stats + 4 * (1024 + b3 * 512)
+        part = stats + 4 * (1024 + b3 * self.part_stride)
         dm_vw = Int32(mKVW[batch_idx, kv_head_idx, 2 * n_block + 1])
         if const_expr(self.pc_inj != 4):
             dm_utils.mbar_wait_parity(mbar + 176 + 8 * b3, (j // 3) & 1)      # partial_full3[j%3] (both WGs)

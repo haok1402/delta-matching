@@ -56,6 +56,17 @@ def _patch(src: str) -> str:
          "        if work_tile.is_valid_tile:\n"
          "            self._dm_ready(mDmSem, m_block, head_idx, batch_idx, tidx, mdQ.shape[1])\n"),
     ]
+    # 2-CTA dQ path: the tile goes gmem -> registers -> sdQ (bf16) -> gmem; the fp32 sdQaccum staging buffer is not
+    # used there, so size the smem for sdQ only (2x the converter CTAs per SM in bwd main's tail)
+    subs += [
+        ("        smem_size = max(\n",
+         "        smem_size = cute.size_in_bytes(self.dtype, self.sdQ_layout) if const_expr(self.use_2cta_instrs) else max(\n"),
+        ("        sdQaccum = smem.allocate_tensor(cutlass.Float32, sdQaccum_layout, byte_alignment=1024)\n",
+         "        if const_expr(self.use_2cta_instrs):\n"
+         "            sdQaccum = smem.allocate_tensor(cutlass.Float32, cute.make_layout(cute.size_in_bytes(self.dtype, sdQ_layout) // 4), byte_alignment=1024)\n"
+         "        else:\n"
+         "            sdQaccum = smem.allocate_tensor(cutlass.Float32, sdQaccum_layout, byte_alignment=1024)\n"),
+    ]
     for a, b in subs:
         if src.count(a) != 1:
             raise RuntimeError(f"tailconv patch anchor not unique/found ({src.count(a)}): {a[:80]!r}")

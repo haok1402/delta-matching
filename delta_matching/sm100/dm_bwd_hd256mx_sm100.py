@@ -538,7 +538,9 @@ class DmHd256Mx:
                                 else:
                                     s0 = -Float32.inf if c0 > rtok else s0
                                     s1 = -Float32.inf if c0 + 1 > rtok else s1
-                            if const_expr(self.rows_are_keys):
+                            if const_expr(self.mode == "dk"):
+                                p0, p1 = Float32(0.0), Float32(0.0)     # dk dump: S_acc, dP_acc, dS (P covered by dv / dq)
+                            elif const_expr(self.rows_are_keys):
                                 p0, p1 = dmh.dm_mx256_p_pair2(s0, s1, cs[j], ld_shared_f32(ldb + (32 * j + i) * 4),
                                                               ld_shared_f32(ldb + (32 * j + i + 1) * 4))
                             else:

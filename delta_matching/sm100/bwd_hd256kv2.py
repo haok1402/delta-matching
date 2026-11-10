@@ -79,11 +79,13 @@ def _s1_mode():
 
 def dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None):
     """Same contract as bwd_hd256mx.dm_bwd_hd256mx: (dq, dk, dv) [+ dbg dict].  dq = DmHd256Mx dq mode, dk/dv = KV2.
+    S1 hand-off proof (codex/hd256-8k-04-s1.md): at dbg=0 the dq kernel's only global store is dq and KV2's only global
+    stores are dk/dv (no TMA stores, no atomics, no global scratch); both only read the ten inputs.
     hd256-8k S1 (DM_H256_S1, default kv2first; dbg=0 only): dq and KV2 are independent (both only read the quantized inputs,
     lse and delta; disjoint outputs) -> dq runs on a side stream concurrently with KV2 on the caller stream, so each fills
     the other's tail SMs. Same kernels, same inputs, same values; the caller stream joins the side stream before returning."""
     mode = _s1_mode() if not dbg else "0"
-    if mode != "0" and q8.is_cuda and not _mx._fake():
+    if mode != "0" and q8.is_cuda and not _mx._fake() and not torch.cuda.is_current_stream_capturing():  # capture: S1 off (Codex 04)
         main = torch.cuda.current_stream(q8.device)
         side = _side(q8.device)
         ready = torch.cuda.Event()
@@ -95,7 +97,8 @@ def dm_bwd_hd256kv2(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg
             with torch.cuda.stream(side):
                 r = _mx.dm_bwd_hd256mx(*ins, causal, modes=("dq",))
             for t in ins:
-                t.record_stream(side)                       # main-allocated inputs read on side: no reuse before side is done
+                t.record_stream(side)                       # inputs read on side: no reuse before side is done
+                t.record_stream(main)                       # and before KV2 on main is done even if they came from another stream
             r[0].record_stream(main)                        # side-allocated dq consumed on main
             return r[0]
 

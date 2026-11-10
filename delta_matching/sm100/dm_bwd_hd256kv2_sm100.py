@@ -100,6 +100,13 @@ class DmHd256Kv2:
     META_STAGE = 1088          # bytes: l2[128], delta[128], qs[4], dos[4] (+ pad)
     DEFAULT_OPTS = "meta qb2 xpt"      # KV2-C1 (bench_c1b3: 1.16-1.27x over C0 at all 8 shapes)
 
+    def _wcl(self, mbar, ph):
+        """leader-side wait on a cross-CTA arrive barrier: acquire.cluster (default) / .cta (debug opt ctasc)."""
+        if const_expr("ctasc" in self.opts):
+            dm_utils.mbar_wait_parity(mbar, ph)
+        else:
+            dm_utils.mbar_wait_parity_cluster(mbar, ph)
+
     def __init__(self, causal: bool, dbg: int = 0, knob: str = "", opts=None):
         self.opts = tuple(sorted((self.DEFAULT_OPTS if opts is None else opts).replace(",", " ").split()))
         assert all(o in self.OPTS for o in self.opts), self.opts
@@ -344,7 +351,7 @@ class DmHd256Kv2:
                 kf = kv_c.wait_and_advance()
                 # prologue: S(0), dP(0)
                 qf = q_c.wait_and_advance()
-                dm_utils.mbar_wait_parity_cluster(E_S, Int32(1))       # fresh slot
+                self._wcl(E_S, Int32(1))       # fresh slot
                 tc_fence_after()
                 if const_expr(self.kn == "q"):
                     if const_expr(self.unsafe):
@@ -366,7 +373,7 @@ class DmHd256Kv2:
                     if t + 1 < total:
                         # S/dP(t+1): the slot was released by every compute thread of both CTAs after its S/dP(t) loads
                         qf = q_c.wait_and_advance()
-                        dm_utils.mbar_wait_parity_cluster(E_S, t & 1)    # all 512 readers of S/dP(t) done (release.cluster)
+                        self._wcl(E_S, t & 1)    # all 512 readers of S/dP(t) done (release.cluster)
                         tc_fence_after()
                         if const_expr(self.kn == "q"):
                             if const_expr(self.unsafe):
@@ -386,7 +393,7 @@ class DmHd256Kv2:
                             qf.release()
                     df = d_c.wait_and_advance()
                     stg = t & 1
-                    dm_utils.mbar_wait_parity_cluster(kbar + 16 + 8 * stg, (t >> 1) & 1)   # codes / SFA of t published
+                    self._wcl(kbar + 16 + 8 * stg, (t >> 1) & 1)   # codes / SFA of t published
                     tc_fence_after()
                     if const_expr(self.kn == "d"):
                         if const_expr(self.unsafe):
@@ -414,8 +421,8 @@ class DmHd256Kv2:
                 with cute.arch.elect_one():
                     commit_mc(F_F)
                 kf.release()
-                dm_utils.mbar_wait_parity_cluster(E_S, (total - 1) & 1)   # last S/dP slot release arrived
-                dm_utils.mbar_wait_parity_cluster(E_F, Int32(0))          # epilogue readers done
+                self._wcl(E_S, (total - 1) & 1)   # last S/dP slot release arrived
+                self._wcl(E_F, Int32(0))          # epilogue readers done
 
         # ------------------------------------------------------------------ compute warps 0-7 (both CTAs)
         if warp < 8:
@@ -468,20 +475,20 @@ class DmHd256Kv2:
                 stg = t & 1
                 dm_utils.mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
                 if const_expr(self.kn == "cd" and self.unsafe):
-                    warp_arrive_c0(kbar + 16 + 8 * stg)   # UNSAFE: published before the codes are written
+                    warp_arrive_c0(kbar + 16 + 8 * stg, "ctasc" in self.opts)   # UNSAFE: published before the codes are written
                     spin(self.DLY)
                 dm_utils.mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
                 tc_fence_after()
                 if const_expr(self.kn == "s"):
                     if const_expr(self.unsafe):
-                        warp_arrive_c0(E_S)   # UNSAFE: slot released before the loads
+                        warp_arrive_c0(E_S, "ctasc" in self.opts)   # UNSAFE: slot released before the loads
                     spin(self.DLY)
                 sv = tmem_ld32(tb + self.COL_S + 32 * hf)
                 dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
                 cute.arch.fence_view_async_tmem_load()
                 tc_fence_before()
                 if const_expr(not (self.kn == "s" and self.unsafe)):
-                    warp_arrive_c0(E_S)    # release.cluster on the leader's barrier
+                    warp_arrive_c0(E_S, "ctasc" in self.opts)    # release.cluster on the leader's barrier
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 for i in cutlass.range_constexpr(0, 32, 4):
@@ -635,7 +642,7 @@ class DmHd256Kv2:
                     if const_expr(not self.unsafe):
                         spin(self.DLY)
                 if const_expr(not (self.kn == "cd" and self.unsafe)):
-                    warp_arrive_c0(kbar + 16 + 8 * stg)    # release.cluster on the leader's barrier
+                    warp_arrive_c0(kbar + 16 + 8 * stg, "ctasc" in self.opts)    # release.cluster on the leader's barrier
             # ---- epilogue: dK / dV rows (64 cols of this warp's half) -> bf16 ----
             if const_expr(not (self.kn == "fin" and self.unsafe)):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))
@@ -656,7 +663,7 @@ class DmHd256Kv2:
             tc_fence_before()
             if const_expr(self.kn == "fin" and self.unsafe):
                 dm_utils.mbar_wait_parity(F_F, Int32(0))  # UNSAFE: dK / dV were read before the final commit
-            warp_arrive_c0(E_F)
+            warp_arrive_c0(E_F, "ctasc" in self.opts)
             # code-stage tail: the last commit on each stage has landed in this CTA before teardown (no in-flight arrive)
             for s_ in cutlass.range_constexpr(2):
                 nu = (total - s_ + 1) // 2

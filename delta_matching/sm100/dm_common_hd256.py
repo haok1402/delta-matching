@@ -1,6 +1,22 @@
-"""hd256 ([64,32] fp32 block-scale contract, "Delta-Matching-256 v1" floor): arithmetic shared bit-for-bit by the
-hd256 matched-delta pass 0 and the (future) hd256 backward.  hd128 uses dm_common.py and is NOT affected by this file.
+"""hd256 arithmetic shared bit-for-bit by the hd256 matched-delta pass 0 and the hd256 backward.
 
+=== SPEC (USER DECISION 2026-11-10): MXFP8 = sm100-mx at D=256 (dm-validator preset "sm100-mx-d256") -> dm_mx256_* ===
+The hd128 sm100-mx P / dP line VERBATIM (each helper calls the hd128 dm_common function, so hd128 and hd256 share one
+implementation).  Inputs: Q / K / V / dO e4m3 codes with ONE pow2 (UE8M0) fp32 scale per 32 tokens over all of D
+(quant.quant_rows rule), Q pre-multiplied by sm = 256^-0.5, K centered.  Per element (row i = query, col j = key):
+  S_acc  = raw fp32 accumulator of tcgen05.mma kind::f8f6f4 (Q8 K8^T) over D=256 as 8 K=32 steps in increasing d
+           (zero-init); causal: S_acc = -inf where j > i (on the raw accumulator)
+  c      = (ks[j//32] * qs[i//32]) * log2(e)          dm_mx256_c(ks, qs)         FMUL, FMUL (this association)
+  l2     = lse[i] * log2(e)                           dm_mx256_l2(lse)           FMUL RN (lse natural log, fp32)
+  x      = fma(S_acc, c, -l2)                         fma.rn.f32x2 (per element = FFMA RN)
+  P      = ex2.approx.ftz.f32(x)                      dm_mx256_p_pair(s0, s1, c, l2)   (no shift, no cap: hd128 line)
+  a      = vs[j//32] * dos[i//32]                     dm_mx256_dp_scale(vs, dos) FMUL
+  dP     = dP_acc * a        (dP_acc = raw f8f6f4 accumulator of dO8 V8^T, same instruction shape as S)
+The scales are on the MMAs' non-contraction dims (rows / cols of S and dP) and are exact powers of two, so the
+post-MMA multiply equals the kind::mxf8f6f4 block-scaled product with uniform SFs; like hd128's pass 0, no SF TMEM is used.
+The backward must compute P with dm_mx256_p_pair from bitwise the same S_acc, c, l2 (and dP_acc, a).
+
+=== RETIRED: [64,32] fp32 contract ("Delta-Matching-256 v1" floor) -> dm_p0h_* (kept only so older branches import) ===
 Contract (spec kda/docs/sm90-numerics-spec-hd256.md §3 / §4.1 / §8.2), per element (row i = query, col j = key):
   S_acc  = raw fp32 accumulator of tcgen05.mma kind::f8f6f4 over D=256 as 8 K=32 steps in increasing d order
            (zero-init), masked entries set to -inf on the raw accumulator.
@@ -19,6 +35,8 @@ import math
 
 import cutlass.cute as cute
 from cutlass import Float32
+
+from delta_matching.sm100 import dm_common
 
 LOG2E = math.log2(math.e)
 FLT_MIN = 1.1754943508222875e-38
@@ -49,3 +67,24 @@ def dm_p0h_phat_pair(s0: Float32, s1: Float32, dsc: Float32, l2: Float32):
     x0 = cute.arch.fmin(x0, Float32(PHAT_CAP))
     x1 = cute.arch.fmin(x1, Float32(PHAT_CAP))
     return cute.math.exp2(x0, approx=True, ftz=True), cute.math.exp2(x1, approx=True, ftz=True)
+
+
+# ---------------------------------------------------------------------------------- MXFP8 (sm100-mx-d256) = THE spec
+def dm_mx256_c(ks: Float32, qs: Float32) -> Float32:
+    """c = (ks * qs) * log2(e)  (= dm_common.dm_bwd_c, this association)."""
+    return dm_common.dm_bwd_c(ks, qs)
+
+
+def dm_mx256_l2(lse: Float32) -> Float32:
+    """l2 = lse * log2(e) (FMUL RN; = hd128 pass 0 / bwd)."""
+    return lse * Float32(dm_common.LOG2E)
+
+
+def dm_mx256_dp_scale(vs: Float32, dos: Float32) -> Float32:
+    """a = vs * dos  (= dm_common.dm_bwd_dp_scale); dP = dP_acc * a."""
+    return dm_common.dm_bwd_dp_scale(vs, dos)
+
+
+def dm_mx256_p_pair(s0: Float32, s1: Float32, c: Float32, l2: Float32):
+    """(P0, P1) = ex2.approx.ftz.f32(fma.rn((s0, s1), c, -l2))  (= dm_common.dm_bwd_p_pair)."""
+    return dm_common.dm_bwd_p_pair(s0, s1, c, l2)

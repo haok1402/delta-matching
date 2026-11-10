@@ -145,10 +145,13 @@ from flash_attn.cute.flash_fwd_sm100 import DescaleTensors  # same class as inte
 
 class DMPass0Hd256Sm100:
     dm_exp_variant = "mufu"  # dm_common contract (proposal variants: "f16x2", "poly")
-    """hd256 ([64,32] fp32 contract) matched-delta pass 0 (fork hd256-p0, P1 = 1-CTA, q_stage 2, kv_stage 2, +tl only).
-    Copied from dm_pass0_sm100.DMPass0Sm100 (hd128, 7d63434); changes: dP TMEM slots placed by n_block (256 + 128*i),
-    no sO buffer, Q/dO scale per 64 rows, P_hat / dsc / dp from dm_common_hd256, delta form switch (+dfl floor default:
-    sum P_hat dP / 256; +dnd: sum P_hat dP / sum P_hat), both with per-lane TwoSum cross-tile sums and one fp64 combine.
+    """hd256 MXFP8 (sm100-mx at D=256, preset sm100-mx-d256) matched-delta pass 0 (fork hd256-p0mx; P1 = 1-CTA, q_stage 2,
+    kv_stage 2, +tl only). Copied from dm_pass0_sm100.DMPass0Sm100 (hd128, 7d63434); changes vs hd128: dP TMEM slots placed
+    by n_block (256 + 128*i), no sO buffer, head_dim 256 (S / dP = 8 K=32 f8f6f4 steps, increasing d). Numerics are the
+    hd128 sm100-mx ones verbatim: Q / K / V / dO pow2 (UE8M0) scale per 32 tokens over all D, so the scales sit on the
+    MMAs' non-contraction dims and multiply the fp32 accumulator after the plain f8f6f4 MMA (exactly as hd128 pass 0; no
+    SF TMEM); P / c / dP-scale from dm_common_hd256.dm_mx256_* (= dm_common.dm_bwd_*); delta = num / den with per-lane
+    TwoSum cross-tile sums and one fp64 combine (+dnd only; the [64,32] floor form +dfl is retired).
     --- hd128 docstring follows ---
     Matched-delta pass 0 (kda-sm100-p0), forked from DMForwardSm100: per KV tile S = Q8 K8^T and dP = dO8 V8^T
     (both kind::f8f6f4, V loaded K-major like K, dP in the forward's O TMEM slots); softmax warps form
@@ -305,8 +308,9 @@ class DMPass0Hd256Sm100:
         if self.dm_tl:
             assert self.dm_h2 and self.dm_ts and not self.dm_c3 and self.dm_b6 == 0 and _r3m(self.dm_exp_variant) == 0
             assert self.dm_exp_variant.split("+")[0] in ("p3_16_0", "mufu"), "tl: all-MUFU P only"
-        # hd256: delta form (compile-time). +dnd: num/den (hd128 sm100 form); default (+dfl): sm90 floor sum(P_hat dP)/256
+        # hd256 MXFP8: delta = num / den (+dnd) only (accuracy-audit ruling 1; the [64,32] floor form is retired)
         self.dm_delta_numden = "dnd" in _fl0
+        assert self.dm_delta_numden, "hd256 MXFP8 pass 0: delta form num/den (+dnd) only"
         assert head_dim == 256 and head_dim_v == 256, "DMPass0Hd256Sm100 is the head_dim 256 pass 0"
         assert self.dm_tl and not self.use_2cta_instrs and self.q_stage == 2 and self.n_block_size == 128 \
             and self.m_block_size == 128, "hd256 P1: 1-CTA, q_stage 2, 128x128 tiles, +tl"
@@ -2688,10 +2692,10 @@ class DMPass0Hd256Sm100:
             m_block = self._q_block(work_m, stage)
             row = m_block * self.m_block_size + row_in
             rowc = cutlass.min(row, seqlen.seqlen_q - 1)
-            # hd256 [64,32] contract: one Q / dO scale per 64 rows, one K / V scale per 32 keys (4 per n_block)
-            qsv = Float32(aux[0][batch_idx, head_idx, rowc // 64])
-            dosv = Float32(aux[3][batch_idx, head_idx, rowc // 64])
-            l2 = dmh.dm_p0h_l2(Float32(aux[5][batch_idx, head_idx, rowc]))
+            # hd256 MXFP8 (sm100-mx): one pow2 Q / dO scale per 32 rows, one K / V scale per 32 keys (4 per n_block)
+            qsv = Float32(aux[0][batch_idx, head_idx, rowc // 32])
+            dosv = Float32(aux[3][batch_idx, head_idx, rowc // 32])
+            l2 = dmh.dm_mx256_l2(Float32(aux[5][batch_idx, head_idx, rowc]))
             # this lane's component of the h2 path's TwoSum pairs, packed as (num, den)
             ts_s = (Float32(0.0), Float32(0.0))
             ts_e = (Float32(0.0), Float32(0.0))
@@ -2706,16 +2710,16 @@ class DMPass0Hd256Sm100:
                     as_ = [None] * 4
                     if const_expr(self.dm_pf):
                         for j in cutlass.range_constexpr(4):
-                            cs[j] = dmh.dm_p0h_dsc(qsv, pks[j])
-                            as_[j] = dmh.dm_p0h_dp_scale(dosv, pvs[j])
+                            cs[j] = dmh.dm_mx256_c(pks[j], qsv)
+                            as_[j] = dmh.dm_mx256_dp_scale(pvs[j], dosv)
                         nbn = cutlass.max(n_block - 1, n_block_min) * (self.n_block_size // 32)
                         pks = tuple(Float32(aux[1][batch_idx, kv_head_idx, nbn + j]) for j in range(4))
                         pvs = tuple(Float32(aux[2][batch_idx, kv_head_idx, nbn + j]) for j in range(4))
                     else:
                         for j in cutlass.range_constexpr(4):
                             kb = n_block * (self.n_block_size // 32) + j
-                            cs[j] = dmh.dm_p0h_dsc(qsv, Float32(aux[1][batch_idx, kv_head_idx, kb]))
-                            as_[j] = dmh.dm_p0h_dp_scale(dosv, Float32(aux[2][batch_idx, kv_head_idx, kb]))
+                            cs[j] = dmh.dm_mx256_c(Float32(aux[1][batch_idx, kv_head_idx, kb]), qsv)
+                            as_[j] = dmh.dm_mx256_dp_scale(Float32(aux[2][batch_idx, kv_head_idx, kb]), dosv)
                     # den chains of this lane's component: d01 = (c0, c1), d23 = (c2, c3) (h2: den[v % 4], v = pair)
                     d01 = (Float32(0.0), Float32(0.0))
                     d23 = (Float32(0.0), Float32(0.0))
@@ -2743,7 +2747,7 @@ class DMPass0Hd256Sm100:
                         for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
                             for v in cutlass.range_constexpr(0, 16, 2):
                                 i0 = 16 * j + v
-                                p = dmh.dm_p0h_phat_pair(r[i0], r[i0 + 1], cs[j], l2)
+                                p = dmh.dm_mx256_p_pair(r[i0], r[i0 + 1], cs[j], l2)
                                 r[i0], r[i0 + 1] = p
                                 if const_expr(v % 4 == 0):
                                     d01 = cute.arch.add_packed_f32x2(d01, p)
@@ -2789,12 +2793,7 @@ class DMPass0Hd256Sm100:
             if par == 0:
                 tn64 = (Float64(ts_s[0]) + Float64(o_sn)) + (Float64(ts_e[0]) + Float64(o_en))
                 td64 = (Float64(ts_s[1]) + Float64(o_sd)) + (Float64(ts_e[1]) + Float64(o_ed))
-                delta = Float32(0.0)
-                if const_expr(self.dm_delta_numden):
-                    delta = Float32(tn64 / td64) if td64 != Float64(0.0) else Float32(0.0)
-                else:
-                    # sm90 floor: delta = sum_j P_hat dP / 256 (exact /256 in fp64, one fp32 rounding)
-                    delta = Float32(tn64 * Float64(dmh.INV_PHAT))
+                delta = Float32(tn64 / td64) if td64 != Float64(0.0) else Float32(0.0)
                 if row < seqlen.seqlen_q:
                     mLSE[row, head_idx, batch_idx] = delta
             work_tile = tile_scheduler.advance_to_next_work()

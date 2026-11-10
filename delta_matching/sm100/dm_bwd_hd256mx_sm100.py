@@ -164,7 +164,7 @@ class DmHd256Mx:
         class SS:
             bars: cute.struct.MemRange[cutlass.Int64, 24]
             tmem_hold: Int32
-            amax: cute.struct.MemRange[Float32, 32]
+            amax: cute.struct.Align[cute.struct.MemRange[Float32, 32], 16]
             sLD: cute.struct.Align[cute.struct.MemRange[Float32, 2 * 2 * 128], 16]
             sXa: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(a_l)], 1024]
             sXb: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(a_l) if nx == 2 else 1024], 1024]

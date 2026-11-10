@@ -18,26 +18,28 @@ import threading
 
 import torch
 
+__all__ = ["ENABLED", "EPOCH", "WHY", "ND_REL", "ND_BLK", "ND_ELEM", "env", "RecCache", "Plan", "key_of", "call"]
+
 ENABLED = os.environ.get("DM_FASTPATH", "1") != "0"
-_TLS = threading.local()
+THREAD_STATE = threading.local()
 EPOCH = [0]     # bumped by every compile-cache miss / insert and every cute.compile (incl. the CuTe producers, quant.py)
 
 try:                        # os.environ.get without the Mapping machinery (same lookup + decode; ~10x cheaper)
-    _ED, _ENC, _DEC = os.environ._data, os.environ.encodekey, os.environ.decodevalue
+    ENV_DATA, ENV_ENCODE, ENV_DECODE = os.environ._data, os.environ.encodekey, os.environ.decodevalue
 except AttributeError:
-    _ED = None
-_EK = {}
+    ENV_DATA = None
+ENV_KEYS = {}
 
 
 def env(k, d=None):
     """== os.environ.get(k, d), read live on every call (tests / debug hooks change the env at runtime)."""
-    if _ED is None:
+    if ENV_DATA is None:
         return os.environ.get(k, d)
-    kb = _EK.get(k)
+    kb = ENV_KEYS.get(k)
     if kb is None:
-        kb = _EK[k] = _ENC(k)
-    v = _ED.get(kb)
-    return d if v is None else _DEC(v)
+        kb = ENV_KEYS[k] = ENV_ENCODE(k)
+    v = ENV_DATA.get(kb)
+    return d if v is None else ENV_DECODE(v)
 
 
 class RecCache:
@@ -54,7 +56,7 @@ class RecCache:
 
     def __getitem__(self, k):
         fn = self._c[k]
-        rec = getattr(_TLS, "rec", None)
+        rec = getattr(THREAD_STATE, "rec", None)
         if rec is None:
             return fn
 
@@ -74,26 +76,26 @@ class RecCache:
         return getattr(self._c, n)
 
 
-def _leaves(x, out):
+def tensor_leaves(x, out):
     if isinstance(x, torch.Tensor):
         out.append(x)
     elif isinstance(x, (tuple, list)):
         for y in x:
-            _leaves(y, out)
+            tensor_leaves(y, out)
     elif isinstance(x, dict):
         for y in x.values():
-            _leaves(y, out)
+            tensor_leaves(y, out)
     return out
 
 
-def _sptr(t):
+def storage_ptr(t):
     return t.untyped_storage().data_ptr()
 
 
-_SENT = 0xFF          # recording only: torch.empty results are filled with this byte (NaN for float dtypes)
+SENTINEL = 0xFF          # recording only: torch.empty results are filled with this byte (NaN for float dtypes)
 
 
-class _Recorder:
+class Recorder:
     def __init__(self, input_ptrs):
         self.calls = []
         self.zero = {}            # storage ptr -> bool (all bytes zero when the first kernel touching it was called)
@@ -103,8 +105,8 @@ class _Recorder:
         self.keep = []            # hooked allocations stay alive while recording: their pointers can't be reused
 
     def log(self, fn, args, kw):
-        for t in _leaves((args, kw), []):
-            p = _sptr(t)
+        for t in tensor_leaves((args, kw), []):
+            p = storage_ptr(t)
             if p in self.input_ptrs or p in self.zero:
                 continue
             st = t.untyped_storage()
@@ -112,7 +114,7 @@ class _Recorder:
             self.zero[p] = bool((b == 0).all().item()) if b.numel() else True
             k = self.kind.get(p)
             if k == "e":
-                self.state[p] = "e" if (not b.numel() or bool((b == _SENT).all().item())) else False
+                self.state[p] = "e" if (not b.numel() or bool((b == SENTINEL).all().item())) else False
             elif k == "z":
                 self.state[p] = "z" if self.zero[p] else False
         self.calls.append((fn, args, kw))
@@ -128,9 +130,9 @@ class _Recorder:
                 t = o(*a, **k)
                 if isinstance(t, torch.Tensor) and t.is_cuda and type(t) is torch.Tensor:
                     if kind == "e" and t.numel():
-                        t.view(-1).view(torch.uint8).fill_(_SENT) if t.is_contiguous() else None
+                        t.view(-1).view(torch.uint8).fill_(SENTINEL) if t.is_contiguous() else None
                     if kind == "z" or t.is_contiguous():
-                        self.kind[_sptr(t)] = kind
+                        self.kind[storage_ptr(t)] = kind
                         self.keep.append(t)
                 return t
             return w
@@ -139,12 +141,12 @@ class _Recorder:
         return orig
 
 
-def _view_spec(t, base):
+def view_spec(t, base):
     """Spec to recreate t from base (same storage): (dtype, size, stride, byte offset from base's data_ptr)."""
     return (t.dtype, tuple(t.shape), tuple(t.stride()), t.data_ptr() - base.data_ptr())
 
 
-def _make_view(base, spec):
+def make_view(base, spec):
     dtype, size, stride, boff = spec
     b = base if base.dtype == dtype else base.view(dtype)
     es = b.element_size()
@@ -156,20 +158,20 @@ def _make_view(base, spec):
 class Plan:
     """Replays recorded compiled calls. inputs: name -> tensor (caller's tensors); allocs recreated per call."""
 
-    def __init__(self, rec: _Recorder, inputs: dict, ret):
+    def __init__(self, rec: Recorder, inputs: dict, ret):
         in_by_ptr = {}
         for name, t in inputs.items():
             if t is not None:
-                in_by_ptr.setdefault(_sptr(t), (name, t))
+                in_by_ptr.setdefault(storage_ptr(t), (name, t))
         allocs = {}            # storage ptr -> [nbytes, device, zero, returned]
-        ret_leaves = _leaves(ret, [])
-        ret_ptrs = {_sptr(t) for t in ret_leaves}
+        ret_leaves = tensor_leaves(ret, [])
+        ret_ptrs = {storage_ptr(t) for t in ret_leaves}
 
         def spec_of(t):
-            p = _sptr(t)
+            p = storage_ptr(t)
             if p in in_by_ptr:
                 name, base = in_by_ptr[p]
-                return ("in", name, _view_spec(t, base))
+                return ("in", name, view_spec(t, base))
             if p not in allocs:
                 st = t.untyped_storage()
                 k = rec.state.get(p)
@@ -221,7 +223,7 @@ class Plan:
     def _codegen(self):
         """Specialised replay function: straight-line Python that rebuilds exactly the recorded arguments."""
         C, T = [], []
-        env = {"torch": torch, "_mv": _make_view, "C": C, "T": T}
+        env = {"torch": torch, "_mv": make_view, "C": C, "T": T}
         pre, memo = [], {}
         # allocations: typed directly when one contiguous view covers the whole storage, else a uint8 buffer
         views_by_alloc = {}
@@ -320,7 +322,7 @@ class Plan:
         return self._run(inputs)
 
 
-_PLANS = {}
+PLANS = {}
 WHY = {}
 
 
@@ -342,14 +344,14 @@ def key_of(tag, inputs: dict, extra):
     return tuple(parts)
 
 
-def _flat_ret(r):
+def flat_return(r):
     return list(r) if isinstance(r, (tuple, list)) else [r]
 
 
 ND_REL, ND_BLK, ND_ELEM = 2e-4, 5e-4, 1.6e-2     # = the validator's run-to-run limits (whole, 128-row block, element)
 
 
-def _nd_spread(x, y):
+def nd_spread(x, y):
     """None if y is within the validator's non-deterministic run-to-run limits of x ((B, N, H, D) gradients): finite,
     whole-tensor rel L2 <= 2e-4, every (batch, 128-row block, head) rel L2 <= 5e-4, every element |y - x| <= 1.6e-2 of
     its row's max |x| (2 bf16 ulp).  Else the first violated criterion."""
@@ -375,10 +377,10 @@ def _nd_spread(x, y):
     return None
 
 
-def _verify(k, plan, inputs, slow, pre, reset, cmp, loose):
+def verify_plan(k, plan, inputs, slow, pre, reset, cmp, loose):
     """First call after recording: the normal host path (its result is returned) AND the replay on the same inputs into
     separate outputs; the plan is enabled only if they agree bitwise (except the `loose` outputs, non-deterministic
-    accumulation order: the validator's run-to-run limits, _nd_spread).  Mismatch or error -> key disabled (WHY)."""
+    accumulation order: the validator's run-to-run limits, nd_spread).  Mismatch or error -> key disabled (WHY)."""
     ret = slow()
     why = None
     try:
@@ -387,7 +389,7 @@ def _verify(k, plan, inputs, slow, pre, reset, cmp, loose):
         if pre is not None:
             pre()
         rep = plan.run(inputs)
-        a, b = _flat_ret(ret), _flat_ret(rep)
+        a, b = flat_return(ret), flat_return(rep)
         idx = range(len(a)) if cmp is None else cmp
         for i in idx:
             x, y = a[i], b[i]
@@ -397,7 +399,7 @@ def _verify(k, plan, inputs, slow, pre, reset, cmp, loose):
                 why = ("verify-meta", i)
                 break
             if i in loose:
-                bad = _nd_spread(x, y)
+                bad = nd_spread(x, y)
                 if bad is not None:
                     why = ("verify-loose", i, bad)
                     break
@@ -410,7 +412,7 @@ def _verify(k, plan, inputs, slow, pre, reset, cmp, loose):
         plan.verified = True
         WHY[k] = ["verified"]
     else:
-        _PLANS[k] = False
+        PLANS[k] = False
         WHY[k] = [why]
         import sys
         print(f"[dm fastpath] plan for {k[0]} disabled: {why}", file=sys.stderr, flush=True)
@@ -425,19 +427,19 @@ def call(tag, inputs: dict, extra, slow, pre=None, reset=None, cmp=None, loose=(
     if not ENABLED or type(next(iter(inputs.values()))) is not torch.Tensor:    # fake / subclass tensors: normal path
         return slow()
     k = key_of(tag, inputs, extra)
-    plan = _PLANS.get(k)
+    plan = PLANS.get(k)
     if plan is not None:
         if plan is False:
             return slow()
         if not plan.verified:
-            return _verify(k, plan, inputs, slow, pre, reset, cmp, loose)
+            return verify_plan(k, plan, inputs, slow, pre, reset, cmp, loose)
         if pre is not None:
             pre()
         return plan.run(inputs)
     if any(isinstance(t, torch._subclasses.fake_tensor.FakeTensor) for t in inputs.values() if t is not None):
         return slow()          # fake tensors (AOT compile): never planned (no plan exists for their keys)
-    rec = _Recorder({_sptr(t) for t in inputs.values() if t is not None})
-    _TLS.rec = rec
+    rec = Recorder({storage_ptr(t) for t in inputs.values() if t is not None})
+    THREAD_STATE.rec = rec
     orig = rec.hooks()
     import cutlass.cute as _cute
     ccomp = _cute.compile
@@ -453,7 +455,7 @@ def call(tag, inputs: dict, extra, slow, pre=None, reset=None, cmp=None, loose=(
         _cute.compile = ccomp
         for n, f in orig.items():
             setattr(torch, n, f)
-        _TLS.rec = None
+        THREAD_STATE.rec = None
     if EPOCH[0] != e0:
         # something was compiled / inserted into a compile cache during this call (cold cache): compiled functions
         # may have been called outside the recorder (FA4's bwd calls a freshly compiled kernel directly) -> no plan
@@ -462,9 +464,9 @@ def call(tag, inputs: dict, extra, slow, pre=None, reset=None, cmp=None, loose=(
         return ret
     try:
         p = Plan(rec, inputs, ret)
-        _PLANS[k] = p if (p.ok and p.calls) else False
+        PLANS[k] = p if (p.ok and p.calls) else False
         WHY[k] = p.why if p.calls else ["no-calls"]
     except Exception as e:
-        _PLANS[k] = False
+        PLANS[k] = False
         WHY[k] = [repr(e)]
     return ret

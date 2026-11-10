@@ -2587,16 +2587,17 @@ class DMBackwardSm100:
                 )
                 process_tile = num_iters > Int32(0)
 
-            if process_tile and const_expr(not self.dm_dqr0):   # DM dqr0: no dS exchange to relay
-                for _ in cutlass.range(num_iters, unroll=1):
-                    # Wait for dS_xchg from peer CTA
-                    cute.arch.mbarrier_wait(dS_cluster_full_mbar_ptr, phase=dS_cluster_phase)
+            if const_expr(not self.dm_dqr0):   # DM dqr0: no dS exchange to relay
+                if process_tile:
+                    for _ in cutlass.range(num_iters, unroll=1):
+                        # Wait for dS_xchg from peer CTA
+                        cute.arch.mbarrier_wait(dS_cluster_full_mbar_ptr, phase=dS_cluster_phase)
 
-                    # Arrive on MMA leader warp
-                    with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive(dS_cluster_leader_mbar_ptr, Int32(0))
+                        # Arrive on MMA leader warp
+                        with cute.arch.elect_one():
+                            cute.arch.mbarrier_arrive(dS_cluster_leader_mbar_ptr, Int32(0))
 
-                    dS_cluster_phase ^= 1
+                        dS_cluster_phase ^= 1
 
             tile_scheduler.prefetch_next_work()
             self._dm_prog(Int32(0), dm_pt, Int32(0), Int32(15))

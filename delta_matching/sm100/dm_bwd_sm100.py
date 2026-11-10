@@ -4778,6 +4778,16 @@ class DMBackwardSm100:
                       #### TMEM->RMEM (Load S from TMEM)
                       tSrS_t2r = cute.make_rmem_tensor(tScS_t2r.shape, Float32)
                       cute.copy(thr_copy_t2r, tStS_t2r, tSrS_t2r)
+                      if const_expr(self.dm_dsq and "esr" in self.dm_opts
+                                    and self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED and "early_dq" not in self.dm_opts):
+                          # brain6 esr (ported from track Z1 0253a60): S(t) is in registers once this warp's TMEM load completed ->
+                          # the dS helper may let dQ(t-1) overwrite the S tail now instead of after the exps (same ordering argument)
+                          if iter_idx > 0:
+                              cute.arch.fence_view_async_tmem_load()
+                              dm_utils.tc_fence_before()
+                              cute.arch.sync_warp()
+                              if cute.arch.lane_idx() == 0:
+                                  dm_utils.mbar_arrive(dm_mbar + 8 * 10)
                   if const_expr(dm_tr is not None):
                       dm_now = dm_utils.clock32()
                       dm_s3 = dm_s3 + (dm_now - dm_tprev)
@@ -5026,12 +5036,11 @@ class DMBackwardSm100:
                                   if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
                                       if iter_idx > 0:
                                           if const_expr(self.dm_dsq):
-                                              # DM dsq: S(t) read by this warp (wait::ld done before the pair barrier) -> the reduce warps may let
-                                              # dQ(t-1) overwrite the S tail; they install the dQ(t-1) SFs and commit pipeline_dS(t-1)
-                                              dm_utils.tc_fence_before()
-                                              cute.arch.sync_warp()
-                                              if cute.arch.lane_idx() == 0:
-                                                  dm_utils.mbar_arrive(dm_mbar + 8 * 10)
+                                              if const_expr("esr" not in self.dm_opts):   # brain6 esr: arrived right after the S load instead
+                                                  dm_utils.tc_fence_before()
+                                                  cute.arch.sync_warp()
+                                                  if cute.arch.lane_idx() == 0:
+                                                      dm_utils.mbar_arrive(dm_mbar + 8 * 10)
                                           else:
                                               self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
                                               cute.arch.fence_view_async_tmem_store()
@@ -5067,12 +5076,11 @@ class DMBackwardSm100:
                           if const_expr(self.cta_schedule == CtaSchedule.TWO_CTA_PIPELINED):
                               if iter_idx > 0:
                                   if const_expr(self.dm_dsq):
-                                      # DM dsq: S(t) read by this warp (wait::ld done before the pair barrier) -> the reduce warps may let
-                                      # dQ(t-1) overwrite the S tail; they install the dQ(t-1) SFs and commit pipeline_dS(t-1)
-                                      dm_utils.tc_fence_before()
-                                      cute.arch.sync_warp()
-                                      if cute.arch.lane_idx() == 0:
-                                          dm_utils.mbar_arrive(dm_mbar + 8 * 10)
+                                      if const_expr("esr" not in self.dm_opts):   # brain6 esr: arrived right after the S load instead
+                                          dm_utils.tc_fence_before()
+                                          cute.arch.sync_warp()
+                                          if cute.arch.lane_idx() == 0:
+                                              dm_utils.mbar_arrive(dm_mbar + 8 * 10)
                                   else:
                                       self._dm_write_dq_sf(dm_t - 1, dm_sdm, dm_mbar, cta_rank_in_cluster)
                                       cute.arch.fence_view_async_tmem_store()

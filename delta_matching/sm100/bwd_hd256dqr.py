@@ -2,7 +2,7 @@
 stores its dS codes + raw block exponents to a workspace; DmHd256Dqg then forms dQ = dS . K as a pure block-scaled GEMM (no S / dP /
 exp recompute).  Same contract and values as bwd_hd256kv2.dm_bwd_hd256kv2 (dq / dk / dv bitwise).  The api DEFAULT since
 hd256-dqr2 (DM_H256_BWD_IMPL=kv2 restores the bundle-6/7 path everywhere).  Workspace = 16 KiB per visited (q tile, key tile, q head)
-+ 4 B, bounded by DM_H256_DQW_GB (GiB, default 2 = the kda-hd256 scratch cap, never exceeded): the call runs in balanced contiguous batch chunks (KV2 + Dqg per chunk, one reused workspace); a single batch element above the budget -> the bundle-6 path
++ 4 B, bounded by DM_BWD_WS_LIMIT_GB (alias DM_H256_DQW_GB; GiB, default 8 = sm90 default, user decision; never exceeded): the call runs in balanced contiguous batch chunks (KV2 + Dqg per chunk, one reused workspace); a single batch element above the budget -> the bundle-6 path
 (dm_bwd_hd256kv2).  Deterministic: one TMEM accumulation chain per dQ element, no atomics."""
 import torch
 
@@ -16,11 +16,11 @@ DETERMINISTIC = True
 
 
 def _cfg():
-    """(scratch cap GiB, Dqg stages, KV2 store mode).  Cap: DM_BWD_WS_LIMIT_GB (the sm90 split.py name; provisional hd256 default 2 GiB),
+    """(scratch cap GiB, Dqg stages, KV2 store mode).  Cap: DM_BWD_WS_LIMIT_GB (the sm90 split.py name; default 8 GiB = sm90, USER DECISION 2026-11-10),
     DM_H256_DQW_GB = the older hd256-dqr name, honoured if DM_BWD_WS_LIMIT_GB is unset."""
     from .fastpath import env as _env
     cap = _env("DM_BWD_WS_LIMIT_GB", None)
-    cap = _env("DM_H256_DQW_GB", "2") if cap is None else cap
+    cap = _env("DM_H256_DQW_GB", "8") if cap is None else cap
     return float(cap), int(_env("DM_H256_DQG_STAGES", "3")), _env("DM_H256_DQW_MODE", "dqt")
 
 

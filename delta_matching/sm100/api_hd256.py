@@ -17,8 +17,8 @@ from .bwd_hd256dqr import dm_bwd_hd256dqr
 from .fastpath import env as _env
 
 BWD_IMPL_DEFAULT = "dqr"    # host impl switch (DM_H256_BWD_IMPL): "mx" = DmHd256Mx dv+dk+dq, "kv2" = DmHd256Mx dq + DmHd256Kv2,
-#                             "dqr" = KV2 (+ dS workspace) then the DmHd256Dqg dQ GEMM (fork hd256-dqr2: DEFAULT; scratch <= DM_H256_DQW_GB,
-#                             default 2 GiB, in batch chunks; a batch element above the cap -> the "kv2" path, same values)
+#                             "dqr" = KV2 (+ dS workspace) then the DmHd256Dqg dQ GEMM (fork hd256-dqr2: DEFAULT; scratch <= DM_BWD_WS_LIMIT_GB,
+#                             default 8 GiB (user), in batch chunks; a batch element above the cap -> the "kv2" path, same values)
 
 
 def _bwd_impl():

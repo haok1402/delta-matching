@@ -36,7 +36,7 @@ def dqw_alloc(B, H, N, causal, dev):
     return (torch.empty(T, 128, 128, device=dev, dtype=torch.uint8), torch.empty(T, 1, 4, device=dev, dtype=torch.uint8))
 
 
-def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqw=None):
+def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqw=None, out=None):
     """dqw = (W, Wsb) from dqw_alloc: KV2 also stores the dS codes / raw block exponents for the dQ GEMM (opts must contain dqw)."""
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
@@ -46,8 +46,12 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     f8 = torch.float8_e4m3fn
     p = lambda x: x.view(f8).permute(1, 3, 2, 0)        # (B, N, h, D) -> (N, D, h, B)  K-major  # noqa: E731
     tt = lambda x: x.view(f8).permute(3, 1, 2, 0)       # (B, N, h, D) -> (D, N, h, B)  MN-major  # noqa: E731
-    dk = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
-    dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
+    if out is not None:      # (dk, dv) contiguous batch slices of the caller's outputs (hd256-dqr batch chunks)
+        dk, dv = out
+        assert dk.shape == (B, N, Hk, D) and dk.is_contiguous() and dv.shape == dk.shape and dv.is_contiguous()
+    else:
+        dk = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
+        dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
     L = B * H
     big = dbg & 2
     if big or dbg & 8:

@@ -864,10 +864,13 @@ def tcf_begin(on):
     _TCF_STATS["fences"] = 0
 
 
-def _tcf_restore_fences(st, n):
-    """allocf helper (plain Python, called at trace time): restore the guard's wrapper-fence tally."""
-    if st is not None:
-        st["fences"] = n
+def _tcf_save_fences():
+    """allocf helpers (plain Python, trace time): save / restore the build-trap guard's wrapper-fence tally."""
+    return int(_TCF_STATS["fences"])
+
+
+def _tcf_restore_fences(n):
+    _TCF_STATS["fences"] = n
 
 
 def tcf_end():

@@ -78,7 +78,13 @@ class DMPass0Hd256Sm100:
     over all D, so the scales sit on the MMAs' non-contraction dims and multiply the fp32 accumulator after the plain
     MMA. P / c / dP-scale from attention_math_sm100.dm_mx256_*; num += P*(dP*a), den += P with per-lane TwoSum
     cross-tile sums and one fp64 combine; delta = num / den written to mLSE (B, H, N).
-    aux_data.tensors = [qs, ks, vs, dos, dO8 (uint8 view, (B,N,H,D)), lse (B,H,N) natural]."""
+    aux_data.tensors = [qs, ks, vs, dos, dO8 (uint8 view, (B,N,H,D)), lse (B,H,N) natural].
+    dm_nd (ring blocks, host variant token "+nd"): aux #6 = nd (B, H, Nq, 2) fp64; the final combine adds this launch's
+    (num, den) of every row to nd instead of writing delta (one lane per row, launches ordered on the stream)."""
+
+    dm_nd = False
+    dm_br = False      # host variant token "+br": causal with Nk > Nq, bottom-right aligned (FA4 convention; the mask
+                       # compares key against row + Nk - Nq; BlockInfo already gives the bottom-right key-tile range)
 
 
     def __init__(
@@ -1009,6 +1015,11 @@ class DMPass0Hd256Sm100:
             m_block = self._q_block(work_m, stage)
             row = m_block * self.m_block_size + row_in
             rowc = cutlass.min(row, seqlen.seqlen_q - 1)
+            rowk = row             # row in key coordinates (causal mask)
+            mrow0 = m_block * self.m_block_size
+            if const_expr(self.dm_br):
+                rowk = row + (seqlen.seqlen_k - seqlen.seqlen_q)
+                mrow0 = mrow0 + (seqlen.seqlen_k - seqlen.seqlen_q)
             # hd256 MXFP8 (sm100-mx): one pow2 Q / dO scale per 32 rows, one K / V scale per 32 keys (4 per n_block)
             qsv = Float32(aux[0][batch_idx, head_idx, rowc // 32])
             dosv = Float32(aux[3][batch_idx, head_idx, rowc // 32])
@@ -1038,7 +1049,7 @@ class DMPass0Hd256Sm100:
                     pipeline_s_p_o.consumer_wait_w_index_phase(stage, s_full_phase)
                     diag = False
                     if const_expr(self.is_causal):
-                        diag = (n_block + 1) * self.n_block_size > m_block * self.m_block_size
+                        diag = (n_block + 1) * self.n_block_size > mrow0
                     kbase = n_block * self.n_block_size
                     r = cute.make_rmem_tensor(cute.make_layout(64), self.qk_acc_dtype)
                     # both S halves to registers first; the S slot is released before any exp, so the MMA warp's
@@ -1054,7 +1065,7 @@ class DMPass0Hd256Sm100:
                         if const_expr(self.is_causal):
                             if diag:
                                 for i in cutlass.range_constexpr(32 * h, 32 * h + 32):
-                                    r[i] = -Float32.inf if kbase + 2 * i + par > row else r[i]
+                                    r[i] = -Float32.inf if kbase + 2 * i + par > rowk else r[i]
                         for j in cutlass.range_constexpr(2 * h, 2 * h + 2):
                             for v in cutlass.range_constexpr(0, 16, 2):
                                 i0 = 16 * j + v
@@ -1104,9 +1115,15 @@ class DMPass0Hd256Sm100:
             if par == 0:
                 tn64 = (Float64(ts_s[0]) + Float64(o_sn)) + (Float64(ts_e[0]) + Float64(o_en))
                 td64 = (Float64(ts_s[1]) + Float64(o_sd)) + (Float64(ts_e[1]) + Float64(o_ed))
-                delta = Float32(tn64 / td64) if td64 != Float64(0.0) else Float32(0.0)
-                if row < seqlen.seqlen_q:
-                    mLSE[row, head_idx, batch_idx] = delta
+                if const_expr(self.dm_nd):
+                    if row < seqlen.seqlen_q:
+                        mnd = aux[6]
+                        mnd[batch_idx, head_idx, row, 0] = mnd[batch_idx, head_idx, row, 0] + tn64
+                        mnd[batch_idx, head_idx, row, 1] = mnd[batch_idx, head_idx, row, 1] + td64
+                else:
+                    delta = Float32(tn64 / td64) if td64 != Float64(0.0) else Float32(0.0)
+                    if row < seqlen.seqlen_q:
+                        mLSE[row, head_idx, batch_idx] = delta
             work_tile = tile_scheduler.advance_to_next_work()
 
     def load_Q(

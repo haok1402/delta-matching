@@ -27,8 +27,13 @@ def _ph(dev):
     return _PH[k]
 
 
-def dqw_tiles(B, H, n_t, causal):
-    """number of (l, q tile, key tile) tiles of the dQ workspace."""
+def dqw_tiles(B, H, n_t, causal, n_k=None):
+    """number of (l, q tile, key tile) tiles of the dQ workspace (n_k: key tiles of a non-causal rect block)."""
+    if n_k is not None and n_k != n_t:
+        if causal:          # bottom-right aligned (ring chunk): q tile ct reads key tiles 0 .. ct + n_k - n_t
+            assert n_k > n_t
+            return B * H * (n_t * (n_t + 1) // 2 + n_t * (n_k - n_t))
+        return B * H * n_t * n_k
     return B * H * (n_t * (n_t + 1) // 2 if causal else n_t * n_t)
 
 
@@ -43,18 +48,26 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     int32 device tensor [Q0, n_t, cin, cout] (+ pad), carries fp32 (B, N, Hk, 256); the launch covers q tiles [Q0, q1)."""
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
-    assert Dq == D and N % 128 == 0 and H % Hk == 0
+    Nk = k8.shape[1]
+    assert Dq == D and N % 128 == 0 and H % Hk == 0 and Nk % 128 == 0 and v8.shape == k8.shape
     dev = q8.device
     causal = bool(causal)
+    ot_ = DmHd256Kv2.DEFAULT_OPTS if opts is None else opts
+    rect = "rect" in ot_.split()
+    assert rect or Nk == N, "Nq != Nk needs opt rect (ring blocks)"
+    assert not (rect and causal and Nk < N), "causal rect: bottom-right aligned, Nk >= Nq"
+    assert qs.shape == (B, H, N // 32) and dos.shape == qs.shape and lse.shape == (B, H, N) and delta.shape == lse.shape
+    assert ks.shape == (B, Hk, Nk // 32) and vs.shape == ks.shape
     f8 = torch.float8_e4m3fn
     p = lambda x: x.view(f8).permute(1, 3, 2, 0)        # (B, N, h, D) -> (N, D, h, B)  K-major  # noqa: E731
     tt = lambda x: x.view(f8).permute(3, 1, 2, 0)       # (B, N, h, D) -> (D, N, h, B)  MN-major  # noqa: E731
     if out is not None:      # (dk, dv) contiguous batch slices of the caller's outputs
         dk, dv = out
-        assert dk.shape == (B, N, Hk, D) and dk.is_contiguous() and dv.shape == dk.shape and dv.is_contiguous()
+        assert dk.shape == (B, Nk, Hk, D) and dk.is_contiguous() and dv.shape == dk.shape and dv.is_contiguous()
+        assert dk.dtype == torch.bfloat16 and dv.dtype == torch.bfloat16
     else:
-        dk = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
-        dv = torch.empty(B, N, Hk, D, device=dev, dtype=torch.bfloat16)
+        dk = torch.empty(B, Nk, Hk, D, device=dev, dtype=torch.bfloat16)
+        dv = torch.empty(B, Nk, Hk, D, device=dev, dtype=torch.bfloat16)
     L = B * H
     big = dbg & 2
     if big or dbg & 24:
@@ -73,7 +86,7 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     if dqw is not None:
         assert not big
         cs_, sbs = dqw
-        assert (dqc is not None or cs_.shape == (dqw_tiles(B, H, N // 128, causal), 128, 128)) and sbs.shape == (cs_.shape[0], 1, 4)
+        assert (dqc is not None or cs_.shape == (dqw_tiles(B, H, N // 128, causal, Nk // 128), 128, 128)) and sbs.shape == (cs_.shape[0], 1, 4)
     assert (dqc is not None) == ("dqc" in ot.split())
     nt_arg = N // 128
     if dqc is not None:

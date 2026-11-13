@@ -38,7 +38,7 @@ def _cache():
 TRACE = {}   # DEBUG (DM_HD256_FWD_TRACE=1): "buf" = the last call's int64 event buffer (see DMFwdHd256MxSm100.tr)
 
 
-def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=None):
+def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=None, rect: bool = False, out=None):
     """q8 (B,N,H,256) e4m3 (sm baked), k8 / v8 (B,N,Hk,256) e4m3; qs (B,H,N/32) fp32 pow2 (quant.quant_qkv2).
     kvw: (B,Hk,N/64) int32 packed UE8M0 K/V words (fwd.pack_kv_scales), or the K scales ks (B,Hk,N/32) fp32 together
     with vs= (packed here, same words). Returns O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
@@ -47,12 +47,20 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
         kvw = pack_kv_scales(kvw, vs)
     B, N, H, D = q8.shape
     Hk = k8.shape[2]
+    Nk = k8.shape[1] if rect else N       # rect (ring blocks): key range independent of the query range (causal: Nk >= Nq,
+    assert Nk % 128 == 0 and v8.shape == k8.shape and not (rect and causal and Nk < N)   # bottom-right aligned)
+    assert not (rect and os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"), "trace buffers are sized by Nq"
     assert D == 256 and N % 128 == 0 and H % Hk == 0
     assert q8.dtype == torch.float8_e4m3fn and k8.dtype == q8.dtype and v8.dtype == q8.dtype
-    assert qs.shape == (B, H, N // 32) and kvw.shape == (B, Hk, N // 64) and kvw.dtype == torch.int32
+    assert qs.shape == (B, H, N // 32) and kvw.shape == (B, Hk, Nk // 64) and kvw.dtype == torch.int32
     q8, k8, v8, qs, kvw = (t.contiguous() for t in (q8, k8, v8, qs, kvw))
-    o = torch.empty(B, N, H, D, device=q8.device, dtype=torch.bfloat16)
-    lse = torch.empty(B, H, N, device=q8.device, dtype=torch.float32)
+    if out is not None:      # (o, lse): caller buffers (contiguous)
+        o, lse = out
+        assert o.shape == (B, N, H, D) and o.dtype == torch.bfloat16 and o.is_contiguous()
+        assert lse.shape == (B, H, N) and lse.dtype == torch.float32 and lse.is_contiguous()
+    else:
+        o = torch.empty(B, N, H, D, device=q8.device, dtype=torch.bfloat16)
+        lse = torch.empty(B, H, N, device=q8.device, dtype=torch.float32)
     sfw = os.environ.get("DM_HD256_MX_SFWAIT", "1") != "0"      # 0 = DEBUG A/B only (pre-C0 unsafe SF overwrite order)
     pc = int(os.environ.get("DM_HD256_MX_PC", "0"))               # DEBUG positive control (0 = off)
     sfb = os.environ.get("DM_HD256_MX_SFBANK", "0") == "1"      # 1 = C5 single-S + SF banks (rejected: slower than C0); default C0
@@ -78,6 +86,8 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
     c8 = int(os.environ.get("DM_HD256_FWD_C8", "1"))   # C8 column split (implies G1a): 1 = C8 (DEFAULT), 2 = C8b; 0 = C6
     if c8 != 1:
         key = key + (f"c8_{c8}",)
+    if rect:
+        key = key + ("rect",)
     trace = os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"   # DEBUG: per-event %clock64 trace -> TRACE["buf"]
     dbg = None
     if trace:
@@ -94,7 +104,7 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (compile it ahead of time with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split, trace=trace, g1=g1, c8=c8)
+                                 split=split, trace=trace, g1=g1, c8=c8, rect=rect)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)

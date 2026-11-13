@@ -146,7 +146,12 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect")
+    # rect (ring blocks, requires dqt): q tiles (n_t argument) may differ from key tiles n_k (grid = 2 n_k CTAs from K's
+    # token extent; in-kernel n_k = grid_dim.x / 2); q loop over n_q = n_t tiles; dK / dV rows = Nk, identity rows = Nq.
+    # Non-causal: W tile T = (l * n_q + ct) * n_k + kt.  Causal: bottom-right aligned, off = n_k - n_q >= 0 tiles (query i
+    # sees keys <= i + 128 off): key tile kt is seen by q tiles ct >= kt - off; mask key > query + 128 off; W tile
+    # T = l * (n_q (n_q + 1) / 2 + n_q off) + ct (ct + 1) / 2 + ct off + kt.  rect with Nq == Nk is bitwise the default.
     # dqc (requires dqt): EXACT-CARRY chunk of the (q head, q tile) reduction of every key tile.  The launch covers
     # q heads [0, rep) of its (copied) head tensors x q tiles [Q0, Q1) (Q1 = the n_t argument; causal: key tiles 0..Q1-1 = the grid).
     # Chunk descriptor (int32, in the mSBP slot): [Q0, n_t of the full sequence, cin, cout]; cin = 1: this launch continues the
@@ -202,6 +207,8 @@ class DmHd256Kv2:
         assert "dqt" not in self.opts or "rly" in self.opts
         self.wsp = "dqw" in self.opts or "dqt" in self.opts
         self.dqc = "dqc" in self.opts
+        self.rect = "rect" in self.opts
+        assert not self.rect or ("dqt" in self.opts and not self.dqc and (self.dbg & ~16) == 0)
         assert not (self.dbg & 16 and self.dbg & 8), "dbg 16 (identity) and 8 (lockstep) share mHash"
         assert not self.dqc or ("dqt" in self.opts and (self.dbg & ~16) == 0)
         self.threads = 384
@@ -309,10 +316,13 @@ class DmHd256Kv2:
             sCP: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(c_l)], 1024]
             sCS: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(c_l)], 1024]
         self.SS = SS
+        n_kg = n_t
+        if const_expr(self.rect):
+            n_kg = cute.size(mK, mode=[0]) // (2 * self.TK)
         self.kernel(mma_s, mma_o, tma_K, tK, tma_V, tV, tma_Q, tQ, tma_dO, tdO, tma_Qd, tQd, tma_dOd, tdOd,
                     a_l, b_l, c_l, t_l, mQs, mKs, mVs, mdOs, mLse, mDelta, mdK, mdV, mDump, mCodesP, mCodesS,
                     mSBP, mSBS, mHash, n_t, H, Hk).launch(
-            grid=[2 * n_t, Hk, cute.size(mK, mode=[3])], block=[self.threads, 1, 1], cluster=[2, 1, 1],
+            grid=[2 * n_kg, Hk, cute.size(mK, mode=[3])], block=[self.threads, 1, 1], cluster=[2, 1, 1],
             smem=SS.size_in_bytes(), stream=stream)
 
     @cute.kernel
@@ -332,10 +342,20 @@ class DmHd256Kv2:
         crank = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         kt = bx // 2                       # 128-key tile of the pair
         rep = H // Hk
-        N = n_t * 128
+        n_q = n_t
+        n_k = n_t
+        if const_expr(self.rect):
+            n_k = cute.arch.grid_dim()[0] // 2
+        N = n_k * 128
+        NQ = N
+        if const_expr(self.rect):
+            NQ = n_q * 128
         c_lo = Int32(0)
         if const_expr(self.causal):
             c_lo = kt
+            if const_expr(self.rect):
+                off_t = n_k - n_q
+                c_lo = cutlass.max(kt - off_t, Int32(0))
         if const_expr(self.dqc):   # (names defined only in dqc builds: the default build's IR / loop-carried values are untouched)
             # nfirst: 1 = this launch continues the key tile's reduction (carry restore, no zero-init)
             dsc = global_address(mSBP)
@@ -348,7 +368,7 @@ class DmHd256Kv2:
                 c_lo = cutlass.max(kt, cq0)
                 nfirst = cutlass.max(cin, Int32(cutlass.select_(kt < cq0, Int32(1), Int32(0))))
             tilesb = Int64((n_t * (n_t + 1) - cq0 * (cq0 + 1)) // 2)
-        ncs = n_t - c_lo
+        ncs = n_q - c_lo
         total = rep * ncs
         if const_expr(self.dqc and self.kn == "dd"):
             if cute.arch.thread_idx()[0] == 0:
@@ -527,10 +547,12 @@ class DmHd256Kv2:
                     wtile = Int64(0)
                     if const_expr(self.dqc and self.causal):
                         wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
+                    elif const_expr(self.causal and self.rect):
+                        wtile = Int64(l) * (n_q * (n_q + 1) // 2 + n_q * off_t) + ct * (ct + 1) // 2 + ct * off_t + kt
                     elif const_expr(self.causal):
                         wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
                     else:
-                        wtile = (Int64(l) * n_t + ct) * n_t + kt
+                        wtile = (Int64(l) * n_q + ct) * n_k + kt
                     if const_expr(self.kn == "wr" and self.unsafe):
                         if t > 0:          # UNSAFE wr: t == 0 is stored without waiting for its codes (compute delayed at t == 0)
                             mbar_wait_parity_cluster(rdy + 8 * stg, (t >> 1) & 1)
@@ -668,10 +690,12 @@ class DmHd256Kv2:
                 if const_expr(self.wsp):
                     if const_expr(self.dqc and self.causal):
                         wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
+                    elif const_expr(self.causal and self.rect):
+                        wtile = Int64(l) * (n_q * (n_q + 1) // 2 + n_q * off_t) + ct * (ct + 1) // 2 + ct * off_t + kt
                     elif const_expr(self.causal):
                         wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
                     else:
-                        wtile = (Int64(l) * n_t + ct) * n_t + kt
+                        wtile = (Int64(l) * n_q + ct) * n_k + kt
                 mf = None
                 qsj = Float32(0.0)
                 dosj = Float32(0.0)
@@ -739,6 +763,8 @@ class DmHd256Kv2:
                         s1 = sv[i + q2 + 1]
                         if const_expr(self.causal):
                             c0 = q0 + i + q2
+                            if const_expr(self.rect):
+                                c0 = c0 + off_t * 128
                             s0 = -Float32.inf if key > c0 else s0
                             s1 = -Float32.inf if key > c0 + 1 else s1
                         p0, p1 = dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
@@ -863,7 +889,7 @@ class DmHd256Kv2:
                     lk_cols_u32(hcl, lane, a0_ + 16)
                     lk_cols_f64(dsv, lane, a0_ + 24)
                 if const_expr(self.dbg & 16):
-                    a1_ = global_address(mHash) + (Int64(l) * N + q0) * 32
+                    a1_ = global_address(mHash) + (Int64(l) * NQ + q0) * 32
                     pdl = [abs_f32(mul_f32(pv[i], mul_f32(dpv[i], ca))) for i in range(32)]
                     lk_cols_f64(dsv, lane, a1_)
                     lk_cols_f64(pdl, lane, a1_ + 8)

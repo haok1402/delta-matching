@@ -277,7 +277,13 @@ class DMFwdHd256MxSm100:
 
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
-                 lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0):
+                 lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0,
+                 rect: bool = False):
+        # rect (ring blocks): the key-tile count comes from K's token extent (Nk), not from the q-tile grid (Nq);
+        # everything else is indexed per key tile.  Non-causal: all Nk keys.  Causal: bottom-right aligned (query i sees
+        # keys <= i + Nk - Nq; Nk - Nq a multiple of 128 -> the diagonal tile and its in-tile mask are unchanged, the
+        # q tile just starts Nk/128 - Nq/128 key tiles further).  rect with Nk == Nq is bitwise the default kernel.
+        self.rect = rect
         # c8 (DM_HD256_FWD_C8=1): column split of every tile over BOTH
         # softmax WGs.  WG h loads S columns 64h..64h+63 (blocks 2h, 2h+1) and runs the m-independent prefix op for op (bmax, kb,
         # bias, FFMA2, ex2, e4m3 codes -> sP, pairwise block sums).  WG1 publishes bmax2/3, bs2/3 (SMEM part[slot][k][128],
@@ -477,6 +483,11 @@ class DMFwdHd256MxSm100:
             batch_idx = (u % n_hb) // n_h
         kv_head_idx = head_idx // self.qhead_per_kvhead
         n_block_max = m_block + 1 if const_expr(self.is_causal) else n_m
+        if const_expr(self.rect):
+            if const_expr(self.is_causal):
+                n_block_max = m_block + 1 + (cute.ceil_div(cute.size(mK.shape[0]), self.n_block_size) - n_m)
+            else:
+                n_block_max = cute.ceil_div(cute.size(mK.shape[0]), self.n_block_size)
         cnt = n_block_max
         if const_expr(self.trace):
             cta_lin = bidx + n_m * (bidy + cute.arch.grid_dim()[1] * bidz)

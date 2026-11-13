@@ -28,6 +28,8 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.cute.nvgpu import cpasync, tcgen05
 
 from delta_matching.sm100.cute_ptx_sm100 import tmem_ld32, bf16x2, st_global_v4, mul_f32, global_address, inline_asm
+from delta_matching.sm100.cute_ptx_sm100 import add_f32, st_global_v4f
+from delta_matching.sm100.quant_cute import ld_v4f
 from delta_matching.sm100.cute_ptx_sm100 import mbar_init, tc_commit, tmem_st_x1, tmem_st_x4
 from delta_matching.sm100.fp8_e8m0_scale_sm100 import add_sb_clamp
 from delta_matching.sm100.mma_sm100 import gemm_ptx_bs
@@ -76,7 +78,16 @@ class DmHd256Dqg:
     KNOBS = ("ab", "sf", "sw", "fin")
     DLY = 1 << 15
 
-    def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = False, band: bool = False):
+    def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = False, band: bool = False,
+                 rect: bool = False, acc: bool = False):
+        # rect (ring blocks, non-causal): n_t = q tiles (grid), the q0 Int32 slot = key tiles n_k (W packing
+        # T = (l * n_q + ct) * n_k + kt, as KV2 opt rect).  acc: dQ is fp32 (B, Nq, H, 256) and this launch ADDS its
+        # x * 2^-4 (read-add-write, one writer per element; launches ordered on the stream -> deterministic).
+        # rect + causal: bottom-right aligned (off = n_k - n_t key tiles): q tile ct reads key tiles 0 .. ct + off,
+        # T = l * (n_t (n_t + 1) / 2 + n_t off) + ct (ct + 1) / 2 + ct off + kt (= KV2 opt rect, causal).
+        self.rect = bool(rect)
+        self.acc = bool(acc)
+        assert not (self.rect and band)
         """wsw: W tiles hold the swizzled MN-major SW128 smem image (KV2 opt dqt) -> 1-D bulk copy; else plain rows (dqw) -> TMA."""
         self.wsw = bool(wsw)
         # band (KV2 opt dqc chunks; causal only): this launch forms dQ of q tiles [q0, q0 + n_t) only (n_t argument =
@@ -144,8 +155,11 @@ class DmHd256Dqg:
         b = rr_ // H
         hk = h // (H // Hk)
         l = b * H + h
-        total = n_t
-        tbase = (Int64(l) * n_t + ct) * n_t
+        n_k = n_t
+        if const_expr(self.rect):
+            n_k = q0
+        total = n_k
+        tbase = (Int64(l) * n_t + ct) * n_k
         nrow = n_t * 128                 # dQ rows of the sequence (band: the full mdQ length)
         if const_expr(self.band):
             ct = ct + q0
@@ -153,6 +167,10 @@ class DmHd256Dqg:
             total = ct + 1
             tbase = Int64(l) * ((q1 * (q1 + 1) - q0 * (q0 + 1)) // 2) + (ct * (ct + 1) - q0 * (q0 + 1)) // 2
             nrow = cute.size(mdQ, mode=[1])
+        elif const_expr(self.causal and self.rect):
+            off_t = n_k - n_t
+            total = ct + 1 + off_t
+            tbase = Int64(l) * (n_t * (n_t + 1) // 2 + n_t * off_t) + ct * (ct + 1) // 2 + ct * off_t
         elif const_expr(self.causal):
             total = ct + 1
             tbase = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2
@@ -286,15 +304,24 @@ class DmHd256Dqg:
                 mbar_wait_parity(FIN, Int32(0))
             tc_fence_after()
             q = ct * 128 + warp * 32 + lane
-            ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 2)
-            for cb in cutlass.range_constexpr(8):
-                ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
-                cute.arch.fence_view_async_tmem_load()
-                for i in cutlass.range_constexpr(0, 32, 8):
-                    wv = [None] * 4
-                    for qq in cutlass.range_constexpr(4):
-                        wv[qq] = bf16x2(mul_f32(ov[i + 2 * qq], Float32(SM)), mul_f32(ov[i + 2 * qq + 1], Float32(SM)))
-                    st_global_v4(ob + (32 * cb + i) * 2, wv[0], wv[1], wv[2], wv[3])
+            if const_expr(self.acc):
+                ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 4)
+                for cb in cutlass.range_constexpr(8):
+                    ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
+                    cute.arch.fence_view_async_tmem_load()
+                    for i in cutlass.range_constexpr(0, 32, 4):
+                        a4 = ld_v4f(ob + (32 * cb + i) * 4)
+                        st_global_v4f(ob + (32 * cb + i) * 4, *[add_f32(a4[qq], mul_f32(ov[i + qq], Float32(SM))) for qq in range(4)])
+            else:
+                ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 2)
+                for cb in cutlass.range_constexpr(8):
+                    ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
+                    cute.arch.fence_view_async_tmem_load()
+                    for i in cutlass.range_constexpr(0, 32, 8):
+                        wv = [None] * 4
+                        for qq in cutlass.range_constexpr(4):
+                            wv[qq] = bf16x2(mul_f32(ov[i + 2 * qq], Float32(SM)), mul_f32(ov[i + 2 * qq + 1], Float32(SM)))
+                        st_global_v4(ob + (32 * cb + i) * 2, wv[0], wv[1], wv[2], wv[3])
             if const_expr(self.kn == "fin" and self.unsafe):
                 mbar_wait_parity(FIN, Int32(0))   # UNSAFE: acc read before the final commit
             tc_fence_before()

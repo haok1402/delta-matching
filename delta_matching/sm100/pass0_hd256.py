@@ -32,7 +32,8 @@ _SEL_MEMO = {}
 def _variant(exp_variant: str):
     if exp_variant not in _CLASSES:
         _CLASSES[exp_variant] = type(f"DMPass0Hd256Sm100_{exp_variant.replace('+', '_F_')}", (DMPass0Hd256Sm100,),
-                                     {"dm_exp_variant": exp_variant})
+                                     {"dm_exp_variant": exp_variant, "dm_nd": "+nd" in exp_variant,
+                                      "dm_br": "+br" in exp_variant})
         if cache_utils.CUTE_DSL_CACHE_ENABLED:
             c = cache_utils.JITPersistentCache(cache_utils.get_cache_path() / "dm_sm100" / fingerprint() / f"pass0hmx_{exp_variant}")
         else:
@@ -68,6 +69,65 @@ def dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, exp_vari
     inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
     return launch_cache_sm100.call("pass0_hd256", inp, (bool(causal), exp_variant, repr(sorted(over.items()))),
                          lambda: _slow(q8, k8, v8, aux, causal, over, exp_variant), cmp=[1])[1]
+
+
+def _block_checks(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal):
+    B, Nq, H, Dq = q8.shape
+    Nk, Hk = k8.shape[1], k8.shape[2]
+    assert Dq == D and k8.shape[-1] == D and v8.shape == k8.shape and do8.shape == q8.shape and Nq % 128 == 0 and Nk % 128 == 0
+    assert not causal or Nk >= Nq, "causal block: bottom-right aligned, Nk >= Nq"
+    assert qs.shape == (B, H, Nq // 32) and dos.shape == qs.shape and lse.shape == (B, H, Nq)
+    assert ks.shape == (B, Hk, Nk // 32) and vs.shape == ks.shape
+    return B, Nq, H, Nk
+
+
+def delta_block_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool):
+    """delta (B, H, Nq) of one block whose rows see ALL their keys here: non-causal Nk free, causal Nk >= Nq bottom-right
+    (query i sees keys <= i + Nk - Nq). Nq == Nk: exactly dm_delta_hd256."""
+    B, Nq, H, Nk = _block_checks(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
+    if Nq == Nk:
+        return dm_delta_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
+    exp_variant = variant_for() + ("+br" if causal else "")
+    over = dict(FORCE)
+    aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
+           _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2)]
+    names = ["qs", "ks", "vs", "dos", "do8", "lse"]
+    inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
+    return launch_cache_sm100.call("pass0_hd256", inp, (bool(causal), exp_variant, repr(sorted(over.items()))),
+                                   lambda: _slow(q8, k8, v8, aux, causal, over, exp_variant), cmp=[1])[1]
+
+
+def delta_nd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, nd: torch.Tensor):
+    """Ring-block pass 0: nd (B, H, Nq, 2) fp64 += this block's per-row [num, den] (same P / dP as dm_delta_hd256 and the
+    backward). Non-causal: Nk is free (key range of k8 / v8); causal: Nk >= Nq bottom-right. lse = the MERGED lse."""
+    B, Nq, H, Nk = _block_checks(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
+    assert nd.shape == (B, H, Nq, 2) and nd.dtype == torch.float64 and nd.is_contiguous()
+    exp_variant = variant_for() + "+nd" + ("+br" if causal and Nk != Nq else "")
+    over = dict(FORCE)
+    nd.__leading_dim__ = 3
+    nd.__assumed_align__ = 8
+    aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
+           _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2), nd]
+    names = ["qs", "ks", "vs", "dos", "do8", "lse", "nd"]
+    inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
+    snap = []
+
+    def slow():           # the fast path's verification call runs slow() AND the replay on the same nd: snapshot + reset
+        snap[:] = [nd.clone()]
+        return _slow(q8, k8, v8, aux, causal, over, exp_variant)
+
+    def reset():
+        nd.copy_(snap[0])
+    launch_cache_sm100.call("pass0_hd256", inp, (bool(causal), exp_variant, repr(sorted(over.items()))), slow,
+                            reset=reset, cmp=[])
+    return nd
+
+
+def delta_finish(nd: torch.Tensor) -> torch.Tensor:
+    """delta (B, H, N) fp32 from accumulated nd: Float32(num / den) (fp64 divide), 0 where den == 0 (= pass 0's own
+    final divide, so one block + delta_finish is bitwise dm_delta_hd256)."""
+    num, den = nd[..., 0], nd[..., 1]
+    return torch.where(den != 0, num / torch.where(den != 0, den, torch.ones_like(den)), torch.zeros_like(num)).float()
 
 
 LAST_CFG = {}

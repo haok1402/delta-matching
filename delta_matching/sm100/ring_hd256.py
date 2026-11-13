@@ -93,7 +93,9 @@ def plan(B, H, Hk, n_q, n_k, causal, cap=None):
 
 def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=None, dv=None):
     """(dq, dk, dv) of the block. dq: None / bf16 (B, Nq, H, 256) -> written; fp32 -> dq += this block's dQ.
-    dk / dv (B, Nk, Hk, 256) bf16, contiguous caller tensors when given. lse / delta: of the rows (merged / global)."""
+    dk / dv (B, Nk, Hk, 256), contiguous caller tensors when given: bf16 -> written (rounded once from the fp32 TMEM
+    accumulator); fp32 -> dk += / dv += this block's fp32 dK / dV (KV2 dkacc: read-add-write, deterministic).
+    lse / delta: of the rows (merged / global)."""
     B, Nq, H, Dq = q8.shape
     Nk, Hk = k8.shape[1], k8.shape[2]
     rep = H // Hk
@@ -109,6 +111,8 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
     if dv is None:
         dv = torch.empty(B, Nk, Hk, D, device=dev, dtype=torch.bfloat16)
     assert dk.shape == (B, Nk, Hk, D) and dv.shape == dk.shape and dk.is_contiguous() and dv.is_contiguous()
+    assert dk.dtype == dv.dtype and dk.dtype in (torch.float32, torch.bfloat16)
+    kacc = dk.dtype == torch.float32
     chunks = plan(B, H, Hk, n_q, n_k, causal)
     assert chunks is not None, f"ring bwd_block: no chunk fits DM_BWD_WS_LIMIT_GB ({B}, {H}, {Hk}, {Nq}, {Nk}, {causal})"
     assert acc or all(c[2:] == (0, n_k) for c in chunks), "key-range chunks need an fp32 dq (accumulate)"
@@ -125,14 +129,20 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
         direct = whole_heads and (B == 1 or (k0, k1) == (0, n_k))     # key-range slices are contiguous at B == 1
         if direct:
             out = (dk[:, keys], dv[:, keys])
+            opts = opts + (" dkacc" if kacc else "")
         else:
-            out = (torch.empty(B, nk_c * 128, g1 - g0, D, device=dev, dtype=torch.bfloat16),
-                   torch.empty(B, nk_c * 128, g1 - g0, D, device=dev, dtype=torch.bfloat16))
+            out = (torch.empty(B, nk_c * 128, g1 - g0, D, device=dev, dtype=dk.dtype),
+                   torch.empty(B, nk_c * 128, g1 - g0, D, device=dev, dtype=dk.dtype))
+            opts = opts + (" dkf32" if kacc else "")
         bwd_hd256kv2.kv2_launch(qq[0], qq[1], kq[0], kq[1], kq[2], kq[3], qq[2], qq[3], qq[4], qq[5], causal,
                                 opts=opts, dqw=(W, Wsb), out=out)
         if not direct:
-            dk[:, keys, g0:g1].copy_(out[0])
-            dv[:, keys, g0:g1].copy_(out[1])
+            if kacc:
+                dk[:, keys, g0:g1] += out[0]
+                dv[:, keys, g0:g1] += out[1]
+            else:
+                dk[:, keys, g0:g1].copy_(out[0])
+                dv[:, keys, g0:g1].copy_(out[1])
         if whole_heads:
             dqg_launch(W, Wsb, kq[0], kq[1], B, Nq, H, causal, dq, n_k=nk_c)
         elif acc:

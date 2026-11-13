@@ -56,6 +56,8 @@ from delta_matching.sm100.dm_bwd_hd256mx_sm100 import (st_shared_v4, ld_shared_v
                                                        tc_fence_after, st_global_u8, f2i, hmix, hidx, lk_cols_u32,
                                                        lk_cols_f64, sel_eq_i32)
 from delta_matching.sm100.dm_bwd_hd256mx_sm100 import tmem_st32 as dmh_st32
+from delta_matching.sm100.cute_ptx_sm100 import add_f32
+from delta_matching.sm100.quant_cute import ld_v4f
 
 F8 = cutlass.Float8E4M3FN
 
@@ -146,7 +148,9 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc")
+    # dkf32: dK / dV written as fp32 (B, Nk, Hk, 256) (the TMEM accumulator, i.e. the value the bf16 epilogue rounds);
+    # dkacc: dK / dV fp32 += (read-add-write; one thread per element, launches ordered on the stream -> deterministic).
     # rect (ring blocks, requires dqt): q tiles (n_t argument) may differ from key tiles n_k (grid = 2 n_k CTAs from K's
     # token extent; in-kernel n_k = grid_dim.x / 2); q loop over n_q = n_t tiles; dK / dV rows = Nk, identity rows = Nq.
     # Non-causal: W tile T = (l * n_q + ct) * n_k + kt.  Causal: bottom-right aligned, off = n_k - n_q >= 0 tiles (query i
@@ -208,6 +212,9 @@ class DmHd256Kv2:
         self.wsp = "dqw" in self.opts or "dqt" in self.opts
         self.dqc = "dqc" in self.opts
         self.rect = "rect" in self.opts
+        self.dkacc = "dkacc" in self.opts
+        self.dkf32 = self.dkacc or "dkf32" in self.opts
+        assert not (self.dkf32 and self.dqc), "fp32 dK / dV outputs: not with the carry chunks"
         assert not self.rect or ("dqt" in self.opts and not self.dqc and (self.dbg & ~16) == 0)
         assert not (self.dbg & 16 and self.dbg & 8), "dbg 16 (identity) and 8 (lockstep) share mHash"
         assert not self.dqc or ("dqt" in self.opts and (self.dbg & ~16) == 0)
@@ -229,6 +236,25 @@ class DmHd256Kv2:
                     for q in cutlass.range_constexpr(4):
                         w[q] = bf16x2(ov[i + 2 * q], ov[i + 2 * q + 1])
                     st_global_v4(ob + (32 * cb + i) * 2, w[0], w[1], w[2], w[3])
+
+    @cute.jit
+    def _epi_f32(self, tb, mdK, mdV, b, key, hx, Hk, N, qd, hf):
+        """opt dkf32 / dkacc: this thread's 64 dK + 64 dV fp32 TMEM words (key row, d0..d0+63) -> fp32 out (= or +=)."""
+        D = self.D
+        d0 = 128 * (qd // 2) + 64 * hf
+        for which in cutlass.range_constexpr(2):
+            col = self.COL_DK if which == 0 else self.COL_DV
+            mOut = mdK if which == 0 else mdV
+            ob = global_address(mOut) + (((Int64(b) * N + key) * Hk + hx) * D + d0) * 4
+            for cb in cutlass.range_constexpr(2):
+                ov = tmem_ld32(tb + col + 64 * hf + 32 * cb)
+                cute.arch.fence_view_async_tmem_load()
+                for i in cutlass.range_constexpr(0, 32, 4):
+                    if const_expr(self.dkacc):
+                        a4 = ld_v4f(ob + (32 * cb + i) * 4)
+                        st_global_v4f(ob + (32 * cb + i) * 4, *[add_f32(a4[q], ov[i + q]) for q in range(4)])
+                    else:
+                        st_global_v4f(ob + (32 * cb + i) * 4, ov[i], ov[i + 1], ov[i + 2], ov[i + 3])
 
     @cute.jit
     def _carry_store(self, tb, mCK, mCV, b, key, hx, Hk, nfull, qd, hf):
@@ -938,6 +964,8 @@ class DmHd256Kv2:
                     self._carry_store(tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
                 else:
                     self._epi_bf16(tb, mdK, mdV, b, key, hx, Hk, N, qd, hf)
+            elif const_expr(self.dkf32):
+                self._epi_f32(tb, mdK, mdV, b, key, hx, Hk, N, qd, hf)
             else:
                 self._epi_bf16(tb, mdK, mdV, b, key, hx, Hk, N, qd, hf)
             tc_fence_before()

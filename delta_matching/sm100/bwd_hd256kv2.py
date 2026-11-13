@@ -64,10 +64,13 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     if out is not None:      # (dk, dv) contiguous batch slices of the caller's outputs
         dk, dv = out
         assert dk.shape == (B, Nk, Hk, D) and dk.is_contiguous() and dv.shape == dk.shape and dv.is_contiguous()
-        assert dk.dtype == torch.bfloat16 and dv.dtype == torch.bfloat16
+        f32 = "dkf32" in ot_.split() or "dkacc" in ot_.split()
+        assert dk.dtype == dv.dtype == (torch.float32 if f32 else torch.bfloat16), (dk.dtype, ot_)
     else:
-        dk = torch.empty(B, Nk, Hk, D, device=dev, dtype=torch.bfloat16)
-        dv = torch.empty(B, Nk, Hk, D, device=dev, dtype=torch.bfloat16)
+        assert "dkacc" not in ot_.split(), "dkacc needs the caller's fp32 accumulators (out=)"
+        odt = torch.float32 if "dkf32" in ot_.split() else torch.bfloat16
+        dk = torch.empty(B, Nk, Hk, D, device=dev, dtype=odt)
+        dv = torch.empty(B, Nk, Hk, D, device=dev, dtype=odt)
     L = B * H
     big = dbg & 2
     if big or dbg & 24:

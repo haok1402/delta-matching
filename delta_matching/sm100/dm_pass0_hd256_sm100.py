@@ -79,8 +79,8 @@ class DMPass0Hd256Sm100:
     MMA. P / c / dP-scale from attention_math_sm100.dm_mx256_*; num += P*(dP*a), den += P with per-lane TwoSum
     cross-tile sums and one fp64 combine; delta = num / den written to mLSE (B, H, N).
     aux_data.tensors = [qs, ks, vs, dos, dO8 (uint8 view, (B,N,H,D)), lse (B,H,N) natural].
-    dm_nd (ring blocks, host variant token "+nd"): aux #6 = nd (B, H, Nq, 2) fp64; the final combine adds this launch's
-    (num, den) of every row to nd instead of writing delta (one lane per row, launches ordered on the stream)."""
+    dm_nd (ring blocks, host variant token "+nd"): aux #6 = nd (B, H, Nq, 2) fp64; the final combine writes this launch's
+    (num, den) of every row to nd instead of delta (one lane per row; the host adds it to the caller's accumulator)."""
 
     dm_nd = False
     dm_br = False      # host variant token "+br": causal with Nk > Nq, bottom-right aligned (FA4 convention; the mask
@@ -1118,8 +1118,8 @@ class DMPass0Hd256Sm100:
                 if const_expr(self.dm_nd):
                     if row < seqlen.seqlen_q:
                         mnd = aux[6]
-                        mnd[batch_idx, head_idx, row, 0] = mnd[batch_idx, head_idx, row, 0] + tn64
-                        mnd[batch_idx, head_idx, row, 1] = mnd[batch_idx, head_idx, row, 1] + td64
+                        mnd[batch_idx, head_idx, row, 0] = tn64
+                        mnd[batch_idx, head_idx, row, 1] = td64
                 else:
                     delta = Float32(tn64 / td64) if td64 != Float64(0.0) else Float32(0.0)
                     if row < seqlen.seqlen_q:

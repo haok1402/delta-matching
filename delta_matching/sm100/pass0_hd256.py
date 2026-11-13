@@ -99,27 +99,23 @@ def delta_block_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool):
 
 def delta_nd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal: bool, nd: torch.Tensor):
     """Ring-block pass 0: nd (B, H, Nq, 2) fp64 += this block's per-row [num, den] (same P / dP as dm_delta_hd256 and the
-    backward). Non-causal: Nk is free (key range of k8 / v8); causal: Nk >= Nq bottom-right. lse = the MERGED lse."""
+    backward). Non-causal: Nk is free (key range of k8 / v8); causal: Nk >= Nq bottom-right. lse = the MERGED lse.
+    The kernel WRITES the block's [num, den] to a temp (idempotent: safe under the fast path's verify-and-replay), the
+    host adds it to nd (fp64, in call order)."""
     B, Nq, H, Nk = _block_checks(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal)
     assert nd.shape == (B, H, Nq, 2) and nd.dtype == torch.float64 and nd.is_contiguous()
     exp_variant = variant_for() + "+nd" + ("+br" if causal and Nk != Nq else "")
     over = dict(FORCE)
-    nd.__leading_dim__ = 3
-    nd.__assumed_align__ = 8
+    blk = torch.empty(B, H, Nq, 2, device=nd.device, dtype=torch.float64)
+    blk.__leading_dim__ = 3
+    blk.__assumed_align__ = 8
     aux = [_aux(qs.contiguous(), 2), _aux(ks.contiguous(), 2), _aux(vs.contiguous(), 2), _aux(dos.contiguous(), 2),
-           _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2), nd]
+           _aux(do8.contiguous().view(torch.uint8), 3), _aux(lse.contiguous(), 2), blk]
     names = ["qs", "ks", "vs", "dos", "do8", "lse", "nd"]
     inp = dict(q8=q8, k8=k8, v8=v8, **{n: t for n, t in zip(names, aux)})
-    snap = []
-
-    def slow():           # the fast path's verification call runs slow() AND the replay on the same nd: snapshot + reset
-        snap[:] = [nd.clone()]
-        return _slow(q8, k8, v8, aux, causal, over, exp_variant)
-
-    def reset():
-        nd.copy_(snap[0])
-    launch_cache_sm100.call("pass0_hd256", inp, (bool(causal), exp_variant, repr(sorted(over.items()))), slow,
-                            reset=reset, cmp=[])
+    launch_cache_sm100.call("pass0_hd256", inp, (bool(causal), exp_variant, repr(sorted(over.items()))),
+                            lambda: _slow(q8, k8, v8, aux, causal, over, exp_variant), cmp=[])
+    nd += blk
     return nd
 
 

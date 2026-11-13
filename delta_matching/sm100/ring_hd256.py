@@ -58,44 +58,69 @@ def dqg_launch(W, Wsb, k8, ks, B, Nq, H, causal, dq, n_k=None):
     return dq
 
 
-def _ws(tiles, dev):
-    """dS workspace of one chunk (allocator-cached; bounded by DM_BWD_WS_LIMIT_GB through the plan)."""
-    return (torch.empty(tiles, 128, 128, device=dev, dtype=torch.uint8),
-            torch.empty(tiles, 1, 4, device=dev, dtype=torch.uint8))
+def _chunk_bytes(B, H, Hk, n_q, n_k, causal, chunk, direct, kv_bytes, dq_bytes):
+    """Device bytes a chunk needs besides the caller's tensors: its dS workspace (W + Wsb) and, when it cannot write
+    the caller's dK / dV / dQ directly, its temporaries (dK + dV of its keys x KV heads, dQ of its q heads)."""
+    g0, g1, k0, k1 = chunk
+    rep = H // Hk
+    nb = bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * rep, n_q, causal, k1 - k0) * TILE_BYTES
+    if not direct:
+        nb += 2 * B * (k1 - k0) * 128 * (g1 - g0) * D * kv_bytes
+    if (g0, g1) != (0, Hk):
+        nb += B * n_q * 128 * (g1 - g0) * rep * D * dq_bytes
+    return nb
 
 
-def plan(B, H, Hk, n_q, n_k, causal, cap=None):
+def _direct(B, Hk, n_k, chunk):
+    g0, g1, k0, k1 = chunk
+    return (g0, g1) == (0, Hk) and (B == 1 or (k0, k1) == (0, n_k))     # key-range slices are contiguous at B == 1
+
+
+def plan_bytes(B, H, Hk, n_q, n_k, causal, chunks, kv_bytes=2, dq_bytes=2):
+    """Peak extra device bytes of bwd_block for this plan (one workspace sized for the largest chunk, reused; one
+    chunk's temporaries live at a time). Excludes the caller's inputs / outputs."""
+    ws = max(bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * (H // Hk), n_q, causal, k1 - k0) for g0, g1, k0, k1 in chunks) * TILE_BYTES
+    tmp = max(_chunk_bytes(B, H, Hk, n_q, n_k, causal, c, _direct(B, Hk, n_k, c), kv_bytes, dq_bytes)
+              - bwd_hd256kv2.dqw_tiles(B, (c[1] - c[0]) * (H // Hk), n_q, causal, c[3] - c[2]) * TILE_BYTES for c in chunks)
+    return ws + tmp
+
+
+def plan(B, H, Hk, n_q, n_k, causal, cap=None, kv_bytes=2, dq_bytes=2):
     """Chunks (g0, g1, k0, k1) in tiles: KV-head groups [g0, g1) x key tiles [k0, k1), ascending (= the unchunked
     reduction order of dQ; dK / dV of a key are formed in exactly one chunk). Preference: whole block; one KV group per
     chunk (bitwise the whole block).  DM_RING_KEYRANGE=1 (non-causal only): key ranges (with all heads at B == 1, else
-    per KV group), dQ = fp32 sum of the ranges' partials (deterministic, not bitwise the whole block)."""
+    per KV group), dQ = fp32 sum of the ranges' partials (deterministic, not bitwise the whole block).
+    The cap DM_BWD_WS_LIMIT_GB bounds plan_bytes(): workspace AND the chunk temporaries (kv_bytes / dq_bytes = element
+    size of the caller's dK / dV and dQ)."""
     cap = workspace_limit_bytes() if cap is None else cap
     rep = H // Hk
 
-    def tiles(nh, nk):
-        return bwd_hd256kv2.dqw_tiles(B, nh, n_q, causal, nk)
+    def fits(chunks):
+        return plan_bytes(B, H, Hk, n_q, n_k, causal, chunks, kv_bytes, dq_bytes) <= cap
 
-    if tiles(H, n_k) * TILE_BYTES <= cap:
-        return [(0, Hk, 0, n_k)]
-    if tiles(rep, n_k) * TILE_BYTES <= cap:
-        return [(g, g + 1, 0, n_k) for g in range(Hk)]
+    for chunks in ([(0, Hk, 0, n_k)], [(g, g + 1, 0, n_k) for g in range(Hk)]):
+        if fits(chunks):
+            return chunks
     if causal or env("DM_RING_KEYRANGE", "0") != "1":
         return None
-    if B == 1:          # key ranges with all heads (outputs straight into the caller's tensors)
-        per = int(cap // (tiles(H, 1) * TILE_BYTES))
-        if per >= 1:
-            return [(0, Hk, k0, min(n_k, k0 + per)) for k0 in range(0, n_k, per)]
-    per = int(cap // (tiles(rep, 1) * TILE_BYTES))
-    if per < 1:
-        return None
-    return [(g, g + 1, k0, min(n_k, k0 + per)) for g in range(Hk) for k0 in range(0, n_k, per)]
+    for nh in ((Hk,) if B == 1 else ()) + (1,):            # key ranges with all heads at B == 1, then per KV group
+        for per in range(n_k, 0, -1):
+            chunks = [(g, g + nh, k0, min(n_k, k0 + per)) for g in range(0, Hk, nh) for k0 in range(0, n_k, per)]
+            if fits(chunks):
+                return chunks
+    return None
+
+
+def _aligned16(t):
+    return t.data_ptr() % 16 == 0
 
 
 def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=None, dv=None):
     """(dq, dk, dv) of the block. dq: None / bf16 (B, Nq, H, 256) -> written; fp32 -> dq += this block's dQ.
     dk / dv (B, Nk, Hk, 256), contiguous caller tensors when given: bf16 -> written (rounded once from the fp32 TMEM
     accumulator); fp32 -> dk += / dv += this block's fp32 dK / dV (KV2 dkacc: read-add-write, deterministic).
-    lse / delta: of the rows (merged / global)."""
+    Caller tensors must be 16-byte aligned (vector epilogues). lse / delta: of the rows (merged / global).
+    Extra device memory: plan_bytes(...) <= DM_BWD_WS_LIMIT_GB (workspace + chunk temporaries)."""
     B, Nq, H, Dq = q8.shape
     Nk, Hk = k8.shape[1], k8.shape[2]
     rep = H // Hk
@@ -112,10 +137,14 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
         dv = torch.empty(B, Nk, Hk, D, device=dev, dtype=torch.bfloat16)
     assert dk.shape == (B, Nk, Hk, D) and dv.shape == dk.shape and dk.is_contiguous() and dv.is_contiguous()
     assert dk.dtype == dv.dtype and dk.dtype in (torch.float32, torch.bfloat16)
+    assert _aligned16(dq) and _aligned16(dk) and _aligned16(dv), "bwd_block: dq / dk / dv must be 16-byte aligned"
     kacc = dk.dtype == torch.float32
-    chunks = plan(B, H, Hk, n_q, n_k, causal)
+    chunks = plan(B, H, Hk, n_q, n_k, causal, kv_bytes=dk.element_size(), dq_bytes=dq.element_size())
     assert chunks is not None, f"ring bwd_block: no chunk fits DM_BWD_WS_LIMIT_GB ({B}, {H}, {Hk}, {Nq}, {Nk}, {causal})"
     assert acc or all(c[2:] == (0, n_k) for c in chunks), "key-range chunks need an fp32 dq (accumulate)"
+    ws_tiles = max(bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * rep, n_q, causal, k1 - k0) for g0, g1, k0, k1 in chunks)
+    W_all = torch.empty(ws_tiles, 128, 128, device=dev, dtype=torch.uint8)     # one workspace, reused by every chunk
+    Wsb_all = torch.empty(ws_tiles, 1, 4, device=dev, dtype=torch.uint8)       # (stream order covers the reuse)
     for g0, g1, k0, k1 in chunks:
         nk_c = k1 - k0
         rect = nk_c != n_q
@@ -123,10 +152,11 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
         heads = slice(g0 * rep, g1 * rep)
         keys = slice(k0 * 128, k1 * 128)
         whole_heads = (g0, g1) == (0, Hk)
-        W, Wsb = _ws(bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * rep, n_q, causal, nk_c), dev)
+        nt = bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * rep, n_q, causal, nk_c)
+        W, Wsb = W_all[:nt], Wsb_all[:nt]
         kq = (k8[:, keys, g0:g1], ks[:, g0:g1, k0 * 4:k1 * 4], v8[:, keys, g0:g1], vs[:, g0:g1, k0 * 4:k1 * 4])
         qq = (q8[:, :, heads], qs[:, heads], do8[:, :, heads], dos[:, heads], lse[:, heads], delta[:, heads])
-        direct = whole_heads and (B == 1 or (k0, k1) == (0, n_k))     # key-range slices are contiguous at B == 1
+        direct = _direct(B, Hk, n_k, (g0, g1, k0, k1))
         if direct:
             out = (dk[:, keys], dv[:, keys])
             opts = opts + (" dkacc" if kacc else "")
@@ -143,14 +173,15 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
             else:
                 dk[:, keys, g0:g1].copy_(out[0])
                 dv[:, keys, g0:g1].copy_(out[1])
+        del out                                                                  # one chunk's temporaries at a time
         if whole_heads:
             dqg_launch(W, Wsb, kq[0], kq[1], B, Nq, H, causal, dq, n_k=nk_c)
-        elif acc:
-            tmp = torch.zeros(B, Nq, (g1 - g0) * rep, D, device=dev, dtype=torch.float32)
-            dqg_launch(W, Wsb, kq[0], kq[1], B, Nq, (g1 - g0) * rep, causal, tmp, n_k=nk_c)
-            dq[:, :, heads] += tmp
         else:
-            tmp = torch.empty(B, Nq, (g1 - g0) * rep, D, device=dev, dtype=torch.bfloat16)
+            tmp = (torch.zeros if acc else torch.empty)(B, Nq, (g1 - g0) * rep, D, device=dev, dtype=dq.dtype)
             dqg_launch(W, Wsb, kq[0], kq[1], B, Nq, (g1 - g0) * rep, causal, tmp, n_k=nk_c)
-            dq[:, :, heads].copy_(tmp)
+            if acc:
+                dq[:, :, heads] += tmp
+            else:
+                dq[:, :, heads].copy_(tmp)
+            del tmp
     return dq, dk, dv

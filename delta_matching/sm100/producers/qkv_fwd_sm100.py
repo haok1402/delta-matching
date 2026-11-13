@@ -137,6 +137,16 @@ def st_u8(addr, v, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def st_v2(addr, a, b, *, loc=None, ip=None):
+    _asm(None, [cutlass.Int64(addr), I32(a), I32(b)], "st.global.v2.b32 [$0], {$1, $2};", "l,r,r", loc, ip, side=True)
+
+
+@dsl_user_op
+def st_f32(addr, v, *, loc=None, ip=None):
+    _asm(None, [cutlass.Int64(addr), F32(v)], "st.global.f32 [$0], $1;", "l,f", loc, ip, side=True)
+
+
+@dsl_user_op
 def ld_cg(addr, *, loc=None, ip=None):
     return F32(_asm(T.f32(), [cutlass.Int64(addr)], "ld.global.cg.f32 $0, [$1];", "=f,l", loc, ip, side=True))
 
@@ -252,9 +262,37 @@ def _codes8(v, k: cutlass.Constexpr, inv):
     return w
 
 
+# ------------------------------------------------------------------------------------------------ output addressing
+# Every code / scale / kvw output is addressed through a destination record so the same kernels write plain tensors or
+# the ring's wire slots. Local token rows [0, csplit) are half 0, [csplit, N) half 1 (csplit = N: one half).
+#   codes  (base bytes, sb rows, o0 rows, o1 rows): row = b*sb + n + (half ? o1 - csplit : o0); byte = row*nh*D + h*D
+#   scales (base bytes, sb, sh, o0, o1) fp32 words: idx = b*sb + h*sh + (half ? o1 + blk - csplit/32 : o0 + blk)
+#   kvw    (base bytes, sb, sh, o0, o1) int32 words: word = b*sb + h*sh + (half ? o1 : o0) + 2*(blkl//4) + which,
+#          byte blkl % 4, blkl = the 32-row block index inside the half.
+@cute.jit
+def _code_addr(cd, b, n_, h, m, hf, csplit, NH: cutlass.Constexpr, D: cutlass.Constexpr):
+    off = cd[2] + cutlass.Int64(hf) * (cd[3] - cd[2] - cutlass.Int64(csplit))
+    row = cutlass.Int64(b) * cd[1] + cutlass.Int64(n_) + off
+    return cd[0] + row * (NH * D) + cutlass.Int64(h) * D + cutlass.Int64(m) * 8
+
+
+@cute.jit
+def _scale_addr(sd, b, h, blk, hf, csplit):
+    off = sd[3] + cutlass.Int64(hf) * (sd[4] - sd[3] - cutlass.Int64(csplit // TR))
+    return sd[0] + (cutlass.Int64(b) * sd[1] + cutlass.Int64(h) * sd[2] + cutlass.Int64(blk) + off) * 4
+
+
+@cute.jit
+def _kvw_addr(wd, b, h, blk, hf, csplit, which: cutlass.Constexpr):
+    blkl = blk - hf * (csplit // TR)
+    off = wd[3] + cutlass.Int64(hf) * (wd[4] - wd[3])
+    word = cutlass.Int64(b) * wd[1] + cutlass.Int64(h) * wd[2] + off + cutlass.Int64(2 * (blkl // 4) + which)
+    return wd[0] + word * 4 + cutlass.Int64(blkl % 4)
+
+
 # ------------------------------------------------------------------------------------------------ Q
 @cute.jit
-def _q_body(tid, pm, pbh, Y4, G4, C4, S4, Q8W, QS, RSQ, red, eps, N: cutlass.Constexpr, H: cutlass.Constexpr,
+def _q_body(tid, pm, pbh, Y4, G4, C4, S4, QD, QSD, csplit, RSQ, red, eps, N: cutlass.Constexpr, H: cutlass.Constexpr,
             D: cutlass.Constexpr, R: cutlass.Constexpr):
     b = pbh // H
     h = pbh - b * H
@@ -268,6 +306,7 @@ def _q_body(tid, pm, pbh, Y4, G4, C4, S4, Q8W, QS, RSQ, red, eps, N: cutlass.Con
     c = lane % RC
     slot = warp * RPW + lane // RC
     g = _load_g(G4, c, RC, NCH)
+    hf = (pm * RB) // csplit
     for i in cutlass.range_constexpr(RB // NSLOT):          # pass i = one 32-row MX block
         r = i * NSLOT + slot
         n_ = pm * RB + r
@@ -284,14 +323,15 @@ def _q_body(tid, pm, pbh, Y4, G4, C4, S4, Q8W, QS, RSQ, red, eps, N: cutlass.Con
         eb = e8m0(m)
         inv = shl23f(I32(254) - eb)
         for k in cutlass.range_constexpr(NCH):
-            Q8W[row, h, c + RC * k, None].store(_codes8(t, k, inv).load())
+            w = _codes8(t, k, inv)
+            st_v2(_code_addr(QD, b, n_, h, c + RC * k, hf, csplit, H, D), w[0], w[1])
         if tid == 0:
-            QS[pbh, (pm * RB + i * NSLOT) // TR] = shl23f(eb)
+            st_f32(_scale_addr(QSD, b, h, (pm * RB + i * NSLOT) // TR, hf, csplit), shl23f(eb))
 
 
 # ------------------------------------------------------------------------------------------------ K1 (+ V, + fold)
 @cute.jit
-def _k1_body(tid, pm, pbg, buf, red, CTR, KM, Y4, G4, C4, S4, KP, RSK, V8W, VS, pKVW, eps, SUMONLY: cutlass.Constexpr,
+def _k1_body(tid, pm, pbg, buf, red, CTR, KM, Y4, G4, C4, S4, KP, RSK, VD, VSD, WD, csplit, eps, SUMONLY: cutlass.Constexpr,
              N: cutlass.Constexpr, H: cutlass.Constexpr, G: cutlass.Constexpr, D: cutlass.Constexpr,
              R: cutlass.Constexpr, ROWS: cutlass.Constexpr, WITH_V: cutlass.Constexpr):
     b = pbg // G
@@ -334,12 +374,14 @@ def _k1_body(tid, pm, pbg, buf, red, CTR, KM, Y4, G4, C4, S4, KP, RSK, V8W, VS, 
             m = _cta_amax(am, red[i, None])
             eb = e8m0(m)
             inv = shl23f(I32(254) - eb)
+            hf = (pm * RB) // csplit
             for k in cutlass.range_constexpr(NCH):
-                V8W[row, gh, c + RC * k, None].store(_codes8(v, k, inv).load())
+                w = _codes8(v, k, inv)
+                st_v2(_code_addr(VD, b, n_, gh, c + RC * k, hf, csplit, G, D), w[0], w[1])
             if tid == 0:
                 blk = (pm * RB + i * NSLOT) // TR
-                VS[pbg, blk] = shl23f(eb)
-                st_u8(pKVW + (cutlass.Int64(pbg) * (N // 64) + 2 * (blk // 4) + 1) * 4 + blk % 4, eb)
+                st_f32(_scale_addr(VSD, b, gh, blk, hf, csplit), shl23f(eb))
+                st_u8(_kvw_addr(WD, b, gh, blk, hf, csplit, 1), eb)
     cute.arch.barrier()
     # quant_qkv2's chunk tree (aligned K): column d = T32(rows 0,2,..,62) + T32(rows 1,3,..,63), T32 = balanced pairwise
     bh16 = cute.make_tensor(cute.recast_ptr(buf.iterator, dtype=cutlass.BFloat16), _lay((RB, D)))
@@ -383,35 +425,49 @@ def _k1_body(tid, pm, pbg, buf, red, CTR, KM, Y4, G4, C4, S4, KP, RSK, V8W, VS, 
 
 
 @cute.kernel
-def _a_kernel(CTR, KM, Y4, GQ4, GK4, C4, S4, Q8W, QS, RSQ, KP, RSK, V8W, VS, pKVW, eps: F32,
+def _a_kernel(CTR, KM, Y4, GQ4, GK4, C4, S4, RSQ, KP, RSK, eps: F32,
+              q0: cutlass.Int64, q1: cutlass.Int64, q2: cutlass.Int64, q3: cutlass.Int64,
+              qs0: cutlass.Int64, qs1: cutlass.Int64, qs2: cutlass.Int64, qs3: cutlass.Int64, qs4: cutlass.Int64,
+              v0: cutlass.Int64, v1: cutlass.Int64, v2: cutlass.Int64, v3: cutlass.Int64,
+              vs0: cutlass.Int64, vs1: cutlass.Int64, vs2: cutlass.Int64, vs3: cutlass.Int64, vs4: cutlass.Int64,
+              w0: cutlass.Int64, w1: cutlass.Int64, w2: cutlass.Int64, w3: cutlass.Int64, w4: cutlass.Int64,
+              csplit: cutlass.Int32,
               N: cutlass.Constexpr, H: cutlass.Constexpr, G: cutlass.Constexpr, BG: cutlass.Constexpr,
               D: cutlass.Constexpr, R: cutlass.Constexpr, ROWS: cutlass.Constexpr, SUMONLY: cutlass.Constexpr,
               ROLE: cutlass.Constexpr):
     """K1 (+ V, + last-CTA fold) CTAs first, then the Q CTAs: one launch (ROLE 0); ROLE 1 = K1 (+ V) only, ROLE 2 =
-    Q only (ring CP: the K-sum all-reduce overlaps the Q launch)."""
+    Q only (ring CP: the K-sum all-gather overlaps the Q launch)."""
     tid, _, _ = cute.arch.thread_idx()
     bid, _, _ = cute.arch.block_idx()
     NK1 = (N // RB) * BG
+    QD, QSD = (q0, q1, q2, q3), (qs0, qs1, qs2, qs3, qs4)
+    VD, VSD, WD = (v0, v1, v2, v3), (vs0, vs1, vs2, vs3, vs4), (w0, w1, w2, w3, w4)
     red = cute.make_tensor(cute.arch.alloc_smem(F32, 32, 16), _lay((4, 8)))
     buf = red
     if cutlass.const_expr(ROLE != 2):     # the K1 bf16 stash (Q-only launches need no big smem)
         buf = cute.make_tensor(cute.arch.alloc_smem(I32, RB * D // 2, 16), _lay((RB, D // 8, 4)))
     if cutlass.const_expr(ROLE == 2):
-        _q_body(tid, bid % (N // RB), bid // (N // RB), Y4, GQ4, C4, S4, Q8W, QS, RSQ, red, eps, N, H, D, R)
+        _q_body(tid, bid % (N // RB), bid // (N // RB), Y4, GQ4, C4, S4, QD, QSD, csplit, RSQ, red, eps, N, H, D, R)
     elif cutlass.const_expr(ROLE == 1):
-        _k1_body(tid, bid % (N // RB), bid // (N // RB), buf, red, CTR, KM, Y4, GK4, C4, S4, KP, RSK, V8W, VS, pKVW,
-                 eps, SUMONLY, N, H, G, D, R, ROWS, True)
+        _k1_body(tid, bid % (N // RB), bid // (N // RB), buf, red, CTR, KM, Y4, GK4, C4, S4, KP, RSK, VD, VSD, WD,
+                 csplit, eps, SUMONLY, N, H, G, D, R, ROWS, True)
     else:
         if bid < NK1:
-            _k1_body(tid, bid % (N // RB), bid // (N // RB), buf, red, CTR, KM, Y4, GK4, C4, S4, KP, RSK, V8W, VS,
-                     pKVW, eps, SUMONLY, N, H, G, D, R, ROWS, True)
+            _k1_body(tid, bid % (N // RB), bid // (N // RB), buf, red, CTR, KM, Y4, GK4, C4, S4, KP, RSK, VD, VSD, WD,
+                     csplit, eps, SUMONLY, N, H, G, D, R, ROWS, True)
         else:
             q = bid - NK1
-            _q_body(tid, q % (N // RB), q // (N // RB), Y4, GQ4, C4, S4, Q8W, QS, RSQ, red, eps, N, H, D, R)
+            _q_body(tid, q % (N // RB), q // (N // RB), Y4, GQ4, C4, S4, QD, QSD, csplit, RSQ, red, eps, N, H, D, R)
 
 
 @cute.jit
-def _launch_a(pCTR, pKM, pY, pGQ, pGK, pC, pS, pQ8, pQS, pRSQ, pKP, pRSK, pV8, pVS, pKVW: cutlass.Int64, eps: F32,
+def _launch_a(pCTR, pKM, pY, pGQ, pGK, pC, pS, pRSQ, pKP, pRSK, eps: F32,
+              q0: cutlass.Int64, q1: cutlass.Int64, q2: cutlass.Int64, q3: cutlass.Int64,
+              qs0: cutlass.Int64, qs1: cutlass.Int64, qs2: cutlass.Int64, qs3: cutlass.Int64, qs4: cutlass.Int64,
+              v0: cutlass.Int64, v1: cutlass.Int64, v2: cutlass.Int64, v3: cutlass.Int64,
+              vs0: cutlass.Int64, vs1: cutlass.Int64, vs2: cutlass.Int64, vs3: cutlass.Int64, vs4: cutlass.Int64,
+              w0: cutlass.Int64, w1: cutlass.Int64, w2: cutlass.Int64, w3: cutlass.Int64, w4: cutlass.Int64,
+              csplit: cutlass.Int32,
               B: cutlass.Constexpr, N: cutlass.Constexpr, H: cutlass.Constexpr, G: cutlass.Constexpr,
               D: cutlass.Constexpr, R: cutlass.Constexpr, ROWS: cutlass.Constexpr, SUMONLY: cutlass.Constexpr,
               ROLE: cutlass.Constexpr, stream):
@@ -425,21 +481,22 @@ def _launch_a(pCTR, pKM, pY, pGQ, pGK, pC, pS, pQ8, pQS, pRSQ, pKP, pRSK, pV8, p
     GK4 = cute.make_tensor(pGK, _lay((1, D // 8, 4)))
     C4 = cute.make_tensor(pC, _lay((B * N, R // 8, 4)))
     S4 = cute.make_tensor(pS, _lay((B * N, R // 8, 4)))
-    Q8W = cute.make_tensor(pQ8, _lay((B * N, H, D // 8, 2)))
-    QS = cute.make_tensor(pQS, _lay((BH, N // TR)))
     RSQ = cute.make_tensor(pRSQ, _lay((BH * N,)))
     KP = cute.make_tensor(pKP, _lay((BG, N // RB, D)))
     RSK = cute.make_tensor(pRSK, _lay((BG * N,)))
-    V8W = cute.make_tensor(pV8, _lay((B * N, G, D // 8, 2)))
-    VS = cute.make_tensor(pVS, _lay((BG, N // TR)))
     ncta = (N // RB) * ((BG if ROLE != 2 else 0) + (BH if ROLE != 1 else 0))
-    _a_kernel(CTR, KM, Y4, GQ4, GK4, C4, S4, Q8W, QS, RSQ, KP, RSK, V8W, VS, pKVW, eps, N, H, G, BG, D, R, ROWS,
+    _a_kernel(CTR, KM, Y4, GQ4, GK4, C4, S4, RSQ, KP, RSK, eps, q0, q1, q2, q3, qs0, qs1, qs2, qs3, qs4,
+              v0, v1, v2, v3, vs0, vs1, vs2, vs3, vs4, w0, w1, w2, w3, w4, csplit, N, H, G, BG, D, R, ROWS,
               SUMONLY, ROLE).launch(grid=[ncta, 1, 1], block=[256, 1, 1], stream=stream)
 
 
 # ------------------------------------------------------------------------------------------------ K2
 @cute.kernel
-def _k2_kernel(Y4, G4, C4, S4, KM, K8W, KS, pKVW: cutlass.Int64, eps: F32, N: cutlass.Constexpr, H: cutlass.Constexpr,
+def _k2_kernel(Y4, G4, C4, S4, KM, eps: F32,
+               k0: cutlass.Int64, k1: cutlass.Int64, k2: cutlass.Int64, k3: cutlass.Int64,
+               ks0: cutlass.Int64, ks1: cutlass.Int64, ks2: cutlass.Int64, ks3: cutlass.Int64, ks4: cutlass.Int64,
+               w0: cutlass.Int64, w1: cutlass.Int64, w2: cutlass.Int64, w3: cutlass.Int64, w4: cutlass.Int64,
+               csplit: cutlass.Int32, N: cutlass.Constexpr, H: cutlass.Constexpr,
                G: cutlass.Constexpr, D: cutlass.Constexpr, R: cutlass.Constexpr):
     tid, _, _ = cute.arch.thread_idx()
     pm, pbg, _ = cute.arch.block_idx()
@@ -460,6 +517,8 @@ def _k2_kernel(Y4, G4, C4, S4, KM, K8W, KS, pKVW: cutlass.Int64, eps: F32, N: cu
         for j in cutlass.range_constexpr(8):
             km[k * 8 + j] = KM[pbg, (c + RC * k) * 8 + j]
     kcol = (2 * H * D + gh * D) // 8
+    KD, KSD, WD = (k0, k1, k2, k3), (ks0, ks1, ks2, ks3, ks4), (w0, w1, w2, w3, w4)
+    hf = (pm * RB) // csplit
     for i in cutlass.range_constexpr(RB // NSLOT):
         r = i * NSLOT + slot
         n_ = pm * RB + r
@@ -474,15 +533,20 @@ def _k2_kernel(Y4, G4, C4, S4, KM, K8W, KS, pKVW: cutlass.Int64, eps: F32, N: cu
         eb = e8m0(m)
         inv = shl23f(I32(254) - eb)
         for k in cutlass.range_constexpr(NCH):
-            K8W[row, gh, c + RC * k, None].store(_codes8(t, k, inv).load())
+            w = _codes8(t, k, inv)
+            st_v2(_code_addr(KD, b, n_, gh, c + RC * k, hf, csplit, G, D), w[0], w[1])
         if tid == 0:
             blk = (pm * RB + i * NSLOT) // TR
-            KS[pbg, blk] = shl23f(eb)
-            st_u8(pKVW + (cutlass.Int64(pbg) * (N // 64) + 2 * (blk // 4)) * 4 + blk % 4, eb)
+            st_f32(_scale_addr(KSD, b, gh, blk, hf, csplit), shl23f(eb))
+            st_u8(_kvw_addr(WD, b, gh, blk, hf, csplit, 0), eb)
 
 
 @cute.jit
-def _launch_k2(pY, pG, pC, pS, pKM, pK8, pKS, pKVW: cutlass.Int64, eps: F32, B: cutlass.Constexpr,
+def _launch_k2(pY, pG, pC, pS, pKM, eps: F32,
+               k0: cutlass.Int64, k1: cutlass.Int64, k2: cutlass.Int64, k3: cutlass.Int64,
+               ks0: cutlass.Int64, ks1: cutlass.Int64, ks2: cutlass.Int64, ks3: cutlass.Int64, ks4: cutlass.Int64,
+               w0: cutlass.Int64, w1: cutlass.Int64, w2: cutlass.Int64, w3: cutlass.Int64, w4: cutlass.Int64,
+               csplit: cutlass.Int32, B: cutlass.Constexpr,
                N: cutlass.Constexpr, H: cutlass.Constexpr, G: cutlass.Constexpr, D: cutlass.Constexpr,
                R: cutlass.Constexpr, stream):
     W = (2 * H + 2 * G) * D
@@ -492,9 +556,8 @@ def _launch_k2(pY, pG, pC, pS, pKM, pK8, pKS, pKVW: cutlass.Int64, eps: F32, B: 
     C4 = cute.make_tensor(pC, _lay((B * N, R // 8, 4)))
     S4 = cute.make_tensor(pS, _lay((B * N, R // 8, 4)))
     KM = cute.make_tensor(pKM, _lay((BG, D)))
-    K8W = cute.make_tensor(pK8, _lay((B * N, G, D // 8, 2)))
-    KS = cute.make_tensor(pKS, _lay((BG, N // TR)))
-    _k2_kernel(Y4, G4, C4, S4, KM, K8W, KS, pKVW, eps, N, H, G, D, R).launch(
+    _k2_kernel(Y4, G4, C4, S4, KM, eps, k0, k1, k2, k3, ks0, ks1, ks2, ks3, ks4, w0, w1, w2, w3, w4, csplit,
+               N, H, G, D, R).launch(
         grid=[N // RB, BG, 1], block=[256, 1, 1], stream=stream)
 
 
@@ -562,11 +625,10 @@ def _launch_bf(pY, pGQ, pGK, pC, pS, pQB, pKB, pRSQ, pRSK, eps: F32, B: cutlass.
 
 # ------------------------------------------------------------------------------------------------ host
 _GM = cute.AddressSpace.gmem
-_DT = {torch.bfloat16: cutlass.BFloat16, torch.float32: cutlass.Float32, torch.float8_e4m3fn: cutlass.Int32,
-       torch.int32: cutlass.Int32}
 _FNS = {}
 _PCACHE = []
 _CTR = {}
+D_ = 256
 
 
 def _fingerprint():
@@ -591,16 +653,17 @@ def _fake_ptr(dt):
     return make_ptr(dt, 16, _GM, assumed_align=16)
 
 
-def _compile(key, fn, dts, consts):
-    """compile with placeholder pointers (no CUDA context needed: AOT on a CPU node), persistent cache."""
+def _compile(key, fn, dts, n_i64, n_i32, consts):
+    """compile with placeholder pointers / ints (no CUDA context needed: AOT on a CPU node), persistent cache.
+    Signature: pointers (dts), eps, n_i64 Int64 (destination records), n_i32 Int32, consts, stream."""
     f = _FNS.get(key)
     if f is None:
         c = _pcache()
         f = c.get(key) if hasattr(c, "get") else None
         if f is None:
             from cutlass.cute.runtime import make_fake_stream
-            args = [_fake_ptr(d) if d is not None else cutlass.Int64(0) for d in dts]
-            f = cute.compile(fn, *args, F32(1e-6), *consts, make_fake_stream(use_tvm_ffi_env_stream=False),
+            args = [_fake_ptr(d) for d in dts] + [F32(1e-6)] + [cutlass.Int64(0)] * n_i64 + [cutlass.Int32(0)] * n_i32
+            f = cute.compile(fn, *args, *consts, make_fake_stream(use_tvm_ffi_env_stream=False),
                              options="--enable-tvm-ffi")
             c[key] = f
         _FNS[key] = f
@@ -616,30 +679,28 @@ def _rows(N):
 
 
 _A_DTS = [cutlass.Int32, cutlass.Float32, cutlass.Int32, cutlass.Int32, cutlass.Int32, cutlass.Int32, cutlass.Int32,
-          cutlass.Int32, cutlass.Float32, cutlass.Float32, cutlass.Float32, cutlass.Float32, cutlass.Int32,
-          cutlass.Float32, None]
-_K2_DTS = [cutlass.Int32, cutlass.Int32, cutlass.Int32, cutlass.Int32, cutlass.Float32, cutlass.Int32,
-           cutlass.Float32, None]
+          cutlass.Float32, cutlass.Float32, cutlass.Float32]
+_K2_DTS = [cutlass.Int32, cutlass.Int32, cutlass.Int32, cutlass.Int32, cutlass.Float32]
+_BF_DTS = [cutlass.Int32] * 7 + [cutlass.Float32] * 2
+_A_I64, _K2_I64 = 23, 14
 
 
 def _key_a(B, N, H, G, D, R, sumonly, role=0):
-    return ("a", B, N, H, G, D, R, _rows(N), bool(sumonly), int(role))
+    return ("a2", B, N, H, G, D, R, _rows(N), bool(sumonly), int(role))
 
 
 def _key_k2(B, N, H, G, D, R):
-    return ("k2", B, N, H, G, D, R)
-
-
-_BF_DTS = [cutlass.Int32] * 7 + [cutlass.Float32] * 2
+    return ("k2b", B, N, H, G, D, R)
 
 
 def aot(B, N, H, G, R=64, D=256):
     """compile every launch for this shape (CPU-only; no CUDA context)."""
-    _compile(("bf", B, N, H, G, D, R), _launch_bf, _BF_DTS, [B, N, H, G, D, R])
-    _compile(_key_a(B, N, H, G, D, R, False), _launch_a, _A_DTS, [B, N, H, G, D, R, _rows(N), False, 0])
+    _compile(("bf", B, N, H, G, D, R), _launch_bf, _BF_DTS, 0, 0, [B, N, H, G, D, R])
+    _compile(_key_a(B, N, H, G, D, R, False), _launch_a, _A_DTS, _A_I64, 1, [B, N, H, G, D, R, _rows(N), False, 0])
     for role in (0, 1, 2):
-        _compile(_key_a(B, N, H, G, D, R, True, role), _launch_a, _A_DTS, [B, N, H, G, D, R, _rows(N), True, role])
-    _compile(_key_k2(B, N, H, G, D, R), _launch_k2, _K2_DTS, [B, N, H, G, D, R])
+        _compile(_key_a(B, N, H, G, D, R, True, role), _launch_a, _A_DTS, _A_I64, 1,
+                 [B, N, H, G, D, R, _rows(N), True, role])
+    _compile(_key_k2(B, N, H, G, D, R), _launch_k2, _K2_DTS, _K2_I64, 1, [B, N, H, G, D, R])
 
 
 def _ctr(n, dev):
@@ -680,55 +741,98 @@ def _out(out, name, shape, dtype, dev):
     return t
 
 
-def _stage_a(y, gq, gk, cos, sin, H, G, R, eps, out, sumonly, role=0):
-    D = 256
+# destination records of plain tensors (one half: csplit = N)
+def dst_codes(t):
+    """(B, N, h, D) codes tensor -> (base, sb rows, o0, o1)."""
+    return (t.data_ptr(), t.shape[1], 0, 0)
+
+
+def dst_scales(t):
+    """(B, h, N/32) fp32 -> (base, sb, sh, o0, o1)."""
+    return (t.data_ptr(), t.shape[1] * t.shape[2], t.shape[2], 0, 0)
+
+
+def dst_kvw(t):
+    """(B, G, N/64) int32 -> (base, sb, sh, o0, o1)."""
+    return (t.data_ptr(), t.shape[1] * t.shape[2], t.shape[2], 0, 0)
+
+
+def _stage_a(y, gq, gk, cos, sin, H, G, R, eps, out, sumonly, role=0, dst=None):
+    """dst: optional destination records overriding the plain outputs: keys q8, qs, v8, vs, kvw (tuples as dst_*) and
+    csplit (local rows of half 0; default N = one half). Plain tensors are allocated only for keys without a record."""
+    D = D_
     B, N = _check(y, gq, gk, cos, sin, H, G, D, R)
     dev = y.device
     e4, f32 = torch.float8_e4m3fn, torch.float32
-    q8 = _out(out, "q8", (B, N, H, D), e4, dev)
-    qs = _out(out, "qs", (B, H, N // TR), f32, dev)
-    v8 = _out(out, "v8", (B, N, G, D), e4, dev)
-    vs = _out(out, "vs", (B, G, N // TR), f32, dev)
-    kvw = _out(out, "kvw", (B, G, N // 64), torch.int32, dev)
+    dst = dst or {}
+    res = {}
+    if role != 1:
+        if "q8" not in dst:
+            res["q8"] = _out(out, "q8", (B, N, H, D), e4, dev)
+        if "qs" not in dst:
+            res["qs"] = _out(out, "qs", (B, H, N // TR), f32, dev)
+    if role != 2:
+        if "v8" not in dst:
+            res["v8"] = _out(out, "v8", (B, N, G, D), e4, dev)
+        if "vs" not in dst:
+            res["vs"] = _out(out, "vs", (B, G, N // TR), f32, dev)
+        if "kvw" not in dst:
+            res["kvw"] = _out(out, "kvw", (B, G, N // 64), torch.int32, dev)
     rq = _out(out, "rstd_q", (B, H, N), f32, dev)
     rk = _out(out, "rstd_k", (B, G, N), f32, dev)
     km = _out(out, "kmean", (B, G, D), f32, dev)
     kp = torch.empty(B * G * (N // RB) * D, device=dev, dtype=f32)
     ctr = _ctr(B * G, dev)
-    f = _compile(_key_a(B, N, H, G, D, R, sumonly, role), _launch_a, _A_DTS,
+    zero4, zero5 = (rq.data_ptr(), 0, 0, 0), (rq.data_ptr(), 0, 0, 0, 0)   # unused by this role
+    qd = dst.get("q8") or (dst_codes(res["q8"]) if "q8" in res else zero4)
+    qsd = dst.get("qs") or (dst_scales(res["qs"]) if "qs" in res else zero5)
+    vd = dst.get("v8") or (dst_codes(res["v8"]) if "v8" in res else zero4)
+    vsd = dst.get("vs") or (dst_scales(res["vs"]) if "vs" in res else zero5)
+    wd = dst.get("kvw") or (dst_kvw(res["kvw"]) if "kvw" in res else zero5)
+    csplit = int(dst.get("csplit", N))
+    assert N % csplit == 0 and csplit % 128 == 0, "csplit: a 128-multiple dividing N"
+    f = _compile(_key_a(B, N, H, G, D, R, sumonly, role), _launch_a, _A_DTS, _A_I64, 1,
                  [B, N, H, G, D, R, _rows(N), bool(sumonly), int(role)])
     i32 = torch.int32
     tens = [ctr, km, y.view(i32), _dense16(gq).view(i32), _dense16(gk).view(i32), _dense16(cos).view(i32),
-            _dense16(sin).view(i32), q8.view(i32), qs, rq, kp, rk, v8.view(i32), vs]
-    f(*[t.data_ptr() for t in tens], kvw.data_ptr(), float(eps), torch.cuda.current_stream(dev).cuda_stream)
+            _dense16(sin).view(i32), rq, kp, rk]
+    f(*[t.data_ptr() for t in tens], float(eps), *qd, *qsd, *vd, *vsd, *wd, csplit,
+      torch.cuda.current_stream(dev).cuda_stream)
     gate = y.unflatten(-1, (-1, D))[:, :, : 2 * H].unflatten(2, (H, 2))[:, :, :, 1]
-    return dict(q8=q8, qs=qs, v8=v8, vs=vs, kvw=kvw, rstd_q=rq, rstd_k=rk, kmean=km, gate=gate,
-                _keep=(gq, gk, cos, sin))
+    res.update(rstd_q=rq, rstd_k=rk, kmean=km, gate=gate, _keep=(gq, gk, cos, sin))
+    return res
 
 
-def k_quant_mean(y, gk, cos, sin, km, H, G, R=64, eps=1e-6, out=None):
-    """K2: k_rot re-derived from y's k columns, minus km (fp32 (B,G,D)), MX codes / scales; K bytes into out['kvw'].
-    -> (k8 (B,N,G,D), ks (B,G,N/32), kvw)."""
-    D = 256
+def k_quant_mean(y, gk, cos, sin, km, H, G, R=64, eps=1e-6, out=None, dst=None):
+    """K2: k_rot re-derived from y's k columns, minus km (fp32 (B,G,D)), MX codes / scales; K bytes of kvw.
+    Plain: -> (k8 (B,N,G,D), ks (B,G,N/32), kvw); with dst records (keys k8, ks, kvw, csplit) the outputs go there and
+    the returned entries for those keys are None."""
+    D = D_
     B, N = _check(y, gk, gk, cos, sin, H, G, D, R)
     dev = y.device
     if tuple(km.shape) != (B, G, D) or km.dtype != torch.float32:
         raise ValueError("k_quant_mean: km must be fp32 (B, G, D)")
-    k8 = _out(out, "k8", (B, N, G, D), torch.float8_e4m3fn, dev)
-    ks = _out(out, "ks", (B, G, N // TR), torch.float32, dev)
-    kvw = _out(out, "kvw", (B, G, N // 64), torch.int32, dev)
-    f = _compile(_key_k2(B, N, H, G, D, R), _launch_k2, _K2_DTS, [B, N, H, G, D, R])
+    dst = dst or {}
+    k8 = None if "k8" in dst else _out(out, "k8", (B, N, G, D), torch.float8_e4m3fn, dev)
+    ks = None if "ks" in dst else _out(out, "ks", (B, G, N // TR), torch.float32, dev)
+    kvw = None if "kvw" in dst else _out(out, "kvw", (B, G, N // 64), torch.int32, dev)
+    kd = dst.get("k8") or dst_codes(k8)
+    ksd = dst.get("ks") or dst_scales(ks)
+    wd = dst.get("kvw") or dst_kvw(kvw)
+    csplit = int(dst.get("csplit", N))
+    f = _compile(_key_k2(B, N, H, G, D, R), _launch_k2, _K2_DTS, _K2_I64, 1, [B, N, H, G, D, R])
     i32 = torch.int32
-    tens = [y.view(i32), _dense16(gk).view(i32), _dense16(cos).view(i32), _dense16(sin).view(i32), _dense16(km),
-            k8.view(i32), ks]
-    f(*[t.data_ptr() for t in tens], kvw.data_ptr(), float(eps), torch.cuda.current_stream(dev).cuda_stream)
+    km = _dense16(km)
+    tens = [y.view(i32), _dense16(gk).view(i32), _dense16(cos).view(i32), _dense16(sin).view(i32), km]
+    f(*[t.data_ptr() for t in tens], float(eps), *kd, *ksd, *wd, csplit, torch.cuda.current_stream(dev).cuda_stream)
     return k8, ks, kvw
 
 
 def fwd_producers(y, gq, gk, cos, sin, H, G, R=64, eps=1e-6, out=None):
     """y bf16 [B, N, (2H+2G)256] contiguous (TE GEMM output: q_h|gate_h per head, k, v); gq, gk bf16 [256];
     cos, sin bf16 [B, N, R] contiguous.  Returns a dict: q8, qs, k8, ks, v8, vs, kvw, rstd_q, rstd_k, kmean, gate.
-    Bitwise the unfused chain (TE rmsnorm -> partial RoPE -> quant.quant_qkv2) on the same y."""
+    Bitwise the unfused chain (TE rmsnorm -> partial RoPE -> quant.quant_qkv2) on the same y; the K mean is
+    quant_qkv2's tree (per 64-row chunk T32(even rows) + T32(odd rows); ROWS-row partials; sequential fold; / N)."""
     r = _stage_a(y, gq, gk, cos, sin, H, G, R, eps, out, False)
     k8, ks, _ = k_quant_mean(y, gk, cos, sin, r["kmean"], H, G, R, eps,
                              out=dict(k8=None if out is None else out.get("k8"),
@@ -737,27 +841,26 @@ def fwd_producers(y, gq, gk, cos, sin, H, G, R=64, eps=1e-6, out=None):
     return r
 
 
-def fwd_producers_ksum(y, gq, gk, cos, sin, H, G, R=64, eps=1e-6, out=None, role=0):
-    """Launch A with the K column SUM (B,G,D) in r['kmean'] instead of the mean (ring CP: all-reduce it, divide by the
-    global N, then k_quant_mean).  The sum is quant_qkv2's tree without the final / N: per 64-row chunk T32(even rows)
-    + T32(odd rows), ROWS-row partials ((0 + c0) + c1) + .., then ((0 + P0) + P1) + ...
-    role 0 = K stats + V + Q (one launch); role 1 = K stats + V only (rstd_q / q8 / qs untouched); role 2 = Q only
-    (kmean / v8 / vs / rstd_k / V bytes of kvw untouched): issue role 1, start the all-reduce, then role 2 overlaps it.
-    Callers pass the same `out` dict to both role calls."""
-    return _stage_a(y, gq, gk, cos, sin, H, G, R, eps, out, True, role)
+def fwd_producers_ksum(y, gq, gk, cos, sin, H, G, R=64, eps=1e-6, out=None, role=0, dst=None):
+    """Launch A with the K column SUM (B,G,D) in r['kmean'] instead of the mean (ring CP: combine the ranks' sums,
+    divide by the global N, then k_quant_mean).  The sum is quant_qkv2's tree without the final / N (the same tree as
+    the CP 1 mean): per 64-row chunk T32(even rows) + T32(odd rows), ROWS-row partials ((0 + c0) + c1) + .., then
+    ((0 + P0) + P1) + ...  role 0 = K stats + V + Q (one launch); role 1 = K stats + V only; role 2 = Q only.  Callers
+    pass the same `out` dict to both role calls.  dst: destination records (see _stage_a)."""
+    return _stage_a(y, gq, gk, cos, sin, H, G, R, eps, out, True, role, dst)
 
 
 def fwd_bf16(y, gq, gk, cos, sin, H, G, R=64, eps=1e-6):
     """q / k norm + partial RoPE, bf16 out: q_rot (B,N,H,D), k_rot (B,N,G,D), rstd_q (B,H,N), rstd_k (B,G,N).
     The same row math as fwd_producers (its pre-quant values)."""
-    D = 256
+    D = D_
     B, N = _check(y, gq, gk, cos, sin, H, G, D, R)
     dev = y.device
     qb = torch.empty(B, N, H, D, device=dev, dtype=torch.bfloat16)
     kb = torch.empty(B, N, G, D, device=dev, dtype=torch.bfloat16)
     rq = torch.empty(B, H, N, device=dev, dtype=torch.float32)
     rk = torch.empty(B, G, N, device=dev, dtype=torch.float32)
-    f = _compile(("bf", B, N, H, G, D, R), _launch_bf, _BF_DTS, [B, N, H, G, D, R])
+    f = _compile(("bf", B, N, H, G, D, R), _launch_bf, _BF_DTS, 0, 0, [B, N, H, G, D, R])
     i32 = torch.int32
     tens = [y.view(i32), _dense16(gq).view(i32), _dense16(gk).view(i32), _dense16(cos).view(i32),
             _dense16(sin).view(i32), qb.view(i32), kb.view(i32), rq, rk]

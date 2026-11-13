@@ -193,6 +193,8 @@ def backward_key_ranges(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, ra
     Wsb = torch.empty(max_tiles, 1, 4, device=device, dtype=torch.uint8)
     carry = torch.empty(1, Nq, H, D, device=device, dtype=torch.float32)      # raw fp32 dQ accumulators between ranges
     opts = bwd_hd256kv2.DmHd256Kv2.DEFAULT_OPTS + " dqt rect" + (" krg" if causal else "")
+    if causal and env("DM_RING_DMK", "1") == "1":     # KV2 opt dmk (bitwise): the causal select only on the peeled tile
+        opts = opts + " dmk"
     assert dk.dtype == dv.dtype and dk.dtype in (torch.bfloat16, torch.float32)
     if dk.dtype == torch.float32:      # caller fp32 dK / dV accumulators: KV2 dkacc (+=) on the range slices
         opts += " dkacc"

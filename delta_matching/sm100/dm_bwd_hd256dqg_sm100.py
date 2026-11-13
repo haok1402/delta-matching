@@ -77,8 +77,8 @@ class DmHd256Dqg:
     #   sw : SF warps skip the SFA-stage WAR wait at the first reuse (t == S); the MMA warp delays MMA(0)
     #   fin: epilogue reads acc before the fin wait; the last MMA tile is delayed
     #   cr : (kr) carry restored AFTER the SFF[0] arrive + delay (MMA(0) may accumulate on stale TMEM); cr_safe: restore before
-    #        the arrive (shipped order) + the same delay after it
-    KNOBS = ("ab", "sf", "sw", "fin", "cr")
+    #        the arrive (shipped order) + the same delay after it; crp_safe: restore, delay, then the arrive (shipped order)
+    KNOBS = ("ab", "sf", "sw", "fin", "cr", "crp")
     DLY = 1 << 15
 
     def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = False, band: bool = False,
@@ -100,8 +100,11 @@ class DmHd256Dqg:
         # range (causal: ct + 1 + o <= m; non-causal: last) writes bf16(acc x 2^-4) to dQ exactly as the default epilogue,
         # else the raw accumulator to mCarry.  cnt(ct) == 0: no MMA, no store.  The MMA sequence of every dQ row is the
         # unchunked one (key tiles ascending, fp32 TMEM state carried bit-exactly) -> bitwise the whole-block dQ.
+        # kr + acc: dQ is fp32 and a finishing row does dq += acc x 2^-4 exactly as the acc epilogue (one add per block).
+        # kr launches are one batch element (B == 1) over the ACTIVE q tiles only: causal grid = (n_t - max(0, -o)) H, so
+        # every CTA has cnt(ct) >= 1 (no CTA without MMAs / stores).
         self.kr = bool(kr)
-        assert not (self.kr and (self.rect or band or self.acc))
+        assert not (self.kr and (self.rect or band))
         """wsw: W tiles hold the swizzled MN-major SW128 smem image (KV2 opt dqt) -> 1-D bulk copy; else plain rows (dqw) -> TMA."""
         self.wsw = bool(wsw)
         # band (KV2 opt dqc chunks; causal only): this launch forms dQ of q tiles [q0, q0 + n_t) only (n_t argument =
@@ -194,6 +197,8 @@ class DmHd256Dqg:
         lane = cute.arch.lane_idx()
         lin, _, _ = cute.arch.block_idx()
         nbz = cute.arch.grid_dim()[0] // (n_t * H)
+        if const_expr(self.kr):
+            nbz = 1
         # causal global LPT: longest q tiles first over all (head, batch)
         ct = n_t - 1 - lin // (H * nbz)
         rr_ = lin - (lin // (H * nbz)) * (H * nbz)
@@ -356,6 +361,9 @@ class DmHd256Dqg:
                 tmem_st_x1(tb + self.COL_SF + 4 * s + warp, sfa)       # SFA of rows 32 w.. at column + w (as Mx2)
                 cute.arch.fence_view_async_tmem_store()
                 tc_fence_before()
+                if const_expr(self.kr and self.kn == "crp"):
+                    if kt == 0:
+                        spin(self.DLY)          # crp_safe: the restored words sit unpublished for a while (MMA must wait)
                 if const_expr(not (self.kn == "sf" and self.unsafe)):
                     warp_arrive(SFF + 8 * s)
                 if const_expr(self.kr and self.kn == "cr"):
@@ -371,15 +379,24 @@ class DmHd256Dqg:
             if const_expr(self.kr):
                 if total > 0:
                     if fin_row != 0:
-                        ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 2)
-                        for cb in cutlass.range_constexpr(8):
-                            ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
-                            cute.arch.fence_view_async_tmem_load()
-                            for i in cutlass.range_constexpr(0, 32, 8):
-                                wv = [None] * 4
-                                for qq in cutlass.range_constexpr(4):
-                                    wv[qq] = bf16x2(mul_f32(ov[i + 2 * qq], Float32(SM)), mul_f32(ov[i + 2 * qq + 1], Float32(SM)))
-                                st_global_v4(ob + (32 * cb + i) * 2, wv[0], wv[1], wv[2], wv[3])
+                        if const_expr(self.acc):        # dq fp32 += acc x 2^-4 (the acc epilogue, once per block)
+                            ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 4)
+                            for cb in cutlass.range_constexpr(8):
+                                ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
+                                cute.arch.fence_view_async_tmem_load()
+                                for i in cutlass.range_constexpr(0, 32, 4):
+                                    a4 = ld_v4f(ob + (32 * cb + i) * 4)
+                                    st_global_v4f(ob + (32 * cb + i) * 4, *[add_f32(a4[qq], mul_f32(ov[i + qq], Float32(SM))) for qq in range(4)])
+                        else:
+                            ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 2)
+                            for cb in cutlass.range_constexpr(8):
+                                ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
+                                cute.arch.fence_view_async_tmem_load()
+                                for i in cutlass.range_constexpr(0, 32, 8):
+                                    wv = [None] * 4
+                                    for qq in cutlass.range_constexpr(4):
+                                        wv[qq] = bf16x2(mul_f32(ov[i + 2 * qq], Float32(SM)), mul_f32(ov[i + 2 * qq + 1], Float32(SM)))
+                                    st_global_v4(ob + (32 * cb + i) * 2, wv[0], wv[1], wv[2], wv[3])
                     else:            # raw fp32 accumulator -> carry (bits preserved: no arithmetic)
                         oc = global_address(mCarry) + ((Int64(b) * nrow + q) * H + h) * (D * 4)
                         for cb in cutlass.range_constexpr(8):
@@ -420,13 +437,15 @@ class DmHd256Dqg:
 class DmHd256DqgKr(DmHd256Dqg):
     """Dqg opt kr: one key-range chunk with the exact dQ carry (see DmHd256Dqg.__init__)."""
 
-    def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = True):
-        super().__init__(causal, stages, knob, wsw, kr=True)
+    def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = True, acc: bool = False):
+        super().__init__(causal, stages, knob, wsw, acc=acc, kr=True)
 
     @cute.jit
     def __call__(self, mA: cute.Tensor, mKt: cute.Tensor, mWsb: cute.Tensor, mKs: cute.Tensor, mdQ: cute.Tensor,
                  mCarry: cute.Tensor, n_t: Int32, H: Int32, Hk: Int32, q0: Int32, stream):
         mma_o, tma_A, tA, tma_T, tT, a_l, t_l, mW = self._setup(mA, mKt)
-        nbz = cute.size(mdQ, mode=[0])
+        n_act = n_t
+        if const_expr(self.causal):      # active q tiles ct >= -o (cnt(ct) >= 1); LPT ct = n_t - 1 - lin // H covers them
+            n_act = n_t - cutlass.max(Int32(16384) - (q0 >> 16), Int32(0))
         self.kernel_kr(mma_o, tma_A, tA, tma_T, tT, a_l, t_l, mW, mWsb, mKs, mdQ, mCarry, n_t, H, Hk, q0).launch(
-            grid=[n_t * H * nbz, 1, 1], block=[self.threads, 1, 1], smem=self.SS.size_in_bytes(), stream=stream)
+            grid=[n_act * H, 1, 1], block=[self.threads, 1, 1], smem=self.SS.size_in_bytes(), stream=stream)

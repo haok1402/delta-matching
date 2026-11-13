@@ -66,20 +66,37 @@ def dqg_kr_launch(W, Wsb, k8, ks, B, Nq, H, causal, dq, carry, m, o, cin, last, 
     """
     Dqg opt kr: the dQ part of one key-range chunk (m key tiles, signed local offset o = off - k0; k8 / ks: the
     range's views) with the exact fp32 carry (B, Nq, H, 256): restored when cin, rows whose last key tile is in this
-    range written as bf16 to dq, the others' raw accumulator stored to carry.
+    range written to dq (bf16: written; fp32: dq += x 2^-4), the others' raw accumulator stored to carry. One batch
+    element per launch.
     """
     Hk = k8.shape[2]
     f8 = torch.float8_e4m3fn
-    assert dq.shape == (B, Nq, H, D) and dq.dtype == torch.bfloat16 and dq.is_contiguous()
-    assert carry.shape == dq.shape and carry.dtype == torch.float32 and carry.is_contiguous()
-    assert 1 <= m < 4096 and -16384 <= o < 16384
-    mA = W.view(f8).permute(2, 1, 0)
-    mKt = k8.view(f8).permute(3, 1, 2, 0)
-    q0 = m | int(cin) << 12 | int(last) << 13 | (o + 16384) << 16
-    key = ("dqg", bool(causal), DQG_STAGES, knob, True, "kr")
-    bwd_hd256mx._run(key, lambda: DmHd256DqgKr(bool(causal), DQG_STAGES, knob, True), [mA, mKt, Wsb, ks, dq, carry], [0, 0, 2, 2, 3, 3],
-                     [Nq // 128, H, Hk, q0], mode="dqg")
+    acc = dq.dtype == torch.float32
+    assert B == 1 and dq.shape == (B, Nq, H, D) and dq.dtype in (torch.bfloat16, torch.float32) and dq.is_contiguous()
+    assert carry.shape == (B, Nq, H, D) and carry.dtype == torch.float32 and carry.is_contiguous()
+    q0 = pack_kr_dqg(m, o, cin, last)
+    key = ("dqg", bool(causal), DQG_STAGES, knob, True, "kr") + (("acc",) if acc else ())
+    bwd_hd256mx._run(key, lambda: DmHd256DqgKr(bool(causal), DQG_STAGES, knob, True, acc), [mA_view(W), K_view(k8), Wsb, ks, dq, carry],
+                     [0, 0, 2, 2, 3, 3], [Nq // 128, H, Hk, q0], mode="dqg")
     return dq
+
+
+KR_MAX_TILES = 4095          # key tiles per range (12-bit field of the Dqg kr argument)
+KR_OFF_BIAS = 16384          # signed local offsets o in [-16384, 16384) (15-bit biased fields of KV2 krg / Dqg kr)
+
+
+def pack_kr_dqg(m, o, cin, last):
+    """Dqg opt kr q0 argument: m | cin << 12 | last << 13 | (o + 16384) << 16 (sign bit clear)."""
+    assert 1 <= m <= KR_MAX_TILES and -KR_OFF_BIAS <= o < KR_OFF_BIAS
+    return m | int(bool(cin)) << 12 | int(bool(last)) << 13 | (o + KR_OFF_BIAS) << 16
+
+
+def mA_view(W):
+    return W.view(torch.float8_e4m3fn).permute(2, 1, 0)
+
+
+def K_view(k8):
+    return k8.view(torch.float8_e4m3fn).permute(3, 1, 2, 0)
 
 
 def key_range_tiles(num_q_tiles, num_k_tiles, k0, k1, causal):
@@ -114,7 +131,7 @@ def key_range_chunks(B, H, num_q_tiles, num_k_tiles, causal, cap, extra_bytes=0)
     ranges, k0 = [], 0
     while k0 < num_k_tiles:
         k1, used = k0, 0
-        while k1 < num_k_tiles and used + per_tile[k1] <= budget:
+        while k1 < num_k_tiles and k1 - k0 < KR_MAX_TILES and used + per_tile[k1] <= budget:
             used += per_tile[k1]
             k1 += 1
         ranges.append((k0, k1))
@@ -128,7 +145,7 @@ def key_range_chunks(B, H, num_q_tiles, num_k_tiles, causal, cap, extra_bytes=0)
                 bounds.append(kt + 1)
         bounds.append(num_k_tiles)
         equal = list(zip(bounds[:-1], bounds[1:]))
-        if len(equal) == count and all(a < b and sum(per_tile[a:b]) <= budget for a, b in equal):
+        if len(equal) == count and all(a < b and b - a <= KR_MAX_TILES and sum(per_tile[a:b]) <= budget for a, b in equal):
             return equal
     return ranges
 
@@ -155,6 +172,9 @@ def backward_key_ranges(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, ra
     Nk = k8.shape[1]
     num_q_tiles, num_k_tiles = Nq // 128, Nk // 128
     off = num_k_tiles - num_q_tiles if causal else 0
+    assert num_q_tiles < 1 << 16 and (not causal or off >= 0)
+    assert ranges and ranges[0][0] == 0 and ranges[-1][1] == num_k_tiles and all(a[1] == b[0] for a, b in zip(ranges, ranges[1:]))
+    assert all(1 <= k1 - k0 <= KR_MAX_TILES and -KR_OFF_BIAS <= off - k0 < KR_OFF_BIAS for k0, k1 in ranges), ranges
     device = q8.device
     max_tiles = max(H * key_range_tiles(num_q_tiles, num_k_tiles, k0, k1, causal) for k0, k1 in ranges)
     W = torch.empty(max_tiles, 128, 128, device=device, dtype=torch.uint8)
@@ -264,7 +284,7 @@ def carry_plan(B, H, Hk, N, causal, cap, carry_mode="1"):
     return best
 
 
-def plan_backward_chunks(B, H, Hk, N, causal):
+def plan_backward_chunks(B, H, Hk, N, causal, carry=True):
     """
     Chunk plan (ascending list of dicts b0 b1 g0 g1 h0 h1 q0 q1: batch range x KV-group range x
     q-head-in-group range x q-tile band) whose workspace, head-split copies and carry fit the cap,
@@ -294,7 +314,7 @@ def plan_backward_chunks(B, H, Hk, N, causal):
             return [whole_heads(b, b + 1, g0, g1) for b in range(B) for g0, g1 in balanced_ranges(Hk, num_groups)]
     carry_mode = env("DM_H256_DQR_CARRY", "heads")
     assert carry_mode in ("0", "1", "heads"), carry_mode
-    if carry_mode == "0":
+    if carry_mode == "0" or not carry:
         return None
     return carry_plan(B, H, Hk, N, causal, cap, carry_mode)
 
@@ -371,13 +391,15 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
     Hk = k8.shape[2]
     heads_per_group, num_q_tiles = H // Hk, N // 128
     causal = bool(causal)
-    chunks = plan_backward_chunks(B, H, Hk, N, causal)
-    if chunks is None and not identity and key_ranges_setting():
+    krange = key_ranges_setting() and not identity
+    chunks = plan_backward_chunks(B, H, Hk, N, causal, carry=not krange or env("DM_H256_DQR_CARRY", None) is not None)
+    if chunks is None and krange:
         ranges = key_range_chunks(B, H, num_q_tiles, num_q_tiles, causal, workspace_limit_bytes())
         if ranges is not None:
             dq = torch.empty(B, N, H, D, device=q8.device, dtype=torch.bfloat16)
             dk = torch.empty(B, N, Hk, D, device=q8.device, dtype=torch.bfloat16)
             return backward_key_ranges(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, ranges, dq, dk, torch.empty_like(dk))
+        chunks = plan_backward_chunks(B, H, Hk, N, causal)          # the legacy carry classes, then the kv2 path
     if chunks is None:
         return backward_kv2_path(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, identity)
     device = q8.device

@@ -336,6 +336,35 @@ def chunk_descriptors(rows, device):
     return CHUNK_DESCRIPTORS[key][1]
 
 
+def group_batch_q(x, b, first_head, num_groups, num_heads, heads_per_group):
+    """
+    View of a q-head tensor x (B, N, H, D) or (B, H, M) at batch b with the KV-group axis as its
+    batch axis: q heads first_head + g * heads_per_group + h for g < num_groups, h < num_heads, as
+    (num_groups, N, num_heads, D) or (num_groups, num_heads, M). No copy.
+    """
+    st = x.stride()
+    if x.dim() == 4:
+        _, N, _, D = x.shape
+        return x.as_strided((num_groups, N, num_heads, D), (heads_per_group * st[2], st[1], st[2], st[3]),
+                            x.storage_offset() + b * st[0] + first_head * st[2])
+    _, _, M = x.shape
+    return x.as_strided((num_groups, num_heads, M), (heads_per_group * st[1], st[1], st[2]),
+                        x.storage_offset() + b * st[0] + first_head * st[1])
+
+
+def group_batch_kv(x, b, g0, num_groups):
+    """
+    View of a KV-head tensor x (B, N, Hk, D) or (B, Hk, M) at batch b, KV heads [g0, g0 +
+    num_groups) as the batch axis: (num_groups, N, 1, D) or (num_groups, 1, M). No copy.
+    """
+    st = x.stride()
+    if x.dim() == 4:
+        _, N, _, D = x.shape
+        return x.as_strided((num_groups, N, 1, D), (st[2], st[1], st[2], st[3]), x.storage_offset() + b * st[0] + g0 * st[2])
+    _, _, M = x.shape
+    return x.as_strided((num_groups, 1, M), (st[1], st[1], st[2]), x.storage_offset() + b * st[0] + g0 * st[1])
+
+
 SIDE_STREAMS = {}
 
 
@@ -436,40 +465,57 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
                 ident[b0 * H:b1 * H].copy_(extra["hash"])
             dqg_launch(*workspace, batch_slice(k8), batch_slice(ks), num_batch, N, H, causal, out=batch_slice(dq))
             continue
-        # head-split chunk: contiguous copies of its heads, group-major (g, hi) -> kernel head g_local * num_heads + hi_local
-        q_heads = [g * heads_per_group + h for g in range(g0, g1) for h in range(h0, h1)]
-        q_head_index = (torch.arange(g0, g1, device=device)[:, None] * heads_per_group + torch.arange(h0, h1, device=device)[None, :]).reshape(-1)  # no H2D copy
-
-        def take_tokens(x):
-            return x[b0:b1].index_select(2, q_head_index)          # (B, N, h, D)
-
-        def take_heads(x):
-            return x[b0:b1].index_select(1, q_head_index)          # (B, h, ...)
-        k8_chunk, ks_chunk = k8[b0:b1, :, g0:g1].contiguous(), ks[b0:b1, g0:g1].contiguous()
-        chunk_inputs = (take_tokens(q8), take_heads(qs), k8_chunk, ks_chunk, v8[b0:b1, :, g0:g1].contiguous(), vs[b0:b1, g0:g1].contiguous(),
-                        take_tokens(do8), take_heads(dos), take_heads(lse), take_heads(delta))
+        # head-split chunk: views of the caller's tensors, no gathers. Whole KV groups: their q heads are the contiguous
+        # range [g0 * hpg, g1 * hpg). Part of each group's q heads (num_batch == 1): the KV-group axis becomes the
+        # batch axis (B' = groups, H' = q heads per group in the chunk, Hk' = 1), which keeps the workspace tile
+        # order l = g * num_heads + h, the carry words and the identity rows of the (B = 1, H = groups * heads,
+        # Hk = groups) launch. KV2 / Dqg write contiguous chunk outputs, moved with one copy each.
+        whole_groups = num_heads == heads_per_group
+        if whole_groups:
+            hq0, hq1 = g0 * heads_per_group, g1 * heads_per_group
+            k8_chunk, ks_chunk = k8[b0:b1, :, g0:g1], ks[b0:b1, g0:g1]
+            chunk_inputs = (q8[b0:b1, :, hq0:hq1], qs[b0:b1, hq0:hq1], k8_chunk, ks_chunk, v8[b0:b1, :, g0:g1], vs[b0:b1, g0:g1],
+                            do8[b0:b1, :, hq0:hq1], dos[b0:b1, hq0:hq1], lse[b0:b1, hq0:hq1], delta[b0:b1, hq0:hq1])
+            launch_b, launch_h, launch_hk = num_batch, num_groups * num_heads, num_groups
+        else:
+            assert num_batch == 1
+            first_head = g0 * heads_per_group + h0
+            k8_chunk, ks_chunk = group_batch_kv(k8, b0, g0, num_groups), group_batch_kv(ks, b0, g0, num_groups)
+            chunk_inputs = (group_batch_q(q8, b0, first_head, num_groups, num_heads, heads_per_group), group_batch_q(qs, b0, first_head, num_groups, num_heads, heads_per_group),
+                            k8_chunk, ks_chunk, group_batch_kv(v8, b0, g0, num_groups), group_batch_kv(vs, b0, g0, num_groups),
+                            group_batch_q(do8, b0, first_head, num_groups, num_heads, heads_per_group), group_batch_q(dos, b0, first_head, num_groups, num_heads, heads_per_group),
+                            group_batch_q(lse, b0, first_head, num_groups, num_heads, heads_per_group), group_batch_q(delta, b0, first_head, num_groups, num_heads, heads_per_group))
+            launch_b, launch_h, launch_hk = num_groups, num_heads, 1
         is_last = h1 == heads_per_group and q1 == num_q_tiles
         if num_heads == heads_per_group and q0 == 0 and q1 == num_q_tiles:      # KV-group chunk: no carry
             dk_chunk, dv_chunk, extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, knob="", opts=opts, dqw=workspace)
         else:
             assert num_batch == 1
             size = N * num_groups * D
-            carry_views = (carry[0].view(-1)[:size].view(1, N, num_groups, D), carry[1].view(-1)[:size].view(1, N, num_groups, D))
+            carry_views = (carry[0].view(-1)[:size].view(launch_b, N, launch_hk, D), carry[1].view(-1)[:size].view(launch_b, N, launch_hk, D))
             dk_chunk, dv_chunk, extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, knob="", opts=opts + " dqc", dqw=workspace,
                                                                 dqc=(descriptors[carry_idx], carry_views[0], carry_views[1], q1))
             carry_idx += 1
         band = None if (q0 == 0 and q1 == num_q_tiles) else (q0, q1)
-        dq_chunk = torch.empty(num_batch, N, num_groups * num_heads, D, device=device, dtype=torch.bfloat16) if band else None
-        dq_chunk = dqg_launch(*workspace, k8_chunk, ks_chunk, num_batch, N, num_groups * num_heads, causal, band=band, out=dq_chunk)
+        dq_chunk = torch.empty(launch_b, N, launch_h, D, device=device, dtype=torch.bfloat16) if band else None
+        dq_chunk = dqg_launch(*workspace, k8_chunk, ks_chunk, launch_b, N, launch_h, causal, band=band, out=dq_chunk)
         rows_ = slice(q0 * 128, q1 * 128)
-        for j, head in enumerate(q_heads):
-            dq[b0:b1, rows_, head].copy_(dq_chunk[:, rows_, j])
-            if identity:      # chunk row (b_local, j) -> global row (b, head); only its q band
+        if whole_groups:
+            dq[b0:b1, rows_, hq0:hq1].copy_(dq_chunk[:, rows_])
+        else:      # (groups, N, heads, D) -> rows x groups x heads of dq[b0] viewed (N, Hk, hpg, D)
+            dq[b0].view(N, Hk, heads_per_group, D)[rows_, g0:g1, h0:h1].copy_(dq_chunk[:, rows_].permute(1, 0, 2, 3))
+        if identity:      # chunk row (b_local, j), j = g_local * num_heads + h_local -> global row (b, head); only its q band
+            q_heads = [g * heads_per_group + h for g in range(g0, g1) for h in range(h0, h1)]
+            for j, head in enumerate(q_heads):
                 for bi in range(num_batch):
                     ident[(b0 + bi) * H + head, rows_].copy_(extra["hash"][bi * num_groups * num_heads + j, rows_])
         if is_last:
-            dk[b0:b1, :, g0:g1].copy_(dk_chunk)
-            dv[b0:b1, :, g0:g1].copy_(dv_chunk)
+            if whole_groups:
+                dk[b0:b1, :, g0:g1].copy_(dk_chunk)
+                dv[b0:b1, :, g0:g1].copy_(dv_chunk)
+            else:
+                dk[b0, :, g0:g1].copy_(dk_chunk[:, :, 0].transpose(0, 1))
+                dv[b0, :, g0:g1].copy_(dv_chunk[:, :, 0].transpose(0, 1))
         del dq_chunk, dk_chunk, dv_chunk, chunk_inputs, k8_chunk, ks_chunk
     if identity:
         return dq, dk, dv, ident

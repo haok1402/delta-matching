@@ -82,7 +82,7 @@ class DmHd256Dqg:
     DLY = 1 << 15
 
     def __init__(self, causal: bool, stages: int = 3, knob: str = "", wsw: bool = False, band: bool = False,
-                 rect: bool = False, acc: bool = False, kr: bool = False):
+                 rect: bool = False, acc: bool = False, kr: bool = False, ostr: bool = False):
         # rect (ring blocks, non-causal): n_t = q tiles (grid), the q0 Int32 slot = key tiles n_k (W packing
         # T = (l * n_q + ct) * n_k + kt, as KV2 opt rect).  acc: dQ is fp32 (B, Nq, H, 256) and this launch ADDS its
         # x * 2^-4 (read-add-write, one writer per element; launches ordered on the stream -> deterministic).
@@ -105,6 +105,10 @@ class DmHd256Dqg:
         # every CTA has cnt(ct) >= 1 (no CTA without MMAs / stores).
         self.kr = bool(kr)
         assert not (self.kr and (self.rect or band))
+        # ostr: the dQ epilogue addresses mdQ through its runtime strides (b, q, head) -> a KV-group chunk writes straight
+        # into the caller's dq[:, :, heads] view (bf16 or fp32 acc)
+        self.ostr = bool(ostr)
+        assert not (self.ostr and (self.kr or band))
         """wsw: W tiles hold the swizzled MN-major SW128 smem image (KV2 opt dqt) -> 1-D bulk copy; else plain rows (dqw) -> TMA."""
         self.wsw = bool(wsw)
         # band (KV2 opt dqc chunks; causal only): this launch forms dQ of q tiles [q0, q0 + n_t) only (n_t argument =
@@ -159,6 +163,13 @@ class DmHd256Dqg:
             sT: cute.struct.Align[cute.struct.MemRange[F8, cute.cosize(t_l)], 1024]
         self.SS = SS
         return mma_o, tma_A, tA, tma_T, tT, a_l, t_l, mW
+
+    def _qrow(self, mdQ, b, q, h, nrow, H, nbytes):
+        """byte offset of dQ row (b, q, head h): contiguous (B, N, H, 256), or the runtime strides (opt ostr)."""
+        if const_expr(self.ostr):
+            st = mdQ.stride
+            return (Int64(b) * Int64(st[0]) + Int64(q) * Int64(st[1]) + Int64(h) * Int64(st[2])) * nbytes
+        return ((Int64(b) * nrow + q) * H + h) * (self.D * nbytes)
 
     @cute.jit
     def _restore(self, cin, total, tb, mCarry, b, ct, warp, lane, n_t, H, h):
@@ -405,7 +416,7 @@ class DmHd256Dqg:
                             for i in cutlass.range_constexpr(0, 32, 4):
                                 st_global_v4f(oc + (32 * cb + i) * 4, ov[i], ov[i + 1], ov[i + 2], ov[i + 3])
             elif const_expr(self.acc):
-                ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 4)
+                ob = global_address(mdQ) + self._qrow(mdQ, b, q, h, nrow, H, 4)
                 for cb in cutlass.range_constexpr(8):
                     ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
                     cute.arch.fence_view_async_tmem_load()
@@ -413,7 +424,7 @@ class DmHd256Dqg:
                         a4 = ld_v4f(ob + (32 * cb + i) * 4)
                         st_global_v4f(ob + (32 * cb + i) * 4, *[add_f32(a4[qq], mul_f32(ov[i + qq], Float32(SM))) for qq in range(4)])
             else:
-                ob = global_address(mdQ) + ((Int64(b) * nrow + q) * H + h) * (D * 2)
+                ob = global_address(mdQ) + self._qrow(mdQ, b, q, h, nrow, H, 2)
                 for cb in cutlass.range_constexpr(8):
                     ov = tmem_ld32(tb + self.COL_ACC + 32 * cb)
                     cute.arch.fence_view_async_tmem_load()

@@ -158,7 +158,7 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc", "krg")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc", "krg", "ostr")
     # dkf32: dK / dV written as fp32 (B, Nk, Hk, 256) (the TMEM accumulator, i.e. the value the bf16 epilogue rounds);
     # dkacc: dK / dV fp32 += (read-add-write; one thread per element, launches ordered on the stream -> deterministic).
     # rect (ring blocks, requires dqt): q tiles (n_t argument) may differ from key tiles n_k (grid = 2 n_k CTAs from K's
@@ -166,6 +166,8 @@ class DmHd256Kv2:
     # Non-causal: W tile T = (l * n_q + ct) * n_k + kt.  Causal: bottom-right aligned, off = n_k - n_q >= 0 tiles (query i
     # sees keys <= i + 128 off): key tile kt is seen by q tiles ct >= kt - off; mask key > query + 128 off; W tile
     # T = l * (n_q (n_q + 1) / 2 + n_q off) + ct (ct + 1) / 2 + ct off + kt.  rect with Nq == Nk is bitwise the default.
+    # ostr: the dK / dV epilogues address the output through its runtime strides (b, key, kv head) instead of the
+    # contiguous (B, N, Hk, 256) layout -> a KV-group chunk writes straight into the caller's dk[:, keys, g0:g1] view.
     # krg (requires rect, causal): one KEY RANGE [k0, k0 + n_k) of a causal / bottom-right block, launched on chunk-local
     # K / V / dK / dV views with a signed local offset o = off - k0 (query i sees local keys <= i + 128 o; o < 0 for the
     # later ranges of a causal square).  n_t argument = n_q | (o + 16384) << 16.  Every key tile of the range keeps its
@@ -231,11 +233,20 @@ class DmHd256Kv2:
         self.dkf32 = self.dkacc or "dkf32" in self.opts
         assert not (self.dkf32 and self.dqc), "fp32 dK / dV outputs: not with the carry chunks"
         self.krg = "krg" in self.opts
+        self.ostr = "ostr" in self.opts
+        assert not (self.ostr and self.dqc)
         assert not self.krg or (self.rect and self.causal)
         assert not self.rect or ("dqt" in self.opts and not self.dqc and (self.dbg & ~16) == 0)
         assert not (self.dbg & 16 and self.dbg & 8), "dbg 16 (identity) and 8 (lockstep) share mHash"
         assert not self.dqc or ("dqt" in self.opts and (self.dbg & ~16) == 0)
         self.threads = 384
+
+    def _row(self, mOut, b, key, hx, Hk, N):
+        """element offset of output row (b, key, kv head hx): contiguous layout, or the runtime strides (opt ostr)."""
+        if const_expr(self.ostr):
+            st = mOut.stride
+            return Int64(b) * Int64(st[0]) + Int64(key) * Int64(st[1]) + Int64(hx) * Int64(st[2])
+        return ((Int64(b) * N + key) * Hk + hx) * self.D
 
     @cute.jit
     def _epi_bf16(self, tb, mdK, mdV, b, key, hx, Hk, N, qd, hf):
@@ -244,7 +255,7 @@ class DmHd256Kv2:
         for which in cutlass.range_constexpr(2):
             col = self.COL_DK if which == 0 else self.COL_DV
             mOut = mdK if which == 0 else mdV
-            ob = global_address(mOut) + (((Int64(b) * N + key) * Hk + hx) * D + d0) * 2
+            ob = global_address(mOut) + (self._row(mOut, b, key, hx, Hk, N) + d0) * 2
             for cb in cutlass.range_constexpr(2):
                 ov = tmem_ld32(tb + col + 64 * hf + 32 * cb)
                 cute.arch.fence_view_async_tmem_load()
@@ -262,7 +273,7 @@ class DmHd256Kv2:
         for which in cutlass.range_constexpr(2):
             col = self.COL_DK if which == 0 else self.COL_DV
             mOut = mdK if which == 0 else mdV
-            ob = global_address(mOut) + (((Int64(b) * N + key) * Hk + hx) * D + d0) * 4
+            ob = global_address(mOut) + (self._row(mOut, b, key, hx, Hk, N) + d0) * 4
             for cb in cutlass.range_constexpr(2):
                 ov = tmem_ld32(tb + col + 64 * hf + 32 * cb)
                 cute.arch.fence_view_async_tmem_load()

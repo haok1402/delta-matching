@@ -73,7 +73,10 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     tt = lambda x: x.view(f8).permute(3, 1, 2, 0)       # (B, N, h, D) -> (D, N, h, B)  MN-major  # noqa: E731
     if out is not None:      # (dk, dv) contiguous batch slices of the caller's outputs
         dk, dv = out
-        assert dk.shape == (B, Nk, Hk, D) and dk.is_contiguous() and dv.shape == dk.shape and dv.is_contiguous()
+        ostr = "ostr" in ot_.split()          # strided views of the caller's dK / dV (KV-group chunks)
+        assert dk.shape == (B, Nk, Hk, D) and dv.shape == dk.shape
+        assert (dk.is_contiguous() and dv.is_contiguous()) or (ostr and dk.stride(-1) == 1 and dv.stride(-1) == 1)
+        assert dk.data_ptr() % 16 == 0 and dv.data_ptr() % 16 == 0
         f32 = "dkf32" in ot_.split() or "dkacc" in ot_.split()
         assert dk.dtype == dv.dtype == (torch.float32 if f32 else torch.bfloat16), (dk.dtype, ot_)
     else:

@@ -23,6 +23,7 @@ from . import bwd_hd256mx
 from .dm_bwd_hd256dqg_sm100 import DmHd256Dqg
 from .attention_bwd_hd256_sm100 import workspace_limit_bytes, TILE_BYTES, DQG_STAGES
 from .attention_bwd_hd256_sm100 import key_range_chunks, key_range_bytes, key_ranges_setting, backward_key_ranges
+from .attention_bwd_hd256_sm100 import output_strides_setting
 from .launch_cache_sm100 import env
 
 D = 256
@@ -45,16 +46,18 @@ def delta_nd(q8, qs, k8, ks, v8, vs, do8, dos, lse, causal, nd):
 
 
 def dqg_launch(W, Wsb, k8, ks, B, Nq, H, causal, dq, n_k=None):
-    """dQ from the workspace: dq fp32 -> dq += dS K x 2^-4; dq bf16 -> written (rect when n_k != Nq / 128)."""
+    """dQ from the workspace: dq fp32 -> dq += dS K x 2^-4; dq bf16 -> written (rect when n_k != Nq / 128). A dq that
+    is a strided view (e.g. the q heads of one KV group of the caller's dQ) is written in place (Dqg opt ostr)."""
     Hk = k8.shape[2]
     f8 = torch.float8_e4m3fn
     acc = dq.dtype == torch.float32
-    assert dq.shape == (B, Nq, H, D) and dq.dtype in (torch.float32, torch.bfloat16) and dq.is_contiguous()
+    ostr = not dq.is_contiguous()
+    assert dq.shape == (B, Nq, H, D) and dq.dtype in (torch.float32, torch.bfloat16) and dq.stride(-1) == 1 and _aligned16(dq)
     rect = n_k is not None and n_k != Nq // 128
     mA = W.view(f8).permute(2, 1, 0)
     mKt = k8.view(f8).permute(3, 1, 2, 0)
-    key = ("dqg", bool(causal), DQG_STAGES, "", True) + (("acc",) if acc else ()) + (("rect",) if rect else ())
-    bwd_hd256mx._run(key, lambda: DmHd256Dqg(bool(causal), DQG_STAGES, "", True, False, rect=rect, acc=acc),
+    key = ("dqg", bool(causal), DQG_STAGES, "", True) + (("acc",) if acc else ()) + (("rect",) if rect else ()) + (("ostr",) if ostr else ())
+    bwd_hd256mx._run(key, lambda: DmHd256Dqg(bool(causal), DQG_STAGES, "", True, False, rect=rect, acc=acc, ostr=ostr),
                      [mA, mKt, Wsb, ks, dq], [0, 0, 2, 2, 3], [Nq // 128, H, Hk, n_k if rect else 0], mode="dqg")
     return dq
 
@@ -67,14 +70,15 @@ def _chunk_bytes(B, H, Hk, n_q, n_k, causal, chunk, direct, kv_bytes, dq_bytes):
     nb = bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * rep, n_q, causal, k1 - k0) * TILE_BYTES
     if not direct:
         nb += 2 * B * (k1 - k0) * 128 * (g1 - g0) * D * kv_bytes
-    if (g0, g1) != (0, Hk):
+    if (g0, g1) != (0, Hk) and not output_strides_setting():
         nb += B * n_q * 128 * (g1 - g0) * rep * D * dq_bytes
     return nb
 
 
 def _direct(B, Hk, n_k, chunk):
+    """the chunk writes the caller's dK / dV directly: contiguous slices, or any slice with DM_BWD_OSTR=1 (KV2 opt ostr)"""
     g0, g1, k0, k1 = chunk
-    return (g0, g1) == (0, Hk) and (B == 1 or (k0, k1) == (0, n_k))     # key-range slices are contiguous at B == 1
+    return output_strides_setting() or ((g0, g1) == (0, Hk) and (B == 1 or (k0, k1) == (0, n_k)))  # key slices contiguous at B == 1
 
 
 def plan_bytes(B, H, Hk, n_q, n_k, causal, chunks, kv_bytes=2, dq_bytes=2):
@@ -174,8 +178,8 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
         qq = (q8[:, :, heads], qs[:, heads], do8[:, :, heads], dos[:, heads], lse[:, heads], delta[:, heads])
         direct = _direct(B, Hk, n_k, (g0, g1, k0, k1))
         if direct:
-            out = (dk[:, keys], dv[:, keys])
-            opts = opts + (" dkacc" if kacc else "")
+            out = (dk[:, keys, g0:g1], dv[:, keys, g0:g1])
+            opts = opts + (" dkacc" if kacc else "") + ("" if out[0].is_contiguous() else " ostr")
         else:
             out = (torch.empty(B, nk_c * 128, g1 - g0, D, device=dev, dtype=dk.dtype),
                    torch.empty(B, nk_c * 128, g1 - g0, D, device=dev, dtype=dk.dtype))
@@ -192,6 +196,8 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
         del out                                                                  # one chunk's temporaries at a time
         if whole_heads:
             dqg_launch(W, Wsb, kq[0], kq[1], B, Nq, H, causal, dq, n_k=nk_c)
+        elif output_strides_setting():             # dQ of the group's q heads straight into the caller's dq (opt ostr)
+            dqg_launch(W, Wsb, kq[0], kq[1], B, Nq, (g1 - g0) * rep, causal, dq[:, :, heads], n_k=nk_c)
         else:
             tmp = (torch.zeros if acc else torch.empty)(B, Nq, (g1 - g0) * rep, D, device=dev, dtype=dq.dtype)
             dqg_launch(W, Wsb, kq[0], kq[1], B, Nq, (g1 - g0) * rep, causal, tmp, n_k=nk_c)

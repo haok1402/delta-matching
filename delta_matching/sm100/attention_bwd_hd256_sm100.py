@@ -50,15 +50,17 @@ def dqg_launch(W, Wsb, k8, ks, B, N, H, causal, *, out=None, band=None):
     Hk = k8.shape[2]
     f8 = torch.float8_e4m3fn
     dq = torch.empty(B, N, H, D, device=k8.device, dtype=torch.bfloat16) if out is None else out
-    assert dq.shape == (B, N, H, D) and dq.is_contiguous()
+    ostr = not dq.is_contiguous()          # a strided view of the caller's dQ (Dqg opt ostr)
+    assert dq.shape == (B, N, H, D) and dq.stride(-1) == 1 and dq.data_ptr() % 16 == 0 and not (ostr and band is not None)
     mA = W.view(f8).permute(2, 1, 0)                       # (T, key, q) -> (q, key, T): MN-major A (queries contiguous)
     mKt = k8.view(f8).permute(3, 1, 2, 0)                  # (B, N, Hk, 256) -> (256, N, Hk, B): MN-major B
     tensors = [mA, mKt, Wsb, ks, dq]
     leading_dims = [0, 0, 2, 2, 3]
     has_band = band is not None
-    key = ("dqg", bool(causal), DQG_STAGES, "", True) + (("band",) if has_band else ())
+    key = ("dqg", bool(causal), DQG_STAGES, "", True) + (("band",) if has_band else ()) + (("ostr",) if ostr else ())
     num_q_tiles, q_start = (band[1] - band[0], band[0]) if has_band else (N // 128, 0)
-    bwd_hd256mx._run(key, lambda: DmHd256Dqg(bool(causal), DQG_STAGES, "", True, has_band), tensors, leading_dims, [num_q_tiles, H, Hk, q_start], mode="dqg")
+    bwd_hd256mx._run(key, lambda: DmHd256Dqg(bool(causal), DQG_STAGES, "", True, has_band, ostr=ostr), tensors, leading_dims,
+                     [num_q_tiles, H, Hk, q_start], mode="dqg")
     return dq
 
 
@@ -148,6 +150,16 @@ def key_range_chunks(B, H, num_q_tiles, num_k_tiles, causal, cap, extra_bytes=0)
         if len(equal) == count and all(a < b and b - a <= KR_MAX_TILES and sum(per_tile[a:b]) <= budget for a, b in equal):
             return equal
     return ranges
+
+
+def output_strides_setting():
+    """
+    DM_BWD_OSTR: "1" (default) lets KV-group chunks write the caller's dK / dV / dQ through strided views (KV2 / Dqg
+    opt ostr, bitwise the same values); "0" keeps one temporary + copy per output and chunk.
+    """
+    value = str(env("DM_BWD_OSTR", "1")).strip()
+    assert value in ("0", "1"), value
+    return value == "1"
 
 
 def key_ranges_setting():
@@ -487,7 +499,13 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
                             group_batch_q(lse, b0, first_head, num_groups, num_heads, heads_per_group), group_batch_q(delta, b0, first_head, num_groups, num_heads, heads_per_group))
             launch_b, launch_h, launch_hk = num_groups, num_heads, 1
         is_last = h1 == heads_per_group and q1 == num_q_tiles
-        if num_heads == heads_per_group and q0 == 0 and q1 == num_q_tiles:      # KV-group chunk: no carry
+        direct = whole_groups and output_strides_setting()      # write dK / dV / dQ through strided views: no copies
+        if num_heads == heads_per_group and q0 == 0 and q1 == num_q_tiles and direct:
+            dk_chunk, dv_chunk = dk[b0:b1, :, g0:g1], dv[b0:b1, :, g0:g1]
+            ostr = "" if dk_chunk.is_contiguous() else " ostr"
+            extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, knob="", opts=opts + ostr, dqw=workspace,
+                                            out=(dk_chunk, dv_chunk))[2]
+        elif num_heads == heads_per_group and q0 == 0 and q1 == num_q_tiles:      # KV-group chunk: no carry
             dk_chunk, dv_chunk, extra = bwd_hd256kv2.kv2_launch(*chunk_inputs, causal, dbg=debug_bits, knob="", opts=opts, dqw=workspace)
         else:
             assert num_batch == 1
@@ -497,10 +515,15 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
                                                                 dqc=(descriptors[carry_idx], carry_views[0], carry_views[1], q1))
             carry_idx += 1
         band = None if (q0 == 0 and q1 == num_q_tiles) else (q0, q1)
-        dq_chunk = torch.empty(launch_b, N, launch_h, D, device=device, dtype=torch.bfloat16) if band else None
-        dq_chunk = dqg_launch(*workspace, k8_chunk, ks_chunk, launch_b, N, launch_h, causal, band=band, out=dq_chunk)
         rows_ = slice(q0 * 128, q1 * 128)
-        if whole_groups:
+        if direct and band is None:
+            dq_chunk = dqg_launch(*workspace, k8_chunk, ks_chunk, launch_b, N, launch_h, causal, out=dq[b0:b1, :, hq0:hq1])
+        else:
+            dq_chunk = torch.empty(launch_b, N, launch_h, D, device=device, dtype=torch.bfloat16) if band else None
+            dq_chunk = dqg_launch(*workspace, k8_chunk, ks_chunk, launch_b, N, launch_h, causal, band=band, out=dq_chunk)
+        if direct and band is None:
+            pass
+        elif whole_groups:
             dq[b0:b1, rows_, hq0:hq1].copy_(dq_chunk[:, rows_])
         else:      # (groups, N, heads, D) -> rows x groups x heads of dq[b0] viewed (N, Hk, hpg, D)
             dq[b0].view(N, Hk, heads_per_group, D)[rows_, g0:g1, h0:h1].copy_(dq_chunk[:, rows_].permute(1, 0, 2, 3))
@@ -509,7 +532,7 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
             for j, head in enumerate(q_heads):
                 for bi in range(num_batch):
                     ident[(b0 + bi) * H + head, rows_].copy_(extra["hash"][bi * num_groups * num_heads + j, rows_])
-        if is_last:
+        if is_last and not (direct and num_heads == heads_per_group and q0 == 0 and q1 == num_q_tiles):
             if whole_groups:
                 dk[b0:b1, :, g0:g1].copy_(dk_chunk)
                 dv[b0:b1, :, g0:g1].copy_(dv_chunk)

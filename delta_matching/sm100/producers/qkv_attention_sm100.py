@@ -13,12 +13,30 @@ rank's rows of the native table under CP). Outputs are (B, N, h, D). gate (and v
 dy_post(dY, amax, scale) -> grad of y (e.g. TE's e5m2 Float8Tensor built from the kernel's amax / scale); None = the
 bf16 dY. Ring CP for the DM arm goes through the ring orchestrator with fwd_producers_ksum / k_quant_mean instead.
 """
+import os
+
 import torch
 
 from . import qkv_bwd_sm100 as _B
 from . import qkv_fwd_sm100 as _F
 
-__all__ = ["qkv_dm_attention", "qkv_bf16"]
+__all__ = ["qkv_dm_attention", "qkv_bf16", "save_y"]
+
+
+def save_y(y, y3, H, G):
+    """What the units keep of y for the producer backward (it reads only the pre-norm q and k columns).
+    DMLM_QKV_SAVE=y (default): y itself ((2H+2G)D columns; it keeps the gate / v columns alive too).
+    DMLM_QKV_SAVE=compact: a (B, N, (H+G)D) copy [q_h ... | k_g ...]; y is freed once its gate / v views are dropped
+    (both arms: -(H+G)D columns per token per attention layer). The backward reads the same values: bitwise."""
+    if os.environ.get("DMLM_QKV_SAVE", "y") != "compact":
+        return y
+    B, N, C = y3.shape
+    D = C // (2 * H + 2 * G)
+    y4 = y3.view(B, N, 2 * H + 2 * G, D)
+    yc = torch.empty(B, N, H + G, D, device=y3.device, dtype=y3.dtype)
+    yc[:, :, :H].copy_(y4[:, :, 0: 2 * H: 2])
+    yc[:, :, H:].copy_(y4[:, :, 2 * H: 2 * H + G])
+    return yc.view(B, N, (H + G) * D)
 
 
 def _y3(y, bn):
@@ -28,8 +46,9 @@ def _y3(y, bn):
     return y.view(B, N, y.shape[-1])
 
 
-def _grads(y, gq, gk, cos, sin, H, G, eps, rq, rk, dq, dk, dv, dgate, dy_post):
-    """the fused producer backward -> (grad y, grad gq, grad gk)."""
+def _grads(y, gq, gk, cos, sin, H, G, eps, rq, rk, dq, dk, dv, dgate, dy_post, yshape=None):
+    """the fused producer backward -> (grad y, grad gq, grad gk).  y: the saved y or its compact q|k copy (save_y);
+    yshape: the shape of the unit's input y (grad y is returned in it)."""
     B, N = rq.shape[0], rq.shape[2]
     D = 256
     dev = y.device
@@ -44,6 +63,8 @@ def _grads(y, gq, gk, cos, sin, H, G, eps, rq, rk, dq, dk, dv, dgate, dy_post):
     r = _B.bwd_producers(dq, dk, dv, dgate.transpose(0, 1), y, gq, gk, cos, sin, H, G, eps, rstd_q=rq, rstd_k=rk,
                          want_amax=dy_post is not None)
     dY, dgq, dgk = r[:3]
+    if yshape is not None and tuple(dY.shape) != tuple(yshape):
+        dY = dY.view(yshape)
     if dy_post is not None:
         dY = dy_post(dY, r[3], r[4])
     return dY, dgq.to(gq.dtype), dgk.to(gk.dtype)
@@ -57,9 +78,10 @@ class _QKVDMAttn(torch.autograd.Function):
         y3 = _y3(y, bn)
         r = _F.fwd_producers(y3, gq, gk, cos, sin, H, G, cos.shape[-1], eps)
         o, lse = dm_fwd_hd256_mx(r["q8"], r["qs"], r["k8"], r["kvw"], r["v8"], True)
-        ctx.save_for_backward(y, gq, gk, cos, sin, r["q8"], r["qs"], r["k8"], r["ks"], r["v8"], r["vs"], o, lse,
-                              r["rstd_q"], r["rstd_k"])
+        ctx.save_for_backward(save_y(y, y3, H, G), gq, gk, cos, sin, r["q8"], r["qs"], r["k8"], r["ks"], r["v8"], r["vs"],
+                              o, lse, r["rstd_q"], r["rstd_k"])
         ctx.meta = (H, G, float(eps), mode, dy_post)
+        ctx.yshape = tuple(y.shape)
         return o, r["gate"]
 
     @staticmethod
@@ -73,7 +95,7 @@ class _QKVDMAttn(torch.autograd.Function):
             do = torch.zeros_like(o)
         do8, dos, delta = _delta_hd256(q8, qs, k8, ks, v8, vs, lse, o, do.contiguous(), mode, True)
         dq, dk, dv = attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, True)
-        dY, dgq, dgk = _grads(y, gq, gk, cos, sin, H, G, eps, rq, rk, dq, dk, dv, dgate, dy_post)
+        dY, dgq, dgk = _grads(y, gq, gk, cos, sin, H, G, eps, rq, rk, dq, dk, dv, dgate, dy_post, ctx.yshape)
         return dY, dgq, dgk, None, None, None, None, None, None, None, None
 
 
@@ -83,8 +105,9 @@ class _QKVBF16(torch.autograd.Function):
     def forward(ctx, y, gq, gk, cos, sin, H, G, eps, bn, dy_post):
         y3 = _y3(y, bn)
         qb, kb, rq, rk = _F.fwd_bf16(y3, gq, gk, cos, sin, H, G, cos.shape[-1], eps)
-        ctx.save_for_backward(y, gq, gk, cos, sin, rq, rk)
+        ctx.save_for_backward(save_y(y, y3, H, G), gq, gk, cos, sin, rq, rk)
         ctx.meta = (H, G, float(eps), dy_post)
+        ctx.yshape = tuple(y.shape)
         D = 256
         yv = y3.unflatten(-1, (-1, D))
         v = yv[:, :, 2 * H + G:]
@@ -96,7 +119,7 @@ class _QKVBF16(torch.autograd.Function):
     def backward(ctx, dq, dk, dv, dgate):
         y, gq, gk, cos, sin, rq, rk = ctx.saved_tensors
         H, G, eps, dy_post = ctx.meta
-        dY, dgq, dgk = _grads(y, gq, gk, cos, sin, H, G, eps, rq, rk, dq, dk, dv, dgate, dy_post)
+        dY, dgq, dgk = _grads(y, gq, gk, cos, sin, H, G, eps, rq, rk, dq, dk, dv, dgate, dy_post, ctx.yshape)
         return dY, dgq, dgk, None, None, None, None, None, None, None
 
 

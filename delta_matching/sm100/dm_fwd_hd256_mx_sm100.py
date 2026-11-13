@@ -278,7 +278,13 @@ class DMFwdHd256MxSm100:
     def __init__(self, is_causal: bool, qhead_per_kvhead: int, kv_stage: int = 4, rescale_T: float = 32.0,
                  sf_wait: bool = True, pc_inj: int = 0, sf_bank: bool = False, two_wg: bool = True, ord_td: bool = False,
                  lpt: bool = False, epi: int = 0, split: int = 0, trace: bool = False, g1: int = 0, c8: int = 0,
-                 rect: bool = False):
+                 rect: bool = False, pair: bool = False):
+        # pair (ring blocks, gb-fwd F1): ONE launch for a rank's two local chunks.  Q / O / LSE hold both chunks
+        # concatenated on the token axis (n_m = 2 n_ms q tiles); K / V are the gathered keys in global token order and chunk
+        # z attends the bottom-right causal prefix [0, nkt_z key tiles).  mDbg carries int32 [n_ms, nkt_0, nkt_1, 0] (no
+        # trace with pair).  CTA order = global longest-first (lpt map); every CTA's work is bitwise the rect launch's.
+        self.pair = pair
+        assert not pair or (rect and is_causal and not trace), "pair: rect causal blocks only, no trace"
         # rect (ring blocks): the key-tile count comes from K's token extent (Nk), not from the q-tile grid (Nq);
         # everything else is indexed per key tile.  Non-causal: all Nk keys.  Causal: bottom-right aligned (query i sees
         # keys <= i + Nk - Nq; Nk - Nq a multiple of 128 -> the diagonal tile and its in-tile mask are unchanged, the
@@ -456,7 +462,7 @@ class DMFwdHd256MxSm100:
         grid = (n_m, cute.size(mQt.shape[2]), cute.size(mQt.shape[3]))
         kargs = [mQt, mKt, mVt, mO_raw, mLSE, mQS, mKVW, tma_atom_Q, tma_atom_K, tma_atom_V,
                  sQ_layout, sK_layout, sV_layout, sP_layout, tiled_mma_qk, tiled_mma_pv]
-        if const_expr(self.trace):
+        if const_expr(self.trace or self.pair):
             kargs.append(mDbg)
         self.kernel(*kargs).launch(
             grid=grid, block=[self.threads_per_cta, 1, 1], stream=stream, min_blocks_per_mp=1)
@@ -474,7 +480,7 @@ class DMFwdHd256MxSm100:
         m_block = n_m - 1 - bidx if const_expr(self.is_causal) else bidx
         head_idx = bidy
         batch_idx = bidz
-        if const_expr(self.is_causal and self.lpt):
+        if const_expr(self.is_causal and (self.lpt or self.pair)):
             n_h = cute.arch.grid_dim()[1]
             n_hb = n_h * cute.arch.grid_dim()[2]
             u = bidx + n_m * (bidy + n_h * bidz)
@@ -483,7 +489,11 @@ class DMFwdHd256MxSm100:
             batch_idx = (u % n_hb) // n_h
         kv_head_idx = head_idx // self.qhead_per_kvhead
         n_block_max = m_block + 1 if const_expr(self.is_causal) else n_m
-        if const_expr(self.rect):
+        if const_expr(self.pair):
+            n_ms = Int32(mDbg[0])
+            seg = Int32(m_block >= n_ms)
+            n_block_max = (m_block - seg * n_ms) + 1 + (Int32(mDbg[1]) * (1 - seg) + Int32(mDbg[2]) * seg - n_ms)
+        elif const_expr(self.rect):
             if const_expr(self.is_causal):
                 n_block_max = m_block + 1 + (cute.ceil_div(cute.size(mK.shape[0]), self.n_block_size) - n_m)
             else:

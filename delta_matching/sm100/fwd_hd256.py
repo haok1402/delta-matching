@@ -38,7 +38,21 @@ def _cache():
 TRACE = {}   # DEBUG (DM_HD256_FWD_TRACE=1): "buf" = the last call's int64 event buffer (see DMFwdHd256MxSm100.tr)
 
 
-def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=None, rect: bool = False, out=None):
+_SEG = {}   # pair launch descriptors: (device, n_ms, nkt0, nkt1) -> int32 [n_ms, nkt0, nkt1, 0] (device-resident, reused)
+
+
+def _seg(dev, n_ms, nkt0, nkt1):
+    k = (str(dev), n_ms, nkt0, nkt1)
+    t = _SEG.get(k)
+    if t is None or is_fake_mode():
+        t = torch.tensor([n_ms, nkt0, nkt1, 0], dtype=torch.int32, device=dev)
+        if not is_fake_mode():
+            _SEG[k] = t
+    return t
+
+
+def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=None, rect: bool = False, out=None,
+                    pair=None):
     """q8 (B,N,H,256) e4m3 (sm baked), k8 / v8 (B,N,Hk,256) e4m3; qs (B,H,N/32) fp32 pow2 (quant.quant_qkv2).
     kvw: (B,Hk,N/64) int32 packed UE8M0 K/V words (fwd.pack_kv_scales), or the K scales ks (B,Hk,N/32) fp32 together
     with vs= (packed here, same words). Returns O (B,N,H,256) bf16, LSE (B,H,N) fp32 natural log."""
@@ -47,6 +61,8 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
         kvw = pack_kv_scales(kvw, vs)
     B, N, H, D = q8.shape
     Hk = k8.shape[2]
+    if pair is not None:     # gb-fwd F1: (nk0, nk1) key extents (tokens) of the two local chunks q[:N/2], q[N/2:]
+        assert rect and causal and N % 256 == 0 and all(c >= N // 2 and c % 128 == 0 and c <= k8.shape[1] for c in pair)
     Nk = k8.shape[1] if rect else N       # rect (ring blocks): key range independent of the query range (causal: Nk >= Nq,
     assert Nk % 128 == 0 and v8.shape == k8.shape and not (rect and causal and Nk < N)   # bottom-right aligned)
     assert not (rect and os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"), "trace buffers are sized by Nq"
@@ -88,8 +104,13 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
         key = key + (f"c8_{c8}",)
     if rect:
         key = key + ("rect",)
+    if pair is not None:
+        key = key + ("pair",)
     trace = os.environ.get("DM_HD256_FWD_TRACE", "0") == "1"   # DEBUG: per-event %clock64 trace -> TRACE["buf"]
     dbg = None
+    if pair is not None:
+        assert not trace
+        dbg = _seg(q8.device, N // 256, pair[0] // 128, pair[1] // 128)
     if trace:
         key = key + ("trace",)
         n_m = N // 128
@@ -104,11 +125,11 @@ def dm_fwd_hd256_mx(q8, qs, k8, kvw, v8, causal: bool, kv_stage: int = 4, vs=Non
             raise RuntimeError(f"DM_H256_NO_COMPILE=1 but {key} is not in the compile cache {getattr(cache, 'cache_path', '?')}"
                                " (compile it ahead of time with the same FLASH_ATTENTION_CUTE_DSL_CACHE_DIR)")
         kern = DMFwdHd256MxSm100(bool(causal), H // Hk, kv_stage=kv_stage, sf_wait=sfw, pc_inj=pc, sf_bank=sfb, two_wg=two, ord_td=otd, lpt=lpt, epi=epi,
-                                 split=split, trace=trace, g1=g1, c8=c8, rect=rect)
+                                 split=split, trace=trace, g1=g1, c8=c8, rect=rect, pair=pair is not None)
         args = [to_cute_tensor(t) for t in (q8, k8, v8, o)]
         args += [to_cute_tensor(lse, assumed_align=4), to_cute_tensor(qs, assumed_align=4), to_cute_tensor(kvw, assumed_align=4)]
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-        if trace:
+        if trace or pair is not None:
             cache[key] = cute.compile(kern, *args, stream, to_cute_tensor(dbg), options="--enable-tvm-ffi")
         else:
             cache[key] = cute.compile(kern, *args, stream, options="--enable-tvm-ffi")

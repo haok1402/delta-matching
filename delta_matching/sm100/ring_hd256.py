@@ -22,6 +22,7 @@ from . import bwd_hd256kv2
 from . import bwd_hd256mx
 from .dm_bwd_hd256dqg_sm100 import DmHd256Dqg
 from .attention_bwd_hd256_sm100 import workspace_limit_bytes, TILE_BYTES, DQG_STAGES
+from .launch_cache_sm100 import env
 
 D = 256
 
@@ -65,8 +66,9 @@ def _ws(tiles, dev):
 
 def plan(B, H, Hk, n_q, n_k, causal, cap=None):
     """Chunks (g0, g1, k0, k1) in tiles: KV-head groups [g0, g1) x key tiles [k0, k1), ascending (= the unchunked
-    reduction order of dQ; dK / dV of a key are formed in exactly one chunk). Preference: whole block; non-causal B == 1:
-    key ranges with all heads; then one KV group per chunk (with key ranges if non-causal)."""
+    reduction order of dQ; dK / dV of a key are formed in exactly one chunk). Preference: whole block; one KV group per
+    chunk (bitwise the whole block).  DM_RING_KEYRANGE=1 (non-causal only): key ranges (with all heads at B == 1, else
+    per KV group), dQ = fp32 sum of the ranges' partials (deterministic, not bitwise the whole block)."""
     cap = workspace_limit_bytes() if cap is None else cap
     rep = H // Hk
 
@@ -75,14 +77,14 @@ def plan(B, H, Hk, n_q, n_k, causal, cap=None):
 
     if tiles(H, n_k) * TILE_BYTES <= cap:
         return [(0, Hk, 0, n_k)]
-    if not causal and B == 1:
+    if tiles(rep, n_k) * TILE_BYTES <= cap:
+        return [(g, g + 1, 0, n_k) for g in range(Hk)]
+    if causal or env("DM_RING_KEYRANGE", "0") != "1":
+        return None
+    if B == 1:          # key ranges with all heads (outputs straight into the caller's tensors)
         per = int(cap // (tiles(H, 1) * TILE_BYTES))
         if per >= 1:
             return [(0, Hk, k0, min(n_k, k0 + per)) for k0 in range(0, n_k, per)]
-    if tiles(rep, n_k) * TILE_BYTES <= cap:
-        return [(g, g + 1, 0, n_k) for g in range(Hk)]
-    if causal:
-        return None
     per = int(cap // (tiles(rep, 1) * TILE_BYTES))
     if per < 1:
         return None

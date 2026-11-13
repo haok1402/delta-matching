@@ -37,6 +37,8 @@ dbg bit 16: per query row, fp64 sums over every key this
   launch visits of the SAME fp32 dS values this kernel quantizes (dsv) and of |P * (dP_acc * ca)| (the DmHd256Mx dbg-1 definition)
   -> mHash[l, q, 0] / mHash[l, q, 1] as f64 bits (fp64 red.add: order-free up to fp64 round-off).  Compiled out unless set.
 """
+from types import SimpleNamespace
+
 import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline as pipeline
@@ -150,7 +152,7 @@ class DmHd256Kv2:
     # l = 0, query PDS_Q, key PDS_K) BEFORE the dbg-16 rowsum and the quantization; "pds_safe" plants nothing.  Compiled out unless
     # knob == "pds" (const_expr): the default / dbg builds are untouched.  Kept out of KNOBS (not a hand-off control).
     KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta")
-    KNOBS = KNOBS + ("dmk",)   # opt dmk sensitivity control: unsafe = the masked tile runs the select-free copy (must corrupt)
+    KNOBS = KNOBS + ("dmk",)   # opt dmk sensitivity control: unsafe = the peeled (masked) tile runs the select-free copy (must corrupt)
     IDKN = ("pds",)
     PDS_Q, PDS_K, PDS_EPS = 5000, 1234, 2.0 ** -20
     DLY = 1 << 15
@@ -161,11 +163,12 @@ class DmHd256Kv2:
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
     OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc", "krg")
     OPTS = OPTS + ("dmk",)
-    # dmk (causal; port of fork hd256-kv3 C1 to the rect / krg / square loops): tile-class specialization of the compute warps'
-    # P / dS math.  The causal select s = -inf where key > query + 128 off can fire on a (q tile ct, key tile kt) only if
-    # kt * 128 + 127 > ct * 128 + 128 off, i.e. ct + off <= kt (off = n_k - n_q for rect, o for krg, 0 for a square); every
-    # other tile runs the select-free copy of the same FFMA / MUFU / FMUL sequence on the same inputs -> bitwise the masked
-    # loop.  One uniform runtime branch per iteration; iteration order, waits, arrives, fences and hand-offs unchanged.
+    # dmk (causal; port of fork hd256-kv3 C1 to the rect / krg / square loops): tile-class specialization of the compute warps.
+    # The loop becomes a nest (q head hi; q tile ct from c_lo); the FIRST q tile of every head (c_lo = max(kt - off, 0), the only
+    # tile where key > query + 128 off can hold: that needs ct + off <= kt) runs the masked P / dS math, every other tile the
+    # select-free copy of the same FFMA / MUFU / FMUL sequence on the same inputs -> bitwise the masked loop.  Iteration
+    # order, t numbering, every wait / arrive / fence / hand-off are the default loop's (the body is the default body verbatim
+    # except the math call); no per-iteration branch.
     # dkf32: dK / dV written as fp32 (B, Nk, Hk, 256) (the TMEM accumulator, i.e. the value the bf16 epilogue rounds);
     # dkacc: dK / dV fp32 += (read-add-write; one thread per element, launches ordered on the stream -> deterministic).
     # rect (ring blocks, requires dqt): q tiles (n_t argument) may differ from key tiles n_k (grid = 2 n_k CTAs from K's
@@ -240,6 +243,7 @@ class DmHd256Kv2:
         self.krg = "krg" in self.opts
         assert not self.krg or (self.rect and self.causal)
         self.dmk = "dmk" in self.opts and self.causal
+        assert not self.dmk or ("meta" in self.opts and not self.dqc)
         assert not self.rect or ("dqt" in self.opts and not self.dqc and (self.dbg & ~16) == 0)
         assert not (self.dbg & 16 and self.dbg & 8), "dbg 16 (identity) and 8 (lockstep) share mHash"
         assert not self.dqc or ("dqt" in self.opts and (self.dbg & ~16) == 0)
@@ -284,6 +288,252 @@ class DmHd256Kv2:
                 x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
                 dsv[i + q2] = x0
                 dsv[i + q2 + 1] = x1
+
+    @cute.jit
+    def _citer(self, cx, t, hi, ct, mf, masked: cutlass.Constexpr):
+        """opt dmk: ONE compute-warp iteration (t; q head hi, q tile ct) = the default loop body verbatim except (a) the meta
+        stage handle mf is acquired by the caller (same position: before every wait of the body), (b) the P / dS math is
+        self._pds(..., masked).  cx = the loop-invariant kernel values (SimpleNamespace)."""
+        sLD_addr, ks_r, vs_r, F_S, jb, key, crow_off, sXP_addr, lane, qd, sXS_addr, warp, hx, rep, b, H, sMeta_addr, tidx, crank, E_S, sCP_addr, mSBP, sCS_addr, mSBS, kt, mQs, mdOs, kbar, tb, hf, mDump, cstage_bytes, mHash, mCodesP, Hk, mDelta, N, rsw, r, mCodesS, NQ, n_k, mLse, n_q, n_t = (cx.sLD_addr, cx.ks_r, cx.vs_r, cx.F_S, cx.jb, cx.key, cx.crow_off, cx.sXP_addr, cx.lane, cx.qd, cx.sXS_addr, cx.warp, cx.hx, cx.rep, cx.b, cx.H, cx.sMeta_addr, cx.tidx, cx.crank, cx.E_S, cx.sCP_addr, cx.mSBP, cx.sCS_addr, cx.mSBS, cx.kt, cx.mQs, cx.mdOs, cx.kbar, cx.tb, cx.hf, cx.mDump, cx.cstage_bytes, cx.mHash, cx.mCodesP, cx.Hk, cx.mDelta, cx.N, cx.rsw, cx.r, cx.mCodesS, cx.NQ, cx.n_k, cx.mLse, cx.n_q, cx.n_t)
+        if const_expr(self.rect):
+            off_t, = (cx.off_t,)
+        if const_expr(self.dqc):
+            nfirst, nfull, tilesb, cq0 = (cx.nfirst, cx.nfull, cx.tilesb, cx.cq0)
+        if const_expr(self.krg):
+            kr_tot, = (cx.kr_tot,)
+        h = hx * rep + hi
+        l = b * H + h
+        par = t & 1
+        ctok0 = ct * 128
+        q0 = ctok0 + 32 * jb                      # first query of this thread's block
+        ldb = sLD_addr + par * 1024
+        wtile = Int64(0)
+        if const_expr(self.wsp):
+            if const_expr(self.dqc and self.causal):
+                wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
+            elif const_expr(self.krg):
+                wtile = Int64(l) * kr_tot + krange_s(ct, off_t, n_k) + kt
+            elif const_expr(self.causal and self.rect):
+                wtile = Int64(l) * (n_q * (n_q + 1) // 2 + n_q * off_t) + ct * (ct + 1) // 2 + ct * off_t + kt
+            elif const_expr(self.causal):
+                wtile = Int64(l) * (n_t * (n_t + 1) // 2) + ct * (ct + 1) // 2 + kt
+            else:
+                wtile = (Int64(l) * n_q + ct) * n_k + kt
+        qsj = Float32(0.0)
+        dosj = Float32(0.0)
+        if const_expr("meta" in self.opts):
+            ldb = sMeta_addr + mf.index * self.META_STAGE
+            if const_expr(self.kn == "meta"):
+                if const_expr(self.unsafe):
+                    mf.release()                  # UNSAFE: stage released before it is read
+                spin(self.DLY)
+            qsj = ld_shared_f32(ldb + 1024 + jb * 4)
+            dosj = ld_shared_f32(ldb + 1040 + jb * 4)
+        else:
+            qsj = Float32(mQs[b, h, ct * 4 + jb])
+            dosj = Float32(mdOs[b, h, ct * 4 + jb])
+            if const_expr(self.kn == "ld" and self.unsafe):
+                ldb = sLD_addr
+            if tidx < 128:
+                st_shared_f32(ldb + tidx * 4, dm_mx256_l2(Float32(mLse[b, h, ctok0 + tidx])))
+            else:
+                st_shared_f32(ldb + 512 + (tidx - 128) * 4, Float32(mDelta[b, h, ctok0 + tidx - 128]))
+            cute.arch.barrier(barrier_id=2, number_of_threads=self.NCOMP)
+            if const_expr(self.kn == "ld"):
+                if warp == 3:
+                    spin(self.DLY)
+        cs = dm_mx256_c(ks_r, qsj)
+        ca = dm_mx256_dp_scale(vs_r, dosj)
+        stg = t & 1
+        mbar_wait_parity(kbar + 32 + 8 * stg, ((t >> 1) & 1) ^ 1)   # stage free (commit after dK(t-2))
+        if const_expr("dqt" in self.opts):
+            if t >= 2:
+                if const_expr(self.kn == "ww"):
+                    if const_expr(self.unsafe):
+                        if t > 2:      # UNSAFE: the first reuse skips the bulk-read wait (store warp delayed at t == 0)
+                            mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
+                    else:
+                        mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)
+                else:
+                    mbar_wait_parity(kbar + 96 + 8 * stg, ((t >> 1) - 1) & 1)   # bulk read of t-2 done
+        if const_expr(self.kn == "wr"):
+            if t == 0:
+                spin(self.DLY)                    # codes of t = 0 written late (wr: the store warp must wait for them)
+        if const_expr(self.kn == "cd" and self.unsafe):
+            self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)   # UNSAFE: published before the codes are written
+            spin(self.DLY)
+        mbar_wait_parity(F_S, t & 1)       # S/dP(t) complete (commit)
+        tc_fence_after()
+        if const_expr(self.kn == "s"):
+            if const_expr(self.unsafe):
+                self._arr(E_S, kbar + 64, crank)   # UNSAFE: slot released before the loads
+            spin(self.DLY)
+        sv = tmem_ld32(tb + self.COL_S + 32 * hf)
+        dpv = tmem_ld32(tb + self.COL_DP + 32 * hf)
+        cute.arch.fence_view_async_tmem_load()
+        tc_fence_before()
+        if const_expr(not (self.kn == "s" and self.unsafe)):
+            self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
+        pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
+        dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
+        off_k = Int32(0)
+        if const_expr(self.rect):
+            off_k = off_t
+        self._pds(sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, off_k * 128, masked)
+        if const_expr(self.kn == "pds" and self.unsafe):
+            hit = (sel_eq_i32(l, Int32(0), Int32(1), Int32(0)) * sel_eq_i32(key, Int32(self.PDS_K), Int32(1), Int32(0))
+                   * sel_eq_i32(q0, Int32(self.PDS_Q - self.PDS_Q % 32), Int32(1), Int32(0)))
+            dsv[self.PDS_Q % 32] = dsv[self.PDS_Q % 32] + Float32(hit) * Float32(self.PDS_EPS)
+        if const_expr(self.dbg & 2):
+            pa = global_address(mDump) + ((Int64(l) * N + q0) * N + key) * 16
+            for i in cutlass.range_constexpr(32):
+                st_global_f32(pa, sv[i])
+                st_global_f32(pa + 4, dpv[i])
+                st_global_f32(pa + 8, pv[i])
+                st_global_f32(pa + 12, dsv[i])
+                pa = pa + Int64(N) * 16
+        # ---- P^T codes: pow2 per (key, 32 queries), thread-local ----
+        am = Float32(0.0)
+        for i in cutlass.range_constexpr(32):
+            am = cute.arch.fmax(am, pv[i])
+        psb = pow2_sb(am)
+        inv = inv_pow2_from_sb(psb)
+        crow = sCP_addr + stg * cstage_bytes + crow_off
+        hpl = [Int32(0)] * 32
+        for hv in cutlass.range_constexpr(2):
+            w = [None] * 4
+            for u in cutlass.range_constexpr(4):
+                i0 = 16 * hv + 4 * u
+                y0, y1 = cute.arch.mul_packed_f32x2((pv[i0], pv[i0 + 1]), (inv, inv))
+                y2, y3 = cute.arch.mul_packed_f32x2((pv[i0 + 2], pv[i0 + 3]), (inv, inv))
+                w[u] = e4m3x4(y0, y1, y2, y3)
+            st_shared_v4(crow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+            if const_expr(self.dbg & 2):
+                cp_ = global_address(mCodesP) + (Int64(l) * N + q0 + 16 * hv) * N + key
+                for u in cutlass.range_constexpr(4):
+                    for q in cutlass.range_constexpr(4):
+                        st_global_u8(cp_, w[u] >> (8 * q))
+                        cp_ = cp_ + Int64(N)
+        if const_expr(self.dbg & 2):
+            mSBP[l, key, ct * 4 + jb] = psb
+        if const_expr(self.dbg & 8):
+            for i in cutlass.range_constexpr(32):
+                hpl[i] = hmix(f2i(pv[i]), hidx(q0 + i, key))
+            lk_cols_u32(hpl, lane, global_address(mHash) + (Int64(l) * N + q0) * 32)
+        # ---- exchange: p_sb byte per (row, q-block); |dS| warp max per warp ----
+        xp = sXP_addr + par * 1024
+        if const_expr(self.kn == "ex"):
+            if warp == 6:
+                spin(self.DLY)
+        if const_expr("xpt" in self.opts):
+            st_shared_b32(xp + (jb * 64 + r) * 4, psb)
+        else:
+            st_shared_b32(xp + (r * 4 + jb) * 4, psb)
+        amd = Float32(0.0)
+        for i in cutlass.range_constexpr(32):
+            amd = cute.arch.fmax(amd, abs_f32(dsv[i]))
+        wm = redux_max_abs_f32(amd)
+        if lane == 0:
+            if const_expr("xsv" in self.opts):
+                st_shared_f32(sXS_addr + (par * 8 + (qd % 2) * 4 + 2 * hf + qd // 2) * 4, wm)
+            else:
+                st_shared_f32(sXS_addr + (par * 8 + warp) * 4, wm)
+        cute.arch.fence_view_async_shared()
+        if const_expr(not (self.kn == "ex" and self.unsafe)):
+            cute.arch.barrier(barrier_id=3, number_of_threads=self.NCOMP)
+        g = qd % 2                                 # key group: warps g, g+2, g+4, g+6
+        xs = sXS_addr + par * 32
+        m4 = Float32(0.0)
+        if const_expr("xsv" in self.opts):
+            x4 = ld_shared_v4f(xs + g * 16)
+            m4 = max_f32(max_f32(x4[0], x4[1]), max_f32(x4[2], x4[3]))
+        else:
+            m4 = max_f32(max_f32(ld_shared_f32(xs + g * 4), ld_shared_f32(xs + (g + 2) * 4)),
+                         max_f32(ld_shared_f32(xs + (g + 4) * 4), ld_shared_f32(xs + (g + 6) * 4)))
+        dsb = pow2_sb(m4)
+        invs = inv_pow2_from_sb(dsb)
+        srow = sCS_addr + stg * cstage_bytes + crow_off
+        hsl = [Int32(0)] * 32
+        hcl = [Int32(0)] * 32
+        for hv in cutlass.range_constexpr(2):
+            w = [None] * 4
+            for u in cutlass.range_constexpr(4):
+                i0 = 16 * hv + 4 * u
+                y0, y1 = cute.arch.mul_packed_f32x2((dsv[i0], dsv[i0 + 1]), (invs, invs))
+                y2, y3 = cute.arch.mul_packed_f32x2((dsv[i0 + 2], dsv[i0 + 3]), (invs, invs))
+                w[u] = e4m3x4(y0, y1, y2, y3)
+            if const_expr(self.kn == "lsk" and self.unsafe):
+                if const_expr(hv == 0):
+                    w[0] = w[0] ^ sel_eq_i32(t + key + hx + b, Int32(0), Int32(1), Int32(0))
+            st_shared_v4(srow + (((2 * jb + hv) ^ rsw) * 16), w[0], w[1], w[2], w[3])
+            if const_expr("dqw" in self.opts):
+                st_global_v4(global_address(mCodesS) + wtile * 16384 + (64 * crank + r) * 128 + 32 * jb + 16 * hv,
+                             w[0], w[1], w[2], w[3])
+            if const_expr(self.dbg & 8):
+                for u in cutlass.range_constexpr(4):
+                    for q in cutlass.range_constexpr(4):
+                        i_ = 16 * hv + 4 * u + q
+                        ix = hidx(q0 + i_, key)
+                        hsl[i_] = hmix(f2i(dsv[i_]), ix)
+                        hcl[i_] = hmix(((w[u] >> (8 * q)) & 255) | (dsb << 8), ix)
+            if const_expr(self.dbg & 2):
+                cp_ = global_address(mCodesS) + (Int64(l) * N + q0 + 16 * hv) * N + key
+                for u in cutlass.range_constexpr(4):
+                    for q in cutlass.range_constexpr(4):
+                        st_global_u8(cp_, w[u] >> (8 * q))
+                        cp_ = cp_ + Int64(N)
+        if const_expr(self.dbg & 2):
+            mSBS[l, key, ct * 4 + jb] = dsb
+        if const_expr(self.wsp):
+            if warp < 2:
+                if lane == 0:
+                    st_global_u8(global_address(mSBS) + wtile * 4 + 2 * crank + qd % 2, dsb)
+        if const_expr(self.dbg & 8):
+            a0_ = global_address(mHash) + (Int64(l) * N + q0) * 32
+            lk_cols_u32(hsl, lane, a0_ + 8)
+            lk_cols_u32(hcl, lane, a0_ + 16)
+            lk_cols_f64(dsv, lane, a0_ + 24)
+        if const_expr(self.dbg & 16):
+            a1_ = global_address(mHash) + (Int64(l) * NQ + q0) * 32
+            pdl = [abs_f32(mul_f32(pv[i], mul_f32(dpv[i], ca))) for i in range(32)]
+            lk_cols_f64(dsv, lane, a1_)
+            lk_cols_f64(pdl, lane, a1_ + 8)
+        # ---- SFA words (warps 0-3 write their own quadrant; rows r at lanes r and r + 64) ----
+        if warp < 4:
+            bp = [Int32(0)] * 4
+            bs = [Int32(0)] * 4
+            for j in cutlass.range_constexpr(4):
+                psj = Int32(0)
+                if const_expr("xpt" in self.opts):
+                    psj = ld_shared_b32(xp + (j * 64 + r) * 4)
+                else:
+                    psj = ld_shared_b32(xp + (r * 4 + j) * 4)
+                dsc_ = Float32(0.0)
+                qsc_ = Float32(0.0)
+                if const_expr("meta" in self.opts):
+                    dsc_ = ld_shared_f32(ldb + 1040 + j * 4)
+                    qsc_ = ld_shared_f32(ldb + 1024 + j * 4)
+                else:
+                    dsc_ = Float32(mdOs[b, h, ct * 4 + j])
+                    qsc_ = Float32(mQs[b, h, ct * 4 + j])
+                bp[j] = add_sb_clamp(psj, sb_of(dsc_))
+                bs[j] = add_sb_clamp(dsb, sb_of(qsc_))
+            tmem_st_x1(tb + self.COL_SFA_P + 4 * stg + (qd % 2), pack4(bp[0], bp[1], bp[2], bp[3]))
+            tmem_st_x1(tb + self.COL_SFA_S + 4 * stg + (qd % 2), pack4(bs[0], bs[1], bs[2], bs[3]))
+            cute.arch.fence_view_async_tmem_store()
+        if const_expr("meta" in self.opts and not (self.kn == "meta" and self.unsafe)):
+            mf.release()
+        cute.arch.fence_view_async_shared()
+        tc_fence_before()
+        if const_expr(self.kn == "cd"):
+            if const_expr(not self.unsafe):
+                spin(self.DLY)
+        if const_expr(not (self.kn == "cd" and self.unsafe)):
+            self._arr(kbar + 16 + 8 * stg, kbar + 72 + 8 * stg, crank)    # release.cluster on the leader's barrier
+        if const_expr(self.dqc and self.kn == "cr" and self.unsafe):
+            if t == 0:       # UNSAFE cr: carry restored after the t = 0 publication + a delay (the first dV / dK MMA runs first)
+                spin(self.DLY)
+                self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
 
     @cute.jit
     def _epi_f32(self, tb, mdK, mdV, b, key, hx, Hk, N, qd, hf):
@@ -759,7 +1009,28 @@ class DmHd256Kv2:
                     spin(self.DLY)               # safe: the same delay, before the restore (and so before the t = 0 publication)
                 if const_expr(not (self.kn == "cr" and self.unsafe)):
                     self._carry_restore(nfirst, tb, mDump, mCodesP, b, key, hx, Hk, nfull, qd, hf)
-            for t in cutlass.range(total, unroll=1):
+            if const_expr(self.dmk):
+                # opt dmk: (q head, q tile) nest over _citer (the default body verbatim but the P / dS math call); the first
+                # tile of each head masked, the rest the select-free copy; meta stages acquired here, in the default order
+                cx = SimpleNamespace(sLD_addr=sLD_addr, ks_r=ks_r, vs_r=vs_r, F_S=F_S, jb=jb, key=key, crow_off=crow_off, sXP_addr=sXP_addr, lane=lane, qd=qd, sXS_addr=sXS_addr, warp=warp, hx=hx, rep=rep, b=b, H=H, sMeta_addr=sMeta_addr, tidx=tidx, crank=crank, E_S=E_S, sCP_addr=sCP_addr, mSBP=mSBP, sCS_addr=sCS_addr, mSBS=mSBS, kt=kt, mQs=mQs, mdOs=mdOs, kbar=kbar, tb=tb, hf=hf, mDump=mDump, cstage_bytes=cstage_bytes, mHash=mHash, mCodesP=mCodesP, Hk=Hk, mDelta=mDelta, N=N, rsw=rsw, r=r, mCodesS=mCodesS, NQ=NQ, n_k=n_k, mLse=mLse, n_q=n_q, n_t=n_t)
+                if const_expr(self.rect):
+                    cx.off_t = off_t
+                if const_expr(self.dqc):
+                    cx.nfirst = nfirst
+                    cx.nfull = nfull
+                    cx.tilesb = tilesb
+                    cx.cq0 = cq0
+                if const_expr(self.krg):
+                    cx.kr_tot = kr_tot
+                for hi in cutlass.range(rep, unroll=1):
+                    t0 = hi * ncs
+                    self._citer(cx, t0, hi, c_lo, m_c.wait_and_advance(), not (self.kn == "dmk" and self.unsafe))
+                    for ci in cutlass.range(1, ncs, unroll=1):
+                        self._citer(cx, t0 + ci, hi, c_lo + ci, m_c.wait_and_advance(), False)
+            n_iter = total
+            if const_expr(self.dmk):
+                n_iter = Int32(0)                         # the default loop runs no iteration in dmk builds
+            for t in cutlass.range(n_iter, unroll=1):
                 hi = t // ncs
                 ct = c_lo + t - hi * ncs
                 h = hx * rep + hi
@@ -839,36 +1110,26 @@ class DmHd256Kv2:
                     self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
-                if const_expr(self.dmk):
-                    off_k = Int32(0)
-                    if const_expr(self.rect):
-                        off_k = off_t
-                    if ct + off_k <= kt:          # the only tiles where key > query + 128 off can hold
-                        self._pds(sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, off_k * 128,
-                                  not (self.kn == "dmk" and self.unsafe))
-                    else:
-                        self._pds(sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, off_k * 128, False)
-                else:
-                    for i in cutlass.range_constexpr(0, 32, 4):
-                        l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
-                        dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
-                        for q2 in cutlass.range_constexpr(0, 4, 2):
-                            s0 = sv[i + q2]
-                            s1 = sv[i + q2 + 1]
-                            if const_expr(self.causal):
-                                c0 = q0 + i + q2
-                                if const_expr(self.rect):
-                                    c0 = c0 + off_t * 128
-                                s0 = -Float32.inf if key > c0 else s0
-                                s1 = -Float32.inf if key > c0 + 1 else s1
-                            p0, p1 = dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
-                            pv[i + q2] = p0
-                            pv[i + q2 + 1] = p1
-                            x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
-                                                                (-dlv[q2], -dlv[q2 + 1]))
-                            x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
-                            dsv[i + q2] = x0
-                            dsv[i + q2 + 1] = x1
+                for i in cutlass.range_constexpr(0, 32, 4):
+                    l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
+                    dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
+                    for q2 in cutlass.range_constexpr(0, 4, 2):
+                        s0 = sv[i + q2]
+                        s1 = sv[i + q2 + 1]
+                        if const_expr(self.causal):
+                            c0 = q0 + i + q2
+                            if const_expr(self.rect):
+                                c0 = c0 + off_t * 128
+                            s0 = -Float32.inf if key > c0 else s0
+                            s1 = -Float32.inf if key > c0 + 1 else s1
+                        p0, p1 = dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
+                        pv[i + q2] = p0
+                        pv[i + q2 + 1] = p1
+                        x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
+                                                            (-dlv[q2], -dlv[q2 + 1]))
+                        x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
+                        dsv[i + q2] = x0
+                        dsv[i + q2 + 1] = x1
                 if const_expr(self.kn == "pds" and self.unsafe):
                     hit = (sel_eq_i32(l, Int32(0), Int32(1), Int32(0)) * sel_eq_i32(key, Int32(self.PDS_K), Int32(1), Int32(0))
                            * sel_eq_i32(q0, Int32(self.PDS_Q - self.PDS_Q % 32), Int32(1), Int32(0)))

@@ -476,7 +476,7 @@ def _launch(p_dq, p_dg, p_y, p_o, p_dk, p_dv, p_cs, p_sn, p_rq, p_rk, p_gq, p_gk
             FOLD: cutlass.Constexpr, CPW: cutlass.Constexpr, stream):
     S = dict(S)
     HD2 = 2 * H * D
-    DQ, DG, YQ, YK = _mk(p_dq, S["dq"]), _mk(p_dg, S["dg"]), _mk(p_y, S["yq"]), _mk(p_y + HD2, S["yk"])
+    DQ, DG, YQ, YK = _mk(p_dq, S["dq"]), _mk(p_dg, S["dg"]), _mk(p_y, S["yq"]), _mk(p_y + S.get("ykoff", HD2), S["yk"])
     OQ, OK, OV = _mk(p_o, S["oq"]), _mk(p_o + HD2, S["ok"]), _mk(p_o + (HD2 + G * D), S["ok"])
     DK, DV, CS, SN = _mk(p_dk, S["dk"]), _mk(p_dv, S["dv"]), _mk(p_cs, S["cs"]), _mk(p_sn, S["sn"])
     RSQ, RSK = _mk(p_rq, S["rq"]), _mk(p_rk, S["rk"])
@@ -555,20 +555,24 @@ def _u(shape, stride, perm, NE):
     return (sh[:-1] + (32, NE), sd[:-1] + (NE, 1))
 
 
-def _spec(B, N, H, G, D, R, C, ydim, strides, has_rstd, eps, want_amax, sms):
-    """(cache key, S, const) of one launch configuration: every shape / stride the kernel bakes in."""
+def _spec(B, N, H, G, D, R, C, ydim, strides, has_rstd, eps, want_amax, sms, compact=False):
+    """(cache key, S, const) of one launch configuration: every shape / stride the kernel bakes in.  compact: y is the
+    saved pre-norm [q_h ... | k_g ...] (B, N, (H+G)D) (no gate / v columns; the kernel reads only those two); C stays
+    the full GEMM width of dY."""
     NE = D // 32
     sdq, sdk, sdv, sdg, sy, scs, ssn, srq, srk = strides
     ys = (N * sy[0], sy[0], 1) if ydim == 2 else tuple(sy)
     CQ, CK = te_ctas_per_col(B * H * N, D, sms), te_ctas_per_col(B * G * N, D, sms)
     S = dict(dq=_u((B, N, H, D), sdq, (0, 1, 2, 3), NE), dg=_u((N, B, H, D), sdg, (1, 0, 2, 3), NE),
              dk=_u((B, N, G, D), sdk, (0, 1, 2, 3), NE), dv=_u((B, N, G, D), sdv, (0, 1, 2, 3), NE),
-             yq=((B, N, H, 2, 32, NE), (ys[0], ys[1], 2 * D, D, NE, 1)),
+             yq=((B, N, H, 2, 32, NE), (ys[0], ys[1], D if compact else 2 * D, 0 if compact else D, NE, 1)),
              yk=((B, N, G, 32, NE), (ys[0], ys[1], D, NE, 1)),
              oq=((B, N, H, 2, 32, NE), (N * C, C, 2 * D, D, NE, 1)), ok=((B, N, G, 32, NE), (N * C, C, D, NE, 1)),
              cs=((B, N, R // NE, NE), (scs[0], scs[1], NE, 1)), sn=((B, N, R // NE, NE), (ssn[0], ssn[1], NE, 1)),
              rq=((B, H, N), tuple(srq) if has_rstd else (0, 0, 0)),
              rk=((B, G, N), tuple(srk) if has_rstd else (0, 0, 0)))
+    if compact:                              # default layout: no extra entry, so its cache key / code are unchanged
+        S["ykoff"] = H * D
     S = tuple(sorted(S.items()))
     const = (B, N, H, G, D, NE, R // NE, (R // 2) // NE, CQ, CK, float(eps), bool(has_rstd), bool(want_amax), 1, 1)
     return ("bwd",) + const + (S,), S, const, CQ, CK
@@ -591,13 +595,14 @@ def aot(B, N, H, G, R=64, D=256, eps=1e-6, sms=152, want_amax=(False, True)):
 
 def _check(dq, dk, dv, dgate, y, gq, gk, cos, sin, H, G, rstd_q, rstd_k):
     B, N, Hd, D = dq.shape
-    C = y.shape[-1]
+    Cy = y.shape[-1]
+    C = (2 * H + 2 * G) * D
     R = cos.shape[-1]
     if D not in TE_BWD_OCC:
         raise ValueError(f"bwd_producers: head_dim {D} unsupported")
-    if Hd != H or H % G or C != (2 * H + 2 * G) * D:
-        raise ValueError("bwd_producers: dq (B, N, H, D) / y (.., (2H+2G)D) / H % G mismatch")
-    if y.shape not in ((B, N, C), (B * N, C)) or not y.is_contiguous():
+    if Hd != H or H % G or Cy not in (C, (H + G) * D):
+        raise ValueError("bwd_producers: dq (B, N, H, D) / y (.., (2H+2G)D or compact (H+G)D) / H % G mismatch")
+    if y.shape not in ((B, N, Cy), (B * N, Cy)) or not y.is_contiguous():
         raise ValueError(f"bwd_producers: y {tuple(y.shape)} must be a contiguous (B, N, C) or (B*N, C)")
     if not (dk.shape == dv.shape == (B, N, G, D)):
         raise ValueError(f"bwd_producers: dk/dv {tuple(dk.shape)} must be (B, N, G, D) (folded, token-major)")
@@ -629,6 +634,8 @@ def bwd_producers(dq, dk, dv, dgate, y, gq, gk, cos, sin, H, G, eps=1e-6, rstd_q
     """see the module docstring.  One CUDA stream at a time per (device, shape): the dgamma workspace is reused
     stream-ordered."""
     B, N, D, C, R = _check(dq, dk, dv, dgate, y, gq, gk, cos, sin, H, G, rstd_q, rstd_k)
+    compact = y.shape[-1] != C          # y = the saved pre-norm q|k only (qkv_save_compact); dY keeps the GEMM width C
+    yshape = y.shape[:-1] + (C,)
     NE = D // 32
     dq, dk, dv, dgate, cos, sin = (t if _vec_ok(t, NE) else t.contiguous()
                                    for t in (dq, dk, dv, dgate, cos, sin))
@@ -637,17 +644,17 @@ def bwd_producers(dq, dk, dv, dgate, y, gq, gk, cos, sin, H, G, eps=1e-6, rstd_q
     sms = _sm_count(dev.index)
     strides = (dq.stride(), dk.stride(), dv.stride(), dgate.stride(), y.stride(), cos.stride(), sin.stride(),
                rstd_q.stride() if has_rstd else None, rstd_k.stride() if has_rstd else None)
-    key, S, const, CQ, CK = _spec(B, N, H, G, D, R, C, y.dim(), strides, has_rstd, eps, want_amax, sms)
+    key, S, const, CQ, CK = _spec(B, N, H, G, D, R, C, y.dim(), strides, has_rstd, eps, want_amax, sms, compact)
     f = _compile(key, S, const)
     wk = (dev.index, CQ, CK, D)
     ws = _WS.get(wk)
     if ws is None:
         ws = _WS[wk] = torch.empty((CQ + CK) * D + 4 * max(CQ, CK), device=dev, dtype=torch.float32)
     if out is None:
-        dY = torch.empty(y.shape, device=dev, dtype=torch.bfloat16)
+        dY = torch.empty(yshape, device=dev, dtype=torch.bfloat16)
     else:
         dY = out
-        if not (dY.is_contiguous() and dY.shape == y.shape and dY.dtype == torch.bfloat16 and dY.data_ptr() % 16 == 0):
+        if not (dY.is_contiguous() and dY.shape == yshape and dY.dtype == torch.bfloat16 and dY.data_ptr() % 16 == 0):
             raise ValueError("bwd_producers: out must be a contiguous, 16 B aligned bf16 tensor like y")
     og = torch.empty(2, D, device=dev, dtype=torch.bfloat16)              # dgq | dgk
     am = torch.empty(2, device=dev, dtype=torch.float32) if want_amax else ws

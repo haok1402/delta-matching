@@ -158,7 +158,9 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc", "krg")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc", "krg",
+            "ablnod", "ablnodo")   # DEBUG energy/time BOUNDS only (wrong dK/dV): ablnod skips the Qd + dOd TMA loads (tx 0),
+                                   # ablnodo skips only dOd (= the 16 KB / CTA-iteration a shared Q/dO layout would save)
     # dkf32: dK / dV written as fp32 (B, Nk, Hk, 256) (the TMEM accumulator, i.e. the value the bf16 epilogue rounds);
     # dkacc: dK / dV fp32 += (read-add-write; one thread per element, launches ordered on the stream -> deterministic).
     # rect (ring blocks, requires dqt): q tiles (n_t argument) may differ from key tiles n_k (grid = 2 n_k CTAs from K's
@@ -458,7 +460,9 @@ class DmHd256Kv2:
                                                    tx_count=2 * 2 * self.bytes_b, barrier_storage=bars + 2,
                                                    cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         d_p, d_c = pipeline.PipelineTmaUmma.create(num_stages=self.nqs, producer_group=one, consumer_group=one,
-                                                   tx_count=2 * 2 * self.bytes_t, barrier_storage=bars + 6,
+                                                   tx_count=0 if const_expr("ablnod" in self.opts) else
+                                                   (2 * self.bytes_t if const_expr("ablnodo" in self.opts) else 2 * 2 * self.bytes_t),
+                                                   barrier_storage=bars + 6,
                                                    cta_layout_vmnk=vmnk, defer_sync=True).make_participants()
         kbar = Int32(st.kb.data_ptr().toint())
         F_S, E_S, F_F, E_F = kbar, kbar + 8, kbar + 48, kbar + 56
@@ -544,8 +548,10 @@ class DmHd256Kv2:
                     cute.copy(tma_Q, tQg[(None, ct)], tQs[(None, qe.index)], tma_bar_ptr=qe.barrier)
                     cute.copy(tma_dO, tdOg[(None, ct)], tdOs[(None, qe.index)], tma_bar_ptr=qe.barrier)
                     de = d_p.acquire_and_advance()
-                    cute.copy(tma_Qd, tQdg[(None, ct)], tQds[(None, de.index)], tma_bar_ptr=de.barrier)
-                    cute.copy(tma_dOd, tdOdg[(None, ct)], tdOds[(None, de.index)], tma_bar_ptr=de.barrier)
+                    if const_expr("ablnod" not in self.opts):
+                        cute.copy(tma_Qd, tQdg[(None, ct)], tQds[(None, de.index)], tma_bar_ptr=de.barrier)
+                        if const_expr("ablnodo" not in self.opts):
+                            cute.copy(tma_dOd, tdOdg[(None, ct)], tdOds[(None, de.index)], tma_bar_ptr=de.barrier)
             kv_p.tail()
             q_p.tail()
             d_p.tail()

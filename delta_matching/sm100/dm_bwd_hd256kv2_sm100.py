@@ -150,6 +150,7 @@ class DmHd256Kv2:
     # l = 0, query PDS_Q, key PDS_K) BEFORE the dbg-16 rowsum and the quantization; "pds_safe" plants nothing.  Compiled out unless
     # knob == "pds" (const_expr): the default / dbg builds are untouched.  Kept out of KNOBS (not a hand-off control).
     KNOBS = ("lsk", "q", "d", "s", "cd", "ex", "ld", "fin", "meta")
+    KNOBS = KNOBS + ("dmk",)   # opt dmk sensitivity control: unsafe = the masked tile runs the select-free copy (must corrupt)
     IDKN = ("pds",)
     PDS_Q, PDS_K, PDS_EPS = 5000, 1234, 2.0 ** -20
     DLY = 1 << 15
@@ -159,6 +160,12 @@ class DmHd256Kv2:
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
     OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc", "krg")
+    OPTS = OPTS + ("dmk",)
+    # dmk (causal; port of fork hd256-kv3 C1 to the rect / krg / square loops): tile-class specialization of the compute warps'
+    # P / dS math.  The causal select s = -inf where key > query + 128 off can fire on a (q tile ct, key tile kt) only if
+    # kt * 128 + 127 > ct * 128 + 128 off, i.e. ct + off <= kt (off = n_k - n_q for rect, o for krg, 0 for a square); every
+    # other tile runs the select-free copy of the same FFMA / MUFU / FMUL sequence on the same inputs -> bitwise the masked
+    # loop.  One uniform runtime branch per iteration; iteration order, waits, arrives, fences and hand-offs unchanged.
     # dkf32: dK / dV written as fp32 (B, Nk, Hk, 256) (the TMEM accumulator, i.e. the value the bf16 epilogue rounds);
     # dkacc: dK / dV fp32 += (read-add-write; one thread per element, launches ordered on the stream -> deterministic).
     # rect (ring blocks, requires dqt): q tiles (n_t argument) may differ from key tiles n_k (grid = 2 n_k CTAs from K's
@@ -232,6 +239,7 @@ class DmHd256Kv2:
         assert not (self.dkf32 and self.dqc), "fp32 dK / dV outputs: not with the carry chunks"
         self.krg = "krg" in self.opts
         assert not self.krg or (self.rect and self.causal)
+        self.dmk = "dmk" in self.opts and self.causal
         assert not self.rect or ("dqt" in self.opts and not self.dqc and (self.dbg & ~16) == 0)
         assert not (self.dbg & 16 and self.dbg & 8), "dbg 16 (identity) and 8 (lockstep) share mHash"
         assert not self.dqc or ("dqt" in self.opts and (self.dbg & ~16) == 0)
@@ -253,6 +261,29 @@ class DmHd256Kv2:
                     for q in cutlass.range_constexpr(4):
                         w[q] = bf16x2(ov[i + 2 * q], ov[i + 2 * q + 1])
                     st_global_v4(ob + (32 * cb + i) * 2, w[0], w[1], w[2], w[3])
+
+    @cute.jit
+    def _pds(self, sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, off_q, masked: cutlass.Constexpr):
+        """opt dmk: the P / dS math of the compute loop (same ops, same order); the causal select only if masked
+        (off_q = the bottom-right / key-range offset in tokens, 0 for a square)."""
+        for i in cutlass.range_constexpr(0, 32, 4):
+            l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
+            dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
+            for q2 in cutlass.range_constexpr(0, 4, 2):
+                s0 = sv[i + q2]
+                s1 = sv[i + q2 + 1]
+                if const_expr(masked):
+                    c0 = q0 + i + q2 + off_q
+                    s0 = -Float32.inf if key > c0 else s0
+                    s1 = -Float32.inf if key > c0 + 1 else s1
+                p0, p1 = dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
+                pv[i + q2] = p0
+                pv[i + q2 + 1] = p1
+                x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
+                                                    (-dlv[q2], -dlv[q2 + 1]))
+                x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
+                dsv[i + q2] = x0
+                dsv[i + q2 + 1] = x1
 
     @cute.jit
     def _epi_f32(self, tb, mdK, mdV, b, key, hx, Hk, N, qd, hf):
@@ -808,26 +839,36 @@ class DmHd256Kv2:
                     self._arr(E_S, kbar + 64, crank)    # release.cluster on the leader's barrier
                 pv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
                 dsv = cute.make_rmem_tensor(cute.make_layout(32), Float32)
-                for i in cutlass.range_constexpr(0, 32, 4):
-                    l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
-                    dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
-                    for q2 in cutlass.range_constexpr(0, 4, 2):
-                        s0 = sv[i + q2]
-                        s1 = sv[i + q2 + 1]
-                        if const_expr(self.causal):
-                            c0 = q0 + i + q2
-                            if const_expr(self.rect):
-                                c0 = c0 + off_t * 128
-                            s0 = -Float32.inf if key > c0 else s0
-                            s1 = -Float32.inf if key > c0 + 1 else s1
-                        p0, p1 = dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
-                        pv[i + q2] = p0
-                        pv[i + q2 + 1] = p1
-                        x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
-                                                            (-dlv[q2], -dlv[q2 + 1]))
-                        x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
-                        dsv[i + q2] = x0
-                        dsv[i + q2 + 1] = x1
+                if const_expr(self.dmk):
+                    off_k = Int32(0)
+                    if const_expr(self.rect):
+                        off_k = off_t
+                    if ct + off_k <= kt:          # the only tiles where key > query + 128 off can hold
+                        self._pds(sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, off_k * 128,
+                                  not (self.kn == "dmk" and self.unsafe))
+                    else:
+                        self._pds(sv, dpv, ldb, jb, q0, key, cs, ca, pv, dsv, off_k * 128, False)
+                else:
+                    for i in cutlass.range_constexpr(0, 32, 4):
+                        l2v = ld_shared_v4f(ldb + (32 * jb + i) * 4)
+                        dlv = ld_shared_v4f(ldb + 512 + (32 * jb + i) * 4)
+                        for q2 in cutlass.range_constexpr(0, 4, 2):
+                            s0 = sv[i + q2]
+                            s1 = sv[i + q2 + 1]
+                            if const_expr(self.causal):
+                                c0 = q0 + i + q2
+                                if const_expr(self.rect):
+                                    c0 = c0 + off_t * 128
+                                s0 = -Float32.inf if key > c0 else s0
+                                s1 = -Float32.inf if key > c0 + 1 else s1
+                            p0, p1 = dm_mx256_p_pair2(s0, s1, cs, l2v[q2], l2v[q2 + 1])
+                            pv[i + q2] = p0
+                            pv[i + q2 + 1] = p1
+                            x0, x1 = cute.arch.fma_packed_f32x2((dpv[i + q2], dpv[i + q2 + 1]), (ca, ca),
+                                                                (-dlv[q2], -dlv[q2 + 1]))
+                            x0, x1 = cute.arch.mul_packed_f32x2((p0, p1), (x0, x1))
+                            dsv[i + q2] = x0
+                            dsv[i + q2 + 1] = x1
                 if const_expr(self.kn == "pds" and self.unsafe):
                     hit = (sel_eq_i32(l, Int32(0), Int32(1), Int32(0)) * sel_eq_i32(key, Int32(self.PDS_K), Int32(1), Int32(0))
                            * sel_eq_i32(q0, Int32(self.PDS_Q - self.PDS_Q % 32), Int32(1), Int32(0)))

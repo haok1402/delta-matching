@@ -165,6 +165,8 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
         nk_c = k1 - k0
         rect = nk_c != n_q
         opts = bwd_hd256kv2.DmHd256Kv2.DEFAULT_OPTS + " dqt" + (" rect" if rect else "")
+        if causal and env("DM_RING_DMK", "1") == "1":     # KV2 tile-class specialization (bitwise): select only where it can fire
+            opts = opts + " dmk"
         heads = slice(g0 * rep, g1 * rep)
         keys = slice(k0 * 128, k1 * 128)
         whole_heads = (g0, g1) == (0, Hk)

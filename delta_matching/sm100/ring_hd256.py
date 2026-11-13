@@ -22,6 +22,7 @@ from . import bwd_hd256kv2
 from . import bwd_hd256mx
 from .dm_bwd_hd256dqg_sm100 import DmHd256Dqg
 from .attention_bwd_hd256_sm100 import workspace_limit_bytes, TILE_BYTES, DQG_STAGES
+from .attention_bwd_hd256_sm100 import key_range_chunks, key_range_bytes, key_ranges_setting, backward_key_ranges
 from .launch_cache_sm100 import env
 
 D = 256
@@ -79,6 +80,8 @@ def _direct(B, Hk, n_k, chunk):
 def plan_bytes(B, H, Hk, n_q, n_k, causal, chunks, kv_bytes=2, dq_bytes=2):
     """Peak extra device bytes of bwd_block for this plan (one workspace sized for the largest chunk, reused; one
     chunk's temporaries live at a time). Excludes the caller's inputs / outputs."""
+    if _exact_ranges(Hk, n_k, chunks):
+        return key_range_bytes(H, n_q, n_k, causal, [(c[2], c[3]) for c in chunks])
     ws = max(bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * (H // Hk), n_q, causal, k1 - k0) for g0, g1, k0, k1 in chunks) * TILE_BYTES
     tmp = max(_chunk_bytes(B, H, Hk, n_q, n_k, causal, c, _direct(B, Hk, n_k, c), kv_bytes, dq_bytes)
               - bwd_hd256kv2.dqw_tiles(B, (c[1] - c[0]) * (H // Hk), n_q, causal, c[3] - c[2]) * TILE_BYTES for c in chunks)
@@ -101,6 +104,12 @@ def plan(B, H, Hk, n_q, n_k, causal, cap=None, kv_bytes=2, dq_bytes=2):
     for chunks in ([(0, Hk, 0, n_k)], [(g, g + 1, 0, n_k) for g in range(Hk)]):
         if fits(chunks):
             return chunks
+    if key_ranges_setting():
+        # DM_BWD_KRANGE=1: key ranges with all heads and the EXACT dQ carry (bitwise the whole block; KV2 opt krg + Dqg
+        # opt kr, attention_bwd_hd256_sm100.backward_key_ranges), causal and non-causal, any dq / dk / dv dtype; replaces
+        # the DM_RING_KEYRANGE sum-of-partials ranges. Workspace (largest range) + fp32 dQ carry <= the cap.
+        ranges = key_range_chunks(B, H, n_q, n_k, causal, cap)
+        return None if ranges is None else [(0, Hk, k0, k1) for k0, k1 in ranges]
     if causal or env("DM_RING_KEYRANGE", "0") != "1":
         return None
     for nh in ((Hk,) if B == 1 else ()) + (1,):            # key ranges with all heads at B == 1, then per KV group
@@ -109,6 +118,11 @@ def plan(B, H, Hk, n_q, n_k, causal, cap=None, kv_bytes=2, dq_bytes=2):
             if fits(chunks):
                 return chunks
     return None
+
+
+def _exact_ranges(Hk, n_k, chunks):
+    """the plan is DM_BWD_KRANGE exact key ranges (all heads, at least one range shorter than the block)."""
+    return key_ranges_setting() and all(c[:2] == (0, Hk) for c in chunks) and any(c[2:] != (0, n_k) for c in chunks)
 
 
 def _aligned16(t):
@@ -141,6 +155,8 @@ def bwd_block(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, dq=None, dk=
     kacc = dk.dtype == torch.float32
     chunks = plan(B, H, Hk, n_q, n_k, causal, kv_bytes=dk.element_size(), dq_bytes=dq.element_size())
     assert chunks is not None, f"ring bwd_block: no chunk fits DM_BWD_WS_LIMIT_GB ({B}, {H}, {Hk}, {Nq}, {Nk}, {causal})"
+    if _exact_ranges(Hk, n_k, chunks):
+        return backward_key_ranges(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, [c[2:] for c in chunks], dq, dk, dv)
     assert acc or all(c[2:] == (0, n_k) for c in chunks), "key-range chunks need an fp32 dq (accumulate)"
     ws_tiles = max(bwd_hd256kv2.dqw_tiles(B, (g1 - g0) * rep, n_q, causal, k1 - k0) for g0, g1, k0, k1 in chunks)
     W_all = torch.empty(ws_tiles, 128, 128, device=dev, dtype=torch.uint8)     # one workspace, reused by every chunk

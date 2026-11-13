@@ -121,6 +121,16 @@ def ld_global_s32(addr: Int64, *, loc=None, ip=None) -> Int32:
     return Int32(inline_asm(_T.i32(), [Int64(addr).ir_value(loc=loc, ip=ip)], "ld.global.u32 $0, [$1];", "=r,l", True, loc, ip))
 
 
+def krange_s(x, o, m):
+    """opt krg / Dqg kr (trace-time helper): S(x) = sum_{c < x} clamp(c + 1 + o, 0, m) = a zero run, a linear run and a
+    saturated run, as Int64 (the W tiles of one q head before q tile x of a key-range chunk)."""
+    z0 = cutlass.max(Int32(0) - o, Int32(0))
+    z1 = cutlass.max(z0, m - 1 - o)
+    a = cutlass.min(cutlass.max(x, z0), z1) - z0
+    sat = cutlass.max(x - z1, Int32(0))
+    return Int64(a) * Int64(z0 + 1 + o) + (Int64(a) * Int64(a - 1)) // 2 + Int64(sat) * Int64(m)
+
+
 def _coop(n):
     return pipeline.CooperativeGroup(pipeline.Agent.Thread, n)
 
@@ -148,7 +158,7 @@ class DmHd256Kv2:
     # iteration into 2 smem stages (local PipelineAsync, C1b); xsv: |dS| warp maxima stored [group][k] -> one LDS.128 gather (C1f)
     # rly: cross-CTA hand-offs routed so that only ONE relay warp per pair (CTA 1, warp 11) issues the expensive
     # arrive.release.cluster; CTA 0 warps arrive at .cta scope on the leader's own barrier, CTA 1 warps on a local relay barrier
-    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc")
+    OPTS = ("qb2", "xpt", "meta", "xsv", "ctasc", "relcl", "acqcl", "rly", "dqw", "dqt", "dqc", "rect", "dkf32", "dkacc", "krg")
     # dkf32: dK / dV written as fp32 (B, Nk, Hk, 256) (the TMEM accumulator, i.e. the value the bf16 epilogue rounds);
     # dkacc: dK / dV fp32 += (read-add-write; one thread per element, launches ordered on the stream -> deterministic).
     # rect (ring blocks, requires dqt): q tiles (n_t argument) may differ from key tiles n_k (grid = 2 n_k CTAs from K's
@@ -156,6 +166,11 @@ class DmHd256Kv2:
     # Non-causal: W tile T = (l * n_q + ct) * n_k + kt.  Causal: bottom-right aligned, off = n_k - n_q >= 0 tiles (query i
     # sees keys <= i + 128 off): key tile kt is seen by q tiles ct >= kt - off; mask key > query + 128 off; W tile
     # T = l * (n_q (n_q + 1) / 2 + n_q off) + ct (ct + 1) / 2 + ct off + kt.  rect with Nq == Nk is bitwise the default.
+    # krg (requires rect, causal): one KEY RANGE [k0, k0 + n_k) of a causal / bottom-right block, launched on chunk-local
+    # K / V / dK / dV views with a signed local offset o = off - k0 (query i sees local keys <= i + 128 o; o < 0 for the
+    # later ranges of a causal square).  n_t argument = n_q | (o + 16384) << 16.  Every key tile of the range keeps its
+    # whole (q head, q tile) reduction (c_lo = max(kt - o, 0)), so dK / dV are bitwise the unchunked block; q tile ct sees
+    # cnt(ct) = clamp(ct + 1 + o, 0, n_k) local key tiles, W tile T = l * S(n_q) + S(ct) + kt, S(x) = sum_{c < x} cnt(c).
     # dqc (requires dqt): EXACT-CARRY chunk of the (q head, q tile) reduction of every key tile.  The launch covers
     # q heads [0, rep) of its (copied) head tensors x q tiles [Q0, Q1) (Q1 = the n_t argument; causal: key tiles 0..Q1-1 = the grid).
     # Chunk descriptor (int32, in the mSBP slot): [Q0, n_t of the full sequence, cin, cout]; cin = 1: this launch continues the
@@ -215,6 +230,8 @@ class DmHd256Kv2:
         self.dkacc = "dkacc" in self.opts
         self.dkf32 = self.dkacc or "dkf32" in self.opts
         assert not (self.dkf32 and self.dqc), "fp32 dK / dV outputs: not with the carry chunks"
+        self.krg = "krg" in self.opts
+        assert not self.krg or (self.rect and self.causal)
         assert not self.rect or ("dqt" in self.opts and not self.dqc and (self.dbg & ~16) == 0)
         assert not (self.dbg & 16 and self.dbg & 8), "dbg 16 (identity) and 8 (lockstep) share mHash"
         assert not self.dqc or ("dqt" in self.opts and (self.dbg & ~16) == 0)
@@ -369,6 +386,9 @@ class DmHd256Kv2:
         kt = bx // 2                       # 128-key tile of the pair
         rep = H // Hk
         n_q = n_t
+        if const_expr(self.krg):
+            n_q = n_t & Int32(0xFFFF)
+            o_t = (n_t >> 16) - Int32(16384)
         n_k = n_t
         if const_expr(self.rect):
             n_k = cute.arch.grid_dim()[0] // 2
@@ -381,6 +401,9 @@ class DmHd256Kv2:
             c_lo = kt
             if const_expr(self.rect):
                 off_t = n_k - n_q
+                if const_expr(self.krg):
+                    off_t = o_t
+                    kr_tot = krange_s(n_q, off_t, n_k)
                 c_lo = cutlass.max(kt - off_t, Int32(0))
         if const_expr(self.dqc):   # (names defined only in dqc builds: the default build's IR / loop-carried values are untouched)
             # nfirst: 1 = this launch continues the key tile's reduction (carry restore, no zero-init)
@@ -573,6 +596,8 @@ class DmHd256Kv2:
                     wtile = Int64(0)
                     if const_expr(self.dqc and self.causal):
                         wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
+                    elif const_expr(self.krg):
+                        wtile = Int64(l) * kr_tot + krange_s(ct, off_t, n_k) + kt
                     elif const_expr(self.causal and self.rect):
                         wtile = Int64(l) * (n_q * (n_q + 1) // 2 + n_q * off_t) + ct * (ct + 1) // 2 + ct * off_t + kt
                     elif const_expr(self.causal):
@@ -716,6 +741,8 @@ class DmHd256Kv2:
                 if const_expr(self.wsp):
                     if const_expr(self.dqc and self.causal):
                         wtile = Int64(l) * tilesb + (ct * (ct + 1) - cq0 * (cq0 + 1)) // 2 + kt
+                    elif const_expr(self.krg):
+                        wtile = Int64(l) * kr_tot + krange_s(ct, off_t, n_k) + kt
                     elif const_expr(self.causal and self.rect):
                         wtile = Int64(l) * (n_q * (n_q + 1) // 2 + n_q * off_t) + ct * (ct + 1) // 2 + ct * off_t + kt
                     elif const_expr(self.causal):

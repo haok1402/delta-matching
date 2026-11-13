@@ -37,15 +37,24 @@ def dqw_tiles(B, H, n_t, causal, n_k=None):
     return B * H * (n_t * (n_t + 1) // 2 if causal else n_t * n_t)
 
 
+def krange_tiles(n_q, o, m, x=None):
+    """opt krg: S(x) = sum_{c < x} clamp(c + 1 + o, 0, m) workspace tiles of one q head of a key-range chunk (x = n_q:
+    the chunk's tiles per q head); o = the chunk's signed local offset (off - k0), m = its key tiles."""
+    x = n_q if x is None else x
+    return sum(min(m, max(0, c + 1 + o)) for c in range(x))
+
+
 def dqw_alloc(B, H, N, causal, dev):
     T = dqw_tiles(B, H, N // 128, bool(causal))
     return (torch.empty(T, 128, 128, device=dev, dtype=torch.uint8), torch.empty(T, 1, 4, device=dev, dtype=torch.uint8))
 
 
-def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqw=None, out=None, dqc=None):
+def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, knob="", opts=None, dqw=None, out=None, dqc=None,
+               krg=None):
     """dqw = (W, Wsb) from dqw_alloc: KV2 also stores the dS codes / raw block exponents for the dQ GEMM (opts must contain dqw).
     dqc = (desc, carry_dk, carry_dv, q1): exact-carry chunk, see DmHd256Kv2 opt dqc; desc =
-    int32 device tensor [Q0, n_t, cin, cout] (+ pad), carries fp32 (B, N, Hk, 256); the launch covers q tiles [Q0, q1)."""
+    int32 device tensor [Q0, n_t, cin, cout] (+ pad), carries fp32 (B, N, Hk, 256); the launch covers q tiles [Q0, q1).
+    krg = o: opt krg key-range chunk of a causal block (k8 / v8 / ks / vs / out: the range's views, o = off - k0)."""
     B, N, H, Dq = q8.shape
     Hk = k8.shape[2]
     Nk = k8.shape[1]
@@ -55,7 +64,8 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     ot_ = DmHd256Kv2.DEFAULT_OPTS if opts is None else opts
     rect = "rect" in ot_.split()
     assert rect or Nk == N, "Nq != Nk needs opt rect (ring blocks)"
-    assert not (rect and causal and Nk < N), "causal rect: bottom-right aligned, Nk >= Nq"
+    assert (krg is not None) == ("krg" in ot_.split()) and (krg is None or (causal and -16384 <= krg < 16384))
+    assert krg is not None or not (rect and causal and Nk < N), "causal rect: bottom-right aligned, Nk >= Nq"
     assert qs.shape == (B, H, N // 32) and dos.shape == qs.shape and lse.shape == (B, H, N) and delta.shape == lse.shape
     assert ks.shape == (B, Hk, Nk // 32) and vs.shape == ks.shape
     f8 = torch.float8_e4m3fn
@@ -89,9 +99,12 @@ def kv2_launch(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, *, dbg=0, k
     if dqw is not None:
         assert not big
         cs_, sbs = dqw
-        assert (dqc is not None or cs_.shape == (dqw_tiles(B, H, N // 128, causal, Nk // 128), 128, 128)) and sbs.shape == (cs_.shape[0], 1, 4)
+        tiles = B * H * krange_tiles(N // 128, krg, Nk // 128) if krg is not None else dqw_tiles(B, H, N // 128, causal, Nk // 128)
+        assert (dqc is not None or cs_.shape == (tiles, 128, 128)) and sbs.shape == (cs_.shape[0], 1, 4)
     assert (dqc is not None) == ("dqc" in ot.split())
     nt_arg = N // 128
+    if krg is not None:
+        nt_arg = N // 128 | (krg + 16384) << 16
     if dqc is not None:
         desc, ck, cv, nt_arg = dqc
         assert desc.dtype == torch.int32 and desc.numel() >= 4 and ck.dtype == torch.float32 and ck.shape == (B, N, Hk, D)

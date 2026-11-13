@@ -13,10 +13,10 @@ from flash_attn.cute.testing import is_fake_mode
 
 from . import bwd_hd256mx
 from . import bwd_hd256kv2
-from .dm_bwd_hd256dqg_sm100 import DmHd256Dqg
+from .dm_bwd_hd256dqg_sm100 import DmHd256Dqg, DmHd256DqgKr
 from .launch_cache_sm100 import env
 
-__all__ = ["attention_bwd_hd256", "plan_backward_chunks", "dqg_launch"]
+__all__ = ["attention_bwd_hd256", "plan_backward_chunks", "dqg_launch", "key_range_chunks", "backward_key_ranges"]
 
 D = 256
 TILE_BYTES = 16384 + 4                  # one workspace tile: 128 x 128 dS codes + 4 block-exponent bytes
@@ -60,6 +60,122 @@ def dqg_launch(W, Wsb, k8, ks, B, N, H, causal, *, out=None, band=None):
     num_q_tiles, q_start = (band[1] - band[0], band[0]) if has_band else (N // 128, 0)
     bwd_hd256mx._run(key, lambda: DmHd256Dqg(bool(causal), DQG_STAGES, "", True, has_band), tensors, leading_dims, [num_q_tiles, H, Hk, q_start], mode="dqg")
     return dq
+
+
+def dqg_kr_launch(W, Wsb, k8, ks, B, Nq, H, causal, dq, carry, m, o, cin, last, knob=""):
+    """
+    Dqg opt kr: the dQ part of one key-range chunk (m key tiles, signed local offset o = off - k0; k8 / ks: the
+    range's views) with the exact fp32 carry (B, Nq, H, 256): restored when cin, rows whose last key tile is in this
+    range written as bf16 to dq, the others' raw accumulator stored to carry.
+    """
+    Hk = k8.shape[2]
+    f8 = torch.float8_e4m3fn
+    assert dq.shape == (B, Nq, H, D) and dq.dtype == torch.bfloat16 and dq.is_contiguous()
+    assert carry.shape == dq.shape and carry.dtype == torch.float32 and carry.is_contiguous()
+    assert 1 <= m < 4096 and -16384 <= o < 16384
+    mA = W.view(f8).permute(2, 1, 0)
+    mKt = k8.view(f8).permute(3, 1, 2, 0)
+    q0 = m | int(cin) << 12 | int(last) << 13 | (o + 16384) << 16
+    key = ("dqg", bool(causal), DQG_STAGES, knob, True, "kr")
+    bwd_hd256mx._run(key, lambda: DmHd256DqgKr(bool(causal), DQG_STAGES, knob, True), [mA, mKt, Wsb, ks, dq, carry], [0, 0, 2, 2, 3, 3],
+                     [Nq // 128, H, Hk, q0], mode="dqg")
+    return dq
+
+
+def key_range_tiles(num_q_tiles, num_k_tiles, k0, k1, causal):
+    """
+    Workspace tiles of one q head for key tiles [k0, k1) of a block (causal: bottom-right aligned, off = n_k - n_q).
+    """
+    if not causal:
+        return num_q_tiles * (k1 - k0)
+    off = num_k_tiles - num_q_tiles
+    return sum(num_q_tiles - max(kt - off, 0) for kt in range(k0, k1))
+
+
+def key_range_bytes(H, num_q_tiles, num_k_tiles, causal, ranges):
+    """
+    Peak extra device bytes of backward_key_ranges: one workspace for the largest range (one batch element at a time)
+    plus the fp32 dQ carry (Nq x H x 256). Excludes the caller's inputs / outputs.
+    """
+    ws = max(H * key_range_tiles(num_q_tiles, num_k_tiles, k0, k1, causal) for k0, k1 in ranges) * TILE_BYTES
+    return ws + num_q_tiles * 128 * H * D * 4
+
+
+def key_range_chunks(B, H, num_q_tiles, num_k_tiles, causal, cap, extra_bytes=0):
+    """
+    Ascending key ranges [k0, k1) of a block whose dS workspace (all heads, one batch element) plus the fp32 dQ carry and
+    extra_bytes fit the cap: greedy longest ranges, then the same number of ranges with near-equal workspace if those fit
+    too. None if one key tile does not fit. A pure function of (shape, cap).
+    """
+    budget = cap - num_q_tiles * 128 * H * D * 4 - extra_bytes
+    per_tile = [H * key_range_tiles(num_q_tiles, num_k_tiles, kt, kt + 1, causal) * TILE_BYTES for kt in range(num_k_tiles)]
+    if budget <= 0 or max(per_tile) > budget:
+        return None
+    ranges, k0 = [], 0
+    while k0 < num_k_tiles:
+        k1, used = k0, 0
+        while k1 < num_k_tiles and used + per_tile[k1] <= budget:
+            used += per_tile[k1]
+            k1 += 1
+        ranges.append((k0, k1))
+        k0 = k1
+    count = len(ranges)
+    if count > 1:
+        total, acc, bounds = sum(per_tile), 0, [0]
+        for kt in range(num_k_tiles):
+            acc += per_tile[kt]
+            if len(bounds) < count and acc >= total * len(bounds) / count:
+                bounds.append(kt + 1)
+        bounds.append(num_k_tiles)
+        equal = list(zip(bounds[:-1], bounds[1:]))
+        if len(equal) == count and all(a < b and sum(per_tile[a:b]) <= budget for a, b in equal):
+            return equal
+    return ranges
+
+
+def key_ranges_setting():
+    """
+    DM_BWD_KRANGE: "1" lets a block that does not fit the cap as a whole or by KV-head groups run as key-range chunks
+    with the exact dQ carry (bitwise the whole block) instead of the kv2 path; "0" (default until gated) keeps the kv2 path.
+    """
+    value = str(env("DM_BWD_KRANGE", "0")).strip()
+    assert value in ("0", "1"), value
+    return value == "1"
+
+
+def backward_key_ranges(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, ranges, dq, dk, dv, knob=""):
+    """
+    One block (Nq queries, Nk keys; causal = bottom-right aligned) as ascending key-range chunks: KV2 (opt rect, + krg
+    when causal) on the range's K / V / dK / dV views stores the range's dS tiles, then Dqg opt kr continues every dQ row
+    from the exact fp32 carry. dK / dV of a key and the dQ MMA sequence of a row are those of the whole block, so the
+    outputs are bitwise the unchunked call. dk / dv bf16: written; fp32: += (KV2 dkacc). Batch elements run one after
+    another (key slices are contiguous at B == 1).
+    """
+    B, Nq, H, _ = q8.shape
+    Nk = k8.shape[1]
+    num_q_tiles, num_k_tiles = Nq // 128, Nk // 128
+    off = num_k_tiles - num_q_tiles if causal else 0
+    device = q8.device
+    max_tiles = max(H * key_range_tiles(num_q_tiles, num_k_tiles, k0, k1, causal) for k0, k1 in ranges)
+    W = torch.empty(max_tiles, 128, 128, device=device, dtype=torch.uint8)
+    Wsb = torch.empty(max_tiles, 1, 4, device=device, dtype=torch.uint8)
+    carry = torch.empty(1, Nq, H, D, device=device, dtype=torch.float32)      # raw fp32 dQ accumulators between ranges
+    opts = bwd_hd256kv2.DmHd256Kv2.DEFAULT_OPTS + " dqt rect" + (" krg" if causal else "")
+    assert dk.dtype == dv.dtype and dk.dtype in (torch.bfloat16, torch.float32)
+    if dk.dtype == torch.float32:      # caller fp32 dK / dV accumulators: KV2 dkacc (+=) on the range slices
+        opts += " dkacc"
+    for b in range(B):
+        rows = [x[b:b + 1] for x in (q8, qs, do8, dos, lse, delta)]
+        for k0, k1 in ranges:
+            m, o = k1 - k0, off - k0
+            tiles = H * (bwd_hd256kv2.krange_tiles(num_q_tiles, o, m) if causal else num_q_tiles * m)
+            workspace = (W[:tiles], Wsb[:tiles])
+            keys = slice(k0 * 128, k1 * 128)
+            kq = (k8[b:b + 1, keys], ks[b:b + 1, :, k0 * 4:k1 * 4], v8[b:b + 1, keys], vs[b:b + 1, :, k0 * 4:k1 * 4])
+            bwd_hd256kv2.kv2_launch(rows[0], rows[1], kq[0], kq[1], kq[2], kq[3], rows[2], rows[3], rows[4], rows[5], causal,
+                                    opts=opts, dqw=workspace, out=(dk[b:b + 1, keys], dv[b:b + 1, keys]), krg=o if causal else None)
+            dqg_kr_launch(*workspace, kq[0], kq[1], 1, Nq, H, causal, dq[b:b + 1], carry, m, o, k0 > 0, k1 == num_k_tiles, knob=knob)
+    return dq, dk, dv
 
 
 def num_workspace_tiles(num_q_tiles, q_start, q_end, causal):
@@ -256,6 +372,12 @@ def attention_bwd_hd256(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, id
     heads_per_group, num_q_tiles = H // Hk, N // 128
     causal = bool(causal)
     chunks = plan_backward_chunks(B, H, Hk, N, causal)
+    if chunks is None and not identity and key_ranges_setting():
+        ranges = key_range_chunks(B, H, num_q_tiles, num_q_tiles, causal, workspace_limit_bytes())
+        if ranges is not None:
+            dq = torch.empty(B, N, H, D, device=q8.device, dtype=torch.bfloat16)
+            dk = torch.empty(B, N, Hk, D, device=q8.device, dtype=torch.bfloat16)
+            return backward_key_ranges(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, ranges, dq, dk, torch.empty_like(dk))
     if chunks is None:
         return backward_kv2_path(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, causal, identity)
     device = q8.device
